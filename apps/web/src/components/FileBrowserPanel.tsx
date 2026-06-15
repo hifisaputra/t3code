@@ -40,6 +40,10 @@ interface FileBrowserPanelProps {
 // Larger cap for images so previews aren't truncated; text reads use the server default.
 const IMAGE_READ_MAX_BYTES = 5 * 1024 * 1024;
 
+// Above this panel width the tree and viewer sit side by side; below it (mobile,
+// tablet, narrow dock) the viewer replaces the tree as a master-detail view.
+const SPLIT_MIN_WIDTH = 640;
+
 const IMAGE_EXTENSIONS = new Set([
   ".avif",
   ".bmp",
@@ -218,6 +222,22 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
   useEffect(() => {
     setMarkdownView("rendered");
   }, [filePath]);
+
+  // Switch between split (tree + viewer) and master-detail based on panel width.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const [isSplit, setIsSplit] = useState(false);
+  useEffect(() => {
+    const element = bodyRef.current;
+    if (!element) {
+      return;
+    }
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      setIsSplit(width >= SPLIT_MIN_WIDTH);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   const dirStatesRef = useRef(dirStates);
   useEffect(() => {
@@ -575,64 +595,110 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     </>
   );
 
+  const markdownToggle =
+    filePath &&
+    isMarkdownPath(filePath) &&
+    fileState.status === "loaded" &&
+    fileState.data?.encoding === "utf8" ? (
+      <ToggleGroup
+        className="shrink-0"
+        variant="outline"
+        size="xs"
+        value={[markdownView]}
+        onValueChange={(value) => {
+          const next = value[0];
+          if (next === "rendered" || next === "source") {
+            setMarkdownView(next);
+          }
+        }}
+      >
+        <Toggle aria-label="Rendered markdown" value="rendered">
+          <BookOpenIcon className="size-3" />
+        </Toggle>
+        <Toggle aria-label="Markdown source" value="source">
+          <CodeIcon className="size-3" />
+        </Toggle>
+      </ToggleGroup>
+    ) : null;
+
+  const renderFilePathBar = (showBack: boolean) =>
+    filePath ? (
+      <div className="flex items-center gap-2 border-b border-border/60 px-2 py-1.5">
+        {showBack ? (
+          <button
+            type="button"
+            className={cn(ACTION_BUTTON_CLASS, "size-6")}
+            aria-label="Back to files"
+            onClick={clearFile}
+          >
+            <ChevronLeftIcon className="size-3.5" />
+          </button>
+        ) : null}
+        <span
+          className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/80"
+          title={filePath}
+        >
+          {filePath}
+        </span>
+        {markdownToggle}
+      </div>
+    ) : null;
+
+  const viewer = filePath ? (
+    <FileContentView
+      fileState={fileState}
+      filePath={filePath}
+      themeName={themeName}
+      cwd={cwd}
+      markdownView={markdownView}
+    />
+  ) : null;
+
+  let body: ReactNode;
+  if (!activeThread || !cwd) {
+    body = (
+      <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
+        Select a thread with a project to browse its files.
+      </div>
+    );
+  } else if (isSplit) {
+    // Wide layout: tree and viewer side by side.
+    body = (
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 w-64 shrink-0 flex-col overflow-auto border-r border-border/60 py-1">
+          {renderDir("", 0)}
+        </div>
+        <div className="flex min-h-0 flex-1 flex-col">
+          {filePath ? (
+            <>
+              {renderFilePathBar(false)}
+              {viewer}
+            </>
+          ) : (
+            <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/60">
+              Select a file to preview.
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  } else {
+    // Narrow layout: viewer replaces the tree (master-detail).
+    body = filePath ? (
+      <div className="flex min-h-0 flex-1 flex-col">
+        {renderFilePathBar(true)}
+        {viewer}
+      </div>
+    ) : (
+      <div className="min-h-0 flex-1 overflow-auto py-1">{renderDir("", 0)}</div>
+    );
+  }
+
   return (
     <DiffPanelShell mode={mode} header={headerRow}>
-      {!activeThread || !cwd ? (
-        <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
-          Select a thread with a project to browse its files.
-        </div>
-      ) : filePath ? (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex items-center gap-2 border-b border-border/60 px-2 py-1.5">
-            <button
-              type="button"
-              className={cn(ACTION_BUTTON_CLASS, "size-6")}
-              aria-label="Back to files"
-              onClick={clearFile}
-            >
-              <ChevronLeftIcon className="size-3.5" />
-            </button>
-            <span
-              className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/80"
-              title={filePath}
-            >
-              {filePath}
-            </span>
-            {isMarkdownPath(filePath) &&
-            fileState.status === "loaded" &&
-            fileState.data?.encoding === "utf8" ? (
-              <ToggleGroup
-                className="shrink-0"
-                variant="outline"
-                size="xs"
-                value={[markdownView]}
-                onValueChange={(value) => {
-                  const next = value[0];
-                  if (next === "rendered" || next === "source") {
-                    setMarkdownView(next);
-                  }
-                }}
-              >
-                <Toggle aria-label="Rendered markdown" value="rendered">
-                  <BookOpenIcon className="size-3" />
-                </Toggle>
-                <Toggle aria-label="Markdown source" value="source">
-                  <CodeIcon className="size-3" />
-                </Toggle>
-              </ToggleGroup>
-            ) : null}
-          </div>
-          <FileContentView
-            fileState={fileState}
-            filePath={filePath}
-            themeName={themeName}
-            cwd={cwd}
-            markdownView={markdownView}
-          />
-        </div>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-auto py-1">{renderDir("", 0)}</div>
-      )}
+      <div ref={bodyRef} className="flex min-h-0 flex-1 flex-col">
+        {body}
+      </div>
     </DiffPanelShell>
   );
 }
