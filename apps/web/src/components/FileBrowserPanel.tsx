@@ -11,7 +11,16 @@ import {
   RefreshCwIcon,
   XIcon,
 } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import * as Schema from "effect/Schema";
 
 import {
   readEnvironmentConnection,
@@ -23,6 +32,7 @@ import { useTheme } from "../hooks/useTheme";
 import { getHighlighterPromise } from "../lib/codeHighlight";
 import { resolveDiffThemeName } from "../lib/diffRendering";
 import { cn } from "~/lib/utils";
+import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
 import { selectProjectByRef, useStore } from "../store";
 import { createThreadSelectorByRef } from "../storeSelectors";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
@@ -43,6 +53,15 @@ const IMAGE_READ_MAX_BYTES = 5 * 1024 * 1024;
 // Above this panel width the tree and viewer sit side by side; below it (mobile,
 // tablet, narrow dock) the viewer replaces the tree as a master-detail view.
 const SPLIT_MIN_WIDTH = 640;
+
+const TREE_DEFAULT_WIDTH = 256;
+const TREE_MIN_WIDTH = 180;
+const TREE_MAX_WIDTH = 480;
+const TREE_WIDTH_STORAGE_KEY = "t3code_file_browser_tree_width";
+
+function clampTreeWidth(width: number): number {
+  return Math.min(TREE_MAX_WIDTH, Math.max(TREE_MIN_WIDTH, width));
+}
 
 const IMAGE_EXTENSIONS = new Set([
   ".avif",
@@ -238,6 +257,35 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+
+  const [treeWidth, setTreeWidth] = useState<number>(() => {
+    const stored = getLocalStorageItem(TREE_WIDTH_STORAGE_KEY, Schema.Finite);
+    return stored == null ? TREE_DEFAULT_WIDTH : clampTreeWidth(stored);
+  });
+  const startTreeResize = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = treeWidth;
+      let latest = startWidth;
+      const onMove = (moveEvent: PointerEvent) => {
+        latest = clampTreeWidth(startWidth + (moveEvent.clientX - startX));
+        setTreeWidth(latest);
+      };
+      const onUp = () => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onUp);
+        document.body.style.removeProperty("user-select");
+        document.body.style.removeProperty("cursor");
+        setLocalStorageItem(TREE_WIDTH_STORAGE_KEY, latest, Schema.Finite);
+      };
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "col-resize";
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+    },
+    [treeWidth],
+  );
 
   const dirStatesRef = useRef(dirStates);
   useEffect(() => {
@@ -665,9 +713,19 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     // Wide layout: tree and viewer side by side.
     body = (
       <div className="flex min-h-0 flex-1">
-        <div className="flex min-h-0 w-64 shrink-0 flex-col overflow-auto border-r border-border/60 py-1">
+        <div
+          className="flex min-h-0 shrink-0 flex-col overflow-auto py-1"
+          style={{ width: treeWidth }}
+        >
           {renderDir("", 0)}
         </div>
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize file tree"
+          className="w-1 shrink-0 cursor-col-resize touch-none bg-border/50 transition-colors hover:bg-border active:bg-border"
+          onPointerDown={startTreeResize}
+        />
         <div className="flex min-h-0 flex-1 flex-col">
           {filePath ? (
             <>
