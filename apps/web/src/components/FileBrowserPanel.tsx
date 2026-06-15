@@ -364,7 +364,9 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     });
   }, [environmentId, cwd, loadDir]);
 
-  // Fetch the selected file's contents.
+  // Fetch the selected file's contents. The reload token lets the refresh
+  // button re-read the file (e.g. after the agent edits it on disk).
+  const [fileReloadToken, setFileReloadToken] = useState(0);
   useEffect(() => {
     if (!filePath || !cwd || !environmentId) {
       setFileState({ status: "idle" });
@@ -393,7 +395,8 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     return () => {
       cancelled = true;
     };
-  }, [filePath, cwd, environmentId]);
+  }, [filePath, cwd, environmentId, fileReloadToken]);
+  const refreshFile = useCallback(() => setFileReloadToken((token) => token + 1), []);
 
   const toggleDir = useCallback(
     (dirPath: string) => {
@@ -689,6 +692,21 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
           {filePath}
         </span>
         {markdownToggle}
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                className={cn(ACTION_BUTTON_CLASS, "size-6")}
+                aria-label="Refresh file"
+                onClick={refreshFile}
+              >
+                <RefreshCwIcon className="size-3.5" />
+              </button>
+            }
+          />
+          <TooltipPopup side="bottom">Refresh file</TooltipPopup>
+        </Tooltip>
       </div>
     ) : null;
 
