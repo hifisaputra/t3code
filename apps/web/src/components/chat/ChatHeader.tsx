@@ -12,6 +12,7 @@ import { type DraftId } from "~/composerDraftStore";
 import { DiffIcon, FilesIcon, TerminalSquareIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
+import { PreviewControl } from "../PreviewControl";
 import { Toggle } from "../ui/toggle";
 import { SidebarTrigger } from "../ui/sidebar";
 import { OpenInPicker } from "./OpenInPicker";
@@ -135,6 +136,7 @@ export const ChatHeader = memo(function ChatHeader({
             {...(draftId ? { draftId } : {})}
           />
         )}
+        {activeProjectName && <PreviewControl cwd={gitCwd} />}
         <Tooltip>
           <TooltipTrigger
             render={
