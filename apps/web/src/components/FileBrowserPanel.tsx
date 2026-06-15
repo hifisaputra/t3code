@@ -1,5 +1,5 @@
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import type { ProjectReadFileResult } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectReadFileResult } from "@t3tools/contracts";
 import {
   BookOpenIcon,
   ChevronDownIcon,
@@ -7,6 +7,7 @@ import {
   ChevronRightIcon,
   CodeIcon,
   EllipsisVerticalIcon,
+  FolderIcon,
   FolderInputIcon,
   FolderPlusIcon,
   Maximize2Icon,
@@ -1262,6 +1263,14 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     );
   }
 
+  const moveBaseName = basenameOf(moveState.sourcePath);
+  const moveDestDir = moveState.value.trim().replace(/^\/+|\/+$/g, "");
+  const moveResolvedPath = moveDestDir ? `${moveDestDir}/${moveBaseName}` : moveBaseName;
+  const moveSubmitDisabled =
+    moveState.mode === "rename"
+      ? moveState.value.trim().length === 0
+      : moveResolvedPath === moveState.sourcePath;
+
   return (
     <>
       <DiffPanelShell mode={mode} header={headerRow}>
@@ -1370,27 +1379,47 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
             <DialogDescription>
               {moveState.mode === "rename"
                 ? `Enter a new name for “${basenameOf(moveState.sourcePath)}”.`
-                : `Move “${basenameOf(moveState.sourcePath)}” into another folder (leave blank for the project root).`}
+                : `Choose a destination folder for “${basenameOf(moveState.sourcePath)}”.`}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
-            <form
-              id={moveFormId}
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submitMove();
-              }}
-            >
-              <Input
-                autoFocus
-                placeholder={moveState.mode === "rename" ? "name" : "path/to/folder"}
-                value={moveState.value}
-                onChange={(event) =>
-                  setMoveState((previous) => ({ ...previous, value: event.target.value }))
-                }
-              />
-              {actionError ? <p className="mt-2 text-sm text-destructive">{actionError}</p> : null}
-            </form>
+            {moveState.mode === "rename" ? (
+              <form
+                id={moveFormId}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void submitMove();
+                }}
+              >
+                <Input
+                  autoFocus
+                  placeholder="name"
+                  value={moveState.value}
+                  onChange={(event) =>
+                    setMoveState((previous) => ({ ...previous, value: event.target.value }))
+                  }
+                />
+              </form>
+            ) : cwd && environmentId ? (
+              <div className="space-y-2">
+                <MoveFolderPicker
+                  cwd={cwd}
+                  environmentId={environmentId}
+                  sourcePath={moveState.sourcePath}
+                  sourceKind={moveState.sourceKind}
+                  selectedDir={moveState.value}
+                  onSelect={(dir) => setMoveState((previous) => ({ ...previous, value: dir }))}
+                  theme={resolvedTheme}
+                />
+                <p
+                  className="truncate text-[11px] text-muted-foreground/70"
+                  title={moveResolvedPath}
+                >
+                  Destination: {moveResolvedPath}
+                </p>
+              </div>
+            ) : null}
+            {actionError ? <p className="mt-2 text-sm text-destructive">{actionError}</p> : null}
           </DialogPanel>
           <DialogFooter>
             <Button
@@ -1401,11 +1430,12 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
               Cancel
             </Button>
             <Button
-              form={moveFormId}
-              type="submit"
-              disabled={moveState.mode === "rename" && moveState.value.trim().length === 0}
+              {...(moveState.mode === "rename"
+                ? { form: moveFormId, type: "submit" as const }
+                : { type: "button" as const, onClick: () => void submitMove() })}
+              disabled={moveSubmitDisabled}
             >
-              {moveState.mode === "rename" ? "Rename" : "Move"}
+              {moveState.mode === "rename" ? "Rename" : "Move here"}
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -1493,6 +1523,167 @@ function FileContentView(props: {
           />
         </div>
       )}
+    </div>
+  );
+}
+
+interface FolderPickerDirState {
+  status: "loading" | "loaded" | "error";
+  entries: ReadonlyArray<string>;
+  error?: string;
+}
+
+function MoveFolderPicker(props: {
+  cwd: string;
+  environmentId: EnvironmentId;
+  sourcePath: string;
+  sourceKind: "file" | "directory";
+  selectedDir: string;
+  onSelect: (dir: string) => void;
+  theme: "light" | "dark";
+}) {
+  const { cwd, environmentId, sourcePath, sourceKind, selectedDir, onSelect, theme } = props;
+  const [dirChildren, setDirChildren] = useState<Map<string, FolderPickerDirState>>(
+    () => new Map(),
+  );
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const dirChildrenRef = useRef(dirChildren);
+  useEffect(() => {
+    dirChildrenRef.current = dirChildren;
+  }, [dirChildren]);
+
+  const loadDir = useCallback(
+    (dirPath: string) => {
+      const setState = (state: FolderPickerDirState) =>
+        setDirChildren((previous) => new Map(previous).set(dirPath, state));
+      const projects = readEnvironmentConnection(environmentId)?.client.projects;
+      if (!projects) {
+        setState({ status: "error", entries: [], error: "Not connected." });
+        return;
+      }
+      setState({ status: "loading", entries: [] });
+      projects
+        .listDirectory({ cwd, ...(dirPath ? { relativePath: dirPath } : {}) })
+        .then((result) => {
+          const entries = result.entries
+            .filter(
+              (entry) =>
+                entry.kind === "directory" &&
+                // Can't move a folder into itself or a descendant.
+                !(sourceKind === "directory" && entry.path === sourcePath),
+            )
+            .map((entry) => entry.path);
+          setState({ status: "loaded", entries });
+        })
+        .catch((error: unknown) => {
+          setState({ status: "error", entries: [], error: messageOfError(error) });
+        });
+    },
+    [cwd, environmentId, sourcePath, sourceKind],
+  );
+
+  useEffect(() => {
+    loadDir("");
+  }, [loadDir]);
+
+  const toggle = useCallback(
+    (dirPath: string) => {
+      setExpanded((previous) => {
+        const next = new Set(previous);
+        if (next.has(dirPath)) {
+          next.delete(dirPath);
+        } else {
+          next.add(dirPath);
+        }
+        return next;
+      });
+      if (!dirChildrenRef.current.has(dirPath)) {
+        loadDir(dirPath);
+      }
+    },
+    [loadDir],
+  );
+
+  const renderChildren = (dirPath: string, depth: number): ReactNode => {
+    const state = dirChildren.get(dirPath);
+    const indent = 8 + depth * 14;
+    if (!state || state.status === "loading") {
+      return (
+        <div className="px-2 py-1 text-xs text-muted-foreground/60" style={{ paddingLeft: indent }}>
+          Loading…
+        </div>
+      );
+    }
+    if (state.status === "error") {
+      return (
+        <div
+          className="flex items-center gap-2 px-2 py-1 text-xs text-destructive/80"
+          style={{ paddingLeft: indent }}
+        >
+          <span className="truncate">{state.error}</span>
+          <button
+            type="button"
+            className="rounded-sm border border-border/60 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+            onClick={() => loadDir(dirPath)}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return state.entries.map((childPath) => {
+      const isExpanded = expanded.has(childPath);
+      const isSelected = selectedDir === childPath;
+      return (
+        <div key={childPath}>
+          <div
+            className={cn(
+              "flex items-center text-[13px]",
+              isSelected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
+            )}
+            style={{ paddingLeft: indent }}
+          >
+            <button
+              type="button"
+              className="flex size-5 shrink-0 items-center justify-center text-muted-foreground/70"
+              aria-label={isExpanded ? "Collapse folder" : "Expand folder"}
+              onClick={() => toggle(childPath)}
+            >
+              {isExpanded ? (
+                <ChevronDownIcon className="size-3.5" />
+              ) : (
+                <ChevronRightIcon className="size-3.5" />
+              )}
+            </button>
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-1.5 py-1 pr-2 text-left"
+              onClick={() => onSelect(childPath)}
+            >
+              <VscodeEntryIcon pathValue={childPath} kind="directory" theme={theme} />
+              <span className="truncate">{basenameOf(childPath)}</span>
+            </button>
+          </div>
+          {isExpanded ? renderChildren(childPath, depth + 1) : null}
+        </div>
+      );
+    });
+  };
+
+  return (
+    <div className="max-h-72 min-h-40 overflow-auto rounded-md border border-border/60 bg-background/40">
+      <button
+        type="button"
+        className={cn(
+          "flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[13px]",
+          selectedDir === "" ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
+        )}
+        onClick={() => onSelect("")}
+      >
+        <FolderIcon className="size-4 text-muted-foreground/80" />
+        <span className="font-medium">Project root</span>
+      </button>
+      {renderChildren("", 0)}
     </div>
   );
 }
