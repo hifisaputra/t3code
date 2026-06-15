@@ -136,6 +136,28 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
         expect(escapedStat).toBeNull();
       }),
     );
+
+    it.effect("writes base64-encoded contents as raw bytes", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "assets/logo.png",
+          contents: Buffer.from(bytes).toString("base64"),
+          encoding: "base64",
+        });
+
+        const saved = yield* fileSystem
+          .readFile(path.join(cwd, "assets/logo.png"))
+          .pipe(Effect.orDie);
+        expect([...saved]).toEqual([...bytes]);
+      }),
+    );
   });
 
   describe("readFile", () => {

@@ -36,10 +36,15 @@ export class ProjectSearchEntriesError extends Schema.TaggedErrorClass<ProjectSe
   },
 ) {}
 
+export const ProjectFileEncoding = Schema.Literals(["utf8", "base64"]);
+export type ProjectFileEncoding = typeof ProjectFileEncoding.Type;
+
 export const ProjectWriteFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
   contents: Schema.String,
+  // How `contents` is encoded. Defaults to "utf8"; "base64" carries binary uploads.
+  encoding: Schema.optional(ProjectFileEncoding),
 });
 export type ProjectWriteFileInput = typeof ProjectWriteFileInput.Type;
 
@@ -80,9 +85,6 @@ export class ProjectListDirectoryError extends Schema.TaggedErrorClass<ProjectLi
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
-
-export const ProjectFileEncoding = Schema.Literals(["utf8", "base64"]);
-export type ProjectFileEncoding = typeof ProjectFileEncoding.Type;
 
 export const ProjectReadFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,

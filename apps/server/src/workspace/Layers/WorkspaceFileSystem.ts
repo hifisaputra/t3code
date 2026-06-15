@@ -76,7 +76,14 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
           }),
       ),
     );
-    yield* fileSystem.writeFileString(target.absolutePath, input.contents).pipe(
+    const writeEffect =
+      input.encoding === "base64"
+        ? fileSystem.writeFile(
+            target.absolutePath,
+            new Uint8Array(Buffer.from(input.contents, "base64")),
+          )
+        : fileSystem.writeFileString(target.absolutePath, input.contents);
+    yield* writeEffect.pipe(
       Effect.mapError(
         (cause) =>
           new WorkspaceFileSystemError({

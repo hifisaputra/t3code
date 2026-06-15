@@ -9,9 +9,12 @@ import {
   Maximize2Icon,
   Minimize2Icon,
   RefreshCwIcon,
+  UploadIcon,
   XIcon,
 } from "lucide-react";
 import {
+  type ChangeEvent as ReactChangeEvent,
+  type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   useCallback,
@@ -53,6 +56,8 @@ const IMAGE_READ_MAX_BYTES = 5 * 1024 * 1024;
 // Above this panel width the tree and viewer sit side by side; below it (mobile,
 // tablet, narrow dock) the viewer replaces the tree as a master-detail view.
 const SPLIT_MIN_WIDTH = 640;
+
+const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 
 const TREE_DEFAULT_WIDTH = 256;
 const TREE_MIN_WIDTH = 180;
@@ -136,6 +141,28 @@ function formatBytes(bytes: number): string {
     return `${(bytes / 1024).toFixed(1)} KB`;
   }
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function dragHasFiles(event: ReactDragEvent): boolean {
+  return Array.from(event.dataTransfer?.types ?? []).includes("Files");
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("Failed to read file."));
+        return;
+      }
+      // readAsDataURL yields "data:<mime>;base64,<payload>" — keep only the payload.
+      const commaIndex = result.indexOf(",");
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file."));
+    reader.readAsDataURL(file);
+  });
 }
 
 function messageOfError(error: unknown): string {
@@ -487,6 +514,109 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     });
   }, [navigate, threadRef]);
 
+  // Upload: write dropped/picked files into a target directory via writeFile.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadTargetRef = useRef<string>("");
+  const [uploadState, setUploadState] = useState<{
+    status: "idle" | "uploading" | "error";
+    message?: string;
+  }>({ status: "idle" });
+  const [dropTargetDir, setDropTargetDir] = useState<string | null>(null);
+
+  const uploadFiles = useCallback(
+    async (targetDir: string, fileList: FileList | File[]) => {
+      if (!cwd || !environmentId) {
+        return;
+      }
+      const projects = readEnvironmentConnection(environmentId)?.client.projects;
+      if (!projects) {
+        setUploadState({ status: "error", message: "Not connected." });
+        return;
+      }
+      const files = Array.from(fileList);
+      if (files.length === 0) {
+        return;
+      }
+      setUploadState({ status: "uploading" });
+      try {
+        for (const file of files) {
+          if (file.size > UPLOAD_MAX_BYTES) {
+            throw new Error(
+              `${file.name} exceeds the ${formatBytes(UPLOAD_MAX_BYTES)} upload limit.`,
+            );
+          }
+          const base64 = await readFileAsBase64(file);
+          const relativePath = targetDir ? `${targetDir}/${file.name}` : file.name;
+          await projects.writeFile({ cwd, relativePath, contents: base64, encoding: "base64" });
+        }
+        setUploadState({ status: "idle" });
+      } catch (error) {
+        setUploadState({ status: "error", message: messageOfError(error) });
+      }
+      loadDir(targetDir);
+      if (targetDir) {
+        setExpanded((previous) => new Set(previous).add(targetDir));
+      }
+    },
+    [cwd, environmentId, loadDir],
+  );
+
+  const openUploadPicker = useCallback((targetDir: string) => {
+    uploadTargetRef.current = targetDir;
+    fileInputRef.current?.click();
+  }, []);
+
+  const onUploadInputChange = useCallback(
+    (event: ReactChangeEvent<HTMLInputElement>) => {
+      const files = event.target.files;
+      if (files && files.length > 0) {
+        void uploadFiles(uploadTargetRef.current, files);
+      }
+      event.target.value = "";
+    },
+    [uploadFiles],
+  );
+
+  const onDirDragOver = useCallback(
+    (targetDir: string) => (event: ReactDragEvent<HTMLElement>) => {
+      if (!dragHasFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "copy";
+      }
+      setDropTargetDir(targetDir);
+    },
+    [],
+  );
+
+  const onDirDrop = useCallback(
+    (targetDir: string) => (event: ReactDragEvent<HTMLElement>) => {
+      if (!dragHasFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      setDropTargetDir(null);
+      const files = event.dataTransfer?.files;
+      if (files && files.length > 0) {
+        void uploadFiles(targetDir, files);
+      }
+    },
+    [uploadFiles],
+  );
+
+  const onDropZoneDragLeave = useCallback(
+    (targetDir: string) => (event: ReactDragEvent<HTMLElement>) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+        setDropTargetDir((current) => (current === targetDir ? null : current));
+      }
+    },
+    [],
+  );
+
   const renderDir = useCallback(
     (dirPath: string, depth: number): ReactNode => {
       const state = dirStates.get(dirPath);
@@ -545,10 +675,20 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
                     isSelected
                       ? "bg-accent text-accent-foreground"
                       : "text-foreground/90 hover:bg-accent/50",
+                    isDirectory &&
+                      dropTargetDir === entry.path &&
+                      "bg-primary/15 ring-1 ring-inset ring-primary/50",
                   )}
                   style={{ paddingLeft: indent }}
                   onClick={() => (isDirectory ? toggleDir(entry.path) : selectFile(entry.path))}
                   aria-expanded={isDirectory ? isExpanded : undefined}
+                  {...(isDirectory
+                    ? {
+                        onDragOver: onDirDragOver(entry.path),
+                        onDrop: onDirDrop(entry.path),
+                        onDragLeave: onDropZoneDragLeave(entry.path),
+                      }
+                    : {})}
                 >
                   <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground/70">
                     {isDirectory ? (
@@ -577,8 +717,22 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
         </>
       );
     },
-    [dirStates, expanded, filePath, loadDir, resolvedTheme, selectFile, toggleDir],
+    [
+      dirStates,
+      expanded,
+      filePath,
+      loadDir,
+      resolvedTheme,
+      selectFile,
+      toggleDir,
+      dropTargetDir,
+      onDirDragOver,
+      onDirDrop,
+      onDropZoneDragLeave,
+    ],
   );
+
+  const treeVisible = isSplit || !filePath;
 
   const headerRow = (
     <>
@@ -589,22 +743,39 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
         </span>
       </div>
       <div className="flex shrink-0 items-center gap-1 [-webkit-app-region:no-drag]">
-        {!filePath ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  className={ACTION_BUTTON_CLASS}
-                  aria-label="Refresh files"
-                  onClick={() => loadDir("")}
-                >
-                  <RefreshCwIcon className="size-3.5" />
-                </button>
-              }
-            />
-            <TooltipPopup side="bottom">Refresh</TooltipPopup>
-          </Tooltip>
+        {treeVisible ? (
+          <>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    className={ACTION_BUTTON_CLASS}
+                    aria-label="Upload files"
+                    onClick={() => openUploadPicker("")}
+                  >
+                    <UploadIcon className="size-3.5" />
+                  </button>
+                }
+              />
+              <TooltipPopup side="bottom">Upload to project root</TooltipPopup>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    className={ACTION_BUTTON_CLASS}
+                    aria-label="Refresh files"
+                    onClick={() => loadDir("")}
+                  >
+                    <RefreshCwIcon className="size-3.5" />
+                  </button>
+                }
+              />
+              <TooltipPopup side="bottom">Refresh</TooltipPopup>
+            </Tooltip>
+          </>
         ) : null}
         <Tooltip>
           <TooltipTrigger
@@ -720,6 +891,35 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     />
   ) : null;
 
+  const uploadBanner =
+    uploadState.status === "idle" ? null : (
+      <div
+        className={cn(
+          "shrink-0 border-b px-3 py-1 text-[11px]",
+          uploadState.status === "error"
+            ? "border-destructive/30 bg-destructive/10 text-destructive/90"
+            : "border-border/50 bg-muted/30 text-muted-foreground/80",
+        )}
+      >
+        {uploadState.status === "uploading" ? "Uploading…" : uploadState.message}
+      </div>
+    );
+
+  // Tree scroll area doubles as a drop zone targeting the workspace root.
+  const treeScroll = (
+    <div
+      className={cn(
+        "min-h-0 flex-1 overflow-auto py-1",
+        dropTargetDir === "" && "bg-primary/5 ring-1 ring-inset ring-primary/40",
+      )}
+      onDragOver={onDirDragOver("")}
+      onDrop={onDirDrop("")}
+      onDragLeave={onDropZoneDragLeave("")}
+    >
+      {renderDir("", 0)}
+    </div>
+  );
+
   let body: ReactNode;
   if (!activeThread || !cwd) {
     body = (
@@ -731,11 +931,9 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     // Wide layout: tree and viewer side by side.
     body = (
       <div className="flex min-h-0 flex-1">
-        <div
-          className="flex min-h-0 shrink-0 flex-col overflow-auto py-1"
-          style={{ width: treeWidth }}
-        >
-          {renderDir("", 0)}
+        <div className="flex min-h-0 shrink-0 flex-col" style={{ width: treeWidth }}>
+          {uploadBanner}
+          {treeScroll}
         </div>
         <div
           role="separator"
@@ -766,12 +964,22 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
         {viewer}
       </div>
     ) : (
-      <div className="min-h-0 flex-1 overflow-auto py-1">{renderDir("", 0)}</div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {uploadBanner}
+        {treeScroll}
+      </div>
     );
   }
 
   return (
     <DiffPanelShell mode={mode} header={headerRow}>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={onUploadInputChange}
+      />
       <div ref={bodyRef} className="flex min-h-0 flex-1 flex-col">
         {body}
       </div>
