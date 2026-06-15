@@ -107,6 +107,8 @@ vi.mock("@t3tools/client-runtime", async (importOriginal) => {
     projects: {
       searchEntries: vi.fn(),
       writeFile: vi.fn(),
+      listDirectory: vi.fn(),
+      readFile: vi.fn(),
     },
     filesystem: {
       browse: vi.fn(),

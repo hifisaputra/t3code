@@ -11,7 +11,11 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 
-import { type FilesystemBrowseInput, type ProjectEntry } from "@t3tools/contracts";
+import {
+  type FilesystemBrowseInput,
+  type ProjectEntry,
+  type ProjectListDirectoryInput,
+} from "@t3tools/contracts";
 import { isExplicitRelativePath, isWindowsAbsolutePath } from "@t3tools/shared/path";
 import {
   insertRankedSearchResult,
@@ -32,6 +36,7 @@ import { WorkspacePaths } from "../Services/WorkspacePaths.ts";
 const WORKSPACE_CACHE_TTL_MS = 15_000;
 const WORKSPACE_CACHE_MAX_KEYS = 4;
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
+const WORKSPACE_LIST_DIRECTORY_MAX_ENTRIES = 2_000;
 const WORKSPACE_SCAN_READDIR_CONCURRENCY = 32;
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
@@ -528,9 +533,93 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     },
   );
 
+  const listDirectory: WorkspaceEntriesShape["listDirectory"] = Effect.fn(
+    "WorkspaceEntries.listDirectory",
+  )(function* (input: ProjectListDirectoryInput) {
+    const normalizedCwd = yield* normalizeWorkspaceRoot(input.cwd);
+
+    // Resolve the requested directory, allowing the workspace root itself
+    // (omitted/empty relativePath) while still rejecting traversal outside root.
+    const relativeDir = input.relativePath
+      ? (yield* workspacePaths.resolveRelativePathWithinRoot({
+          workspaceRoot: normalizedCwd,
+          relativePath: input.relativePath,
+        })).relativePath
+      : "";
+    const absoluteDir = relativeDir ? path.join(normalizedCwd, relativeDir) : normalizedCwd;
+
+    const dirents = yield* Effect.tryPromise({
+      try: () => fsPromises.readdir(absoluteDir, { withFileTypes: true }),
+      catch: (cause) =>
+        new WorkspaceEntriesError({
+          cwd: input.cwd,
+          operation: "workspaceEntries.listDirectory",
+          detail: cause instanceof Error ? cause.message : String(cause),
+          cause,
+        }),
+    });
+
+    const candidates: Array<{ relativePath: string; isDirectory: boolean }> = [];
+    for (const dirent of dirents) {
+      if (!dirent.name || dirent.name === "." || dirent.name === "..") {
+        continue;
+      }
+      const isDirectory = dirent.isDirectory();
+      if (isDirectory && IGNORED_DIRECTORY_NAMES.has(dirent.name)) {
+        continue;
+      }
+      if (!isDirectory && !dirent.isFile()) {
+        continue;
+      }
+      const relativePath = toPosixPath(
+        relativeDir ? path.join(relativeDir, dirent.name) : dirent.name,
+      );
+      if (isPathInIgnoredDirectory(relativePath)) {
+        continue;
+      }
+      candidates.push({ relativePath, isDirectory });
+    }
+
+    const shouldFilterWithGitIgnore = yield* isInsideVcsWorkTree(normalizedCwd);
+    const allowedPathSet = shouldFilterWithGitIgnore
+      ? new Set(
+          yield* filterVcsIgnoredPaths(
+            normalizedCwd,
+            candidates.map((candidate) => candidate.relativePath),
+          ),
+        )
+      : null;
+
+    const directoryEntries: ProjectEntry[] = [];
+    const fileEntries: ProjectEntry[] = [];
+    for (const candidate of candidates) {
+      if (allowedPathSet && !allowedPathSet.has(candidate.relativePath)) {
+        continue;
+      }
+      const entry: ProjectEntry = {
+        path: candidate.relativePath,
+        kind: candidate.isDirectory ? "directory" : "file",
+        parentPath: parentPathOf(candidate.relativePath),
+      };
+      (candidate.isDirectory ? directoryEntries : fileEntries).push(entry);
+    }
+
+    directoryEntries.sort((left, right) => left.path.localeCompare(right.path));
+    fileEntries.sort((left, right) => left.path.localeCompare(right.path));
+    const entries = [...directoryEntries, ...fileEntries];
+    const truncated = entries.length > WORKSPACE_LIST_DIRECTORY_MAX_ENTRIES;
+
+    return {
+      ...(relativeDir ? { relativePath: relativeDir } : {}),
+      entries: truncated ? entries.slice(0, WORKSPACE_LIST_DIRECTORY_MAX_ENTRIES) : entries,
+      truncated,
+    };
+  });
+
   return {
     browse,
     invalidate,
+    listDirectory,
     search,
   } satisfies WorkspaceEntriesShape;
 });

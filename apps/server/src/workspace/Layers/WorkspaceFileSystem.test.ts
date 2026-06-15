@@ -137,4 +137,98 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
       }),
     );
   });
+
+  describe("readFile", () => {
+    it.effect("reads text files relative to the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "src/main.ts", "export const answer = 42;\n");
+
+        const result = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "src/main.ts",
+        });
+
+        expect(result.encoding).toBe("utf8");
+        expect(result.contents).toBe("export const answer = 42;\n");
+        expect(result.truncated).toBe(false);
+        expect(result.byteSize).toBe(26);
+        expect(result.relativePath).toBe("src/main.ts");
+        expect(result.mediaType).toBeUndefined();
+      }),
+    );
+
+    it.effect("truncates text files beyond the requested byte cap", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "big.txt", "abcdefgh");
+
+        const result = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "big.txt",
+          maxBytes: 4,
+        });
+
+        expect(result.encoding).toBe("utf8");
+        expect(result.contents).toBe("abcd");
+        expect(result.truncated).toBe(true);
+        expect(result.byteSize).toBe(8);
+      }),
+    );
+
+    it.effect("returns base64 contents and a media type for images", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+        yield* fileSystem.writeFile(path.join(cwd, "logo.png"), bytes).pipe(Effect.orDie);
+
+        const result = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "logo.png",
+        });
+
+        expect(result.encoding).toBe("base64");
+        expect(result.mediaType).toBe("image/png");
+        expect(result.truncated).toBe(false);
+        expect(result.contents).toBe(Buffer.from(bytes).toString("base64"));
+      }),
+    );
+
+    it.effect("rejects reading a directory", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "src/main.ts", "export {};\n");
+
+        const error = yield* workspaceFileSystem
+          .readFile({ cwd, relativePath: "src" })
+          .pipe(Effect.flip);
+
+        expect(error._tag).toBe("WorkspaceFileSystemError");
+        if (error._tag === "WorkspaceFileSystemError") {
+          expect(error.detail).toContain("directory");
+        }
+      }),
+    );
+
+    it.effect("rejects reads outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+
+        const error = yield* workspaceFileSystem
+          .readFile({ cwd, relativePath: "../escape.md" })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain(
+          "Workspace file path must be relative to the project root: ../escape.md",
+        );
+      }),
+    );
+  });
 });

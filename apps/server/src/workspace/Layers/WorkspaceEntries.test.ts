@@ -408,4 +408,71 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
       }),
     );
   });
+
+  describe("listDirectory", () => {
+    it.effect("lists the workspace root with directories before files", () =>
+      Effect.gen(function* () {
+        const workspaceEntries = yield* WorkspaceEntries;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-list-root-" });
+        yield* writeTextFile(cwd, "src/index.ts", "export {};");
+        yield* writeTextFile(cwd, "README.md", "# readme");
+        yield* writeTextFile(cwd, "node_modules/pkg/index.js", "module.exports = {};");
+        yield* writeTextFile(cwd, ".git/HEAD", "ref: refs/heads/main");
+
+        const result = yield* workspaceEntries.listDirectory({ cwd });
+
+        expect(result.relativePath).toBeUndefined();
+        expect(result.truncated).toBe(false);
+        expect(result.entries.map((entry) => entry.path)).toEqual(["src", "README.md"]);
+        expect(result.entries.find((entry) => entry.path === "src")?.kind).toBe("directory");
+        expect(result.entries.find((entry) => entry.path === "README.md")?.kind).toBe("file");
+      }),
+    );
+
+    it.effect("lists the immediate children of a subdirectory", () =>
+      Effect.gen(function* () {
+        const workspaceEntries = yield* WorkspaceEntries;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-list-subdir-" });
+        yield* writeTextFile(cwd, "src/index.ts", "export {};");
+        yield* writeTextFile(cwd, "src/components/Composer.tsx", "export {};");
+
+        const result = yield* workspaceEntries.listDirectory({ cwd, relativePath: "src" });
+
+        expect(result.relativePath).toBe("src");
+        expect(result.entries.map((entry) => entry.path)).toEqual([
+          "src/components",
+          "src/index.ts",
+        ]);
+      }),
+    );
+
+    it.effect("excludes gitignored entries for git repositories", () =>
+      Effect.gen(function* () {
+        const workspaceEntries = yield* WorkspaceEntries;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-list-gitignore-", git: true });
+        yield* writeTextFile(cwd, ".gitignore", "ignored.txt\n");
+        yield* writeTextFile(cwd, "keep.ts", "export {};");
+        yield* writeTextFile(cwd, "ignored.txt", "ignore me");
+
+        const result = yield* workspaceEntries.listDirectory({ cwd });
+        const paths = result.entries.map((entry) => entry.path);
+
+        expect(paths).toContain("keep.ts");
+        expect(paths).not.toContain("ignored.txt");
+      }),
+    );
+
+    it.effect("rejects directories outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceEntries = yield* WorkspaceEntries;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-list-escape-" });
+
+        const error = yield* workspaceEntries
+          .listDirectory({ cwd, relativePath: "../" })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain("must be relative to the project root");
+      }),
+    );
+  });
 });

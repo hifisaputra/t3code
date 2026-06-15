@@ -1,5 +1,5 @@
 import { createFileRoute, retainSearchParams, useNavigate } from "@tanstack/react-router";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
 
 import ChatView from "../components/ChatView";
 import { threadHasStarted } from "../components/ChatView.logic";
@@ -16,6 +16,11 @@ import {
   parseDiffRouteSearch,
   stripDiffSearchParams,
 } from "../diffRouteSearch";
+import {
+  type FilesRouteSearch,
+  parseFilesRouteSearch,
+  stripFilesSearchParams,
+} from "../filesRouteSearch";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { selectEnvironmentState, selectThreadExistsByRef, useStore } from "../store";
@@ -25,6 +30,7 @@ import { RightPanelSheet } from "../components/RightPanelSheet";
 import { Sidebar, SidebarInset, SidebarProvider, SidebarRail } from "~/components/ui/sidebar";
 
 const DiffPanel = lazy(() => import("../components/DiffPanel"));
+const FileBrowserPanel = lazy(() => import("../components/FileBrowserPanel"));
 const DIFF_INLINE_SIDEBAR_WIDTH_STORAGE_KEY = "chat_diff_sidebar_width";
 const DIFF_INLINE_DEFAULT_WIDTH = "clamp(24rem,34vw,36rem)";
 const DIFF_INLINE_SIDEBAR_MIN_WIDTH = 22 * 16;
@@ -49,22 +55,30 @@ const LazyDiffPanel = (props: { mode: DiffPanelMode }) => {
   );
 };
 
-const DiffPanelInlineSidebar = (props: {
-  diffOpen: boolean;
-  onCloseDiff: () => void;
-  onOpenDiff: () => void;
-  renderDiffContent: boolean;
+const LazyFileBrowserPanel = (props: { mode: DiffPanelMode }) => {
+  return (
+    <Suspense fallback={<DiffLoadingFallback mode={props.mode} />}>
+      <FileBrowserPanel mode={props.mode} />
+    </Suspense>
+  );
+};
+
+const RightPanelInlineSidebar = (props: {
+  open: boolean;
+  onClose: () => void;
+  onOpen: () => void;
+  children: ReactNode;
 }) => {
-  const { diffOpen, onCloseDiff, onOpenDiff, renderDiffContent } = props;
+  const { open, onClose, onOpen, children } = props;
   const onOpenChange = useCallback(
-    (open: boolean) => {
-      if (open) {
-        onOpenDiff();
+    (nextOpen: boolean) => {
+      if (nextOpen) {
+        onOpen();
         return;
       }
-      onCloseDiff();
+      onClose();
     },
-    [onCloseDiff, onOpenDiff],
+    [onClose, onOpen],
   );
   const shouldAcceptInlineSidebarWidth = useCallback(
     ({ nextWidth, wrapper }: { nextWidth: number; wrapper: HTMLElement }) => {
@@ -115,7 +129,7 @@ const DiffPanelInlineSidebar = (props: {
   return (
     <SidebarProvider
       defaultOpen={false}
-      open={diffOpen}
+      open={open}
       onOpenChange={onOpenChange}
       className="w-auto min-h-0 flex-none bg-transparent"
       style={{ "--sidebar-width": DIFF_INLINE_DEFAULT_WIDTH } as React.CSSProperties}
@@ -131,7 +145,7 @@ const DiffPanelInlineSidebar = (props: {
           storageKey: DIFF_INLINE_SIDEBAR_WIDTH_STORAGE_KEY,
         }}
       >
-        {renderDiffContent ? <LazyDiffPanel mode="sidebar" /> : null}
+        {children}
         <SidebarRail />
       </Sidebar>
     </SidebarProvider>
@@ -168,6 +182,9 @@ function ChatThreadRouteView() {
   const serverThreadStarted = threadHasStarted(serverThread);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
   const diffOpen = search.diff === "1";
+  const filesOpen = search.files === "1";
+  const rightPanelOpen = diffOpen || filesOpen;
+  const activeRightPanel: "diff" | "files" | null = filesOpen ? "files" : diffOpen ? "diff" : null;
   const shouldUseDiffSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const currentThreadKey = threadRef ? `${threadRef.environmentId}:${threadRef.threadId}` : null;
   const [diffPanelMountState, setDiffPanelMountState] = useState(() => ({
@@ -189,14 +206,14 @@ function ChatThreadRouteView() {
       };
     });
   }, [currentThreadKey]);
-  const closeDiff = useCallback(() => {
+  const closeRightPanel = useCallback(() => {
     if (!threadRef) {
       return;
     }
     void navigate({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(threadRef),
-      search: { diff: undefined },
+      search: { diff: undefined, files: undefined },
     });
   }, [navigate, threadRef]);
   const openDiff = useCallback(() => {
@@ -208,7 +225,7 @@ function ChatThreadRouteView() {
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(threadRef),
       search: (previous) => {
-        const rest = stripDiffSearchParams(previous);
+        const rest = stripFilesSearchParams(stripDiffSearchParams(previous));
         return { ...rest, diff: "1" };
       },
     });
@@ -245,16 +262,17 @@ function ChatThreadRouteView() {
             environmentId={threadRef.environmentId}
             threadId={threadRef.threadId}
             onDiffPanelOpen={markDiffOpened}
-            reserveTitleBarControlInset={!diffOpen}
+            reserveTitleBarControlInset={!rightPanelOpen}
             routeKind="server"
           />
         </SidebarInset>
-        <DiffPanelInlineSidebar
-          diffOpen={diffOpen}
-          onCloseDiff={closeDiff}
-          onOpenDiff={openDiff}
-          renderDiffContent={shouldRenderDiffContent}
-        />
+        <RightPanelInlineSidebar open={rightPanelOpen} onClose={closeRightPanel} onOpen={openDiff}>
+          {activeRightPanel === "files" ? (
+            <LazyFileBrowserPanel mode="sidebar" />
+          ) : shouldRenderDiffContent ? (
+            <LazyDiffPanel mode="sidebar" />
+          ) : null}
+        </RightPanelInlineSidebar>
       </>
     );
   }
@@ -269,17 +287,24 @@ function ChatThreadRouteView() {
           routeKind="server"
         />
       </SidebarInset>
-      <RightPanelSheet open={diffOpen} onClose={closeDiff}>
-        {shouldRenderDiffContent ? <LazyDiffPanel mode="sheet" /> : null}
+      <RightPanelSheet open={rightPanelOpen} onClose={closeRightPanel}>
+        {activeRightPanel === "files" ? (
+          <LazyFileBrowserPanel mode="sheet" />
+        ) : shouldRenderDiffContent ? (
+          <LazyDiffPanel mode="sheet" />
+        ) : null}
       </RightPanelSheet>
     </>
   );
 }
 
 export const Route = createFileRoute("/_chat/$environmentId/$threadId")({
-  validateSearch: (search) => parseDiffRouteSearch(search),
+  validateSearch: (search): DiffRouteSearch & FilesRouteSearch => ({
+    ...parseDiffRouteSearch(search),
+    ...parseFilesRouteSearch(search),
+  }),
   search: {
-    middlewares: [retainSearchParams<DiffRouteSearch>(["diff"])],
+    middlewares: [retainSearchParams<DiffRouteSearch & FilesRouteSearch>(["diff", "files"])],
   },
   component: ChatThreadRouteView,
 });

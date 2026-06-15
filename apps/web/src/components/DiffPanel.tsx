@@ -41,6 +41,7 @@ import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { useSettings } from "../hooks/useSettings";
 import { formatShortTimestamp } from "../timestampFormat";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
+import { RightPanelTabs } from "./RightPanelTabs";
 import { ToggleGroup, Toggle } from "./ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
@@ -436,6 +437,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
 
   const headerRow = (
     <>
+      <RightPanelTabs active="diff" />
       <div className="relative min-w-0 flex-1 [-webkit-app-region:no-drag]">
         <button
           type="button"

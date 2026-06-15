@@ -13,9 +13,13 @@ import type * as Effect from "effect/Effect";
 import type {
   FilesystemBrowseInput,
   FilesystemBrowseResult,
+  ProjectListDirectoryInput,
+  ProjectListDirectoryResult,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
+
+import type { WorkspacePathOutsideRootError } from "./WorkspacePaths.ts";
 
 export class WorkspaceEntriesError extends Schema.TaggedErrorClass<WorkspaceEntriesError>()(
   "WorkspaceEntriesError",
@@ -57,6 +61,19 @@ export interface WorkspaceEntriesShape {
   readonly search: (
     input: ProjectSearchEntriesInput,
   ) => Effect.Effect<ProjectSearchEntriesResult, WorkspaceEntriesError>;
+
+  /**
+   * List the immediate children of a single workspace-root-relative directory.
+   *
+   * Honors the same ignore rules as the search index (ignored directory names
+   * plus VCS ignore patterns) and rejects paths that escape the workspace root.
+   */
+  readonly listDirectory: (
+    input: ProjectListDirectoryInput,
+  ) => Effect.Effect<
+    ProjectListDirectoryResult,
+    WorkspaceEntriesError | WorkspacePathOutsideRootError
+  >;
 
   /**
    * Drop any cached workspace entries for the given workspace root.
