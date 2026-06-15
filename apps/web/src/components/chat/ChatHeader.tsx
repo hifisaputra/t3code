@@ -13,6 +13,7 @@ import { DiffIcon, FilesIcon, TerminalSquareIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
 import { PreviewControl } from "../PreviewControl";
+import { NotificationsControl } from "../NotificationsControl";
 import { Toggle } from "../ui/toggle";
 import { SidebarTrigger } from "../ui/sidebar";
 import { OpenInPicker } from "./OpenInPicker";
@@ -137,6 +138,7 @@ export const ChatHeader = memo(function ChatHeader({
           />
         )}
         {activeProjectName && <PreviewControl cwd={gitCwd} />}
+        <NotificationsControl environmentId={activeThreadEnvironmentId} />
         <Tooltip>
           <TooltipTrigger
             render={

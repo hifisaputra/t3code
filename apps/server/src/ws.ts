@@ -77,6 +77,7 @@ import { redactServerSettingsForClient, ServerSettingsService } from "./serverSe
 import { TerminalManager } from "./terminal/Services/Manager.ts";
 import { WorkspaceEntries } from "./workspace/Services/WorkspaceEntries.ts";
 import { WorkspaceFileSystem } from "./workspace/Services/WorkspaceFileSystem.ts";
+import { WebPushNotifier } from "./push/WebPushNotifier.ts";
 import { WorkspacePathOutsideRootError } from "./workspace/Services/WorkspacePaths.ts";
 import { VcsStatusBroadcaster } from "./vcs/VcsStatusBroadcaster.ts";
 import { VcsProvisioningService } from "./vcs/VcsProvisioningService.ts";
@@ -166,6 +167,9 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.projectsDeletePath, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsCreateDirectory, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsMovePath, AuthOrchestrationOperateScope],
+  [WS_METHODS.pushGetStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.pushSubscribe, AuthOrchestrationReadScope],
+  [WS_METHODS.pushUnsubscribe, AuthOrchestrationReadScope],
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.subscribeVcsStatus, AuthOrchestrationReadScope],
@@ -258,6 +262,7 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
       const startup = yield* ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem;
+      const webPushNotifier = yield* WebPushNotifier;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
       const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
       const serverEnvironment = yield* ServerEnvironment;
@@ -1241,6 +1246,18 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
             ),
             { "rpc.aggregate": "workspace" },
           ),
+        [WS_METHODS.pushGetStatus]: (_input) =>
+          observeRpcEffect(WS_METHODS.pushGetStatus, webPushNotifier.getStatus(), {
+            "rpc.aggregate": "push",
+          }),
+        [WS_METHODS.pushSubscribe]: (input) =>
+          observeRpcEffect(WS_METHODS.pushSubscribe, webPushNotifier.subscribe(input), {
+            "rpc.aggregate": "push",
+          }),
+        [WS_METHODS.pushUnsubscribe]: (input) =>
+          observeRpcEffect(WS_METHODS.pushUnsubscribe, webPushNotifier.unsubscribe(input), {
+            "rpc.aggregate": "push",
+          }),
         [WS_METHODS.shellOpenInEditor]: (input) =>
           observeRpcEffect(WS_METHODS.shellOpenInEditor, externalLauncher.launchEditor(input), {
             "rpc.aggregate": "workspace",

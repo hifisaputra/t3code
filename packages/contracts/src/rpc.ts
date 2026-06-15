@@ -64,6 +64,15 @@ import {
   RelayClientStatusSchema,
 } from "./relayClient.ts";
 import {
+  PushError,
+  PushStatusInput,
+  PushStatusResult,
+  PushSubscribeResult,
+  PushSubscriptionInput,
+  PushUnsubscribeInput,
+  PushUnsubscribeResult,
+} from "./push.ts";
+import {
   ProjectCreateDirectoryError,
   ProjectCreateDirectoryInput,
   ProjectCreateDirectoryResult,
@@ -143,6 +152,9 @@ export const WS_METHODS = {
   projectsDeletePath: "projects.deletePath",
   projectsCreateDirectory: "projects.createDirectory",
   projectsMovePath: "projects.movePath",
+  pushGetStatus: "push.getStatus",
+  pushSubscribe: "push.subscribe",
+  pushUnsubscribe: "push.unsubscribe",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -369,6 +381,24 @@ export const WsProjectsMovePathRpc = Rpc.make(WS_METHODS.projectsMovePath, {
   payload: ProjectMovePathInput,
   success: ProjectMovePathResult,
   error: Schema.Union([ProjectMovePathError, EnvironmentAuthorizationError]),
+});
+
+export const WsPushGetStatusRpc = Rpc.make(WS_METHODS.pushGetStatus, {
+  payload: PushStatusInput,
+  success: PushStatusResult,
+  error: Schema.Union([PushError, EnvironmentAuthorizationError]),
+});
+
+export const WsPushSubscribeRpc = Rpc.make(WS_METHODS.pushSubscribe, {
+  payload: PushSubscriptionInput,
+  success: PushSubscribeResult,
+  error: Schema.Union([PushError, EnvironmentAuthorizationError]),
+});
+
+export const WsPushUnsubscribeRpc = Rpc.make(WS_METHODS.pushUnsubscribe, {
+  payload: PushUnsubscribeInput,
+  success: PushUnsubscribeResult,
+  error: Schema.Union([PushError, EnvironmentAuthorizationError]),
 });
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
@@ -620,6 +650,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsDeletePathRpc,
   WsProjectsCreateDirectoryRpc,
   WsProjectsMovePathRpc,
+  WsPushGetStatusRpc,
+  WsPushSubscribeRpc,
+  WsPushUnsubscribeRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsSubscribeVcsStatusRpc,

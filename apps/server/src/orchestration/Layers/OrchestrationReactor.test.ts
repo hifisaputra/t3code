@@ -12,6 +12,7 @@ import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
+import * as WebPushNotifier from "../../push/WebPushNotifier.ts";
 
 describe("OrchestrationReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<OrchestrationReactor, never> | null = null;
@@ -73,6 +74,17 @@ describe("OrchestrationReactor", () => {
             },
           }),
         ),
+        Layer.provideMerge(
+          Layer.succeed(WebPushNotifier.WebPushNotifier, {
+            getStatus: () => Effect.succeed({ enabled: false }),
+            subscribe: () => Effect.succeed({ ok: true }),
+            unsubscribe: () => Effect.succeed({ ok: true }),
+            start: () => {
+              started.push("web-push-notifier");
+              return Effect.void;
+            },
+          }),
+        ),
       ),
     );
 
@@ -86,6 +98,7 @@ describe("OrchestrationReactor", () => {
       "checkpoint-reactor",
       "thread-deletion-reactor",
       "agent-awareness-relay",
+      "web-push-notifier",
     ]);
 
     await Effect.runPromise(Scope.close(scope, Exit.void));

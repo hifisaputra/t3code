@@ -117,6 +117,7 @@ import {
 } from "./environment/Services/ServerEnvironment.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
 import { WorkspaceFileSystemLive } from "./workspace/Layers/WorkspaceFileSystem.ts";
+import { WebPushNotifier } from "./push/WebPushNotifier.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriver from "./vcs/VcsDriver.ts";
@@ -669,6 +670,14 @@ const buildAppUnderTest = (options?: {
           dispatch: () => Effect.succeed({ sequence: 0 }),
           streamDomainEvents: Stream.empty,
           ...options?.layers?.orchestrationEngine,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(WebPushNotifier)({
+          getStatus: () => Effect.succeed({ enabled: false }),
+          subscribe: () => Effect.succeed({ ok: true }),
+          unsubscribe: () => Effect.succeed({ ok: true }),
+          start: () => Effect.void,
         }),
       ),
       Layer.provide(
