@@ -35,6 +35,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   ProjectCreateDirectoryError,
   ProjectDeletePathError,
+  ProjectMovePathError,
   ProjectListDirectoryError,
   ProjectReadFileError,
   ProjectSearchEntriesError,
@@ -164,6 +165,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.projectsReadFile, AuthOrchestrationReadScope],
   [WS_METHODS.projectsDeletePath, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsCreateDirectory, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsMovePath, AuthOrchestrationOperateScope],
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.subscribeVcsStatus, AuthOrchestrationReadScope],
@@ -1222,6 +1224,19 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
                   ? "Directory path must stay within the project root."
                   : `Failed to create directory: ${cause.detail}`;
                 return new ProjectCreateDirectoryError({ message, cause });
+              }),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsMovePath]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsMovePath,
+            workspaceFileSystem.movePath(input).pipe(
+              Effect.mapError((cause) => {
+                const message = isWorkspacePathOutsideRootError(cause)
+                  ? "Path must stay within the project root."
+                  : `Failed to move path: ${cause.detail}`;
+                return new ProjectMovePathError({ message, cause });
               }),
             ),
             { "rpc.aggregate": "workspace" },

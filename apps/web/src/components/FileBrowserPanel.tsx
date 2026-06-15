@@ -6,9 +6,12 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CodeIcon,
+  EllipsisVerticalIcon,
+  FolderInputIcon,
   FolderPlusIcon,
   Maximize2Icon,
   Minimize2Icon,
+  PencilIcon,
   RefreshCwIcon,
   Trash2Icon,
   UploadIcon,
@@ -66,6 +69,7 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { Input } from "./ui/input";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "./ui/menu";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
@@ -695,6 +699,91 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     setDeleteTarget({ path, kind });
   }, []);
 
+  const moveFormId = useId();
+  const [moveState, setMoveState] = useState<{
+    open: boolean;
+    mode: "rename" | "move";
+    sourcePath: string;
+    sourceKind: "file" | "directory";
+    value: string;
+  }>({ open: false, mode: "rename", sourcePath: "", sourceKind: "file", value: "" });
+
+  const openRename = useCallback((path: string, kind: "file" | "directory") => {
+    setActionError(null);
+    setMoveState({
+      open: true,
+      mode: "rename",
+      sourcePath: path,
+      sourceKind: kind,
+      value: basenameOf(path),
+    });
+  }, []);
+
+  const openMove = useCallback((path: string, kind: "file" | "directory") => {
+    setActionError(null);
+    setMoveState({
+      open: true,
+      mode: "move",
+      sourcePath: path,
+      sourceKind: kind,
+      value: parentDirOf(path),
+    });
+  }, []);
+
+  const submitMove = useCallback(async () => {
+    if (!cwd || !environmentId) {
+      return;
+    }
+    const projects = readEnvironmentConnection(environmentId)?.client.projects;
+    if (!projects) {
+      setActionError("Not connected.");
+      return;
+    }
+    const { mode, sourcePath, sourceKind, value } = moveState;
+    let toPath: string;
+    if (mode === "rename") {
+      const name = value.trim().replace(/\/+$/, "");
+      if (!name) {
+        return;
+      }
+      const parentDir = parentDirOf(sourcePath);
+      toPath = parentDir ? `${parentDir}/${name}` : name;
+    } else {
+      const destDir = value.trim().replace(/^\/+|\/+$/g, "");
+      toPath = destDir ? `${destDir}/${basenameOf(sourcePath)}` : basenameOf(sourcePath);
+    }
+    if (toPath === sourcePath) {
+      setMoveState((previous) => ({ ...previous, open: false }));
+      return;
+    }
+    try {
+      await projects.movePath({ cwd, fromRelativePath: sourcePath, toRelativePath: toPath });
+      setMoveState((previous) => ({ ...previous, open: false }));
+      const sourceParent = parentDirOf(sourcePath);
+      const destParent = parentDirOf(toPath);
+      loadDir(sourceParent);
+      if (destParent !== sourceParent) {
+        loadDir(destParent);
+      }
+      setExpanded((previous) => {
+        const next = new Set(previous);
+        next.delete(sourcePath);
+        if (destParent) {
+          next.add(destParent);
+        }
+        return next;
+      });
+      // Keep the viewer pointed at the file if it (or its parent) was moved.
+      if (filePath === sourcePath) {
+        selectFile(toPath);
+      } else if (sourceKind === "directory" && filePath?.startsWith(`${sourcePath}/`)) {
+        selectFile(`${toPath}${filePath.slice(sourcePath.length)}`);
+      }
+    } catch (error) {
+      setActionError(messageOfError(error));
+    }
+  }, [cwd, environmentId, moveState, loadDir, filePath, selectFile]);
+
   const confirmDelete = useCallback(async () => {
     if (!deleteTarget || !cwd || !environmentId) {
       return;
@@ -817,25 +906,44 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
                     />
                     <span className="truncate">{basenameOf(entry.path)}</span>
                   </button>
-                  <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100">
-                    {isDirectory ? (
-                      <button
-                        type="button"
-                        className={ROW_ACTION_BUTTON_CLASS}
-                        aria-label={`New folder in ${basenameOf(entry.path)}`}
-                        onClick={() => openCreateFolder(entry.path)}
+                  <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100 has-[[data-popup-open]]:opacity-100">
+                    <Menu>
+                      <MenuTrigger
+                        render={
+                          <button
+                            type="button"
+                            className={ROW_ACTION_BUTTON_CLASS}
+                            aria-label={`Actions for ${basenameOf(entry.path)}`}
+                          />
+                        }
                       >
-                        <FolderPlusIcon className="size-3.5" />
-                      </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      className={cn(ROW_ACTION_BUTTON_CLASS, "hover:text-destructive")}
-                      aria-label={`Delete ${basenameOf(entry.path)}`}
-                      onClick={() => requestDelete(entry.path, entry.kind)}
-                    >
-                      <Trash2Icon className="size-3.5" />
-                    </button>
+                        <EllipsisVerticalIcon className="size-3.5" />
+                      </MenuTrigger>
+                      <MenuPopup align="end">
+                        {isDirectory ? (
+                          <MenuItem onClick={() => openCreateFolder(entry.path)}>
+                            <FolderPlusIcon />
+                            New folder
+                          </MenuItem>
+                        ) : null}
+                        <MenuItem onClick={() => openRename(entry.path, entry.kind)}>
+                          <PencilIcon />
+                          Rename
+                        </MenuItem>
+                        <MenuItem onClick={() => openMove(entry.path, entry.kind)}>
+                          <FolderInputIcon />
+                          Move
+                        </MenuItem>
+                        <MenuSeparator />
+                        <MenuItem
+                          variant="destructive"
+                          onClick={() => requestDelete(entry.path, entry.kind)}
+                        >
+                          <Trash2Icon />
+                          Delete
+                        </MenuItem>
+                      </MenuPopup>
+                    </Menu>
                   </div>
                 </div>
                 {isDirectory && isExpanded ? renderDir(entry.path, depth + 1) : null}
@@ -866,6 +974,8 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
       onDirDrop,
       onDropZoneDragLeave,
       openCreateFolder,
+      openRename,
+      openMove,
       requestDelete,
     ],
   );
@@ -1031,21 +1141,34 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
           />
           <TooltipPopup side="bottom">Refresh file</TooltipPopup>
         </Tooltip>
-        <Tooltip>
-          <TooltipTrigger
+        <Menu>
+          <MenuTrigger
             render={
               <button
                 type="button"
-                className={cn(ACTION_BUTTON_CLASS, "size-6 hover:text-destructive")}
-                aria-label="Delete file"
-                onClick={() => requestDelete(filePath, "file")}
-              >
-                <Trash2Icon className="size-3.5" />
-              </button>
+                className={cn(ACTION_BUTTON_CLASS, "size-6")}
+                aria-label="File actions"
+              />
             }
-          />
-          <TooltipPopup side="bottom">Delete file</TooltipPopup>
-        </Tooltip>
+          >
+            <EllipsisVerticalIcon className="size-3.5" />
+          </MenuTrigger>
+          <MenuPopup align="end">
+            <MenuItem onClick={() => openRename(filePath, "file")}>
+              <PencilIcon />
+              Rename
+            </MenuItem>
+            <MenuItem onClick={() => openMove(filePath, "file")}>
+              <FolderInputIcon />
+              Move
+            </MenuItem>
+            <MenuSeparator />
+            <MenuItem variant="destructive" onClick={() => requestDelete(filePath, "file")}>
+              <Trash2Icon />
+              Delete
+            </MenuItem>
+          </MenuPopup>
+        </Menu>
       </div>
     ) : null;
 
@@ -1233,6 +1356,60 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
           </AlertDialogFooter>
         </AlertDialogPopup>
       </AlertDialog>
+
+      <Dialog
+        open={moveState.open}
+        onOpenChange={(open) => setMoveState((previous) => ({ ...previous, open }))}
+      >
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>
+              {moveState.mode === "rename" ? "Rename" : "Move"}{" "}
+              {moveState.sourceKind === "directory" ? "folder" : "file"}
+            </DialogTitle>
+            <DialogDescription>
+              {moveState.mode === "rename"
+                ? `Enter a new name for “${basenameOf(moveState.sourcePath)}”.`
+                : `Move “${basenameOf(moveState.sourcePath)}” into another folder (leave blank for the project root).`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            <form
+              id={moveFormId}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitMove();
+              }}
+            >
+              <Input
+                autoFocus
+                placeholder={moveState.mode === "rename" ? "name" : "path/to/folder"}
+                value={moveState.value}
+                onChange={(event) =>
+                  setMoveState((previous) => ({ ...previous, value: event.target.value }))
+                }
+              />
+              {actionError ? <p className="mt-2 text-sm text-destructive">{actionError}</p> : null}
+            </form>
+          </DialogPanel>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setMoveState((previous) => ({ ...previous, open: false }))}
+            >
+              Cancel
+            </Button>
+            <Button
+              form={moveFormId}
+              type="submit"
+              disabled={moveState.mode === "rename" && moveState.value.trim().length === 0}
+            >
+              {moveState.mode === "rename" ? "Rename" : "Move"}
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
     </>
   );
 }

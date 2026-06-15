@@ -73,6 +73,9 @@ import {
   ProjectListDirectoryError,
   ProjectListDirectoryInput,
   ProjectListDirectoryResult,
+  ProjectMovePathError,
+  ProjectMovePathInput,
+  ProjectMovePathResult,
   ProjectReadFileError,
   ProjectReadFileInput,
   ProjectReadFileResult,
@@ -139,6 +142,7 @@ export const WS_METHODS = {
   projectsReadFile: "projects.readFile",
   projectsDeletePath: "projects.deletePath",
   projectsCreateDirectory: "projects.createDirectory",
+  projectsMovePath: "projects.movePath",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -359,6 +363,12 @@ export const WsProjectsCreateDirectoryRpc = Rpc.make(WS_METHODS.projectsCreateDi
   payload: ProjectCreateDirectoryInput,
   success: ProjectCreateDirectoryResult,
   error: Schema.Union([ProjectCreateDirectoryError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsMovePathRpc = Rpc.make(WS_METHODS.projectsMovePath, {
+  payload: ProjectMovePathInput,
+  success: ProjectMovePathResult,
+  error: Schema.Union([ProjectMovePathError, EnvironmentAuthorizationError]),
 });
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
@@ -609,6 +619,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsReadFileRpc,
   WsProjectsDeletePathRpc,
   WsProjectsCreateDirectoryRpc,
+  WsProjectsMovePathRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsSubscribeVcsStatusRpc,

@@ -86,6 +86,7 @@ export interface WsRpcClient {
     readonly readFile: RpcUnaryMethod<typeof WS_METHODS.projectsReadFile>;
     readonly deletePath: RpcUnaryMethod<typeof WS_METHODS.projectsDeletePath>;
     readonly createDirectory: RpcUnaryMethod<typeof WS_METHODS.projectsCreateDirectory>;
+    readonly movePath: RpcUnaryMethod<typeof WS_METHODS.projectsMovePath>;
   };
   readonly filesystem: {
     readonly browse: RpcUnaryMethod<typeof WS_METHODS.filesystemBrowse>;
@@ -229,6 +230,8 @@ export function createWsRpcClient(
         transport.request((client) => client[WS_METHODS.projectsDeletePath](input)),
       createDirectory: (input) =>
         transport.request((client) => client[WS_METHODS.projectsCreateDirectory](input)),
+      movePath: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsMovePath](input)),
     },
     filesystem: {
       browse: (input) => transport.request((client) => client[WS_METHODS.filesystemBrowse](input)),

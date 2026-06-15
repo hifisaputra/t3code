@@ -153,3 +153,30 @@ export class ProjectCreateDirectoryError extends Schema.TaggedErrorClass<Project
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
+
+export const ProjectMovePathInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  // Source and destination are both workspace-root-relative POSIX paths. Renaming
+  // is a move within the same parent directory.
+  fromRelativePath: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH),
+  ),
+  toRelativePath: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH),
+  ),
+});
+export type ProjectMovePathInput = typeof ProjectMovePathInput.Type;
+
+export const ProjectMovePathResult = Schema.Struct({
+  fromRelativePath: TrimmedNonEmptyString,
+  toRelativePath: TrimmedNonEmptyString,
+});
+export type ProjectMovePathResult = typeof ProjectMovePathResult.Type;
+
+export class ProjectMovePathError extends Schema.TaggedErrorClass<ProjectMovePathError>()(
+  "ProjectMovePathError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}

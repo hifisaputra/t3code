@@ -222,7 +222,70 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
     return { relativePath: target.relativePath };
   });
 
-  return { writeFile, readFile, deletePath, createDirectory } satisfies WorkspaceFileSystemShape;
+  const movePath: WorkspaceFileSystemShape["movePath"] = Effect.fn("WorkspaceFileSystem.movePath")(
+    function* (input) {
+      const from = yield* workspacePaths.resolveRelativePathWithinRoot({
+        workspaceRoot: input.cwd,
+        relativePath: input.fromRelativePath,
+      });
+      const to = yield* workspacePaths.resolveRelativePathWithinRoot({
+        workspaceRoot: input.cwd,
+        relativePath: input.toRelativePath,
+      });
+
+      if (from.relativePath === to.relativePath) {
+        return { fromRelativePath: from.relativePath, toRelativePath: to.relativePath };
+      }
+
+      const makeError = (operation: string, detail: string, cause?: unknown) =>
+        new WorkspaceFileSystemError({
+          cwd: input.cwd,
+          relativePath: input.toRelativePath,
+          operation,
+          detail,
+          ...(cause === undefined ? {} : { cause }),
+        });
+
+      const destinationExists = yield* fileSystem
+        .exists(to.absolutePath)
+        .pipe(
+          Effect.mapError((cause) =>
+            makeError("workspaceFileSystem.movePath.exists", cause.message, cause),
+          ),
+        );
+      if (destinationExists) {
+        return yield* makeError(
+          "workspaceFileSystem.movePath",
+          `A file or folder already exists at ${to.relativePath}.`,
+        );
+      }
+
+      yield* fileSystem
+        .makeDirectory(path.dirname(to.absolutePath), { recursive: true })
+        .pipe(
+          Effect.mapError((cause) =>
+            makeError("workspaceFileSystem.movePath.makeDirectory", cause.message, cause),
+          ),
+        );
+      yield* fileSystem
+        .rename(from.absolutePath, to.absolutePath)
+        .pipe(
+          Effect.mapError((cause) =>
+            makeError("workspaceFileSystem.movePath.rename", cause.message, cause),
+          ),
+        );
+      yield* workspaceEntries.invalidate(input.cwd);
+      return { fromRelativePath: from.relativePath, toRelativePath: to.relativePath };
+    },
+  );
+
+  return {
+    writeFile,
+    readFile,
+    deletePath,
+    createDirectory,
+    movePath,
+  } satisfies WorkspaceFileSystemShape;
 });
 
 export const WorkspaceFileSystemLive = Layer.effect(WorkspaceFileSystem, makeWorkspaceFileSystem);

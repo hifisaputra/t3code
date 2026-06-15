@@ -332,4 +332,83 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
       }),
     );
   });
+
+  describe("movePath", () => {
+    it.effect("renames a file within the same directory", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "src/old.ts", "export const a = 1;\n");
+
+        const result = yield* workspaceFileSystem.movePath({
+          cwd,
+          fromRelativePath: "src/old.ts",
+          toRelativePath: "src/new.ts",
+        });
+
+        expect(result).toEqual({ fromRelativePath: "src/old.ts", toRelativePath: "src/new.ts" });
+        const oldExists = yield* fileSystem.exists(path.join(cwd, "src/old.ts")).pipe(Effect.orDie);
+        const moved = yield* fileSystem
+          .readFileString(path.join(cwd, "src/new.ts"))
+          .pipe(Effect.orDie);
+        expect(oldExists).toBe(false);
+        expect(moved).toBe("export const a = 1;\n");
+      }),
+    );
+
+    it.effect("moves a file into another directory, creating parents", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "a.ts", "export {};\n");
+
+        yield* workspaceFileSystem.movePath({
+          cwd,
+          fromRelativePath: "a.ts",
+          toRelativePath: "lib/nested/a.ts",
+        });
+
+        const moved = yield* fileSystem
+          .exists(path.join(cwd, "lib/nested/a.ts"))
+          .pipe(Effect.orDie);
+        expect(moved).toBe(true);
+      }),
+    );
+
+    it.effect("refuses to overwrite an existing destination", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "a.ts", "a\n");
+        yield* writeTextFile(cwd, "b.ts", "b\n");
+
+        const error = yield* workspaceFileSystem
+          .movePath({ cwd, fromRelativePath: "a.ts", toRelativePath: "b.ts" })
+          .pipe(Effect.flip);
+
+        expect(error._tag).toBe("WorkspaceFileSystemError");
+        if (error._tag === "WorkspaceFileSystemError") {
+          expect(error.detail).toContain("already exists");
+        }
+      }),
+    );
+
+    it.effect("rejects moves outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "a.ts", "a\n");
+
+        const error = yield* workspaceFileSystem
+          .movePath({ cwd, fromRelativePath: "a.ts", toRelativePath: "../escape.ts" })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain("must be relative to the project root");
+      }),
+    );
+  });
 });

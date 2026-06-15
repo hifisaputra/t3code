@@ -15,6 +15,8 @@ import type {
   ProjectCreateDirectoryResult,
   ProjectDeletePathInput,
   ProjectDeletePathResult,
+  ProjectMovePathInput,
+  ProjectMovePathResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectWriteFileInput,
@@ -85,6 +87,19 @@ export interface WorkspaceFileSystemShape {
     input: ProjectCreateDirectoryInput,
   ) => Effect.Effect<
     ProjectCreateDirectoryResult,
+    WorkspaceFileSystemError | WorkspacePathOutsideRootError
+  >;
+
+  /**
+   * Move or rename a file or directory within the workspace root.
+   *
+   * Creates the destination's parent directories as needed, refuses to
+   * overwrite an existing destination, and rejects paths that escape the root.
+   */
+  readonly movePath: (
+    input: ProjectMovePathInput,
+  ) => Effect.Effect<
+    ProjectMovePathResult,
     WorkspaceFileSystemError | WorkspacePathOutsideRootError
   >;
 }
