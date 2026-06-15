@@ -43,6 +43,101 @@ brew install --cask t3-code
 yay -S t3code-bin
 ```
 
+## Remote access over Tailscale
+
+Run T3 Code on one machine (your dev box, a home server, etc.) and use it from
+your phone or laptop over your private [Tailscale](https://tailscale.com)
+network — nothing is exposed to the public internet.
+
+### 1. Prerequisites
+
+- [Install Tailscale](https://tailscale.com/download) and sign in on **both** the
+  host and the device you'll connect from (same tailnet).
+- Authenticate at least one provider on the host (see [Installation](#installation)).
+
+### 2. Run the server
+
+T3 Code listens on `127.0.0.1:3773` by default:
+
+```bash
+npx t3@latest
+```
+
+Useful flags (`npx t3@latest --help` for the full list):
+
+- `--port <number>` — change the port (default `3773`).
+- `--host <iface>` — bind address, e.g. `127.0.0.1`, `0.0.0.0`, or a Tailnet IP.
+
+Keep the default `127.0.0.1` bind and put Tailscale in front (next step); that
+keeps the server off every other interface.
+
+### 3. Expose it over HTTPS with Tailscale
+
+Notifications (Web Push) and other browser features require a **secure context**
+(HTTPS), so front the server with `tailscale serve` instead of hitting the raw
+port over HTTP.
+
+Enable **MagicDNS** and **HTTPS Certificates** once in the
+[Tailscale admin console](https://login.tailscale.com/admin/dns), then on the host:
+
+```bash
+# proxy HTTPS on your tailnet -> the local T3 Code server, in the background
+tailscale serve --bg 3773
+
+# print the https://<machine>.<tailnet>.ts.net URL
+tailscale serve status
+```
+
+Open that `https://<machine>.<tailnet>.ts.net` URL from any device on your
+tailnet. Stop serving later with `tailscale serve reset`.
+
+> [!WARNING]
+> Use `tailscale serve` (private to your tailnet) — **not** `tailscale funnel`,
+> which publishes to the public internet.
+
+### 4. Keep it running in the background
+
+`tailscale serve --bg` already persists on its own. To keep the T3 Code process
+running too:
+
+**Linux (systemd user service)** — survives logout and starts on boot:
+
+```ini
+# ~/.config/systemd/user/t3code.service
+[Unit]
+Description=T3 Code
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/env npx t3@latest --port 3773 --host 127.0.0.1
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now t3code
+loginctl enable-linger "$USER"   # run even with no active login session
+```
+
+(Adjust `ExecStart` to your Node/npx path — `which npx` — or install globally
+with `npm i -g t3` and use `t3 --port 3773`.)
+
+**Quick alternative (any OS)** — run it inside `tmux`/`screen`, or detach with:
+
+```bash
+nohup npx t3@latest >/tmp/t3code.log 2>&1 &
+```
+
+### 5. Enable notifications on your phone
+
+Open the `https://…ts.net` URL, tap the **bell** in the top bar, and choose
+**Enable notifications**. On Android, add the site to your home screen first for
+the most reliable delivery. You'll get a push when an agent finishes or needs
+approval — even with the tab closed.
+
 ## Some notes
 
 We are very very early in this project. Expect bugs.
