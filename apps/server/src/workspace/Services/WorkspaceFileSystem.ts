@@ -11,6 +11,10 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
 import type {
+  ProjectCreateDirectoryInput,
+  ProjectCreateDirectoryResult,
+  ProjectDeletePathInput,
+  ProjectDeletePathResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectWriteFileInput,
@@ -57,6 +61,30 @@ export interface WorkspaceFileSystemShape {
     input: ProjectReadFileInput,
   ) => Effect.Effect<
     ProjectReadFileResult,
+    WorkspaceFileSystemError | WorkspacePathOutsideRootError
+  >;
+
+  /**
+   * Delete a file or directory (recursively) relative to the workspace root.
+   *
+   * Rejects paths that escape the workspace root or target the root itself.
+   */
+  readonly deletePath: (
+    input: ProjectDeletePathInput,
+  ) => Effect.Effect<
+    ProjectDeletePathResult,
+    WorkspaceFileSystemError | WorkspacePathOutsideRootError
+  >;
+
+  /**
+   * Create a directory (and any missing parents) relative to the workspace root.
+   *
+   * Rejects paths that escape the workspace root or target the root itself.
+   */
+  readonly createDirectory: (
+    input: ProjectCreateDirectoryInput,
+  ) => Effect.Effect<
+    ProjectCreateDirectoryResult,
     WorkspaceFileSystemError | WorkspacePathOutsideRootError
   >;
 }

@@ -115,3 +115,41 @@ export class ProjectReadFileError extends Schema.TaggedErrorClass<ProjectReadFil
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
+
+export const ProjectDeletePathInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
+});
+export type ProjectDeletePathInput = typeof ProjectDeletePathInput.Type;
+
+export const ProjectDeletePathResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+});
+export type ProjectDeletePathResult = typeof ProjectDeletePathResult.Type;
+
+export class ProjectDeletePathError extends Schema.TaggedErrorClass<ProjectDeletePathError>()(
+  "ProjectDeletePathError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export const ProjectCreateDirectoryInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
+});
+export type ProjectCreateDirectoryInput = typeof ProjectCreateDirectoryInput.Type;
+
+export const ProjectCreateDirectoryResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+});
+export type ProjectCreateDirectoryResult = typeof ProjectCreateDirectoryResult.Type;
+
+export class ProjectCreateDirectoryError extends Schema.TaggedErrorClass<ProjectCreateDirectoryError>()(
+  "ProjectCreateDirectoryError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}

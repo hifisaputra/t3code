@@ -64,6 +64,12 @@ import {
   RelayClientStatusSchema,
 } from "./relayClient.ts";
 import {
+  ProjectCreateDirectoryError,
+  ProjectCreateDirectoryInput,
+  ProjectCreateDirectoryResult,
+  ProjectDeletePathError,
+  ProjectDeletePathInput,
+  ProjectDeletePathResult,
   ProjectListDirectoryError,
   ProjectListDirectoryInput,
   ProjectListDirectoryResult,
@@ -131,6 +137,8 @@ export const WS_METHODS = {
   projectsWriteFile: "projects.writeFile",
   projectsListDirectory: "projects.listDirectory",
   projectsReadFile: "projects.readFile",
+  projectsDeletePath: "projects.deletePath",
+  projectsCreateDirectory: "projects.createDirectory",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -339,6 +347,18 @@ export const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
   payload: ProjectReadFileInput,
   success: ProjectReadFileResult,
   error: Schema.Union([ProjectReadFileError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsDeletePathRpc = Rpc.make(WS_METHODS.projectsDeletePath, {
+  payload: ProjectDeletePathInput,
+  success: ProjectDeletePathResult,
+  error: Schema.Union([ProjectDeletePathError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsCreateDirectoryRpc = Rpc.make(WS_METHODS.projectsCreateDirectory, {
+  payload: ProjectCreateDirectoryInput,
+  success: ProjectCreateDirectoryResult,
+  error: Schema.Union([ProjectCreateDirectoryError, EnvironmentAuthorizationError]),
 });
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
@@ -587,6 +607,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsWriteFileRpc,
   WsProjectsListDirectoryRpc,
   WsProjectsReadFileRpc,
+  WsProjectsDeletePathRpc,
+  WsProjectsCreateDirectoryRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsSubscribeVcsStatusRpc,

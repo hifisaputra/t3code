@@ -33,6 +33,8 @@ import {
   OrchestrationGetSnapshotError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
+  ProjectCreateDirectoryError,
+  ProjectDeletePathError,
   ProjectListDirectoryError,
   ProjectReadFileError,
   ProjectSearchEntriesError,
@@ -160,6 +162,8 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.projectsWriteFile, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsListDirectory, AuthOrchestrationReadScope],
   [WS_METHODS.projectsReadFile, AuthOrchestrationReadScope],
+  [WS_METHODS.projectsDeletePath, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsCreateDirectory, AuthOrchestrationOperateScope],
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.subscribeVcsStatus, AuthOrchestrationReadScope],
@@ -1192,6 +1196,32 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
                   ? "File path must stay within the project root."
                   : `Failed to read workspace file: ${cause.detail}`;
                 return new ProjectReadFileError({ message, cause });
+              }),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsDeletePath]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsDeletePath,
+            workspaceFileSystem.deletePath(input).pipe(
+              Effect.mapError((cause) => {
+                const message = isWorkspacePathOutsideRootError(cause)
+                  ? "Path must stay within the project root."
+                  : `Failed to delete path: ${cause.detail}`;
+                return new ProjectDeletePathError({ message, cause });
+              }),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsCreateDirectory]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsCreateDirectory,
+            workspaceFileSystem.createDirectory(input).pipe(
+              Effect.mapError((cause) => {
+                const message = isWorkspacePathOutsideRootError(cause)
+                  ? "Directory path must stay within the project root."
+                  : `Failed to create directory: ${cause.detail}`;
+                return new ProjectCreateDirectoryError({ message, cause });
               }),
             ),
             { "rpc.aggregate": "workspace" },

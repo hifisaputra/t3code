@@ -253,4 +253,83 @@ it.layer(TestLayer)("WorkspaceFileSystemLive", (it) => {
       }),
     );
   });
+
+  describe("deletePath", () => {
+    it.effect("deletes a file", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "src/old.ts", "export {};\n");
+
+        yield* workspaceFileSystem.deletePath({ cwd, relativePath: "src/old.ts" });
+
+        const exists = yield* fileSystem.exists(path.join(cwd, "src/old.ts")).pipe(Effect.orDie);
+        expect(exists).toBe(false);
+      }),
+    );
+
+    it.effect("deletes a directory recursively", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "pkg/nested/a.ts", "export {};\n");
+        yield* writeTextFile(cwd, "pkg/b.ts", "export {};\n");
+
+        yield* workspaceFileSystem.deletePath({ cwd, relativePath: "pkg" });
+
+        const exists = yield* fileSystem.exists(path.join(cwd, "pkg")).pipe(Effect.orDie);
+        expect(exists).toBe(false);
+      }),
+    );
+
+    it.effect("rejects deletes outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+
+        const error = yield* workspaceFileSystem
+          .deletePath({ cwd, relativePath: "../escape" })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain("must be relative to the project root");
+      }),
+    );
+  });
+
+  describe("createDirectory", () => {
+    it.effect("creates nested directories", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+
+        const result = yield* workspaceFileSystem.createDirectory({
+          cwd,
+          relativePath: "src/components",
+        });
+
+        expect(result.relativePath).toBe("src/components");
+        const stat = yield* fileSystem.stat(path.join(cwd, "src/components")).pipe(Effect.orDie);
+        expect(stat.type).toBe("Directory");
+      }),
+    );
+
+    it.effect("rejects directories outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+
+        const error = yield* workspaceFileSystem
+          .createDirectory({ cwd, relativePath: "../escape" })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain("must be relative to the project root");
+      }),
+    );
+  });
 });

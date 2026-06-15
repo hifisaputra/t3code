@@ -6,9 +6,11 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CodeIcon,
+  FolderPlusIcon,
   Maximize2Icon,
   Minimize2Icon,
   RefreshCwIcon,
+  Trash2Icon,
   UploadIcon,
   XIcon,
 } from "lucide-react";
@@ -19,6 +21,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -43,6 +46,26 @@ import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
 import ChatMarkdown from "./ChatMarkdown";
 import { DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { RightPanelTabs } from "./RightPanelTabs";
+import {
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from "./ui/alert-dialog";
+import { Button } from "./ui/button";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "./ui/dialog";
+import { Input } from "./ui/input";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
@@ -110,6 +133,11 @@ interface FileState {
 function basenameOf(path: string): string {
   const index = path.lastIndexOf("/");
   return index === -1 ? path : path.slice(index + 1);
+}
+
+function parentDirOf(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index === -1 ? "" : path.slice(0, index);
 }
 
 function extensionOf(path: string): string {
@@ -228,6 +256,9 @@ function HighlightedCode(props: { code: string; language: string; themeName: str
 
 const ACTION_BUTTON_CLASS =
   "inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/70 text-muted-foreground transition-colors hover:border-border hover:text-foreground";
+
+const ROW_ACTION_BUTTON_CLASS =
+  "inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:bg-background/70 hover:text-foreground";
 
 export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelProps) {
   const navigate = useNavigate();
@@ -617,6 +648,83 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     [],
   );
 
+  const createFolderFormId = useId();
+  const [createFolderState, setCreateFolderState] = useState<{
+    open: boolean;
+    parentDir: string;
+  }>({ open: false, parentDir: "" });
+  const [newFolderName, setNewFolderName] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<{
+    path: string;
+    kind: "file" | "directory";
+  } | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const openCreateFolder = useCallback((parentDir: string) => {
+    setNewFolderName("");
+    setActionError(null);
+    setCreateFolderState({ open: true, parentDir });
+  }, []);
+
+  const submitCreateFolder = useCallback(async () => {
+    const name = newFolderName.trim();
+    if (!name || !cwd || !environmentId) {
+      return;
+    }
+    const projects = readEnvironmentConnection(environmentId)?.client.projects;
+    if (!projects) {
+      setActionError("Not connected.");
+      return;
+    }
+    const parentDir = createFolderState.parentDir;
+    const relativePath = parentDir ? `${parentDir}/${name}` : name;
+    try {
+      await projects.createDirectory({ cwd, relativePath });
+      setCreateFolderState({ open: false, parentDir: "" });
+      loadDir(parentDir);
+      if (parentDir) {
+        setExpanded((previous) => new Set(previous).add(parentDir));
+      }
+    } catch (error) {
+      setActionError(messageOfError(error));
+    }
+  }, [newFolderName, cwd, environmentId, createFolderState.parentDir, loadDir]);
+
+  const requestDelete = useCallback((path: string, kind: "file" | "directory") => {
+    setActionError(null);
+    setDeleteTarget({ path, kind });
+  }, []);
+
+  const confirmDelete = useCallback(async () => {
+    if (!deleteTarget || !cwd || !environmentId) {
+      return;
+    }
+    const projects = readEnvironmentConnection(environmentId)?.client.projects;
+    if (!projects) {
+      setActionError("Not connected.");
+      return;
+    }
+    const target = deleteTarget;
+    try {
+      await projects.deletePath({ cwd, relativePath: target.path });
+      setDeleteTarget(null);
+      loadDir(parentDirOf(target.path));
+      setExpanded((previous) => {
+        const next = new Set(previous);
+        next.delete(target.path);
+        return next;
+      });
+      if (
+        filePath === target.path ||
+        (target.kind === "directory" && filePath?.startsWith(`${target.path}/`))
+      ) {
+        clearFile();
+      }
+    } catch (error) {
+      setActionError(messageOfError(error));
+    }
+  }, [deleteTarget, cwd, environmentId, loadDir, filePath, clearFile]);
+
   const renderDir = useCallback(
     (dirPath: string, depth: number): ReactNode => {
       const state = dirStates.get(dirPath);
@@ -668,10 +776,9 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
             const isSelected = entry.path === filePath;
             return (
               <div key={entry.path}>
-                <button
-                  type="button"
+                <div
                   className={cn(
-                    "flex w-full items-center gap-1.5 py-1 pr-2 text-left text-[13px] transition-colors",
+                    "group/row flex items-center pr-1 transition-colors",
                     isSelected
                       ? "bg-accent text-accent-foreground"
                       : "text-foreground/90 hover:bg-accent/50",
@@ -679,9 +786,6 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
                       dropTargetDir === entry.path &&
                       "bg-primary/15 ring-1 ring-inset ring-primary/50",
                   )}
-                  style={{ paddingLeft: indent }}
-                  onClick={() => (isDirectory ? toggleDir(entry.path) : selectFile(entry.path))}
-                  aria-expanded={isDirectory ? isExpanded : undefined}
                   {...(isDirectory
                     ? {
                         onDragOver: onDirDragOver(entry.path),
@@ -690,18 +794,50 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
                       }
                     : {})}
                 >
-                  <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground/70">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left text-[13px]"
+                    style={{ paddingLeft: indent }}
+                    onClick={() => (isDirectory ? toggleDir(entry.path) : selectFile(entry.path))}
+                    aria-expanded={isDirectory ? isExpanded : undefined}
+                  >
+                    <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground/70">
+                      {isDirectory ? (
+                        isExpanded ? (
+                          <ChevronDownIcon className="size-3.5" />
+                        ) : (
+                          <ChevronRightIcon className="size-3.5" />
+                        )
+                      ) : null}
+                    </span>
+                    <VscodeEntryIcon
+                      pathValue={entry.path}
+                      kind={entry.kind}
+                      theme={resolvedTheme}
+                    />
+                    <span className="truncate">{basenameOf(entry.path)}</span>
+                  </button>
+                  <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100">
                     {isDirectory ? (
-                      isExpanded ? (
-                        <ChevronDownIcon className="size-3.5" />
-                      ) : (
-                        <ChevronRightIcon className="size-3.5" />
-                      )
+                      <button
+                        type="button"
+                        className={ROW_ACTION_BUTTON_CLASS}
+                        aria-label={`New folder in ${basenameOf(entry.path)}`}
+                        onClick={() => openCreateFolder(entry.path)}
+                      >
+                        <FolderPlusIcon className="size-3.5" />
+                      </button>
                     ) : null}
-                  </span>
-                  <VscodeEntryIcon pathValue={entry.path} kind={entry.kind} theme={resolvedTheme} />
-                  <span className="truncate">{basenameOf(entry.path)}</span>
-                </button>
+                    <button
+                      type="button"
+                      className={cn(ROW_ACTION_BUTTON_CLASS, "hover:text-destructive")}
+                      aria-label={`Delete ${basenameOf(entry.path)}`}
+                      onClick={() => requestDelete(entry.path, entry.kind)}
+                    >
+                      <Trash2Icon className="size-3.5" />
+                    </button>
+                  </div>
+                </div>
                 {isDirectory && isExpanded ? renderDir(entry.path, depth + 1) : null}
               </div>
             );
@@ -729,6 +865,8 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
       onDirDragOver,
       onDirDrop,
       onDropZoneDragLeave,
+      openCreateFolder,
+      requestDelete,
     ],
   );
 
@@ -759,6 +897,21 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
                 }
               />
               <TooltipPopup side="bottom">Upload to project root</TooltipPopup>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    className={ACTION_BUTTON_CLASS}
+                    aria-label="New folder"
+                    onClick={() => openCreateFolder("")}
+                  >
+                    <FolderPlusIcon className="size-3.5" />
+                  </button>
+                }
+              />
+              <TooltipPopup side="bottom">New folder in project root</TooltipPopup>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
@@ -878,6 +1031,21 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
           />
           <TooltipPopup side="bottom">Refresh file</TooltipPopup>
         </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                className={cn(ACTION_BUTTON_CLASS, "size-6 hover:text-destructive")}
+                aria-label="Delete file"
+                onClick={() => requestDelete(filePath, "file")}
+              >
+                <Trash2Icon className="size-3.5" />
+              </button>
+            }
+          />
+          <TooltipPopup side="bottom">Delete file</TooltipPopup>
+        </Tooltip>
       </div>
     ) : null;
 
@@ -972,18 +1140,100 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
   }
 
   return (
-    <DiffPanelShell mode={mode} header={headerRow}>
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        className="hidden"
-        onChange={onUploadInputChange}
-      />
-      <div ref={bodyRef} className="flex min-h-0 flex-1 flex-col">
-        {body}
-      </div>
-    </DiffPanelShell>
+    <>
+      <DiffPanelShell mode={mode} header={headerRow}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={onUploadInputChange}
+        />
+        <div ref={bodyRef} className="flex min-h-0 flex-1 flex-col">
+          {body}
+        </div>
+      </DiffPanelShell>
+
+      <Dialog
+        open={createFolderState.open}
+        onOpenChange={(open) => setCreateFolderState((previous) => ({ ...previous, open }))}
+      >
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>New folder</DialogTitle>
+            <DialogDescription>
+              {createFolderState.parentDir
+                ? `Create a folder inside ${createFolderState.parentDir}.`
+                : "Create a folder in the project root."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            <form
+              id={createFolderFormId}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitCreateFolder();
+              }}
+            >
+              <Input
+                autoFocus
+                placeholder="folder-name"
+                value={newFolderName}
+                onChange={(event) => setNewFolderName(event.target.value)}
+              />
+              {actionError ? <p className="mt-2 text-sm text-destructive">{actionError}</p> : null}
+            </form>
+          </DialogPanel>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setCreateFolderState((previous) => ({ ...previous, open: false }))}
+            >
+              Cancel
+            </Button>
+            <Button
+              form={createFolderFormId}
+              type="submit"
+              disabled={newFolderName.trim().length === 0}
+            >
+              Create folder
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeleteTarget(null);
+          }
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {deleteTarget?.kind === "directory" ? "folder" : "file"}
+              {deleteTarget ? ` “${basenameOf(deleteTarget.path)}”` : ""}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget?.kind === "directory"
+                ? "This permanently deletes the folder and everything inside it."
+                : "This permanently deletes the file."}{" "}
+              This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {actionError ? <p className="px-1 text-sm text-destructive">{actionError}</p> : null}
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <Button variant="destructive" onClick={() => void confirmDelete()}>
+              Delete
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+    </>
   );
 }
 
