@@ -183,6 +183,7 @@ function ChatThreadRouteView() {
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
   const diffOpen = search.diff === "1";
   const filesOpen = search.files === "1";
+  const filesFull = search.filesFull === "1";
   const rightPanelOpen = diffOpen || filesOpen;
   const activeRightPanel: "diff" | "files" | null = filesOpen ? "files" : diffOpen ? "diff" : null;
   const shouldUseDiffSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
@@ -253,6 +254,27 @@ function ChatThreadRouteView() {
   }
 
   const shouldRenderDiffContent = diffOpen || hasOpenedDiff;
+
+  // Full-screen file browser overlay: keep the chat mounted behind it and cover
+  // the viewport so documentation and wide files are readable.
+  if (activeRightPanel === "files" && filesFull) {
+    return (
+      <>
+        <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
+          <ChatView
+            environmentId={threadRef.environmentId}
+            threadId={threadRef.threadId}
+            onDiffPanelOpen={markDiffOpened}
+            reserveTitleBarControlInset={false}
+            routeKind="server"
+          />
+        </SidebarInset>
+        <div className="fixed inset-0 z-50 flex flex-col bg-background">
+          <LazyFileBrowserPanel mode="sidebar" />
+        </div>
+      </>
+    );
+  }
 
   if (!shouldUseDiffSheet) {
     return (

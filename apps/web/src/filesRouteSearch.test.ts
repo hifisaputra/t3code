@@ -30,14 +30,24 @@ describe("parseFilesRouteSearch", () => {
     expect(parseFilesRouteSearch({ files: "0", filePath: "src/app.ts" })).toEqual({});
   });
 
+  it("parses the full-screen flag only when files is open", () => {
+    expect(parseFilesRouteSearch({ files: "1", filesFull: "1" })).toEqual({
+      files: "1",
+      filesFull: "1",
+    });
+    expect(parseFilesRouteSearch({ filesFull: "1" })).toEqual({});
+  });
+
   it("normalizes whitespace-only file values", () => {
     expect(parseFilesRouteSearch({ files: "1", filePath: "   " })).toEqual({ files: "1" });
   });
 });
 
 describe("stripFilesSearchParams", () => {
-  it("removes files and filePath while keeping other params", () => {
-    expect(stripFilesSearchParams({ files: "1", filePath: "src/app.ts", diff: "1" })).toEqual({
+  it("removes files, filePath, and filesFull while keeping other params", () => {
+    expect(
+      stripFilesSearchParams({ files: "1", filePath: "src/app.ts", filesFull: "1", diff: "1" }),
+    ).toEqual({
       diff: "1",
     });
   });

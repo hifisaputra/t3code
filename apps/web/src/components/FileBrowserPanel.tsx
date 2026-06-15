@@ -1,9 +1,13 @@
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import type { ProjectReadFileResult } from "@t3tools/contracts";
 import {
+  BookOpenIcon,
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  CodeIcon,
+  Maximize2Icon,
+  Minimize2Icon,
   RefreshCwIcon,
   XIcon,
 } from "lucide-react";
@@ -23,8 +27,10 @@ import { selectProjectByRef, useStore } from "../store";
 import { createThreadSelectorByRef } from "../storeSelectors";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
+import ChatMarkdown from "./ChatMarkdown";
 import { DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { RightPanelTabs } from "./RightPanelTabs";
+import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 interface FileBrowserPanelProps {
@@ -48,6 +54,8 @@ const IMAGE_EXTENSIONS = new Set([
   ".tiff",
   ".webp",
 ]);
+
+const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown", ".mdx"]);
 
 const SHIKI_LANGUAGE_ALIASES: Record<string, string> = {
   cjs: "javascript",
@@ -83,6 +91,10 @@ function extensionOf(path: string): string {
 
 function isImagePath(path: string): boolean {
   return IMAGE_EXTENSIONS.has(extensionOf(path));
+}
+
+function isMarkdownPath(path: string): boolean {
+  return MARKDOWN_EXTENSIONS.has(extensionOf(path));
 }
 
 function languageForPath(path: string): string {
@@ -181,6 +193,7 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     select: (search) => parseFilesRouteSearch(search),
   });
   const filePath = filesSearch.filePath ?? null;
+  const isMaximized = filesSearch.filesFull === "1";
 
   const activeThread = useStore(useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]));
   const activeProjectId = activeThread?.projectId ?? null;
@@ -199,6 +212,12 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
   const [dirStates, setDirStates] = useState<Map<string, DirState>>(() => new Map());
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [fileState, setFileState] = useState<FileState>({ status: "idle" });
+  const [markdownView, setMarkdownView] = useState<"rendered" | "source">("rendered");
+
+  // Default each markdown file to the rendered view when it is first opened.
+  useEffect(() => {
+    setMarkdownView("rendered");
+  }, [filePath]);
 
   const dirStatesRef = useRef(dirStates);
   useEffect(() => {
@@ -336,6 +355,36 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
       search: { diff: undefined, files: undefined },
     });
   }, [navigate, threadRef]);
+
+  const toggleMaximize = useCallback(() => {
+    if (!threadRef) {
+      return;
+    }
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams(threadRef),
+      replace: true,
+      search: (previous) => ({
+        ...previous,
+        files: "1",
+        filesFull: isMaximized ? undefined : "1",
+      }),
+    });
+  }, [isMaximized, navigate, threadRef]);
+
+  // Allow Escape to leave full-screen mode (matches the sheet/overlay convention).
+  useEffect(() => {
+    if (!isMaximized) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        toggleMaximize();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isMaximized, toggleMaximize]);
 
   const selectFile = useCallback(
     (path: string) => {
@@ -492,6 +541,27 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
               <button
                 type="button"
                 className={ACTION_BUTTON_CLASS}
+                aria-label={isMaximized ? "Exit full screen" : "Full screen"}
+                onClick={toggleMaximize}
+              >
+                {isMaximized ? (
+                  <Minimize2Icon className="size-3.5" />
+                ) : (
+                  <Maximize2Icon className="size-3.5" />
+                )}
+              </button>
+            }
+          />
+          <TooltipPopup side="bottom">
+            {isMaximized ? "Exit full screen" : "Full screen"}
+          </TooltipPopup>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                className={ACTION_BUTTON_CLASS}
                 aria-label="Close panel"
                 onClick={closePanel}
               >
@@ -522,11 +592,43 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
             >
               <ChevronLeftIcon className="size-3.5" />
             </button>
-            <span className="truncate text-[11px] text-muted-foreground/80" title={filePath}>
+            <span
+              className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground/80"
+              title={filePath}
+            >
               {filePath}
             </span>
+            {isMarkdownPath(filePath) &&
+            fileState.status === "loaded" &&
+            fileState.data?.encoding === "utf8" ? (
+              <ToggleGroup
+                className="shrink-0"
+                variant="outline"
+                size="xs"
+                value={[markdownView]}
+                onValueChange={(value) => {
+                  const next = value[0];
+                  if (next === "rendered" || next === "source") {
+                    setMarkdownView(next);
+                  }
+                }}
+              >
+                <Toggle aria-label="Rendered markdown" value="rendered">
+                  <BookOpenIcon className="size-3" />
+                </Toggle>
+                <Toggle aria-label="Markdown source" value="source">
+                  <CodeIcon className="size-3" />
+                </Toggle>
+              </ToggleGroup>
+            ) : null}
           </div>
-          <FileContentView fileState={fileState} filePath={filePath} themeName={themeName} />
+          <FileContentView
+            fileState={fileState}
+            filePath={filePath}
+            themeName={themeName}
+            cwd={cwd}
+            markdownView={markdownView}
+          />
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto py-1">{renderDir("", 0)}</div>
@@ -535,8 +637,14 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
   );
 }
 
-function FileContentView(props: { fileState: FileState; filePath: string; themeName: string }) {
-  const { fileState, filePath, themeName } = props;
+function FileContentView(props: {
+  fileState: FileState;
+  filePath: string;
+  themeName: string;
+  cwd: string | null;
+  markdownView: "rendered" | "source";
+}) {
+  const { fileState, filePath, themeName, cwd, markdownView } = props;
 
   if (fileState.status === "loading" || fileState.status === "idle") {
     return (
@@ -586,6 +694,8 @@ function FileContentView(props: { fileState: FileState; filePath: string; themeN
     );
   }
 
+  const renderMarkdown = isMarkdownPath(filePath) && markdownView === "rendered";
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {data.truncated ? (
@@ -593,13 +703,19 @@ function FileContentView(props: { fileState: FileState; filePath: string; themeN
           Showing the first part of this file ({formatBytes(data.byteSize)} total).
         </div>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-auto">
-        <HighlightedCode
-          code={data.contents}
-          language={languageForPath(filePath)}
-          themeName={themeName}
-        />
-      </div>
+      {renderMarkdown ? (
+        <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+          <ChatMarkdown text={data.contents} cwd={cwd ?? undefined} isStreaming={false} />
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto">
+          <HighlightedCode
+            code={data.contents}
+            language={languageForPath(filePath)}
+            themeName={themeName}
+          />
+        </div>
+      )}
     </div>
   );
 }
