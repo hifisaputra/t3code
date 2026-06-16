@@ -1964,7 +1964,9 @@ export default function ChatView(props: ChatViewProps) {
       replace: true,
       search: (previous) => {
         const rest = stripFilesSearchParams(stripDiffSearchParams(previous));
-        return filesOpen ? { ...rest } : { ...rest, files: "1" };
+        // Open the file manager maximized by default; the in-panel toggle can
+        // drop it back to the sidebar.
+        return filesOpen ? { ...rest } : { ...rest, files: "1", filesFull: "1" };
       },
     });
   }, [filesOpen, environmentId, isServerThread, navigate, threadId]);

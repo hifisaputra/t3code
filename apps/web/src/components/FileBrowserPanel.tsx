@@ -14,6 +14,8 @@ import {
   Minimize2Icon,
   PencilIcon,
   RefreshCwIcon,
+  SaveIcon,
+  SquarePenIcon,
   Trash2Icon,
   UploadIcon,
   XIcon,
@@ -23,6 +25,8 @@ import {
   type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useId,
@@ -73,6 +77,10 @@ import { Input } from "./ui/input";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "./ui/menu";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+
+// CodeMirror and its language modes are heavy; keep them out of the main bundle
+// and only load them when the user actually enters edit mode.
+const FileEditor = lazy(() => import("./FileEditor"));
 
 interface FileBrowserPanelProps {
   mode?: DiffPanelMode;
@@ -299,10 +307,17 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [fileState, setFileState] = useState<FileState>({ status: "idle" });
   const [markdownView, setMarkdownView] = useState<"rendered" | "source">("rendered");
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
-  // Default each markdown file to the rendered view when it is first opened.
+  // Default each markdown file to the rendered view, and abandon any in-progress
+  // edit, whenever a different file is opened.
   useEffect(() => {
     setMarkdownView("rendered");
+    setEditing(false);
+    setEditError(null);
   }, [filePath]);
 
   // Switch between split (tree + viewer) and master-detail based on panel width.
@@ -460,6 +475,56 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     };
   }, [filePath, cwd, environmentId, fileReloadToken]);
   const refreshFile = useCallback(() => setFileReloadToken((token) => token + 1), []);
+
+  const fileData = fileState.status === "loaded" ? fileState.data : undefined;
+  // Editing is limited to fully-loaded UTF-8 text. Truncated reads are excluded
+  // because saving the partial contents would destroy the rest of the file.
+  const canEdit = Boolean(
+    filePath && fileData && fileData.encoding === "utf8" && !fileData.truncated,
+  );
+  const editDirty = editing && fileData ? editValue !== fileData.contents : false;
+
+  const beginEdit = useCallback(() => {
+    if (!fileData || fileData.encoding !== "utf8") {
+      return;
+    }
+    setEditValue(fileData.contents);
+    setEditError(null);
+    setEditing(true);
+  }, [fileData]);
+
+  const cancelEdit = useCallback(() => {
+    setEditing(false);
+    setEditError(null);
+  }, []);
+
+  const saveEdit = useCallback(async () => {
+    if (!filePath || !cwd || !environmentId) {
+      return;
+    }
+    const projects = readEnvironmentConnection(environmentId)?.client.projects;
+    if (!projects) {
+      setEditError("Not connected.");
+      return;
+    }
+    setEditSaving(true);
+    setEditError(null);
+    try {
+      await projects.writeFile({
+        cwd,
+        relativePath: filePath,
+        contents: editValue,
+        encoding: "utf8",
+      });
+      setEditing(false);
+      // Re-read so the viewer reflects the saved contents and updated byte size.
+      refreshFile();
+    } catch (error) {
+      setEditError(messageOfError(error));
+    } finally {
+      setEditSaving(false);
+    }
+  }, [filePath, cwd, environmentId, editValue, refreshFile]);
 
   const toggleDir = useCallback(
     (dirPath: string) => {
@@ -1110,7 +1175,7 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
   const renderFilePathBar = (showBack: boolean) =>
     filePath ? (
       <div className="flex items-center gap-2 border-b border-border/60 px-2 py-1.5">
-        {showBack ? (
+        {showBack && !editing ? (
           <button
             type="button"
             className={cn(ACTION_BUTTON_CLASS, "size-6")}
@@ -1125,51 +1190,94 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
           title={filePath}
         >
           {filePath}
+          {editDirty ? <span className="ml-1 text-primary">•</span> : null}
         </span>
-        {markdownToggle}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <button
-                type="button"
-                className={cn(ACTION_BUTTON_CLASS, "size-6")}
-                aria-label="Refresh file"
-                onClick={refreshFile}
-              >
-                <RefreshCwIcon className="size-3.5" />
-              </button>
-            }
-          />
-          <TooltipPopup side="bottom">Refresh file</TooltipPopup>
-        </Tooltip>
-        <Menu>
-          <MenuTrigger
-            render={
-              <button
-                type="button"
-                className={cn(ACTION_BUTTON_CLASS, "size-6")}
-                aria-label="File actions"
+        {editing ? (
+          <>
+            <Button
+              size="xs"
+              variant="outline"
+              className="shrink-0"
+              onClick={cancelEdit}
+              disabled={editSaving}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="xs"
+              className="shrink-0"
+              onClick={() => void saveEdit()}
+              disabled={editSaving || !editDirty}
+            >
+              <SaveIcon />
+              {editSaving ? "Saving…" : "Save"}
+            </Button>
+          </>
+        ) : (
+          <>
+            {markdownToggle}
+            {canEdit ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      className={cn(ACTION_BUTTON_CLASS, "size-6")}
+                      aria-label="Edit file"
+                      onClick={beginEdit}
+                    >
+                      <SquarePenIcon className="size-3.5" />
+                    </button>
+                  }
+                />
+                <TooltipPopup side="bottom">Edit file</TooltipPopup>
+              </Tooltip>
+            ) : null}
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    className={cn(ACTION_BUTTON_CLASS, "size-6")}
+                    aria-label="Refresh file"
+                    onClick={refreshFile}
+                  >
+                    <RefreshCwIcon className="size-3.5" />
+                  </button>
+                }
               />
-            }
-          >
-            <EllipsisVerticalIcon className="size-3.5" />
-          </MenuTrigger>
-          <MenuPopup align="end">
-            <MenuItem onClick={() => openRename(filePath, "file")}>
-              <PencilIcon />
-              Rename
-            </MenuItem>
-            <MenuItem onClick={() => openMove(filePath, "file")}>
-              <FolderInputIcon />
-              Move
-            </MenuItem>
-            <MenuSeparator />
-            <MenuItem variant="destructive" onClick={() => requestDelete(filePath, "file")}>
-              <Trash2Icon />
-              Delete
-            </MenuItem>
-          </MenuPopup>
-        </Menu>
+              <TooltipPopup side="bottom">Refresh file</TooltipPopup>
+            </Tooltip>
+            <Menu>
+              <MenuTrigger
+                render={
+                  <button
+                    type="button"
+                    className={cn(ACTION_BUTTON_CLASS, "size-6")}
+                    aria-label="File actions"
+                  />
+                }
+              >
+                <EllipsisVerticalIcon className="size-3.5" />
+              </MenuTrigger>
+              <MenuPopup align="end">
+                <MenuItem onClick={() => openRename(filePath, "file")}>
+                  <PencilIcon />
+                  Rename
+                </MenuItem>
+                <MenuItem onClick={() => openMove(filePath, "file")}>
+                  <FolderInputIcon />
+                  Move
+                </MenuItem>
+                <MenuSeparator />
+                <MenuItem variant="destructive" onClick={() => requestDelete(filePath, "file")}>
+                  <Trash2Icon />
+                  Delete
+                </MenuItem>
+              </MenuPopup>
+            </Menu>
+          </>
+        )}
       </div>
     ) : null;
 
@@ -1182,6 +1290,36 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
       markdownView={markdownView}
     />
   ) : null;
+
+  const editorPane =
+    filePath && editing ? (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {editError ? (
+          <div className="shrink-0 border-b border-destructive/30 bg-destructive/10 px-3 py-1 text-[11px] text-destructive/90">
+            {editError}
+          </div>
+        ) : null}
+        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground/60">
+                Loading editor…
+              </div>
+            }
+          >
+            <FileEditor
+              value={editValue}
+              filePath={filePath}
+              theme={resolvedTheme}
+              onChange={setEditValue}
+            />
+          </Suspense>
+        </div>
+      </div>
+    ) : null;
+
+  // Show the editor in place of the read-only viewer while editing.
+  const content = editing ? editorPane : viewer;
 
   const uploadBanner =
     uploadState.status === "idle" ? null : (
@@ -1234,11 +1372,11 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
           className="w-1 shrink-0 cursor-col-resize touch-none bg-border/50 transition-colors hover:bg-border active:bg-border"
           onPointerDown={startTreeResize}
         />
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {filePath ? (
             <>
               {renderFilePathBar(false)}
-              {viewer}
+              {content}
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/60">
@@ -1251,9 +1389,9 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
   } else {
     // Narrow layout: viewer replaces the tree (master-detail).
     body = filePath ? (
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {renderFilePathBar(true)}
-        {viewer}
+        {content}
       </div>
     ) : (
       <div className="flex min-h-0 flex-1 flex-col">
@@ -1504,7 +1642,7 @@ function FileContentView(props: {
   const renderMarkdown = isMarkdownPath(filePath) && markdownView === "rendered";
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {data.truncated ? (
         <div className="border-b border-border/50 bg-muted/30 px-3 py-1 text-[11px] text-muted-foreground/70">
           Showing the first part of this file ({formatBytes(data.byteSize)} total).
