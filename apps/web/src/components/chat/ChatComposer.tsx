@@ -720,7 +720,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       providerInstanceEntries[0]?.instanceId ??
       activeThreadModelSelection?.instanceId ??
       activeProjectDefaultModelSelection?.instanceId ??
-      ProviderInstanceId.make("codex")
+      ProviderInstanceId.make("claudeAgent")
     );
   }, [
     activeProjectDefaultModelSelection?.instanceId,

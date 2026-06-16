@@ -1,5 +1,6 @@
 import {
   type ApprovalRequestId,
+  DEFAULT_CLAUDE_MODEL,
   DEFAULT_MODEL,
   defaultInstanceIdForDriver,
   type EnvironmentId,
@@ -999,8 +1000,8 @@ export default function ChatView(props: ChatViewProps) {
             threadId,
             draftThread,
             fallbackDraftProject?.defaultModelSelection ?? {
-              instanceId: ProviderInstanceId.make("codex"),
-              model: DEFAULT_MODEL,
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: DEFAULT_CLAUDE_MODEL,
             },
             localDraftError,
           )
