@@ -10,7 +10,7 @@
  *
  * @module WebPushNotifier
  */
-import * as webpush from "web-push";
+import webpush from "web-push";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
