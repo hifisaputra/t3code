@@ -81,7 +81,13 @@ export function NotificationsControl({ environmentId }: { environmentId: Environ
         throw new Error("Server push is not configured.");
       }
       const registration = await navigator.serviceWorker.register(PUSH_SW_URL);
-      const subscription = await registration.pushManager.subscribe({
+      // register() resolves once the worker is installed, but pushManager.subscribe()
+      // requires an *active* worker — otherwise the first enable fails with
+      // "Subscription failed - no active Service Worker". Wait for activation.
+      const activeRegistration = registration.active
+        ? registration
+        : await navigator.serviceWorker.ready;
+      const subscription = await activeRegistration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(status.vapidPublicKey),
       });
