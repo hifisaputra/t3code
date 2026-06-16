@@ -86,8 +86,9 @@ interface FileBrowserPanelProps {
   mode?: DiffPanelMode;
 }
 
-// Larger cap for images so previews aren't truncated; text reads use the server default.
-const IMAGE_READ_MAX_BYTES = 5 * 1024 * 1024;
+// Larger cap for binary previews (images, PDFs) so they aren't truncated; text
+// reads use the server default. The server clamps this to its own hard limit.
+const PREVIEW_READ_MAX_BYTES = 5 * 1024 * 1024;
 
 // Above this panel width the tree and viewer sit side by side; below it (mobile,
 // tablet, narrow dock) the viewer replaces the tree as a master-detail view.
@@ -160,6 +161,10 @@ function extensionOf(path: string): string {
 
 function isImagePath(path: string): boolean {
   return IMAGE_EXTENSIONS.has(extensionOf(path));
+}
+
+function isPdfPath(path: string): boolean {
+  return extensionOf(path) === ".pdf";
 }
 
 function isMarkdownPath(path: string): boolean {
@@ -457,7 +462,8 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     }
     let cancelled = false;
     setFileState({ status: "loading" });
-    const maxBytes = isImagePath(filePath) ? IMAGE_READ_MAX_BYTES : undefined;
+    const maxBytes =
+      isImagePath(filePath) || isPdfPath(filePath) ? PREVIEW_READ_MAX_BYTES : undefined;
     projects
       .readFile({ cwd, relativePath: filePath, ...(maxBytes ? { maxBytes } : {}) })
       .then((result) => {
@@ -1582,6 +1588,61 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
   );
 }
 
+function PdfPreview(props: { contents: string; fileName: string }) {
+  const { contents, fileName } = props;
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  // Build a blob: URL from the base64 payload so the browser's native PDF
+  // viewer can render it in an iframe (avoids a multi-MB data: URI in the DOM).
+  useEffect(() => {
+    let objectUrl: string | null = null;
+    setUrl(null);
+    setFailed(false);
+    try {
+      const binary = atob(contents);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      objectUrl = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+      setUrl(objectUrl);
+    } catch {
+      setFailed(true);
+    }
+    return () => {
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [contents]);
+
+  if (failed) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
+        Unable to preview this PDF.
+      </div>
+    );
+  }
+  if (!url) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-muted-foreground/60">
+        Loading PDF…
+      </div>
+    );
+  }
+  return (
+    <object data={url} type="application/pdf" title={fileName} className="min-h-0 w-full flex-1">
+      <div className="flex h-full flex-col items-center justify-center gap-2 px-5 text-center text-xs text-muted-foreground/70">
+        <span>This browser can&apos;t display PDFs inline.</span>
+        <a href={url} download={fileName} className="text-primary underline">
+          Download {fileName}
+        </a>
+      </div>
+    </object>
+  );
+}
+
 function FileContentView(props: {
   fileState: FileState;
   filePath: string;
@@ -1627,6 +1688,23 @@ function FileContentView(props: {
           alt={basenameOf(filePath)}
           className="max-h-full max-w-full object-contain"
         />
+      </div>
+    );
+  }
+
+  const isPdf =
+    data.encoding === "base64" && (data.mediaType === "application/pdf" || isPdfPath(filePath));
+  if (isPdf) {
+    if (data.truncated) {
+      return (
+        <div className="flex min-h-0 flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
+          PDF is too large to preview ({formatBytes(data.byteSize)}).
+        </div>
+      );
+    }
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <PdfPreview contents={data.contents} fileName={basenameOf(filePath)} />
       </div>
     );
   }
