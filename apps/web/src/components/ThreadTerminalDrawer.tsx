@@ -1,5 +1,13 @@
 import { FitAddon } from "@xterm/addon-fit";
-import { Plus, SquareSplitHorizontal, TerminalSquare, Trash2, XIcon } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Plus,
+  SquareSplitHorizontal,
+  TerminalSquare,
+  Trash2,
+  XIcon,
+} from "lucide-react";
 import {
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
@@ -781,6 +789,8 @@ interface ThreadTerminalDrawerProps {
   worktreePath?: string | null;
   runtimeEnv?: Record<string, string>;
   visible?: boolean;
+  /** Collapsed to a slim restore bar while keeping sessions running. */
+  minimized?: boolean;
   height: number;
   terminalIds: string[];
   activeTerminalId: string;
@@ -789,6 +799,8 @@ interface ThreadTerminalDrawerProps {
   focusRequestId: number;
   onSplitTerminal: () => void;
   onNewTerminal: () => void;
+  onMinimize: () => void;
+  onRestore: () => void;
   splitShortcutLabel?: string | undefined;
   newShortcutLabel?: string | undefined;
   closeShortcutLabel?: string | undefined;
@@ -839,6 +851,7 @@ export default function ThreadTerminalDrawer({
   worktreePath,
   runtimeEnv,
   visible = true,
+  minimized = false,
   height,
   terminalIds,
   activeTerminalId,
@@ -847,6 +860,8 @@ export default function ThreadTerminalDrawer({
   focusRequestId,
   onSplitTerminal,
   onNewTerminal,
+  onMinimize,
+  onRestore,
   splitShortcutLabel,
   newShortcutLabel,
   closeShortcutLabel,
@@ -1010,6 +1025,8 @@ export default function ThreadTerminalDrawer({
   const closeTerminalActionLabel = closeShortcutLabel
     ? `Close Terminal (${closeShortcutLabel})`
     : "Close Terminal";
+  const minimizeTerminalActionLabel = "Minimize Terminal";
+  const restoreTerminalActionLabel = "Restore Terminal";
   const onSplitTerminalAction = useCallback(() => {
     if (hasReachedSplitLimit) return;
     onSplitTerminal();
@@ -1147,6 +1164,33 @@ export default function ThreadTerminalDrawer({
     );
   }
 
+  if (minimized) {
+    const activeTerminalLabel =
+      terminalLabelById.get(resolvedActiveTerminalId) ?? "Terminal";
+    const terminalCount = normalizedTerminalIds.length;
+    return (
+      <aside className="thread-terminal-drawer relative flex h-8 min-w-0 shrink-0 items-stretch overflow-hidden border-t border-border/80 bg-background">
+        <button
+          type="button"
+          className="flex h-full w-full min-w-0 items-center gap-2 px-3 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          onClick={onRestore}
+          aria-label={restoreTerminalActionLabel}
+          title={restoreTerminalActionLabel}
+        >
+          <ChevronUp className="size-3.5 shrink-0" />
+          <TerminalSquare className="size-3.5 shrink-0" />
+          <span className="truncate font-medium text-foreground/90">{activeTerminalLabel}</span>
+          {terminalCount > 1 && (
+            <span className="shrink-0 rounded bg-muted px-1 py-0.5 text-[10px] leading-none text-muted-foreground">
+              {terminalCount}
+            </span>
+          )}
+          <span className="ml-auto shrink-0 text-[11px] uppercase tracking-[0.08em]">Restore</span>
+        </button>
+      </aside>
+    );
+  }
+
   const activeTerminalLaunchLocation = resolveTerminalLaunchLocation(resolvedActiveTerminalId);
 
   return (
@@ -1165,6 +1209,14 @@ export default function ThreadTerminalDrawer({
       {!hasTerminalSidebar && (
         <div className="pointer-events-none absolute right-2 top-2 z-20">
           <div className="pointer-events-auto inline-flex items-center overflow-hidden rounded-md border border-border/80 bg-background/70">
+            <TerminalActionButton
+              className="p-1 text-foreground/90 transition-colors hover:bg-accent"
+              onClick={onMinimize}
+              label={minimizeTerminalActionLabel}
+            >
+              <ChevronDown className="size-3.25" />
+            </TerminalActionButton>
+            <div className="h-4 w-px bg-border/80" />
             <TerminalActionButton
               className={`p-1 text-foreground/90 transition-colors ${
                 hasReachedSplitLimit
@@ -1280,7 +1332,14 @@ export default function ThreadTerminalDrawer({
               <div className="flex h-[22px] items-stretch justify-end border-b border-border/70">
                 <div className="inline-flex h-full items-stretch">
                   <TerminalActionButton
-                    className={`inline-flex h-full items-center px-1 text-foreground/90 transition-colors ${
+                    className="inline-flex h-full items-center px-1 text-foreground/90 transition-colors hover:bg-accent/70"
+                    onClick={onMinimize}
+                    label={minimizeTerminalActionLabel}
+                  >
+                    <ChevronDown className="size-3.25" />
+                  </TerminalActionButton>
+                  <TerminalActionButton
+                    className={`inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors ${
                       hasReachedSplitLimit
                         ? "cursor-not-allowed opacity-45 hover:bg-transparent"
                         : "hover:bg-accent/70"

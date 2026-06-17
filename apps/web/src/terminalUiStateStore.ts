@@ -19,6 +19,8 @@ import {
 
 interface ThreadTerminalUiState {
   terminalOpen: boolean;
+  /** Collapsed to a slim bar while keeping the drawer open and sessions running. */
+  terminalMinimized: boolean;
   terminalHeight: number;
   terminalIds: string[];
   activeTerminalId: string;
@@ -166,6 +168,7 @@ function threadTerminalUiStateEqual(
 ): boolean {
   return (
     left.terminalOpen === right.terminalOpen &&
+    left.terminalMinimized === right.terminalMinimized &&
     left.terminalHeight === right.terminalHeight &&
     left.activeTerminalId === right.activeTerminalId &&
     left.activeTerminalGroupId === right.activeTerminalGroupId &&
@@ -176,6 +179,7 @@ function threadTerminalUiStateEqual(
 
 const DEFAULT_THREAD_TERMINAL_UI_STATE: ThreadTerminalUiState = Object.freeze({
   terminalOpen: false,
+  terminalMinimized: false,
   terminalHeight: DEFAULT_THREAD_TERMINAL_HEIGHT,
   terminalIds: [],
   activeTerminalId: "",
@@ -211,6 +215,9 @@ function normalizeThreadTerminalUiState(state: ThreadTerminalUiState): ThreadTer
 
   const normalized: ThreadTerminalUiState = {
     terminalOpen: state.terminalOpen,
+    // Minimized only makes sense while the drawer is open and has live sessions.
+    terminalMinimized:
+      Boolean(state.terminalMinimized) && state.terminalOpen && nextTerminalIds.length > 0,
     terminalHeight:
       Number.isFinite(state.terminalHeight) && state.terminalHeight > 0
         ? state.terminalHeight
@@ -278,6 +285,7 @@ function upsertTerminalIntoGroups(
     return normalizeThreadTerminalUiState({
       ...normalized,
       terminalOpen: true,
+      terminalMinimized: false,
       terminalIds,
       activeTerminalId: terminalId,
       terminalGroups,
@@ -327,6 +335,7 @@ function upsertTerminalIntoGroups(
   return normalizeThreadTerminalUiState({
     ...normalized,
     terminalOpen: true,
+    terminalMinimized: false,
     terminalIds,
     activeTerminalId: terminalId,
     terminalGroups,
@@ -339,8 +348,25 @@ function setThreadTerminalOpen(state: ThreadTerminalUiState, open: boolean): Thr
   if (open && normalized.terminalIds.length === 0) {
     return upsertTerminalIntoGroups(normalized, DEFAULT_THREAD_TERMINAL_ID, "new");
   }
-  if (normalized.terminalOpen === open) return normalized;
-  return { ...normalized, terminalOpen: open };
+  // Showing the drawer always restores it from the minimized slim bar.
+  const nextMinimized = open ? false : normalized.terminalMinimized;
+  if (normalized.terminalOpen === open && normalized.terminalMinimized === nextMinimized) {
+    return normalized;
+  }
+  return { ...normalized, terminalOpen: open, terminalMinimized: nextMinimized };
+}
+
+function setThreadTerminalMinimized(
+  state: ThreadTerminalUiState,
+  minimized: boolean,
+): ThreadTerminalUiState {
+  const normalized = normalizeThreadTerminalUiState(state);
+  // Only an open drawer with live sessions can be minimized.
+  const nextMinimized = minimized && normalized.terminalOpen && normalized.terminalIds.length > 0;
+  if (normalized.terminalMinimized === nextMinimized) {
+    return normalized;
+  }
+  return { ...normalized, terminalMinimized: nextMinimized };
 }
 
 function setThreadTerminalHeight(
@@ -429,6 +455,7 @@ function closeThreadTerminal(
 
   return normalizeThreadTerminalUiState({
     terminalOpen: normalized.terminalOpen,
+    terminalMinimized: normalized.terminalMinimized,
     terminalHeight: normalized.terminalHeight,
     terminalIds: remainingTerminalIds,
     activeTerminalId: nextActiveTerminalId,
@@ -508,6 +535,7 @@ function updateTerminalUiStateByThreadKey(
 interface TerminalUiStateStoreState {
   terminalUiStateByThreadKey: Record<string, ThreadTerminalUiState>;
   setTerminalOpen: (threadRef: ScopedThreadRef, open: boolean) => void;
+  setTerminalMinimized: (threadRef: ScopedThreadRef, minimized: boolean) => void;
   setTerminalHeight: (threadRef: ScopedThreadRef, height: number) => void;
   splitTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
   newTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
@@ -550,6 +578,8 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
         terminalUiStateByThreadKey: {},
         setTerminalOpen: (threadRef, open) =>
           updateTerminal(threadRef, (state) => setThreadTerminalOpen(state, open)),
+        setTerminalMinimized: (threadRef, minimized) =>
+          updateTerminal(threadRef, (state) => setThreadTerminalMinimized(state, minimized)),
         setTerminalHeight: (threadRef, height) =>
           updateTerminal(threadRef, (state) => setThreadTerminalHeight(state, height)),
         splitTerminal: (threadRef, terminalId) =>

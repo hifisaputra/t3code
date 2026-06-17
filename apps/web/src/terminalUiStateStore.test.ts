@@ -28,6 +28,7 @@ describe("terminalUiStateStore actions", () => {
     );
     expect(terminalUiState).toEqual({
       terminalOpen: false,
+      terminalMinimized: false,
       terminalHeight: 280,
       terminalIds: [],
       activeTerminalId: "",
@@ -65,6 +66,7 @@ describe("terminalUiStateStore actions", () => {
     );
     expect(terminalUiState).toEqual({
       terminalOpen: true,
+      terminalMinimized: false,
       terminalHeight: 280,
       terminalIds: [DEFAULT_THREAD_TERMINAL_ID],
       activeTerminalId: DEFAULT_THREAD_TERMINAL_ID,
@@ -76,6 +78,68 @@ describe("terminalUiStateStore actions", () => {
       ],
       activeTerminalGroupId: `group-${DEFAULT_THREAD_TERMINAL_ID}`,
     });
+  });
+
+  it("minimizes an open drawer and restores it via setTerminalMinimized", () => {
+    const store = useTerminalUiStateStore.getState();
+    store.setTerminalOpen(THREAD_REF, true);
+    store.setTerminalMinimized(THREAD_REF, true);
+
+    const minimized = selectThreadTerminalUiState(
+      useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
+      THREAD_REF,
+    );
+    expect(minimized.terminalOpen).toBe(true);
+    expect(minimized.terminalMinimized).toBe(true);
+
+    store.setTerminalMinimized(THREAD_REF, false);
+    const restored = selectThreadTerminalUiState(
+      useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
+      THREAD_REF,
+    );
+    expect(restored.terminalMinimized).toBe(false);
+  });
+
+  it("does not minimize a drawer that has no terminals", () => {
+    const store = useTerminalUiStateStore.getState();
+    store.setTerminalMinimized(THREAD_REF, true);
+
+    expect(
+      selectThreadTerminalUiState(
+        useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
+        THREAD_REF,
+      ).terminalMinimized,
+    ).toBe(false);
+  });
+
+  it("restores a minimized drawer when it is shown again", () => {
+    const store = useTerminalUiStateStore.getState();
+    store.setTerminalOpen(THREAD_REF, true);
+    store.setTerminalMinimized(THREAD_REF, true);
+    // Hide then show again — showing must clear the minimized slim bar.
+    store.setTerminalOpen(THREAD_REF, false);
+    store.setTerminalOpen(THREAD_REF, true);
+
+    expect(
+      selectThreadTerminalUiState(
+        useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
+        THREAD_REF,
+      ).terminalMinimized,
+    ).toBe(false);
+  });
+
+  it("clears minimized when a new terminal is created", () => {
+    const store = useTerminalUiStateStore.getState();
+    store.setTerminalOpen(THREAD_REF, true);
+    store.setTerminalMinimized(THREAD_REF, true);
+    store.newTerminal(THREAD_REF, "terminal-2");
+
+    expect(
+      selectThreadTerminalUiState(
+        useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
+        THREAD_REF,
+      ).terminalMinimized,
+    ).toBe(false);
   });
 
   it("caps splits at four terminals per group", () => {

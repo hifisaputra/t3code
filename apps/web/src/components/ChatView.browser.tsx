@@ -1954,6 +1954,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       terminalUiStateByThreadKey: {
         [THREAD_KEY]: {
           terminalOpen: true,
+          terminalMinimized: false,
           terminalHeight: 280,
           terminalIds: ["default"],
           activeTerminalId: "default",

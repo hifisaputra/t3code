@@ -604,6 +604,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     [knownTerminalSessions],
   );
   const storeSetTerminalHeight = useTerminalUiStateStore((state) => state.setTerminalHeight);
+  const storeSetTerminalMinimized = useTerminalUiStateStore((state) => state.setTerminalMinimized);
   const storeSplitTerminal = useTerminalUiStateStore((state) => state.splitTerminal);
   const storeNewTerminal = useTerminalUiStateStore((state) => state.newTerminal);
   const storeSetActiveTerminal = useTerminalUiStateStore((state) => state.setActiveTerminal);
@@ -664,6 +665,15 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     },
     [storeSetTerminalHeight, threadRef],
   );
+
+  const minimizeTerminal = useCallback(() => {
+    storeSetTerminalMinimized(threadRef, true);
+  }, [storeSetTerminalMinimized, threadRef]);
+
+  const restoreTerminal = useCallback(() => {
+    storeSetTerminalMinimized(threadRef, false);
+    bumpFocusRequestId();
+  }, [bumpFocusRequestId, storeSetTerminalMinimized, threadRef]);
 
   const splitTerminal = useCallback(() => {
     const api = readEnvironmentApi(threadRef.environmentId);
@@ -789,6 +799,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
         worktreePath={effectiveWorktreePath}
         runtimeEnv={runtimeEnv}
         visible={visible}
+        minimized={terminalUiState.terminalMinimized}
         height={terminalUiState.terminalHeight}
         // Known-session order is MRU and changes on focus; persisted store order keeps sidebar labels stable.
         terminalIds={terminalUiState.terminalIds}
@@ -798,6 +809,8 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
         focusRequestId={focusRequestId + localFocusRequestId + (visible ? 1 : 0)}
         onSplitTerminal={splitTerminal}
         onNewTerminal={createNewTerminal}
+        onMinimize={minimizeTerminal}
+        onRestore={restoreTerminal}
         splitShortcutLabel={visible ? splitShortcutLabel : undefined}
         newShortcutLabel={visible ? newShortcutLabel : undefined}
         closeShortcutLabel={visible ? closeShortcutLabel : undefined}
