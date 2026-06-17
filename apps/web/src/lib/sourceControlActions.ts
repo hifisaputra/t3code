@@ -281,6 +281,7 @@ export function useGitStackedAction(scope: SourceControlActionScope) {
       action,
       commitMessage,
       featureBranch,
+      baseBranch,
       filePaths,
       onProgress,
     }: {
@@ -288,6 +289,7 @@ export function useGitStackedAction(scope: SourceControlActionScope) {
       action: GitStackedAction;
       commitMessage?: string;
       featureBranch?: boolean;
+      baseBranch?: string;
       filePaths?: string[];
       onProgress?: (event: GitActionProgressEvent) => void;
     }): Promise<GitRunStackedActionResult | null> => {
@@ -299,6 +301,7 @@ export function useGitStackedAction(scope: SourceControlActionScope) {
           action,
           ...(commitMessage ? { commitMessage } : {}),
           ...(featureBranch ? { featureBranch: true } : {}),
+          ...(baseBranch ? { baseBranch } : {}),
           ...(filePaths && filePaths.length > 0 ? { filePaths } : {}),
         },
         {

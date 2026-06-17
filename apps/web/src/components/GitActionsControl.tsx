@@ -44,6 +44,7 @@ import {
   resolveThreadBranchUpdate,
 } from "./GitActionsControl.logic";
 import { AnimatedHeight } from "./AnimatedHeight";
+import { CreatePrDialog } from "./CreatePrDialog";
 import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
 import {
@@ -93,6 +94,7 @@ interface PendingDefaultBranchAction {
   branchName: string;
   includesCommit: boolean;
   commitMessage?: string;
+  baseBranch?: string;
   onConfirmed?: () => void;
   filePaths?: string[];
 }
@@ -123,6 +125,7 @@ interface RunGitActionWithToastInput {
   skipDefaultBranchPrompt?: boolean;
   statusOverride?: VcsStatusResult | null;
   featureBranch?: boolean;
+  baseBranch?: string;
   progressToastId?: GitActionToastId;
   filePaths?: string[];
 }
@@ -975,6 +978,7 @@ export default function GitActionsControl({
   const [excludedFiles, setExcludedFiles] = useState<ReadonlySet<string>>(new Set());
   const [isEditingFiles, setIsEditingFiles] = useState(false);
   const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
+  const [isCreatePrDialogOpen, setIsCreatePrDialogOpen] = useState(false);
   const [pendingDefaultBranchAction, setPendingDefaultBranchAction] =
     useState<PendingDefaultBranchAction | null>(null);
   const activeGitActionProgressRef = useRef<ActiveGitActionProgress | null>(null);
@@ -1225,6 +1229,7 @@ export default function GitActionsControl({
       skipDefaultBranchPrompt = false,
       statusOverride,
       featureBranch = false,
+      baseBranch,
       progressToastId,
       filePaths,
     }: RunGitActionWithToastInput) => {
@@ -1254,6 +1259,7 @@ export default function GitActionsControl({
           branchName: actionBranch,
           includesCommit,
           ...(commitMessage ? { commitMessage } : {}),
+          ...(baseBranch ? { baseBranch } : {}),
           ...(onConfirmed ? { onConfirmed } : {}),
           ...(filePaths ? { filePaths } : {}),
         });
@@ -1366,6 +1372,7 @@ export default function GitActionsControl({
         action,
         ...(commitMessage ? { commitMessage } : {}),
         ...(featureBranch ? { featureBranch } : {}),
+        ...(baseBranch ? { baseBranch } : {}),
         ...(filePaths ? { filePaths } : {}),
         onProgress: applyProgressEvent,
       });
@@ -1388,6 +1395,10 @@ export default function GitActionsControl({
             children: toastCta.label,
             onClick: () => {
               closeResultToast();
+              if (toastCta.action.kind === "create_pr") {
+                setIsCreatePrDialogOpen(true);
+                return;
+              }
               void runGitActionWithToast({
                 action: toastCta.action.kind,
               });
@@ -1448,11 +1459,13 @@ export default function GitActionsControl({
 
   const continuePendingDefaultBranchAction = () => {
     if (!pendingDefaultBranchAction) return;
-    const { action, commitMessage, onConfirmed, filePaths } = pendingDefaultBranchAction;
+    const { action, commitMessage, baseBranch, onConfirmed, filePaths } =
+      pendingDefaultBranchAction;
     setPendingDefaultBranchAction(null);
     void runGitActionWithToast({
       action,
       ...(commitMessage ? { commitMessage } : {}),
+      ...(baseBranch ? { baseBranch } : {}),
       ...(onConfirmed ? { onConfirmed } : {}),
       ...(filePaths ? { filePaths } : {}),
       skipDefaultBranchPrompt: true,
@@ -1461,11 +1474,13 @@ export default function GitActionsControl({
 
   const checkoutFeatureBranchAndContinuePendingAction = () => {
     if (!pendingDefaultBranchAction) return;
-    const { action, commitMessage, onConfirmed, filePaths } = pendingDefaultBranchAction;
+    const { action, commitMessage, baseBranch, onConfirmed, filePaths } =
+      pendingDefaultBranchAction;
     setPendingDefaultBranchAction(null);
     void runGitActionWithToast({
       action,
       ...(commitMessage ? { commitMessage } : {}),
+      ...(baseBranch ? { baseBranch } : {}),
       ...(onConfirmed ? { onConfirmed } : {}),
       ...(filePaths ? { filePaths } : {}),
       featureBranch: true,
@@ -1533,6 +1548,10 @@ export default function GitActionsControl({
       });
       return;
     }
+    if (quickAction.action === "create_pr") {
+      setIsCreatePrDialogOpen(true);
+      return;
+    }
     if (quickAction.action) {
       void runGitActionWithToast({ action: quickAction.action });
     }
@@ -1549,7 +1568,7 @@ export default function GitActionsControl({
       return;
     }
     if (item.dialogAction === "create_pr") {
-      void runGitActionWithToast({ action: "create_pr" });
+      setIsCreatePrDialogOpen(true);
       return;
     }
     setExcludedFiles(new Set());
@@ -1926,6 +1945,19 @@ export default function GitActionsControl({
         onOpenChange={setIsPublishDialogOpen}
         environmentId={activeEnvironmentId}
         gitCwd={gitCwd}
+      />
+
+      <CreatePrDialog
+        open={isCreatePrDialogOpen}
+        onOpenChange={setIsCreatePrDialogOpen}
+        environmentId={activeEnvironmentId}
+        cwd={gitCwd}
+        headBranch={gitStatusForActions?.refName ?? null}
+        changeRequestLabel={changeRequestTerminology.singular}
+        onConfirm={(baseBranch) => {
+          setIsCreatePrDialogOpen(false);
+          void runGitActionWithToast({ action: "create_pr", baseBranch });
+        }}
       />
 
       <Dialog
