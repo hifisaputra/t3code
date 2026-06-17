@@ -61,6 +61,16 @@ import {
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const decodeShellSnapshot = Schema.decodeUnknownEffect(OrchestrationShellSnapshot);
 const decodeThread = Schema.decodeUnknownEffect(OrchestrationThread);
+
+// The web client hard-caps the per-thread detail it keeps in memory (see
+// MAX_THREAD_* in apps/web/src/store.ts: 2000 messages, 500 activities). Older
+// rows are dropped client-side and never rendered, so loading the full history
+// from SQLite only inflates the snapshot payload (a 10k-activity thread ships
+// ~10MB of which the client discards ~92%). Bound the snapshot queries to the
+// most recent rows to match what the client keeps — behaviour-preserving, but
+// it keeps the WebSocket snapshot small enough to reliably load long threads.
+const THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
+const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
@@ -771,19 +781,23 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionThreadMessageDbRowSchema,
     execute: ({ threadId }) =>
       sql`
-        SELECT
-          message_id AS "messageId",
-          thread_id AS "threadId",
-          turn_id AS "turnId",
-          role,
-          text,
-          attachments_json AS "attachments",
-          is_streaming AS "isStreaming",
-          created_at AS "createdAt",
-          updated_at AS "updatedAt"
-        FROM projection_thread_messages
-        WHERE thread_id = ${threadId}
-        ORDER BY created_at ASC, message_id ASC
+        SELECT * FROM (
+          SELECT
+            message_id AS "messageId",
+            thread_id AS "threadId",
+            turn_id AS "turnId",
+            role,
+            text,
+            attachments_json AS "attachments",
+            is_streaming AS "isStreaming",
+            created_at AS "createdAt",
+            updated_at AS "updatedAt"
+          FROM projection_thread_messages
+          WHERE thread_id = ${threadId}
+          ORDER BY created_at DESC, message_id DESC
+          LIMIT ${THREAD_DETAIL_MESSAGE_LIMIT}
+        )
+        ORDER BY "createdAt" ASC, "messageId" ASC
       `,
   });
 
@@ -812,22 +826,29 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionThreadActivityDbRowSchema,
     execute: ({ threadId }) =>
       sql`
-        SELECT
-          activity_id AS "activityId",
-          thread_id AS "threadId",
-          turn_id AS "turnId",
-          tone,
-          kind,
-          summary,
-          payload_json AS "payload",
-          sequence,
-          created_at AS "createdAt"
-        FROM projection_thread_activities
-        WHERE thread_id = ${threadId}
+        SELECT * FROM (
+          SELECT
+            activity_id AS "activityId",
+            thread_id AS "threadId",
+            turn_id AS "turnId",
+            tone,
+            kind,
+            summary,
+            payload_json AS "payload",
+            sequence,
+            created_at AS "createdAt"
+          FROM projection_thread_activities
+          WHERE thread_id = ${threadId}
+          ORDER BY
+            sequence DESC,
+            created_at DESC,
+            activity_id DESC
+          LIMIT ${THREAD_DETAIL_ACTIVITY_LIMIT}
+        )
         ORDER BY
           sequence ASC,
-          created_at ASC,
-          activity_id ASC
+          "createdAt" ASC,
+          "activityId" ASC
       `,
   });
 

@@ -1011,6 +1011,76 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("bounds thread detail to the most recent activities", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_state`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'project-1', 'Project 1', '/tmp/project-1',
+          '{"provider":"codex","model":"gpt-5-codex"}', '[]',
+          '2026-04-01T00:00:00.000Z', '2026-04-01T00:00:01.000Z', NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, branch, worktree_path, latest_turn_id,
+          latest_user_message_at, pending_approval_count, pending_user_input_count,
+          has_actionable_proposed_plan, created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'thread-1', 'project-1', 'Thread 1',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          NULL, NULL, NULL, NULL, 0, 0, 0,
+          '2026-04-01T00:00:02.000Z', '2026-04-01T00:00:03.000Z', NULL
+        )
+      `;
+
+      // Insert more activities than the snapshot bound (500) keeps. The web
+      // client only retains the last 500 anyway, so the snapshot must return the
+      // most recent 500 in ascending order — never the full history.
+      const total = 502;
+      yield* Effect.forEach(
+        Array.from({ length: total }, (_unused, index) => index + 1),
+        (seq) =>
+          sql`
+            INSERT INTO projection_thread_activities (
+              activity_id, thread_id, turn_id, tone, kind, summary,
+              payload_json, sequence, created_at
+            )
+            VALUES (
+              ${`activity-${String(seq).padStart(4, "0")}`}, 'thread-1', NULL,
+              'info', 'runtime.note', ${`activity ${seq}`}, '{}', ${seq},
+              '2026-04-01T00:00:00.000Z'
+            )
+          `,
+        { discard: true },
+      );
+
+      const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
+      assert.equal(threadDetail._tag, "Some");
+      if (threadDetail._tag === "Some") {
+        const activities = threadDetail.value.activities;
+        assert.equal(activities.length, 500);
+        // Oldest two (sequence 1 and 2) are dropped; result is ascending.
+        assert.equal(activities[0]?.sequence, 3);
+        assert.equal(activities[activities.length - 1]?.sequence, total);
+      }
+    }),
+  );
+
   it.effect("uses projection_threads.latest_turn_id for targeted thread latest turn queries", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
