@@ -3,6 +3,8 @@ import { Alert, AlertAction, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { CircleAlertIcon, XIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { cn } from "~/lib/utils";
+import { useSettings } from "~/hooks/useSettings";
 
 export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   error,
@@ -11,9 +13,10 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   error: string | null;
   onDismiss?: () => void;
 }) {
+  const chatWidth = useSettings((s) => s.chatWidth);
   if (!error) return null;
   return (
-    <div className="pt-3 mx-auto max-w-3xl">
+    <div className={cn("pt-3 mx-auto", chatWidth === "full" ? "max-w-none" : "max-w-3xl")}>
       <Alert variant="error">
         <CircleAlertIcon />
         <Tooltip>

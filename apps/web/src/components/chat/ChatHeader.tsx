@@ -9,8 +9,15 @@ import { scopeThreadRef } from "@t3tools/client-runtime";
 import { memo } from "react";
 import GitActionsControl from "../GitActionsControl";
 import { type DraftId } from "~/composerDraftStore";
-import { DiffIcon, FilesIcon, TerminalSquareIcon } from "lucide-react";
+import {
+  DiffIcon,
+  FilesIcon,
+  FoldHorizontalIcon,
+  TerminalSquareIcon,
+  UnfoldHorizontalIcon,
+} from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
 import { PreviewControl } from "../PreviewControl";
 import { NotificationsControl } from "../NotificationsControl";
@@ -92,6 +99,9 @@ export const ChatHeader = memo(function ChatHeader({
     activeThreadEnvironmentId,
     primaryEnvironmentId,
   });
+  const chatWidth = useSettings((s) => s.chatWidth);
+  const { updateSettings } = useUpdateSettings();
+  const isFullWidth = chatWidth === "full";
 
   return (
     <div className="@container/header-actions flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -139,6 +149,31 @@ export const ChatHeader = memo(function ChatHeader({
         )}
         {activeProjectName && <PreviewControl cwd={gitCwd} />}
         <NotificationsControl environmentId={activeThreadEnvironmentId} />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                className="shrink-0"
+                pressed={isFullWidth}
+                onPressedChange={(pressed) =>
+                  updateSettings({ chatWidth: pressed ? "full" : "boxed" })
+                }
+                aria-label="Toggle full-width conversation"
+                variant="ghost"
+                size="xs"
+              >
+                {isFullWidth ? (
+                  <FoldHorizontalIcon className="size-3" />
+                ) : (
+                  <UnfoldHorizontalIcon className="size-3" />
+                )}
+              </Toggle>
+            }
+          />
+          <TooltipPopup side="bottom">
+            {isFullWidth ? "Switch to boxed width" : "Switch to full width"}
+          </TooltipPopup>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger
             render={
