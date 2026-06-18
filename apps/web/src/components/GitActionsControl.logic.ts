@@ -205,15 +205,10 @@ export function resolveQuickAction(
     if (!gitStatus.hasUpstream && !hasPrimaryRemote) {
       return { label: "Commit", disabled: false, kind: "run_action", action: "commit" };
     }
-    if (hasOpenPr || isDefaultRef) {
-      return { label: "Commit & push", disabled: false, kind: "run_action", action: "commit_push" };
-    }
-    return {
-      label: `Commit, push & ${terminology.shortLabel}`,
-      disabled: false,
-      kind: "run_action",
-      action: "commit_push_pr",
-    };
+    // The one-click button stops at commit + push; opening a change request is
+    // a deliberate choice via the dropdown menu (or the standalone "Create"
+    // quick action once everything is pushed) so it can't happen by accident.
+    return { label: "Commit & push", disabled: false, kind: "run_action", action: "commit_push" };
   }
 
   if (!gitStatus.hasUpstream) {
@@ -246,12 +241,7 @@ export function resolveQuickAction(
         action: isDefaultRef ? "commit_push" : "push",
       };
     }
-    return {
-      label: `Push & create ${terminology.shortLabel}`,
-      disabled: false,
-      kind: "run_action",
-      action: "create_pr",
-    };
+    return { label: "Push", disabled: false, kind: "run_action", action: "push" };
   }
 
   if (isDiverged) {
@@ -280,12 +270,7 @@ export function resolveQuickAction(
         action: isDefaultRef ? "commit_push" : "push",
       };
     }
-    return {
-      label: `Push & create ${terminology.shortLabel}`,
-      disabled: false,
-      kind: "run_action",
-      action: "create_pr",
-    };
+    return { label: "Push", disabled: false, kind: "run_action", action: "push" };
   }
 
   if (hasOpenPr && gitStatus.hasUpstream) {

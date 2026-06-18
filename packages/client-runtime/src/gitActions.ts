@@ -187,15 +187,9 @@ export function resolveQuickAction(
     if (!gitStatus.hasUpstream && !hasOriginRemote) {
       return { label: "Commit", disabled: false, kind: "run_action", action: "commit" };
     }
-    if (hasOpenPr || isDefaultBranch) {
-      return { label: "Commit & push", disabled: false, kind: "run_action", action: "commit_push" };
-    }
-    return {
-      label: "Commit, push & PR",
-      disabled: false,
-      kind: "run_action",
-      action: "commit_push_pr",
-    };
+    // The one-click button stops at commit + push; creating a PR is a
+    // deliberate choice via the dropdown menu so it can't happen by accident.
+    return { label: "Commit & push", disabled: false, kind: "run_action", action: "commit_push" };
   }
 
   if (!gitStatus.hasUpstream) {
@@ -229,12 +223,7 @@ export function resolveQuickAction(
         action: isDefaultBranch ? "commit_push" : "push",
       };
     }
-    return {
-      label: "Push & create PR",
-      disabled: false,
-      kind: "run_action",
-      action: "create_pr",
-    };
+    return { label: "Push", disabled: false, kind: "run_action", action: "push" };
   }
 
   if (isDiverged) {
@@ -263,12 +252,7 @@ export function resolveQuickAction(
         action: isDefaultBranch ? "commit_push" : "push",
       };
     }
-    return {
-      label: "Push & create PR",
-      disabled: false,
-      kind: "run_action",
-      action: "create_pr",
-    };
+    return { label: "Push", disabled: false, kind: "run_action", action: "push" };
   }
 
   if (hasOpenPr && gitStatus.hasUpstream) {

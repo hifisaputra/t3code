@@ -281,10 +281,10 @@ describe("GitActionsControl thread-scoped progress toast", () => {
     const screen = await render(<Harness />, { container: host });
 
     try {
-      const quickActionButton = findButtonByText("Push & create PR");
-      expect(quickActionButton, 'Unable to find button containing "Push & create PR"').toBeTruthy();
+      const quickActionButton = findButtonByText("Push");
+      expect(quickActionButton, 'Unable to find button containing "Push"').toBeTruthy();
       if (!(quickActionButton instanceof HTMLButtonElement)) {
-        throw new Error('Unable to find button containing "Push & create PR"');
+        throw new Error('Unable to find button containing "Push"');
       }
       quickActionButton.click();
 

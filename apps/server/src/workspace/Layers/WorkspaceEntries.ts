@@ -94,6 +94,14 @@ function basenameOf(input: string): string {
   return input.slice(separatorIndex + 1);
 }
 
+// Dotenv-style files (`.env`, `.env.local`, `.env.production`, `.envrc`, ...)
+// are routinely gitignored, but users still need to view and edit them in the
+// file browser, so they are exempt from VCS-ignore filtering when listing a
+// directory.
+function isEnvFileName(name: string): boolean {
+  return name === ".env" || name === ".envrc" || name.startsWith(".env.");
+}
+
 function toSearchableWorkspaceEntry(entry: ProjectEntry): SearchableWorkspaceEntry {
   const normalizedPath = entry.path.toLowerCase();
   return {
@@ -593,7 +601,13 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     const directoryEntries: ProjectEntry[] = [];
     const fileEntries: ProjectEntry[] = [];
     for (const candidate of candidates) {
-      if (allowedPathSet && !allowedPathSet.has(candidate.relativePath)) {
+      const keepDespiteVcsIgnore =
+        !candidate.isDirectory && isEnvFileName(basenameOf(candidate.relativePath));
+      if (
+        allowedPathSet &&
+        !allowedPathSet.has(candidate.relativePath) &&
+        !keepDespiteVcsIgnore
+      ) {
         continue;
       }
       const entry: ProjectEntry = {

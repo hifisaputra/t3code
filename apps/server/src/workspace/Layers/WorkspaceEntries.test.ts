@@ -462,6 +462,28 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
       }),
     );
 
+    it.effect("keeps gitignored dotenv files visible so they can be edited", () =>
+      Effect.gen(function* () {
+        const workspaceEntries = yield* WorkspaceEntries;
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-list-env-", git: true });
+        yield* writeTextFile(cwd, ".gitignore", ".env\n.env.local\nsecret.txt\n");
+        yield* writeTextFile(cwd, "keep.ts", "export {};");
+        yield* writeTextFile(cwd, ".env", "TOKEN=abc");
+        yield* writeTextFile(cwd, ".env.local", "TOKEN=def");
+        yield* writeTextFile(cwd, "secret.txt", "nope");
+
+        const result = yield* workspaceEntries.listDirectory({ cwd });
+        const paths = result.entries.map((entry) => entry.path);
+
+        expect(paths).toContain(".env");
+        expect(paths).toContain(".env.local");
+        expect(paths).toContain("keep.ts");
+        // Non-env gitignored files stay hidden.
+        expect(paths).not.toContain("secret.txt");
+        expect(result.entries.find((entry) => entry.path === ".env")?.kind).toBe("file");
+      }),
+    );
+
     it.effect("rejects directories outside the workspace root", () =>
       Effect.gen(function* () {
         const workspaceEntries = yield* WorkspaceEntries;

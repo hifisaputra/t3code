@@ -335,9 +335,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [activeTurnInProgress, isRevertingCheckpoint, isWorking],
   );
 
-  // renderItem only closes over the chat-width preference, which changes
-  // rarely (header toggle). Row components otherwise read shared state from
-  // TimelineRowCtx, which propagates through LegendList's memo.
+  // renderItem closes over the chat-width preference; the matching
+  // `extraData={chatWidth}` on LegendList re-runs it for already-mounted
+  // (virtualized/recycled) rows when the header toggle flips. Row components
+  // otherwise read shared state from TimelineRowCtx.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
       <div
@@ -371,6 +372,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           data={rows}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
+          extraData={chatWidth}
           estimatedItemSize={90}
           initialScrollAtEnd
           maintainScrollAtEnd={!foldToggleSettling}

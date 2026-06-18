@@ -213,12 +213,12 @@ describe("when: ref is clean, ahead, and has an open PR", () => {
 });
 
 describe("when: ref is clean, ahead, and has no open PR", () => {
-  it("resolveQuickAction pushes and creates a PR", () => {
+  it("resolveQuickAction pushes without creating a PR", () => {
     const quick = resolveQuickAction(status({ aheadCount: 2, pr: null }), false);
     assert.deepInclude(quick, {
       kind: "run_action",
-      action: "create_pr",
-      label: "Push & create PR",
+      action: "push",
+      label: "Push",
     });
   });
 
@@ -267,10 +267,12 @@ describe("when: source control provider uses merge requests", () => {
     const quick = resolveQuickAction(gitlabStatus, false);
     const items = buildMenuItems(gitlabStatus, false);
 
+    // The one-click quick action no longer bundles MR creation; the dropdown
+    // menu item is where MR terminology still surfaces.
     assert.deepInclude(quick, {
       kind: "run_action",
-      action: "create_pr",
-      label: "Push & create MR",
+      action: "push",
+      label: "Push",
     });
     assert.deepInclude(items[2], {
       id: "pr",
@@ -389,12 +391,12 @@ describe("when: ref has diverged from upstream", () => {
 });
 
 describe("when: working tree has local changes", () => {
-  it("resolveQuickAction returns commit, push, and create PR", () => {
+  it("resolveQuickAction returns commit and push without creating a PR", () => {
     const quick = resolveQuickAction(status({ hasWorkingTreeChanges: true }), false);
     assert.deepInclude(quick, {
       kind: "run_action",
-      action: "commit_push_pr",
-      label: "Commit, push & PR",
+      action: "commit_push",
+      label: "Commit & push",
     });
   });
 
@@ -539,15 +541,15 @@ describe("when: on default ref without open PR", () => {
 });
 
 describe("when: working tree has local changes and ref is behind upstream", () => {
-  it("resolveQuickAction still prefers commit, push, and create PR", () => {
+  it("resolveQuickAction still prefers commit and push", () => {
     const quick = resolveQuickAction(
       status({ hasWorkingTreeChanges: true, behindCount: 1 }),
       false,
     );
     assert.deepInclude(quick, {
       kind: "run_action",
-      action: "commit_push_pr",
-      label: "Commit, push & PR",
+      action: "commit_push",
+      label: "Commit & push",
     });
   });
 
@@ -713,7 +715,7 @@ describe("when: ref has no upstream configured", () => {
     ]);
   });
 
-  it("resolveQuickAction runs push and create PR when no upstream and commits are ahead", () => {
+  it("resolveQuickAction runs push without creating a PR when no upstream and commits are ahead", () => {
     const quick = resolveQuickAction(
       status({
         hasUpstream: false,
@@ -724,8 +726,8 @@ describe("when: ref has no upstream configured", () => {
     );
     assert.deepInclude(quick, {
       kind: "run_action",
-      action: "create_pr",
-      label: "Push & create PR",
+      action: "push",
+      label: "Push",
       disabled: false,
     });
   });
