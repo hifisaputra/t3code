@@ -1,0 +1,8 @@
+{
+  "actions": [
+    { "label": "Build t3", "command": "pnpm vp run --filter t3 build" },
+    { "label": "Typecheck web", "command": "pnpm vp run --filter @t3tools/web typecheck" },
+    { "label": "Typecheck server", "command": "pnpm vp run --filter t3 typecheck" },
+    { "label": "Test workspace", "command": "pnpm vitest run apps/server/src/workspace" }
+  ]
+}
