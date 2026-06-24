@@ -10,6 +10,12 @@
 import * as NodeFSP from "node:fs/promises";
 
 import type {
+  ProjectCreateDirectoryInput,
+  ProjectCreateDirectoryResult,
+  ProjectDeletePathInput,
+  ProjectDeletePathResult,
+  ProjectMovePathInput,
+  ProjectMovePathResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectWriteFileInput,
@@ -43,6 +49,9 @@ export class WorkspaceFileSystemOperationError extends Schema.TaggedErrorClass<W
       "close",
       "make-directory",
       "write-file",
+      "remove",
+      "rename",
+      "exists",
     ]),
     cause: Schema.Defect(),
   },
@@ -92,11 +101,26 @@ export class WorkspaceBinaryFileError extends Schema.TaggedErrorClass<WorkspaceB
   }
 }
 
+export class WorkspaceMoveDestinationExistsError extends Schema.TaggedErrorClass<WorkspaceMoveDestinationExistsError>()(
+  "WorkspaceMoveDestinationExistsError",
+  {
+    workspaceRoot: Schema.String,
+    fromRelativePath: Schema.String,
+    toRelativePath: Schema.String,
+    resolvedPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Cannot move '${this.fromRelativePath}' to '${this.toRelativePath}' in '${this.workspaceRoot}': a file or folder already exists at the destination.`;
+  }
+}
+
 export const WorkspaceFileSystemError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
   WorkspaceBinaryFileError,
+  WorkspaceMoveDestinationExistsError,
 ]);
 export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 
@@ -123,8 +147,51 @@ export class WorkspaceFileSystem extends Context.Service<
       ProjectWriteFileResult,
       WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
     >;
+    /** Create a directory (recursive) relative to the workspace root. */
+    readonly createDirectory: (
+      input: ProjectCreateDirectoryInput,
+    ) => Effect.Effect<
+      ProjectCreateDirectoryResult,
+      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
+    /** Recursively delete a file or directory relative to the workspace root. */
+    readonly deletePath: (
+      input: ProjectDeletePathInput,
+    ) => Effect.Effect<
+      ProjectDeletePathResult,
+      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
+    /** Move/rename a file or directory; refuses to overwrite an existing destination. */
+    readonly movePath: (
+      input: ProjectMovePathInput,
+    ) => Effect.Effect<
+      ProjectMovePathResult,
+      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
   }
 >()("t3/workspace/WorkspaceFileSystem") {}
+
+const PROJECT_READ_FILE_HARD_MAX_BYTES = 5 * 1024 * 1024;
+
+const PREVIEW_MEDIA_TYPES: ReadonlyMap<string, string> = new Map([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".gif", "image/gif"],
+  [".webp", "image/webp"],
+  [".svg", "image/svg+xml"],
+  [".bmp", "image/bmp"],
+  [".ico", "image/x-icon"],
+  [".avif", "image/avif"],
+  [".pdf", "application/pdf"],
+]);
+
+/** Returns a MIME type for previewable binary files (images, PDF), else undefined. */
+function detectPreviewMediaType(relativePath: string): string | undefined {
+  const lastDot = relativePath.lastIndexOf(".");
+  if (lastDot < 0) return undefined;
+  return PREVIEW_MEDIA_TYPES.get(relativePath.slice(lastDot).toLowerCase());
+}
 
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -213,7 +280,14 @@ export const make = Effect.gen(function* () {
             });
           }
 
-          const bytesToRead = Math.min(stat.size, PROJECT_READ_FILE_MAX_BYTES);
+          const mediaType = detectPreviewMediaType(input.relativePath);
+          const requestedMax = input.maxBytes ?? PROJECT_READ_FILE_MAX_BYTES;
+          // Previewable binaries (images/PDF) get the higher hard cap; text uses the
+          // requested cap, both bounded by the hard maximum.
+          const effectiveMax = mediaType
+            ? PROJECT_READ_FILE_HARD_MAX_BYTES
+            : Math.min(requestedMax, PROJECT_READ_FILE_HARD_MAX_BYTES);
+          const bytesToRead = Math.min(stat.size, effectiveMax);
           const buffer = Buffer.alloc(bytesToRead);
           const { bytesRead } = yield* Effect.tryPromise({
             try: () => handle.read(buffer, 0, bytesToRead, 0),
@@ -228,6 +302,19 @@ export const make = Effect.gen(function* () {
               }),
           });
           const fileBytes = buffer.subarray(0, bytesRead);
+
+          // Images and PDFs are returned as base64 for inline preview.
+          if (mediaType) {
+            return {
+              relativePath: target.relativePath,
+              contents: Buffer.from(fileBytes).toString("base64"),
+              byteLength: stat.size,
+              truncated: stat.size > effectiveMax,
+              encoding: "base64" as const,
+              mediaType,
+            };
+          }
+
           if (fileBytes.includes(0)) {
             return yield* new WorkspaceBinaryFileError({
               workspaceRoot: input.cwd,
@@ -240,7 +327,8 @@ export const make = Effect.gen(function* () {
             relativePath: target.relativePath,
             contents: new TextDecoder("utf-8").decode(fileBytes),
             byteLength: stat.size,
-            truncated: stat.size > PROJECT_READ_FILE_MAX_BYTES,
+            truncated: stat.size > effectiveMax,
+            encoding: "utf8" as const,
           };
         }),
       (handle) =>
@@ -280,7 +368,11 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
-    yield* fileSystem.writeFileString(target.absolutePath, input.contents).pipe(
+    const writeOperation =
+      input.encoding === "base64"
+        ? fileSystem.writeFile(target.absolutePath, new Uint8Array(Buffer.from(input.contents, "base64")))
+        : fileSystem.writeFileString(target.absolutePath, input.contents);
+    yield* writeOperation.pipe(
       Effect.mapError(
         (cause) =>
           new WorkspaceFileSystemOperationError({
@@ -297,7 +389,129 @@ export const make = Effect.gen(function* () {
     return { relativePath: target.relativePath };
   });
 
-  return WorkspaceFileSystem.of({ readFile, writeFile });
+  const createDirectory: WorkspaceFileSystem["Service"]["createDirectory"] = Effect.fn(
+    "WorkspaceFileSystem.createDirectory",
+  )(function* (input) {
+    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.relativePath,
+    });
+    yield* fileSystem.makeDirectory(target.absolutePath, { recursive: true }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new WorkspaceFileSystemOperationError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedPath: target.absolutePath,
+            operationPath: target.absolutePath,
+            operation: "make-directory",
+            cause,
+          }),
+      ),
+    );
+    yield* workspaceEntries.refresh(input.cwd);
+    return { relativePath: target.relativePath };
+  });
+
+  const deletePath: WorkspaceFileSystem["Service"]["deletePath"] = Effect.fn(
+    "WorkspaceFileSystem.deletePath",
+  )(function* (input) {
+    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.relativePath,
+    });
+    yield* fileSystem.remove(target.absolutePath, { recursive: true }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new WorkspaceFileSystemOperationError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedPath: target.absolutePath,
+            operationPath: target.absolutePath,
+            operation: "remove",
+            cause,
+          }),
+      ),
+    );
+    yield* workspaceEntries.refresh(input.cwd);
+    return { relativePath: target.relativePath };
+  });
+
+  const movePath: WorkspaceFileSystem["Service"]["movePath"] = Effect.fn(
+    "WorkspaceFileSystem.movePath",
+  )(function* (input) {
+    const from = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.fromRelativePath,
+    });
+    const to = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.toRelativePath,
+    });
+
+    if (from.relativePath === to.relativePath) {
+      return { fromRelativePath: from.relativePath, toRelativePath: to.relativePath };
+    }
+
+    const destinationExists = yield* fileSystem.exists(to.absolutePath).pipe(
+      Effect.mapError(
+        (cause) =>
+          new WorkspaceFileSystemOperationError({
+            workspaceRoot: input.cwd,
+            relativePath: input.toRelativePath,
+            resolvedPath: to.absolutePath,
+            operationPath: to.absolutePath,
+            operation: "exists",
+            cause,
+          }),
+      ),
+    );
+    if (destinationExists) {
+      return yield* new WorkspaceMoveDestinationExistsError({
+        workspaceRoot: input.cwd,
+        fromRelativePath: from.relativePath,
+        toRelativePath: to.relativePath,
+        resolvedPath: to.absolutePath,
+      });
+    }
+
+    yield* fileSystem.makeDirectory(path.dirname(to.absolutePath), { recursive: true }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new WorkspaceFileSystemOperationError({
+            workspaceRoot: input.cwd,
+            relativePath: input.toRelativePath,
+            resolvedPath: to.absolutePath,
+            operationPath: path.dirname(to.absolutePath),
+            operation: "make-directory",
+            cause,
+          }),
+      ),
+    );
+    yield* fileSystem.rename(from.absolutePath, to.absolutePath).pipe(
+      Effect.mapError(
+        (cause) =>
+          new WorkspaceFileSystemOperationError({
+            workspaceRoot: input.cwd,
+            relativePath: input.toRelativePath,
+            resolvedPath: to.absolutePath,
+            operationPath: to.absolutePath,
+            operation: "rename",
+            cause,
+          }),
+      ),
+    );
+    yield* workspaceEntries.refresh(input.cwd);
+    return { fromRelativePath: from.relativePath, toRelativePath: to.relativePath };
+  });
+
+  return WorkspaceFileSystem.of({
+    readFile,
+    writeFile,
+    createDirectory,
+    deletePath,
+    movePath,
+  });
 });
 
 export const layer = Layer.effect(WorkspaceFileSystem, make);

@@ -69,6 +69,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           contents: "export const answer = 42;\n",
           byteLength: 26,
           truncated: false,
+          encoding: "utf8",
         });
       }),
     );
@@ -262,6 +263,138 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           .stat(escapedPath)
           .pipe(Effect.orElseSucceed(() => null));
         expect(escapedStat).toBeNull();
+      }),
+    );
+  });
+
+  describe("writeFile base64", () => {
+    it.effect("writes base64-encoded binary content", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const bytes = new Uint8Array([0, 1, 2, 255, 254, 0]);
+        const base64 = Buffer.from(bytes).toString("base64");
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "assets/blob.bin",
+          contents: base64,
+          encoding: "base64",
+        });
+
+        const saved = yield* fileSystem
+          .readFile(path.join(cwd, "assets/blob.bin"))
+          .pipe(Effect.orDie);
+        expect(Array.from(saved)).toEqual(Array.from(bytes));
+      }),
+    );
+  });
+
+  describe("readFile binary preview", () => {
+    it.effect("returns base64 + mediaType for image/pdf files", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x00, 0x01]);
+        yield* fileSystem
+          .makeDirectory(path.join(cwd, "docs"), { recursive: true })
+          .pipe(Effect.orDie);
+        yield* fileSystem.writeFile(path.join(cwd, "docs/file.pdf"), pdfBytes).pipe(Effect.orDie);
+
+        const result = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "docs/file.pdf",
+        });
+
+        expect(result.encoding).toBe("base64");
+        expect(result.mediaType).toBe("application/pdf");
+        expect(Array.from(Buffer.from(result.contents, "base64"))).toEqual(Array.from(pdfBytes));
+      }),
+    );
+  });
+
+  describe("createDirectory", () => {
+    it.effect("creates nested directories relative to the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+
+        const result = yield* workspaceFileSystem.createDirectory({
+          cwd,
+          relativePath: "a/b/c",
+        });
+
+        expect(result).toEqual({ relativePath: "a/b/c" });
+        const stat = yield* fileSystem.stat(path.join(cwd, "a/b/c")).pipe(Effect.orDie);
+        expect(stat.type).toBe("Directory");
+      }),
+    );
+  });
+
+  describe("deletePath", () => {
+    it.effect("recursively deletes a directory", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "dir/nested/file.txt", "x");
+
+        const result = yield* workspaceFileSystem.deletePath({ cwd, relativePath: "dir" });
+
+        expect(result).toEqual({ relativePath: "dir" });
+        const exists = yield* fileSystem.exists(path.join(cwd, "dir"));
+        expect(exists).toBe(false);
+      }),
+    );
+  });
+
+  describe("movePath", () => {
+    it.effect("renames a file to a new path", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "old/name.txt", "hello");
+
+        const result = yield* workspaceFileSystem.movePath({
+          cwd,
+          fromRelativePath: "old/name.txt",
+          toRelativePath: "new/renamed.txt",
+        });
+
+        expect(result).toEqual({
+          fromRelativePath: "old/name.txt",
+          toRelativePath: "new/renamed.txt",
+        });
+        const moved = yield* fileSystem
+          .readFileString(path.join(cwd, "new/renamed.txt"))
+          .pipe(Effect.orDie);
+        expect(moved).toBe("hello");
+        const oldExists = yield* fileSystem.exists(path.join(cwd, "old/name.txt"));
+        expect(oldExists).toBe(false);
+      }),
+    );
+
+    it.effect("refuses to overwrite an existing destination", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "a.txt", "a");
+        yield* writeTextFile(cwd, "b.txt", "b");
+
+        const error = yield* workspaceFileSystem
+          .movePath({ cwd, fromRelativePath: "a.txt", toRelativePath: "b.txt" })
+          .pipe(Effect.flip);
+
+        expect(error._tag).toBe("WorkspaceMoveDestinationExistsError");
       }),
     );
   });

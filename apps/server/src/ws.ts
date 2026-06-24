@@ -37,7 +37,10 @@ import {
   type ProjectEntriesFailure,
   type ProjectFileFailure,
   type ProjectFileOperation,
+  ProjectCreateDirectoryError,
+  ProjectDeletePathError,
   ProjectListEntriesError,
+  ProjectMovePathError,
   ProjectReadFileError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
@@ -232,6 +235,12 @@ function projectFileFailureContext(
       return { failure: "path_not_file", resolvedPath: error.resolvedPath };
     case "WorkspaceBinaryFileError":
       return { failure: "binary_file", resolvedPath: error.resolvedPath };
+    case "WorkspaceMoveDestinationExistsError":
+      return {
+        failure: "operation_failed",
+        resolvedPath: error.resolvedPath,
+        operation: "rename",
+      };
     default:
       return unexpectedCompatibilityError(error);
   }
@@ -303,6 +312,9 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.projectsReadFile, AuthOrchestrationReadScope],
   [WS_METHODS.projectsSearchEntries, AuthOrchestrationReadScope],
   [WS_METHODS.projectsWriteFile, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsCreateDirectory, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsDeletePath, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsMovePath, AuthOrchestrationOperateScope],
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.assetsCreateUrl, AuthOrchestrationReadScope],
@@ -1377,6 +1389,58 @@ const makeWsRpcLayer = (currentSession: EnvironmentAuth.AuthenticatedSession) =>
                     cwd: input.cwd,
                     relativePath: input.relativePath,
                     ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsCreateDirectory]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsCreateDirectory,
+            workspaceFileSystem.createDirectory(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectCreateDirectoryError({
+                    cwd: input.cwd,
+                    relativePath: input.relativePath,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsDeletePath]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsDeletePath,
+            workspaceFileSystem.deletePath(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectDeletePathError({
+                    cwd: input.cwd,
+                    relativePath: input.relativePath,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsMovePath]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsMovePath,
+            workspaceFileSystem.movePath(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectMovePathError({
+                    cwd: input.cwd,
+                    fromRelativePath: input.fromRelativePath,
+                    toRelativePath: input.toRelativePath,
+                    ...projectFileFailureContext(cause),
+                    ...(cause._tag === "WorkspaceMoveDestinationExistsError"
+                      ? { message: cause.message }
+                      : {}),
                     cause,
                   }),
               ),

@@ -77,6 +77,15 @@ import {
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
+  ProjectCreateDirectoryError,
+  ProjectCreateDirectoryInput,
+  ProjectCreateDirectoryResult,
+  ProjectDeletePathError,
+  ProjectDeletePathInput,
+  ProjectDeletePathResult,
+  ProjectMovePathError,
+  ProjectMovePathInput,
+  ProjectMovePathResult,
 } from "./project.ts";
 import {
   TerminalAttachInput,
@@ -152,6 +161,9 @@ export const WS_METHODS = {
   projectsReadFile: "projects.readFile",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
+  projectsCreateDirectory: "projects.createDirectory",
+  projectsDeletePath: "projects.deletePath",
+  projectsMovePath: "projects.movePath",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -375,6 +387,24 @@ export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   payload: ProjectWriteFileInput,
   success: ProjectWriteFileResult,
   error: Schema.Union([ProjectWriteFileError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsCreateDirectoryRpc = Rpc.make(WS_METHODS.projectsCreateDirectory, {
+  payload: ProjectCreateDirectoryInput,
+  success: ProjectCreateDirectoryResult,
+  error: Schema.Union([ProjectCreateDirectoryError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsDeletePathRpc = Rpc.make(WS_METHODS.projectsDeletePath, {
+  payload: ProjectDeletePathInput,
+  success: ProjectDeletePathResult,
+  error: Schema.Union([ProjectDeletePathError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsMovePathRpc = Rpc.make(WS_METHODS.projectsMovePath, {
+  payload: ProjectMovePathInput,
+  success: ProjectMovePathResult,
+  error: Schema.Union([ProjectMovePathError, EnvironmentAuthorizationError]),
 });
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
@@ -701,6 +731,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsReadFileRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
+  WsProjectsCreateDirectoryRpc,
+  WsProjectsDeletePathRpc,
+  WsProjectsMovePathRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsAssetsCreateUrlRpc,

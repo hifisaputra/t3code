@@ -102,5 +102,35 @@ export function createProjectEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.cwd, input.relativePath]),
       },
     }),
+    createDirectory: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:create-directory",
+      tag: WS_METHODS.projectsCreateDirectory,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.cwd, input.relativePath]),
+      },
+    }),
+    deletePath: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:delete-path",
+      tag: WS_METHODS.projectsDeletePath,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.cwd, input.relativePath]),
+      },
+    }),
+    movePath: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:move-path",
+      tag: WS_METHODS.projectsMovePath,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.cwd, input.fromRelativePath, input.toRelativePath]),
+      },
+    }),
   };
 }

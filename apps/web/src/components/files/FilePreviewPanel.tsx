@@ -290,6 +290,52 @@ function useFileSaveCoordinator({
   return coordinator;
 }
 
+/**
+ * Renders a base64-encoded binary file (image or PDF) returned by `readFile`
+ * for previewable media types. Falls back to an unsupported notice otherwise.
+ */
+function BinaryPreviewSurface({
+  base64,
+  mediaType,
+  relativePath,
+}: {
+  base64: string;
+  mediaType: string;
+  relativePath: string;
+}) {
+  const dataUrl = `data:${mediaType};base64,${base64}`;
+  if (mediaType.startsWith("image/")) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-background p-4">
+        <img
+          src={dataUrl}
+          alt={relativePath}
+          className="max-h-full max-w-full object-contain"
+        />
+      </div>
+    );
+  }
+  if (mediaType === "application/pdf") {
+    return (
+      <object
+        data={dataUrl}
+        type="application/pdf"
+        aria-label={relativePath}
+        className="min-h-0 flex-1"
+      >
+        <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs text-muted-foreground">
+          This PDF can’t be displayed inline.
+        </div>
+      </object>
+    );
+  }
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-muted-foreground">
+      Binary file ({mediaType}) — preview not supported.
+    </div>
+  );
+}
+
 function EditableFileSurface({
   environmentId,
   cwd,
@@ -827,7 +873,13 @@ export default function FilePreviewPanel({
               <LoaderCircle className="size-5 animate-spin" />
             </div>
           ) : relativePath && file.data ? (
-            isMarkdown && renderMarkdown ? (
+            file.data.encoding === "base64" ? (
+              <BinaryPreviewSurface
+                base64={file.data.contents}
+                mediaType={file.data.mediaType ?? "application/octet-stream"}
+                relativePath={relativePath}
+              />
+            ) : isMarkdown && renderMarkdown ? (
               <RenderedMarkdownSurface
                 environmentId={environmentId}
                 cwd={cwd}
