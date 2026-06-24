@@ -1,4 +1,5 @@
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
+import type { FileTreeDropResult } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import { FolderPlus, Pencil, RefreshCw, Search, Trash2, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -64,6 +65,22 @@ function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
 }
 
+/** Last path segment of a workspace-relative path. */
+function baseName(relativePath: string): string {
+  const slash = relativePath.lastIndexOf("/");
+  return slash === -1 ? relativePath : relativePath.slice(slash + 1);
+}
+
+/** Strip trailing slashes — directory tree paths carry one. */
+function stripTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+/** Destination directory of a tree drop ("" for the workspace root). */
+function dropDestinationDir(target: FileTreeDropResult["target"]): string {
+  return target.kind === "root" ? "" : stripTrailingSlash(target.directoryPath ?? "");
+}
+
 /** Base64-encode a File without overflowing the call stack on large inputs. */
 async function fileToBase64(file: File): Promise<string> {
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -101,6 +118,9 @@ export default function FileBrowserPanel({
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  // The tree model is created once, so its drag-and-drop callback would capture
+  // stale props/commands. Route drops through a ref refreshed each render.
+  const dropHandlerRef = useRef<(event: FileTreeDropResult) => void>(() => {});
 
   const createDirectory = useAtomCommand(projectEnvironment.createDirectory);
   const deletePath = useAtomCommand(projectEnvironment.deletePath);
@@ -109,6 +129,19 @@ export default function FileBrowserPanel({
 
   const { model } = useFileTree({
     density: "compact",
+    dragAndDrop: {
+      // Reject dropping a directory into itself or one of its descendants.
+      canDrop: (event) => {
+        const destDir = dropDestinationDir(event.target);
+        return event.draggedPaths.every((raw) => {
+          const from = stripTrailingSlash(raw);
+          return destDir !== from && !destDir.startsWith(`${from}/`);
+        });
+      },
+      onDropComplete: (event) => {
+        dropHandlerRef.current(event);
+      },
+    },
     fileTreeSearchMode: "hide-non-matches",
     flattenEmptyDirectories: true,
     initialExpansion: 1,
@@ -211,6 +244,41 @@ export default function FileBrowserPanel({
     },
     [cwd, entriesQuery, environmentId, targetDir, writeFile],
   );
+
+  // Apply a drag-and-drop move: each dragged item keeps its name under the drop
+  // target directory. Skips no-ops (already in place) and invalid self-drops.
+  const performDrop = useCallback(
+    async (event: FileTreeDropResult) => {
+      const destDir = dropDestinationDir(event.target);
+      const moves = event.draggedPaths
+        .map((raw) => stripTrailingSlash(raw))
+        .filter((from) => from.length > 0)
+        .map((from) => ({ from, to: joinPath(destDir, baseName(from)) }))
+        .filter(
+          ({ from }) =>
+            parentDir(from) !== destDir &&
+            destDir !== from &&
+            !destDir.startsWith(`${from}/`),
+        );
+      if (moves.length === 0) return;
+      setBusy(true);
+      for (const { from, to } of moves) {
+        await movePath({
+          environmentId,
+          input: { cwd, fromRelativePath: from, toRelativePath: to },
+        });
+      }
+      setBusy(false);
+      entriesQuery.refresh();
+    },
+    [cwd, entriesQuery, environmentId, movePath],
+  );
+
+  useEffect(() => {
+    dropHandlerRef.current = (event) => {
+      void performDrop(event);
+    };
+  }, [performDrop]);
 
   const iconButton =
     "rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40";
