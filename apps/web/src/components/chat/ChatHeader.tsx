@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   type EditorId,
+  type ProjectActionDefinition,
   type ProjectScript,
   type ResolvedKeybindingsConfig,
   type ThreadId,
@@ -8,6 +9,7 @@ import {
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { memo } from "react";
 import GitActionsControl from "../GitActionsControl";
+import { ChatActionsMenu } from "./ChatActionsMenu";
 import { type DraftId } from "~/composerDraftStore";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import ProjectScriptsControl, {
@@ -31,6 +33,8 @@ interface ChatHeaderProps {
   availableEditors: ReadonlyArray<EditorId>;
   rightPanelOpen: boolean;
   gitCwd: string | null;
+  actionsCwd: string | null;
+  onRunProjectAction: (action: ProjectActionDefinition) => void;
   onRunProjectScript: (script: ProjectScript) => void;
   onAddProjectScript: (input: NewProjectScriptInput) => Promise<ProjectScriptActionResult>;
   onUpdateProjectScript: (
@@ -65,6 +69,8 @@ export const ChatHeader = memo(function ChatHeader({
   availableEditors,
   rightPanelOpen,
   gitCwd,
+  actionsCwd,
+  onRunProjectAction,
   onRunProjectScript,
   onAddProjectScript,
   onUpdateProjectScript,
@@ -117,6 +123,13 @@ export const ChatHeader = memo(function ChatHeader({
             keybindings={keybindings}
             availableEditors={availableEditors}
             openInCwd={openInCwd}
+          />
+        )}
+        {actionsCwd && (
+          <ChatActionsMenu
+            environmentId={activeThreadEnvironmentId}
+            cwd={actionsCwd}
+            onRunAction={onRunProjectAction}
           />
         )}
         {activeProjectName && (

@@ -5,6 +5,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
+  type ProjectActionDefinition,
   type ProjectScript,
   type ProjectId,
   type ProviderApprovalDecision,
@@ -2513,6 +2514,104 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
+  const runProjectAction = useCallback(
+    async (action: ProjectActionDefinition) => {
+      if (!activeThreadId || !activeProject || !activeThread || !activeThreadRef) return;
+      const workspaceRoot = activeProject.workspaceRoot;
+      const targetCwd = action.cwd
+        ? `${workspaceRoot.replace(/[\\/]+$/, "")}/${action.cwd.replace(/^[\\/]+/, "")}`
+        : (gitCwd ?? workspaceRoot);
+      const baseTerminalId =
+        terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
+      const shouldCreateNewTerminal = runningTerminalIds.includes(baseTerminalId);
+      const targetWorktreePath = activeThread.worktreePath ?? null;
+
+      setTerminalUiLaunchContext({
+        threadId: activeThreadId,
+        cwd: targetCwd,
+        worktreePath: targetWorktreePath,
+      });
+      setTerminalOpen(true);
+      setTerminalFocusRequestId((value) => value + 1);
+
+      const runtimeEnv = projectScriptRuntimeEnv({
+        project: { cwd: workspaceRoot },
+        worktreePath: targetWorktreePath,
+      });
+      const targetTerminalId = shouldCreateNewTerminal
+        ? nextTerminalId(activeKnownTerminalIds)
+        : baseTerminalId;
+      const openTerminalInput: TerminalOpenInput = shouldCreateNewTerminal
+        ? {
+            threadId: activeThreadId,
+            terminalId: targetTerminalId,
+            cwd: targetCwd,
+            ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
+            env: runtimeEnv,
+            cols: SCRIPT_TERMINAL_COLS,
+            rows: SCRIPT_TERMINAL_ROWS,
+          }
+        : {
+            threadId: activeThreadId,
+            terminalId: targetTerminalId,
+            cwd: targetCwd,
+            ...(targetWorktreePath !== null ? { worktreePath: targetWorktreePath } : {}),
+            env: runtimeEnv,
+          };
+
+      if (shouldCreateNewTerminal) {
+        storeNewTerminal(activeThreadRef, targetTerminalId);
+      } else {
+        storeSetActiveTerminal(activeThreadRef, targetTerminalId);
+      }
+
+      const openResult = await openTerminal({ environmentId, input: openTerminalInput });
+      if (openResult._tag === "Failure") {
+        if (!isAtomCommandInterrupted(openResult)) {
+          const error = squashAtomCommandFailure(openResult);
+          setThreadError(
+            activeThreadId,
+            error instanceof Error ? error.message : `Failed to run action "${action.label}".`,
+          );
+        }
+        return;
+      }
+
+      const writeResult = await writeTerminal({
+        environmentId,
+        input: {
+          threadId: activeThreadId,
+          terminalId: targetTerminalId,
+          data: `${action.command}\r`,
+        },
+      });
+      if (writeResult._tag === "Failure" && !isAtomCommandInterrupted(writeResult)) {
+        const error = squashAtomCommandFailure(writeResult);
+        setThreadError(
+          activeThreadId,
+          error instanceof Error ? error.message : `Failed to run action "${action.label}".`,
+        );
+      }
+    },
+    [
+      activeProject,
+      activeThread,
+      activeThreadId,
+      activeThreadRef,
+      gitCwd,
+      setTerminalOpen,
+      setThreadError,
+      storeNewTerminal,
+      storeSetActiveTerminal,
+      environmentId,
+      openTerminal,
+      activeKnownTerminalIds,
+      runningTerminalIds,
+      terminalUiState.activeTerminalId,
+      writeTerminal,
+    ],
+  );
+
   const persistProjectScripts = useCallback(
     async (input: {
       projectId: ProjectId;
@@ -4706,6 +4805,8 @@ function ChatViewContent(props: ChatViewProps) {
             availableEditors={availableEditors}
             rightPanelOpen={rightPanelOpen}
             gitCwd={gitCwd}
+            actionsCwd={gitCwd ?? activeProject?.workspaceRoot ?? null}
+            onRunProjectAction={runProjectAction}
             onRunProjectScript={runProjectScript}
             onAddProjectScript={saveProjectScript}
             onUpdateProjectScript={updateProjectScript}

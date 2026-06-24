@@ -66,6 +66,12 @@ export function createProjectEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       idleTtlMs: 5 * 60_000,
     }),
+    listActions: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:projects:list-actions",
+      tag: WS_METHODS.projectsListActions,
+      staleTimeMs: 30_000,
+      idleTtlMs: 5 * 60_000,
+    }),
     readFile: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:projects:read-file",
       tag: WS_METHODS.projectsReadFile,

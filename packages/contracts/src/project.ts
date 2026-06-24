@@ -368,3 +368,45 @@ export class ProjectMovePathError extends Schema.TaggedErrorClass<ProjectMovePat
     } as any);
   }
 }
+
+const PROJECT_ACTION_LABEL_MAX_LENGTH = 120;
+const PROJECT_ACTION_COMMAND_MAX_LENGTH = 4096;
+const PROJECT_ACTION_CWD_MAX_LENGTH = 512;
+
+/** A single repo-defined shell action declared in `.t3code/actions.json`. */
+export const ProjectActionDefinition = Schema.Struct({
+  label: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_ACTION_LABEL_MAX_LENGTH)),
+  command: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_ACTION_COMMAND_MAX_LENGTH)),
+  cwd: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_ACTION_CWD_MAX_LENGTH))),
+});
+export type ProjectActionDefinition = typeof ProjectActionDefinition.Type;
+
+export const ProjectListActionsInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+});
+export type ProjectListActionsInput = typeof ProjectListActionsInput.Type;
+
+export const ProjectListActionsResult = Schema.Struct({
+  actions: Schema.Array(ProjectActionDefinition),
+});
+export type ProjectListActionsResult = typeof ProjectListActionsResult.Type;
+
+export class ProjectListActionsError extends Schema.TaggedErrorClass<ProjectListActionsError>()(
+  "ProjectListActionsError",
+  {
+    cwd: Schema.optional(TrimmedNonEmptyString),
+    detail: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: { readonly cwd?: string; readonly detail?: string; readonly cause?: unknown }) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ??
+        `Failed to list project actions${props.cwd ? ` in '${props.cwd}'` : ""}.`,
+    } as any);
+  }
+}
