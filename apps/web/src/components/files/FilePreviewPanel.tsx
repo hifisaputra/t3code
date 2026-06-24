@@ -678,16 +678,23 @@ export default function FilePreviewPanel({
   });
   const file = useProjectFileQuery(environmentId, cwd, relativePath);
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
+  // Explicit user override of the markdown view mode for a given file. When no
+  // override applies, markdown renders by default; source is shown only while a
+  // specific line is being revealed (e.g. a search hit or diff jump).
   const [markdownView, setMarkdownView] = useState<{
     path: string | null;
+    mode: "rendered" | "source";
     revealRequestId: number | null;
-  }>({ path: null, revealRequestId: null });
+  }>({ path: null, mode: "rendered", revealRequestId: null });
   const breadcrumbRef = useRef<HTMLDivElement>(null);
   const isMarkdown = relativePath ? isMarkdownPreviewFile(relativePath) : false;
+  const revealingLine = revealLine !== null;
+  const markdownOverrideApplies =
+    markdownView.path === relativePath &&
+    (!revealingLine || markdownView.revealRequestId === revealRequestId);
   const renderMarkdown =
     isMarkdown &&
-    markdownView.path === relativePath &&
-    (revealLine === null || markdownView.revealRequestId === revealRequestId);
+    (markdownOverrideApplies ? markdownView.mode === "rendered" : !revealingLine);
   const canOpenInBrowser =
     relativePath !== null && isPreviewSupportedInRuntime() && isBrowserPreviewFile(relativePath);
   const absolutePath = relativePath ? resolvePathLinkTarget(relativePath, cwd) : null;
@@ -795,8 +802,9 @@ export default function FilePreviewPanel({
                     pressed={renderMarkdown}
                     onPressedChange={(pressed) => {
                       setMarkdownView({
-                        path: pressed ? relativePath : null,
-                        revealRequestId: pressed ? revealRequestId : null,
+                        path: relativePath,
+                        mode: pressed ? "rendered" : "source",
+                        revealRequestId: revealingLine ? revealRequestId : null,
                       });
                     }}
                     aria-label={renderMarkdown ? "Show markdown source" : "Show rendered markdown"}
