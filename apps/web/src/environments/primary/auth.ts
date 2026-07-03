@@ -3,6 +3,7 @@ import type {
   AuthClientMetadata,
   AuthEnvironmentScope,
   AuthPairingCredentialResult,
+  AuthProjectScope,
   ServerAuthSessionMethod,
   AuthSessionId,
   AuthSessionState,
@@ -36,6 +37,7 @@ export interface ServerPairingLinkRecord {
   readonly id: string;
   readonly credential: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly projectIds: AuthProjectScope;
   readonly subject: string;
   readonly label?: string;
   readonly createdAt: string;
@@ -46,6 +48,7 @@ export interface ServerClientSessionRecord {
   readonly sessionId: AuthSessionId;
   readonly subject: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly projectIds: AuthProjectScope;
   readonly method: ServerAuthSessionMethod;
   readonly client: AuthClientMetadata;
   readonly issuedAt: string;
@@ -293,6 +296,7 @@ export async function submitServerAuthCredential(credential: string): Promise<vo
 export async function createServerPairingCredential(input?: {
   readonly label?: string;
   readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+  readonly projectIds?: AuthProjectScope;
 }): Promise<AuthPairingCredentialResult> {
   const trimmedLabel = input?.label?.trim();
   try {
@@ -304,6 +308,7 @@ export async function createServerPairingCredential(input?: {
             payload: {
               ...(trimmedLabel ? { label: trimmedLabel } : {}),
               ...(input?.scopes ? { scopes: input.scopes } : {}),
+              ...(input?.projectIds !== undefined ? { projectIds: input.projectIds } : {}),
             },
           }),
         ),
@@ -337,6 +342,7 @@ export async function listServerPairingLinks(): Promise<ReadonlyArray<ServerPair
           id: pairingLink.id,
           credential: pairingLink.credential,
           scopes: pairingLink.scopes,
+          projectIds: pairingLink.projectIds ?? null,
           subject: pairingLink.subject,
           createdAt: timestamps.createdAt,
           expiresAt: timestamps.expiresAt,
@@ -346,6 +352,7 @@ export async function listServerPairingLinks(): Promise<ReadonlyArray<ServerPair
         id: pairingLink.id,
         credential: pairingLink.credential,
         scopes: pairingLink.scopes,
+        projectIds: pairingLink.projectIds ?? null,
         subject: pairingLink.subject,
         label: pairingLink.label,
         createdAt: timestamps.createdAt,
@@ -381,6 +388,34 @@ export async function revokeServerPairingLink(id: string): Promise<void> {
   }
 }
 
+export async function updateServerPairingLink(input: {
+  readonly id: string;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly projectIds: AuthProjectScope;
+}): Promise<boolean> {
+  try {
+    const result = await runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) =>
+          client.auth.updatePairingLink({
+            headers: {},
+            payload: { id: input.id, scopes: input.scopes, projectIds: input.projectIds },
+          }),
+        ),
+      ),
+    );
+    return result.updated;
+  } catch (error) {
+    throw new Error(
+      readHttpApiErrorMessage(
+        error,
+        `Failed to update pairing link (${readHttpApiStatus(error) ?? "unknown"}).`,
+      ),
+      { cause: error },
+    );
+  }
+}
+
 export async function listServerClientSessions(): Promise<
   ReadonlyArray<ServerClientSessionRecord>
 > {
@@ -394,6 +429,7 @@ export async function listServerClientSessions(): Promise<
       sessionId: clientSession.sessionId,
       subject: clientSession.subject,
       scopes: clientSession.scopes,
+      projectIds: clientSession.projectIds ?? null,
       method: clientSession.method,
       client: clientSession.client,
       issuedAt: DateTime.formatIso(clientSession.issuedAt),
@@ -430,6 +466,38 @@ export async function revokeServerClientSession(sessionId: AuthSessionId): Promi
       readHttpApiErrorMessage(
         error,
         `Failed to revoke client session (${readHttpApiStatus(error) ?? "unknown"}).`,
+      ),
+      { cause: error },
+    );
+  }
+}
+
+export async function updateServerClientSession(input: {
+  readonly sessionId: AuthSessionId;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly projectIds: AuthProjectScope;
+}): Promise<boolean> {
+  try {
+    const result = await runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) =>
+          client.auth.updateClient({
+            headers: {},
+            payload: {
+              sessionId: input.sessionId,
+              scopes: input.scopes,
+              projectIds: input.projectIds,
+            },
+          }),
+        ),
+      ),
+    );
+    return result.updated;
+  } catch (error) {
+    throw new Error(
+      readHttpApiErrorMessage(
+        error,
+        `Failed to update client session (${readHttpApiStatus(error) ?? "unknown"}).`,
       ),
       { cause: error },
     );

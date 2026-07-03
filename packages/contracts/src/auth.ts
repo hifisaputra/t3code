@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 
-import { AuthSessionId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { AuthSessionId, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /**
  * Declares the server's overall authentication posture.
@@ -109,6 +109,20 @@ export const AuthAdministrativeScopes = [
   AuthRelayWriteScope,
 ] as const;
 
+/**
+ * Restricts a credential to a specific set of projects.
+ *
+ * Semantics are deliberately "null means unrestricted":
+ * - `null` (or an absent field) grants access to every project in the
+ *   environment — the historical, environment-wide behavior.
+ * - a non-empty array restricts the paired client to exactly those project ids.
+ *
+ * This is orthogonal to {@link AuthEnvironmentScope}: scopes describe *what*
+ * actions are allowed, project scope describes *where* they are allowed.
+ */
+export const AuthProjectScope = Schema.NullOr(Schema.Array(ProjectId));
+export type AuthProjectScope = typeof AuthProjectScope.Type;
+
 export const AuthTokenExchangeGrantType =
   "urn:ietf:params:oauth:grant-type:token-exchange" as const;
 export const AuthAccessTokenType = "urn:ietf:params:oauth:token-type:access_token" as const;
@@ -211,6 +225,7 @@ export const AuthPairingLink = Schema.Struct({
   id: TrimmedNonEmptyString,
   credential: TrimmedNonEmptyString,
   scopes: AuthEnvironmentScopes,
+  projectIds: Schema.optionalKey(AuthProjectScope),
   subject: TrimmedNonEmptyString,
   label: Schema.optionalKey(TrimmedNonEmptyString),
   createdAt: Schema.DateTimeUtc,
@@ -232,6 +247,7 @@ export const AuthClientSession = Schema.Struct({
   sessionId: AuthSessionId,
   subject: TrimmedNonEmptyString,
   scopes: AuthEnvironmentScopes,
+  projectIds: Schema.optionalKey(AuthProjectScope),
   method: ServerAuthSessionMethod,
   client: AuthClientMetadata,
   issuedAt: Schema.DateTimeUtc,
@@ -331,8 +347,33 @@ export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.T
 export const AuthCreatePairingCredentialInput = Schema.Struct({
   label: Schema.optionalKey(TrimmedNonEmptyString),
   scopes: Schema.optionalKey(AuthEnvironmentScopes),
+  projectIds: Schema.optionalKey(AuthProjectScope),
 });
 export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentialInput.Type;
+
+export const AuthUpdatePairingLinkInput = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  scopes: AuthEnvironmentScopes,
+  projectIds: AuthProjectScope,
+});
+export type AuthUpdatePairingLinkInput = typeof AuthUpdatePairingLinkInput.Type;
+
+export const AuthUpdatePairingLinkResult = Schema.Struct({
+  updated: Schema.Boolean,
+});
+export type AuthUpdatePairingLinkResult = typeof AuthUpdatePairingLinkResult.Type;
+
+export const AuthUpdateClientSessionInput = Schema.Struct({
+  sessionId: AuthSessionId,
+  scopes: AuthEnvironmentScopes,
+  projectIds: AuthProjectScope,
+});
+export type AuthUpdateClientSessionInput = typeof AuthUpdateClientSessionInput.Type;
+
+export const AuthUpdateClientSessionResult = Schema.Struct({
+  updated: Schema.Boolean,
+});
+export type AuthUpdateClientSessionResult = typeof AuthUpdateClientSessionResult.Type;
 
 export const AuthSessionState = Schema.Struct({
   authenticated: Schema.Boolean,

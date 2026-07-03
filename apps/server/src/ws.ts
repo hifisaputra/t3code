@@ -20,6 +20,7 @@ import {
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
   type AuthEnvironmentScope,
+  type AuthProjectScope,
   AuthSessionId,
   CommandId,
   EventId,
@@ -28,6 +29,7 @@ import {
   type GitManagerServiceError,
   OrchestrationDispatchCommandError,
   type OrchestrationEvent,
+  type OrchestrationShellSnapshot,
   type OrchestrationShellStreamEvent,
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetSnapshotError,
@@ -37,6 +39,7 @@ import {
   ProjectDeletePathError,
   ProjectMovePathError,
   ProjectListDirectoryError,
+  type ProjectId,
   ProjectReadFileError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
@@ -282,6 +285,29 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const relayClient = yield* RelayClient.RelayClient;
+      // A connection captures its grants at connect time, but an administrator
+      // can edit a live client's scopes/projects. We keep the effective grants
+      // in mutable state and refresh them from the auth-access change stream so
+      // edits take effect on this connection's next request without requiring a
+      // reconnect. `effectiveProjectIds === null` means unrestricted.
+      let effectiveScopes: ReadonlyArray<AuthEnvironmentScope> = currentSession.scopes;
+      let effectiveProjectIds: AuthProjectScope = currentSession.projectIds;
+      yield* Effect.forkScoped(
+        sessions.streamChanges.pipe(
+          Stream.runForEach((change) =>
+            Effect.sync(() => {
+              if (
+                change.type === "clientUpserted" &&
+                change.clientSession.sessionId === currentSessionId
+              ) {
+                effectiveScopes = change.clientSession.scopes;
+                effectiveProjectIds = change.clientSession.projectIds ?? null;
+              }
+            }),
+          ),
+          Effect.ignoreCause({ log: true }),
+        ),
+      );
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
           message: `The authenticated token is missing required scope: ${requiredScope}.`,
@@ -291,14 +317,14 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
         requiredScope: AuthEnvironmentScope,
         effect: Effect.Effect<A, E, R>,
       ): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
-        currentSession.scopes.includes(requiredScope)
+        effectiveScopes.includes(requiredScope)
           ? effect
           : Effect.fail(authorizationError(requiredScope));
       const authorizeStream = <A, E, R>(
         requiredScope: AuthEnvironmentScope,
         stream: Stream.Stream<A, E, R>,
       ): Stream.Stream<A, E | EnvironmentAuthorizationError, R> =>
-        currentSession.scopes.includes(requiredScope)
+        effectiveScopes.includes(requiredScope)
           ? stream
           : Stream.fail(authorizationError(requiredScope));
       const requiredScopeForMethod = (method: string): AuthEnvironmentScope => {
@@ -774,7 +800,246 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
           .refreshStatus(cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
-      return WsRpcGroup.of({
+      // ----------------------------------------------------------------------
+      // Project-scope enforcement.
+      //
+      // When a session is restricted to a subset of projects, every RPC that
+      // touches project-scoped data must be confined to the allow-list. Each
+      // method is classified by how its target project is derived from the
+      // request, and a guard runs before the handler. Methods we cannot safely
+      // attribute to a project fail closed for restricted sessions. Sessions
+      // with `effectiveProjectIds === null` (the default for every existing
+      // link) are unaffected.
+      // ----------------------------------------------------------------------
+      type ProjectScopeKind = "global" | "threadId" | "cwd" | "dispatch" | "deny";
+      const RPC_PROJECT_KIND = new Map<string, ProjectScopeKind>([
+        [ORCHESTRATION_WS_METHODS.dispatchCommand, "dispatch"],
+        [ORCHESTRATION_WS_METHODS.getTurnDiff, "threadId"],
+        [ORCHESTRATION_WS_METHODS.getFullThreadDiff, "threadId"],
+        // Replays the entire cross-project event log; cannot be filtered safely.
+        [ORCHESTRATION_WS_METHODS.replayEvents, "deny"],
+        // Snapshot streams are filtered to allowed projects inside the handler.
+        [ORCHESTRATION_WS_METHODS.subscribeShell, "global"],
+        [ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot, "global"],
+        [ORCHESTRATION_WS_METHODS.subscribeThread, "threadId"],
+        [WS_METHODS.serverGetConfig, "global"],
+        [WS_METHODS.serverRefreshProviders, "global"],
+        [WS_METHODS.serverUpdateProvider, "global"],
+        [WS_METHODS.serverUpsertKeybinding, "global"],
+        [WS_METHODS.serverRemoveKeybinding, "global"],
+        [WS_METHODS.serverGetSettings, "global"],
+        [WS_METHODS.serverUpdateSettings, "global"],
+        [WS_METHODS.serverDiscoverSourceControl, "global"],
+        [WS_METHODS.serverGetTraceDiagnostics, "global"],
+        [WS_METHODS.serverGetProcessDiagnostics, "global"],
+        [WS_METHODS.serverGetProcessResourceHistory, "global"],
+        [WS_METHODS.serverSignalProcess, "global"],
+        [WS_METHODS.cloudGetRelayClientStatus, "global"],
+        [WS_METHODS.cloudInstallRelayClient, "global"],
+        [WS_METHODS.sourceControlLookupRepository, "global"],
+        [WS_METHODS.sourceControlCloneRepository, "global"],
+        [WS_METHODS.sourceControlPublishRepository, "cwd"],
+        [WS_METHODS.projectsSearchEntries, "cwd"],
+        [WS_METHODS.projectsWriteFile, "cwd"],
+        [WS_METHODS.projectsListDirectory, "cwd"],
+        [WS_METHODS.projectsReadFile, "cwd"],
+        [WS_METHODS.projectsDeletePath, "cwd"],
+        [WS_METHODS.projectsCreateDirectory, "cwd"],
+        [WS_METHODS.projectsMovePath, "cwd"],
+        [WS_METHODS.pushGetStatus, "global"],
+        [WS_METHODS.pushSubscribe, "global"],
+        [WS_METHODS.pushUnsubscribe, "global"],
+        // Launches an editor on an arbitrary server path.
+        [WS_METHODS.shellOpenInEditor, "deny"],
+        // Browses the whole server filesystem.
+        [WS_METHODS.filesystemBrowse, "deny"],
+        [WS_METHODS.subscribeVcsStatus, "cwd"],
+        [WS_METHODS.vcsRefreshStatus, "cwd"],
+        [WS_METHODS.vcsPull, "cwd"],
+        [WS_METHODS.gitRunStackedAction, "cwd"],
+        [WS_METHODS.gitResolvePullRequest, "cwd"],
+        [WS_METHODS.gitPreparePullRequestThread, "cwd"],
+        [WS_METHODS.vcsListRefs, "cwd"],
+        [WS_METHODS.vcsCreateWorktree, "cwd"],
+        [WS_METHODS.vcsRemoveWorktree, "cwd"],
+        [WS_METHODS.vcsCreateRef, "cwd"],
+        [WS_METHODS.vcsSwitchRef, "cwd"],
+        [WS_METHODS.vcsInit, "cwd"],
+        [WS_METHODS.reviewGetDiffPreview, "cwd"],
+        [WS_METHODS.terminalOpen, "threadId"],
+        [WS_METHODS.terminalAttach, "threadId"],
+        [WS_METHODS.terminalWrite, "threadId"],
+        [WS_METHODS.terminalResize, "threadId"],
+        [WS_METHODS.terminalClear, "threadId"],
+        [WS_METHODS.terminalRestart, "threadId"],
+        [WS_METHODS.terminalClose, "threadId"],
+        // Terminal event/metadata streams are not partitioned by project.
+        [WS_METHODS.subscribeTerminalEvents, "deny"],
+        [WS_METHODS.subscribeTerminalMetadata, "deny"],
+        [WS_METHODS.subscribeServerConfig, "global"],
+        [WS_METHODS.subscribeServerLifecycle, "global"],
+        [WS_METHODS.subscribeAuthAccess, "global"],
+      ]);
+
+      const isProjectAllowed = (projectId: ProjectId): boolean =>
+        effectiveProjectIds === null || effectiveProjectIds.includes(projectId);
+
+      const filterShellSnapshot = (
+        snapshot: OrchestrationShellSnapshot,
+      ): OrchestrationShellSnapshot =>
+        effectiveProjectIds === null
+          ? snapshot
+          : {
+              ...snapshot,
+              projects: snapshot.projects.filter((project) => isProjectAllowed(project.id)),
+              threads: snapshot.threads.filter((thread) => isProjectAllowed(thread.projectId)),
+            };
+
+      const isShellStreamEventAllowed = (event: OrchestrationShellStreamEvent): boolean => {
+        if (effectiveProjectIds === null) {
+          return true;
+        }
+        switch (event.kind) {
+          case "project-upserted":
+            return isProjectAllowed(event.project.id);
+          case "project-removed":
+            return isProjectAllowed(event.projectId);
+          case "thread-upserted":
+            return isProjectAllowed(event.thread.projectId);
+          default:
+            // thread-removed carries only an id; forwarding a removal for a
+            // thread the client never saw is a harmless no-op.
+            return true;
+        }
+      };
+
+      const projectAuthorizationError = (method: string, detail: string) =>
+        new EnvironmentAuthorizationError({
+          message: `This client is restricted to specific projects and cannot access ${detail}.`,
+          requiredScope: requiredScopeForMethod(method),
+        });
+
+      const resolveThreadProjectId = (threadId: ThreadId) =>
+        projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+          Effect.map((thread) => Option.map(thread, (value) => value.projectId)),
+          Effect.orElseSucceed(() => Option.none<ProjectId>()),
+        );
+
+      const resolveAllowedWorkspaceRoots = (): Effect.Effect<ReadonlyArray<string>> =>
+        effectiveProjectIds === null
+          ? Effect.succeed([])
+          : Effect.forEach(
+              effectiveProjectIds,
+              (projectId) =>
+                projectionSnapshotQuery.getProjectShellById(projectId).pipe(
+                  Effect.map((project) => Option.map(project, (value) => value.workspaceRoot)),
+                  Effect.orElseSucceed(() => Option.none<string>()),
+                ),
+              { concurrency: 4 },
+            ).pipe(
+              Effect.map((roots) =>
+                roots.flatMap((root) => (Option.isSome(root) ? [root.value] : [])),
+              ),
+            );
+
+      // Workspace roots are absolute POSIX paths; a cwd belongs to a project
+      // when it is the root itself or nested beneath it.
+      const isPathWithin = (childPath: string, parentPath: string): boolean => {
+        const normalizedParent = parentPath.replace(/\/+$/, "");
+        return childPath === normalizedParent || childPath.startsWith(`${normalizedParent}/`);
+      };
+
+      const requireThreadAccess = (method: string, threadId: ThreadId) =>
+        resolveThreadProjectId(threadId).pipe(
+          Effect.flatMap((projectId) =>
+            Option.isSome(projectId) && isProjectAllowed(projectId.value)
+              ? Effect.void
+              : Effect.fail(projectAuthorizationError(method, `thread ${threadId}`)),
+          ),
+        );
+
+      const requireCwdAccess = (method: string, cwd: string) =>
+        resolveAllowedWorkspaceRoots().pipe(
+          Effect.flatMap((roots) =>
+            roots.some((root) => isPathWithin(cwd, root))
+              ? Effect.void
+              : Effect.fail(projectAuthorizationError(method, `path ${cwd}`)),
+          ),
+        );
+
+      const requireDispatchAccess = (
+        method: string,
+        command: OrchestrationCommand,
+      ): Effect.Effect<void, EnvironmentAuthorizationError> =>
+        Effect.gen(function* () {
+          const directProjectId = (command as { readonly projectId?: ProjectId }).projectId;
+          const bootstrapProjectId =
+            command.type === "thread.turn.start"
+              ? command.bootstrap?.createThread?.projectId
+              : undefined;
+          for (const projectId of [directProjectId, bootstrapProjectId]) {
+            if (projectId !== undefined && !isProjectAllowed(projectId)) {
+              return yield* projectAuthorizationError(method, `project ${projectId}`);
+            }
+          }
+          const threadId = (command as { readonly threadId?: ThreadId }).threadId;
+          if (threadId !== undefined && directProjectId === undefined) {
+            const projectId = yield* resolveThreadProjectId(threadId);
+            if (Option.isSome(projectId)) {
+              if (!isProjectAllowed(projectId.value)) {
+                return yield* projectAuthorizationError(method, `thread ${threadId}`);
+              }
+            } else if (bootstrapProjectId === undefined) {
+              // Unknown thread and no bootstrap project to vouch for it.
+              return yield* projectAuthorizationError(method, `thread ${threadId}`);
+            }
+          }
+        });
+
+      const buildProjectGuard = (
+        method: string,
+        kind: ProjectScopeKind,
+        input: unknown,
+      ): Effect.Effect<void, EnvironmentAuthorizationError> => {
+        if (effectiveProjectIds === null) {
+          return Effect.void;
+        }
+        switch (kind) {
+          case "global":
+            return Effect.void;
+          case "deny":
+            return Effect.fail(projectAuthorizationError(method, "this resource"));
+          case "threadId":
+            return requireThreadAccess(method, (input as { threadId: ThreadId }).threadId);
+          case "cwd":
+            return requireCwdAccess(method, (input as { cwd: string }).cwd);
+          case "dispatch":
+            return requireDispatchAccess(method, input as OrchestrationCommand);
+        }
+      };
+
+      const applyProjectScope = <T>(handlers: T): T => {
+        const source = handlers as Record<string, (input: unknown) => unknown>;
+        const guarded: Record<string, (input: unknown) => unknown> = {};
+        for (const method of Object.keys(source)) {
+          const handler = source[method]!;
+          const kind = RPC_PROJECT_KIND.get(method) ?? "deny";
+          guarded[method] = (input) => {
+            const guard = buildProjectGuard(method, kind, input);
+            const result = handler(input);
+            // This generic wrapper preserves each handler's own typing; the
+            // intermediate values are deliberately untyped here.
+            if (Effect.isEffect(result)) {
+              // @effect-diagnostics-next-line anyUnknownInErrorContext:off
+              return Effect.flatMap(guard, () => result as Effect.Effect<unknown, unknown, unknown>);
+            }
+            return Stream.unwrap(Effect.as(guard, result as Stream.Stream<unknown, unknown, unknown>));
+          };
+        }
+        return guarded as T;
+      };
+
+      return applyProjectScope(WsRpcGroup.of({
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -912,14 +1177,16 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
               const liveStream = orchestrationEngine.streamDomainEvents.pipe(
                 Stream.mapEffect(toShellStreamEvent),
                 Stream.flatMap((event) =>
-                  Option.isSome(event) ? Stream.succeed(event.value) : Stream.empty,
+                  Option.isSome(event) && isShellStreamEventAllowed(event.value)
+                    ? Stream.succeed(event.value)
+                    : Stream.empty,
                 ),
               );
 
               return Stream.concat(
                 Stream.make({
                   kind: "snapshot" as const,
-                  snapshot,
+                  snapshot: filterShellSnapshot(snapshot),
                 }),
                 liveStream,
               );
@@ -933,6 +1200,7 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
               Effect.tapError((cause) =>
                 Effect.logError("orchestration archived shell snapshot load failed", { cause }),
               ),
+              Effect.map(filterShellSnapshot),
               Effect.mapError(
                 (cause) =>
                   new OrchestrationGetSnapshotError({
@@ -1540,7 +1808,7 @@ const makeWsRpcLayer = (currentSession: AuthenticatedSession) =>
             }),
             { "rpc.aggregate": "auth" },
           ),
-      });
+      }));
     }),
   );
 

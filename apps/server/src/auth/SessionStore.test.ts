@@ -48,6 +48,7 @@ const failingSessionLookupRepositoryLayer = Layer.succeed(AuthSessionRepository,
   revoke: () => Effect.succeed(false),
   revokeAllExcept: () => Effect.succeed([]),
   setLastConnectedAt: () => Effect.void,
+  updateScopes: () => Effect.fail(repositoryFailure),
 });
 
 const failingSessionLookupCredentialLayer = Layer.effect(
@@ -83,6 +84,33 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
       expect(verified.client.label).toBe("Desktop app");
       expect(verified.client.browser).toBe("Electron");
       expect(verified.expiresAt?.toString()).toBe(issued.expiresAt.toString());
+    }).pipe(Effect.provide(makeSessionStoreLayer())),
+  );
+  it.effect("verifies the project scope and applies live scope edits from the database", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* sessions.issue({
+        subject: "scoped-friend",
+        scopes: ["orchestration:read"],
+        projectIds: ["project-a"],
+      });
+
+      const verified = yield* sessions.verify(issued.token);
+      expect(verified.scopes).toEqual(["orchestration:read"]);
+      expect(verified.projectIds).toEqual(["project-a"]);
+
+      // The token is unchanged, but verify reads scopes/projects from the row,
+      // so an administrative edit takes effect immediately.
+      const updated = yield* sessions.updateScopes({
+        sessionId: issued.sessionId,
+        scopes: ["orchestration:read", "orchestration:operate"],
+        projectIds: null,
+      });
+      expect(updated).toBe(true);
+
+      const reverified = yield* sessions.verify(issued.token);
+      expect(reverified.scopes).toEqual(["orchestration:read", "orchestration:operate"]);
+      expect(reverified.projectIds).toBeNull();
     }).pipe(Effect.provide(makeSessionStoreLayer())),
   );
   it.effect("rejects malformed session tokens", () =>

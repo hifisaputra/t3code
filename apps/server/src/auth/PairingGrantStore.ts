@@ -3,6 +3,7 @@ import {
   AuthStandardClientScopes,
   type AuthEnvironmentScope,
   type AuthPairingLink,
+  type AuthProjectScope,
   type ServerAuthBootstrapMethod,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -24,6 +25,8 @@ import { AuthPairingLinkRepository } from "../persistence/Services/AuthPairingLi
 export interface BootstrapGrant {
   readonly method: ServerAuthBootstrapMethod;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  /** Project restriction; `null` means the grant is unrestricted (all projects). */
+  readonly projectIds: AuthProjectScope;
   readonly subject: string;
   readonly label?: string;
   readonly proofKeyThumbprint?: string;
@@ -69,6 +72,7 @@ export interface PairingGrantStoreShape {
   readonly issueOneTimeToken: (input?: {
     readonly ttl?: Duration.Duration;
     readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+    readonly projectIds?: AuthProjectScope;
     readonly subject?: string;
     readonly label?: string;
     readonly proofKeyThumbprint?: string;
@@ -79,6 +83,11 @@ export interface PairingGrantStoreShape {
   >;
   readonly streamChanges: Stream.Stream<BootstrapCredentialChange>;
   readonly revoke: (id: string) => Effect.Effect<boolean, BootstrapCredentialInternalError>;
+  readonly updateScopes: (input: {
+    readonly id: string;
+    readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+    readonly projectIds: AuthProjectScope;
+  }) => Effect.Effect<boolean, BootstrapCredentialInternalError>;
   readonly consume: (
     credential: string,
     input?: {
@@ -170,6 +179,7 @@ export const make = Effect.fn("makePairingGrantStore")(function* () {
     yield* seedGrant(config.desktopBootstrapToken, {
       method: "desktop-bootstrap",
       scopes: AuthAdministrativeScopes,
+      projectIds: null,
       subject: "desktop-bootstrap",
       expiresAt: DateTime.add(now, {
         milliseconds: Duration.toMillis(DEFAULT_ONE_TIME_TOKEN_TTL_MINUTES),
@@ -194,6 +204,7 @@ export const make = Effect.fn("makePairingGrantStore")(function* () {
               id: row.id,
               credential: row.credential,
               scopes: row.scopes,
+              projectIds: row.projectIds,
               subject: row.subject,
               label: row.label,
               createdAt: row.createdAt,
@@ -203,6 +214,7 @@ export const make = Effect.fn("makePairingGrantStore")(function* () {
               id: row.id,
               credential: row.credential,
               scopes: row.scopes,
+              projectIds: row.projectIds,
               subject: row.subject,
               createdAt: row.createdAt,
               expiresAt: row.expiresAt,
@@ -227,6 +239,34 @@ export const make = Effect.fn("makePairingGrantStore")(function* () {
     Effect.mapError(toBootstrapCredentialError("Failed to revoke pairing link.")),
   );
 
+  const updateScopes: PairingGrantStoreShape["updateScopes"] = Effect.fn(
+    "PairingGrantStore.updateScopes",
+  )(
+    function* (input) {
+      const updated = yield* pairingLinks.updateScopes({
+        id: input.id,
+        scopes: input.scopes,
+        projectIds: input.projectIds,
+      });
+      if (Option.isNone(updated)) {
+        return false;
+      }
+      const row = updated.value;
+      yield* emitUpsert({
+        id: row.id,
+        credential: row.credential,
+        scopes: row.scopes,
+        projectIds: row.projectIds,
+        subject: row.subject,
+        ...(row.label ? { label: row.label } : {}),
+        createdAt: row.createdAt,
+        expiresAt: row.expiresAt,
+      });
+      return true;
+    },
+    Effect.mapError(toBootstrapCredentialError("Failed to update pairing link scopes.")),
+  );
+
   const issueOneTimeToken: PairingGrantStoreShape["issueOneTimeToken"] = Effect.fn(
     "PairingGrantStore.issueOneTimeToken",
   )(
@@ -248,6 +288,7 @@ export const make = Effect.fn("makePairingGrantStore")(function* () {
         credential,
         method: "one-time-token",
         scopes: input?.scopes ?? AuthStandardClientScopes,
+        projectIds: input?.projectIds ?? null,
         subject: input?.subject ?? "one-time-token",
         label: input?.label ?? null,
         proofKeyThumbprint: input?.proofKeyThumbprint ?? null,
@@ -258,6 +299,7 @@ export const make = Effect.fn("makePairingGrantStore")(function* () {
         id,
         credential,
         scopes: input?.scopes ?? AuthStandardClientScopes,
+        projectIds: input?.projectIds ?? null,
         subject: input?.subject ?? "one-time-token",
         ...(input?.label ? { label: input.label } : {}),
         createdAt: now,
@@ -328,6 +370,7 @@ export const make = Effect.fn("makePairingGrantStore")(function* () {
               grant: {
                 method: grant.method,
                 scopes: grant.scopes,
+                projectIds: grant.projectIds,
                 subject: grant.subject,
                 ...(grant.label ? { label: grant.label } : {}),
                 ...(grant.proofKeyThumbprint
@@ -360,6 +403,7 @@ export const make = Effect.fn("makePairingGrantStore")(function* () {
         return {
           method: consumed.value.method,
           scopes: consumed.value.scopes,
+          projectIds: consumed.value.projectIds,
           subject: consumed.value.subject,
           ...(consumed.value.label ? { label: consumed.value.label } : {}),
           ...(consumed.value.proofKeyThumbprint
@@ -412,6 +456,7 @@ export const make = Effect.fn("makePairingGrantStore")(function* () {
       return Stream.fromPubSub(changesPubSub);
     },
     revoke,
+    updateScopes,
     consume,
   } satisfies PairingGrantStoreShape;
 });

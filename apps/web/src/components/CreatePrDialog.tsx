@@ -2,7 +2,7 @@ import type { EnvironmentId, VcsRef } from "@t3tools/contracts";
 import { CheckIcon, GitBranchIcon, SearchIcon } from "lucide-react";
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 
-import { useVcsRefs } from "../lib/vcsRefState";
+import { useVcsRefs, vcsRefManager } from "../lib/vcsRefState";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import {
@@ -50,6 +50,17 @@ export function CreatePrDialog({
   );
   const refState = useVcsRefs(refTarget);
   const refs = refState.data?.refs ?? EMPTY_REFS;
+
+  // Fetch branches imperatively when the dialog opens (and as the query changes).
+  // The passive `useVcsRefs` watch does not reliably dispatch the first load under
+  // the production cache config, which left the list empty until some other view
+  // populated the shared cache. Mirrors BranchToolbarBranchSelector's open handler.
+  useEffect(() => {
+    if (!open) return;
+    void vcsRefManager
+      .load(refTarget, undefined, { limit: 100, preserveLoadedRefs: true })
+      .catch(() => undefined);
+  }, [open, refTarget]);
 
   // Candidate base branches: every ref except the branch we're merging from.
   // De-duplicate by display name (a branch may exist both locally and on a remote).

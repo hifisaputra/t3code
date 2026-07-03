@@ -164,6 +164,51 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
     ),
   );
 
+  it.effect("carries the project scope through issue, list, and consume", () =>
+    Effect.gen(function* () {
+      const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
+      const unrestricted = yield* bootstrapCredentials.issueOneTimeToken();
+      const restricted = yield* bootstrapCredentials.issueOneTimeToken({
+        projectIds: ["project-a", "project-b"],
+      });
+
+      const active = yield* bootstrapCredentials.listActive();
+      const unrestrictedActive = active.find((entry) => entry.id === unrestricted.id);
+      const restrictedActive = active.find((entry) => entry.id === restricted.id);
+      expect(unrestrictedActive?.projectIds ?? null).toBeNull();
+      expect(restrictedActive?.projectIds).toEqual(["project-a", "project-b"]);
+
+      const grant = yield* bootstrapCredentials.consume(restricted.credential);
+      expect(grant.projectIds).toEqual(["project-a", "project-b"]);
+    }).pipe(Effect.provide(makePairingGrantStoreLayer())),
+  );
+
+  it.effect("updates the scopes and project scope of an active pairing link", () =>
+    Effect.gen(function* () {
+      const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
+      const issued = yield* bootstrapCredentials.issueOneTimeToken();
+
+      const updated = yield* bootstrapCredentials.updateScopes({
+        id: issued.id,
+        scopes: ["orchestration:read"],
+        projectIds: ["project-a"],
+      });
+      expect(updated).toBe(true);
+
+      const grant = yield* bootstrapCredentials.consume(issued.credential);
+      expect(grant.scopes).toEqual(["orchestration:read"]);
+      expect(grant.projectIds).toEqual(["project-a"]);
+
+      // A consumed link can no longer be updated.
+      const afterConsume = yield* bootstrapCredentials.updateScopes({
+        id: issued.id,
+        scopes: ["orchestration:read", "orchestration:operate"],
+        projectIds: null,
+      });
+      expect(afterConsume).toBe(false);
+    }).pipe(Effect.provide(makePairingGrantStoreLayer())),
+  );
+
   it.effect("lists and revokes active pairing links", () =>
     Effect.gen(function* () {
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;

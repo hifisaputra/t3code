@@ -6,6 +6,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   CodeIcon,
+  DownloadIcon,
   EllipsisVerticalIcon,
   FolderIcon,
   FolderInputIcon,
@@ -75,6 +76,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "./ui/menu";
+import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
@@ -95,6 +97,11 @@ const PREVIEW_READ_MAX_BYTES = 5 * 1024 * 1024;
 const SPLIT_MIN_WIDTH = 640;
 
 const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
+// Matches the server's hard read cap (HARD_READ_MAX_BYTES in WorkspaceFileSystem).
+// Files larger than this come back truncated, so we refuse the download rather than
+// save partial bytes.
+const DOWNLOAD_MAX_BYTES = 5 * 1024 * 1024;
 
 const TREE_DEFAULT_WIDTH = 256;
 const TREE_MIN_WIDTH = 180;
@@ -209,6 +216,28 @@ function readFileAsBase64(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error("Failed to read file."));
     reader.readAsDataURL(file);
   });
+}
+
+// Trigger a browser "save as" for already-loaded file contents. Mirrors the
+// blob + anchor approach used for plan exports (see proposedPlan.ts).
+function triggerFileDownload(result: ProjectReadFileResult): void {
+  let blob: Blob;
+  if (result.encoding === "base64") {
+    const binary = atob(result.contents);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    blob = new Blob([bytes], { type: result.mediaType ?? "application/octet-stream" });
+  } else {
+    blob = new Blob([result.contents], { type: "text/plain;charset=utf-8" });
+  }
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = basenameOf(result.relativePath);
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function messageOfError(error: unknown): string {
@@ -668,6 +697,46 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
     [cwd, environmentId, loadDir],
   );
 
+  // Download: read a file via the existing readFile RPC and hand it to the
+  // browser's save mechanism. The server caps reads at DOWNLOAD_MAX_BYTES; if the
+  // file exceeds that it comes back truncated, so we refuse rather than save a
+  // corrupt partial file.
+  const downloadFile = useCallback(
+    async (path: string) => {
+      if (!cwd || !environmentId) {
+        return;
+      }
+      const projects = readEnvironmentConnection(environmentId)?.client.projects;
+      const reportError = (description: string) =>
+        toastManager.add(
+          stackedThreadToast({ type: "error", title: "Couldn’t download file", description }),
+        );
+      if (!projects) {
+        reportError("Not connected.");
+        return;
+      }
+      try {
+        const result = await projects.readFile({
+          cwd,
+          relativePath: path,
+          maxBytes: DOWNLOAD_MAX_BYTES,
+        });
+        if (result.truncated) {
+          reportError(
+            `“${basenameOf(path)}” is ${formatBytes(result.byteSize)}, larger than the ${formatBytes(
+              DOWNLOAD_MAX_BYTES,
+            )} download limit.`,
+          );
+          return;
+        }
+        triggerFileDownload(result);
+      } catch (error) {
+        reportError(messageOfError(error));
+      }
+    },
+    [cwd, environmentId],
+  );
+
   const openUploadPicker = useCallback((targetDir: string) => {
     uploadTargetRef.current = targetDir;
     fileInputRef.current?.click();
@@ -993,11 +1062,22 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
                       </MenuTrigger>
                       <MenuPopup align="end">
                         {isDirectory ? (
-                          <MenuItem onClick={() => openCreateFolder(entry.path)}>
-                            <FolderPlusIcon />
-                            New folder
+                          <>
+                            <MenuItem onClick={() => openUploadPicker(entry.path)}>
+                              <UploadIcon />
+                              Upload here
+                            </MenuItem>
+                            <MenuItem onClick={() => openCreateFolder(entry.path)}>
+                              <FolderPlusIcon />
+                              New folder
+                            </MenuItem>
+                          </>
+                        ) : (
+                          <MenuItem onClick={() => void downloadFile(entry.path)}>
+                            <DownloadIcon />
+                            Download
                           </MenuItem>
-                        ) : null}
+                        )}
                         <MenuItem onClick={() => openRename(entry.path, entry.kind)}>
                           <PencilIcon />
                           Rename
@@ -1045,10 +1125,12 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
       onDirDragOver,
       onDirDrop,
       onDropZoneDragLeave,
+      openUploadPicker,
       openCreateFolder,
       openRename,
       openMove,
       requestDelete,
+      downloadFile,
     ],
   );
 
@@ -1239,6 +1321,21 @@ export default function FileBrowserPanel({ mode = "inline" }: FileBrowserPanelPr
                 <TooltipPopup side="bottom">Edit file</TooltipPopup>
               </Tooltip>
             ) : null}
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    className={cn(ACTION_BUTTON_CLASS, "size-6")}
+                    aria-label="Download file"
+                    onClick={() => void downloadFile(filePath)}
+                  >
+                    <DownloadIcon className="size-3.5" />
+                  </button>
+                }
+              />
+              <TooltipPopup side="bottom">Download file</TooltipPopup>
+            </Tooltip>
             <Tooltip>
               <TooltipTrigger
                 render={

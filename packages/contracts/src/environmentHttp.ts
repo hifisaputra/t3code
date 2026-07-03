@@ -18,6 +18,10 @@ import {
   AuthPairingLink,
   AuthRevokeClientSessionInput,
   AuthRevokePairingLinkInput,
+  AuthUpdateClientSessionInput,
+  AuthUpdateClientSessionResult,
+  AuthUpdatePairingLinkInput,
+  AuthUpdatePairingLinkResult,
   AuthEnvironmentScope,
   AuthTokenExchangeRequest,
   AuthSessionState,
@@ -77,8 +81,10 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "pairing_credential_issuance_failed",
   "pairing_links_load_failed",
   "pairing_link_revoke_failed",
+  "pairing_link_update_failed",
   "client_sessions_load_failed",
   "client_session_revoke_failed",
+  "client_session_update_failed",
   "orchestration_snapshot_failed",
   "orchestration_dispatch_failed",
   "internal_error",
@@ -265,6 +271,10 @@ const EnvironmentSessionRevokeErrors = [
   EnvironmentOperationForbiddenError,
   EnvironmentInternalError,
 ] as const;
+const EnvironmentSessionUpdateErrors = [
+  EnvironmentRequestInvalidError,
+  ...EnvironmentSessionRevokeErrors,
+] as const;
 const EnvironmentOrchestrationSnapshotErrors = [
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
@@ -400,6 +410,14 @@ export class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
+    HttpApiEndpoint.post("updatePairingLink", "/api/auth/pairing-links/update", {
+      headers: OptionalBearerHeaders,
+      payload: AuthUpdatePairingLinkInput,
+      success: AuthUpdatePairingLinkResult,
+      error: EnvironmentPairingCredentialErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
     HttpApiEndpoint.get("clients", "/api/auth/clients", {
       headers: OptionalBearerHeaders,
       success: Schema.Array(AuthClientSession),
@@ -412,6 +430,14 @@ export class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       payload: AuthRevokeClientSessionInput,
       success: AuthClientSessionRevokeResult,
       error: EnvironmentSessionRevokeErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("updateClient", "/api/auth/clients/update", {
+      headers: OptionalBearerHeaders,
+      payload: AuthUpdateClientSessionInput,
+      success: AuthUpdateClientSessionResult,
+      error: EnvironmentSessionUpdateErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

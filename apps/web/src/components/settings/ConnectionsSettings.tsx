@@ -23,6 +23,8 @@ import {
   type AuthClientSession,
   type AuthEnvironmentScope,
   type AuthPairingLink,
+  type AuthProjectScope,
+  type ProjectId,
   type AdvertisedEndpoint,
   type DesktopDiscoveredSshHost,
   type DesktopSshEnvironmentTarget,
@@ -96,6 +98,8 @@ import {
   revokeOtherServerClientSessions,
   revokeServerClientSession,
   revokeServerPairingLink,
+  updateServerClientSession,
+  updateServerPairingLink,
   isLoopbackHostname,
   usePrimaryEnvironmentId,
   usePrimarySessionState,
@@ -116,6 +120,8 @@ import {
   removeSavedEnvironment,
 } from "~/environments/runtime";
 import { useUiStateStore } from "~/uiStateStore";
+import { useShallow } from "zustand/react/shallow";
+import { useStore, selectProjectsForEnvironment } from "~/store";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { useServerConfig } from "~/rpc/serverState";
 import {
@@ -235,6 +241,421 @@ function AccessScopeSummary({
         </div>
       </PopoverPopup>
     </Popover>
+  );
+}
+
+type ProjectOption = {
+  readonly id: ProjectId;
+  readonly name: string;
+};
+
+function useProjectOptions(): ReadonlyArray<ProjectOption> {
+  const environmentId = usePrimaryEnvironmentId();
+  const projects = useStore(
+    useShallow((state) => selectProjectsForEnvironment(state, environmentId)),
+  );
+  return useMemo(
+    () => projects.map((project) => ({ id: project.id, name: project.name })),
+    [projects],
+  );
+}
+
+function projectScopeLabel(projectScope: AuthProjectScope): string {
+  if (projectScope === null) {
+    return "All projects";
+  }
+  if (projectScope.length === 0) {
+    return "No projects";
+  }
+  return `${projectScope.length} ${projectScope.length === 1 ? "project" : "projects"}`;
+}
+
+function ProjectScopeSummary({
+  projectScope,
+  projects,
+}: {
+  readonly projectScope: AuthProjectScope;
+  readonly projects: ReadonlyArray<ProjectOption>;
+}) {
+  if (projectScope === null) {
+    return <span className="text-muted-foreground">All projects</span>;
+  }
+  const nameById = new Map(projects.map((project) => [project.id, project.name]));
+  const names = projectScope.map((id) => nameById.get(id) ?? id);
+  return (
+    <Popover>
+      <PopoverTrigger
+        openOnHover
+        delay={250}
+        closeDelay={100}
+        render={
+          <button
+            type="button"
+            aria-label={`Project access: ${projectScopeLabel(projectScope)}`}
+            className="cursor-help underline decoration-border underline-offset-2 outline-hidden hover:text-foreground focus-visible:text-foreground"
+          />
+        }
+      >
+        {projectScopeLabel(projectScope)}
+      </PopoverTrigger>
+      <PopoverPopup side="top" align="start" tooltipStyle className="w-max max-w-80 whitespace-normal">
+        <p className="mb-1 font-medium">Allowed projects</p>
+        <div className="flex flex-col gap-0.5">
+          {names.length === 0 ? (
+            <span className="text-foreground/85">None</span>
+          ) : (
+            names.map((name) => (
+              <span key={name} className="text-foreground/85">
+                {name}
+              </span>
+            ))
+          )}
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
+function ProjectScopeField({
+  projectScope,
+  onChange,
+  projects,
+  disabled = false,
+}: {
+  readonly projectScope: AuthProjectScope;
+  readonly onChange: (next: AuthProjectScope) => void;
+  readonly projects: ReadonlyArray<ProjectOption>;
+  readonly disabled?: boolean;
+}) {
+  const restricted = projectScope !== null;
+  const selected = new Set(projectScope ?? []);
+  const toggleProject = (id: ProjectId, checked: boolean) => {
+    const next = new Set(selected);
+    if (checked) {
+      next.add(id);
+    } else {
+      next.delete(id);
+    }
+    onChange([...next]);
+  };
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-medium text-foreground">Project access</h3>
+          <p className="text-xs text-muted-foreground">
+            {restricted
+              ? "Only the selected projects are visible to this client."
+              : "This client can access every project."}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Limit to projects</span>
+          <Switch
+            checked={restricted}
+            disabled={disabled}
+            onCheckedChange={(checked) => onChange(checked ? [] : null)}
+          />
+        </div>
+      </div>
+      {restricted ? (
+        projects.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No projects available.</p>
+        ) : (
+          <div className="divide-y divide-border/60 rounded-lg border border-input bg-muted/25">
+            {projects.map((project) => (
+              <label
+                key={project.id}
+                className="flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40"
+              >
+                <Checkbox
+                  checked={selected.has(project.id)}
+                  disabled={disabled}
+                  onCheckedChange={(checked) => toggleProject(project.id, checked === true)}
+                />
+                <span className="min-w-0 truncate text-xs font-medium text-foreground">
+                  {project.name}
+                </span>
+              </label>
+            ))}
+          </div>
+        )
+      ) : null}
+      {restricted && selected.size === 0 ? (
+        <p className="text-xs text-destructive">
+          Select at least one project, or turn off the limit.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function PairingPermissionsEditor({
+  scopes,
+  onScopesChange,
+  projectScope,
+  onProjectScopeChange,
+  projects,
+  disabled = false,
+}: {
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly onScopesChange: (next: ReadonlyArray<AuthEnvironmentScope>) => void;
+  readonly projectScope: AuthProjectScope;
+  readonly onProjectScopeChange: (next: AuthProjectScope) => void;
+  readonly projects: ReadonlyArray<ProjectOption>;
+  readonly disabled?: boolean;
+}) {
+  const toggleScope = (scope: AuthEnvironmentScope, checked: boolean) => {
+    onScopesChange(checked ? [...scopes, scope] : scopes.filter((current) => current !== scope));
+  };
+  return (
+    <>
+      <section className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-xs font-medium text-foreground">Permissions</h3>
+            <p className="text-xs text-muted-foreground">Limit what the paired client can do.</p>
+          </div>
+          <div className="flex gap-1">
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={disabled}
+              onClick={() => onScopesChange([AuthOrchestrationReadScope])}
+            >
+              Read only
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={disabled}
+              onClick={() => onScopesChange([...AuthStandardClientScopes])}
+            >
+              Standard
+            </Button>
+          </div>
+        </div>
+        <div className="divide-y divide-border/60 rounded-lg border border-input bg-muted/25">
+          {PAIRING_SCOPE_OPTIONS.map(({ scope, title, description }) => (
+            <label
+              key={scope}
+              className="flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40"
+            >
+              <Checkbox
+                className="mt-0.5"
+                checked={scopes.includes(scope)}
+                disabled={disabled}
+                onCheckedChange={(checked) => toggleScope(scope, checked === true)}
+              />
+              <span className="min-w-0">
+                <span className="block text-xs font-medium text-foreground">{title}</span>
+                <span className="block text-xs leading-snug text-muted-foreground">
+                  {description}
+                </span>
+              </span>
+            </label>
+          ))}
+        </div>
+        {scopes.length === 0 ? (
+          <p className="text-xs text-destructive">Select at least one permission.</p>
+        ) : scopes.includes(AuthAccessWriteScope) ? (
+          <p className="text-xs text-warning">
+            This client can create or revoke access for other devices.
+          </p>
+        ) : null}
+      </section>
+      <ProjectScopeField
+        projectScope={projectScope}
+        onChange={onProjectScopeChange}
+        projects={projects}
+        disabled={disabled}
+      />
+    </>
+  );
+}
+
+function isProjectScopeValid(projectScope: AuthProjectScope): boolean {
+  return projectScope === null || projectScope.length > 0;
+}
+
+function EditPairingLinkPermissionsDialog({
+  pairingLink,
+  projects,
+  disabled,
+}: {
+  readonly pairingLink: ServerPairingLinkRecord;
+  readonly projects: ReadonlyArray<ProjectOption>;
+  readonly disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [scopes, setScopes] = useState<ReadonlyArray<AuthEnvironmentScope>>(pairingLink.scopes);
+  const [projectScope, setProjectScope] = useState<AuthProjectScope>(pairingLink.projectIds);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const resetFromRecord = useCallback(() => {
+    setScopes(pairingLink.scopes);
+    setProjectScope(pairingLink.projectIds);
+  }, [pairingLink.scopes, pairingLink.projectIds]);
+
+  const handleSave = useCallback(async () => {
+    setIsSaving(true);
+    try {
+      await updateServerPairingLink({ id: pairingLink.id, scopes, projectIds: projectScope });
+      setOpen(false);
+    } catch (error) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not update pairing link",
+          description:
+            error instanceof Error ? error.message : "Failed to update pairing link permissions.",
+        }),
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }, [pairingLink.id, scopes, projectScope]);
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) {
+          resetFromRecord();
+        }
+      }}
+    >
+      <DialogTrigger
+        render={
+          <Button size="xs" variant="outline" disabled={disabled}>
+            Edit
+          </Button>
+        }
+      />
+      <DialogPopup className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit pairing link permissions</DialogTitle>
+          <DialogDescription>
+            Changes apply the next time this link is used to pair.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="space-y-5">
+          <PairingPermissionsEditor
+            scopes={scopes}
+            onScopesChange={setScopes}
+            projectScope={projectScope}
+            onProjectScopeChange={setProjectScope}
+            projects={projects}
+            disabled={isSaving}
+          />
+        </DialogPanel>
+        <DialogFooter variant="bare">
+          <Button variant="outline" disabled={isSaving} onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            disabled={isSaving || scopes.length === 0 || !isProjectScopeValid(projectScope)}
+            onClick={() => void handleSave()}
+          >
+            {isSaving ? "Saving…" : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+}
+
+function EditClientPermissionsDialog({
+  clientSession,
+  projects,
+  disabled,
+}: {
+  readonly clientSession: ServerClientSessionRecord;
+  readonly projects: ReadonlyArray<ProjectOption>;
+  readonly disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [scopes, setScopes] = useState<ReadonlyArray<AuthEnvironmentScope>>(clientSession.scopes);
+  const [projectScope, setProjectScope] = useState<AuthProjectScope>(clientSession.projectIds);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const resetFromRecord = useCallback(() => {
+    setScopes(clientSession.scopes);
+    setProjectScope(clientSession.projectIds);
+  }, [clientSession.scopes, clientSession.projectIds]);
+
+  const handleSave = useCallback(async () => {
+    setIsSaving(true);
+    try {
+      await updateServerClientSession({
+        sessionId: clientSession.sessionId,
+        scopes,
+        projectIds: projectScope,
+      });
+      setOpen(false);
+    } catch (error) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not update client access",
+          description:
+            error instanceof Error ? error.message : "Failed to update client permissions.",
+        }),
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }, [clientSession.sessionId, scopes, projectScope]);
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) {
+          resetFromRecord();
+        }
+      }}
+    >
+      <DialogTrigger
+        render={
+          <Button size="xs" variant="outline" disabled={disabled}>
+            Edit
+          </Button>
+        }
+      />
+      <DialogPopup className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edit client permissions</DialogTitle>
+          <DialogDescription>
+            Changes take effect on this client&rsquo;s next request, and on its live connection once
+            it reconnects.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="space-y-5">
+          <PairingPermissionsEditor
+            scopes={scopes}
+            onScopesChange={setScopes}
+            projectScope={projectScope}
+            onProjectScopeChange={setProjectScope}
+            projects={projects}
+            disabled={isSaving}
+          />
+        </DialogPanel>
+        <DialogFooter variant="bare">
+          <Button variant="outline" disabled={isSaving} onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            disabled={isSaving || scopes.length === 0 || !isProjectScopeValid(projectScope)}
+            onClick={() => void handleSave()}
+          >
+            {isSaving ? "Saving…" : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
   );
 }
 
@@ -484,6 +905,7 @@ function sortDesktopClientSessions(sessions: ReadonlyArray<ServerClientSessionRe
 function toDesktopPairingLinkRecord(pairingLink: AuthPairingLink): ServerPairingLinkRecord {
   return {
     ...pairingLink,
+    projectIds: pairingLink.projectIds ?? null,
     createdAt: DateTime.formatIso(pairingLink.createdAt),
     expiresAt: DateTime.formatIso(pairingLink.expiresAt),
   };
@@ -492,6 +914,7 @@ function toDesktopPairingLinkRecord(pairingLink: AuthPairingLink): ServerPairing
 function toDesktopClientSessionRecord(clientSession: AuthClientSession): ServerClientSessionRecord {
   return {
     ...clientSession,
+    projectIds: clientSession.projectIds ?? null,
     issuedAt: DateTime.formatIso(clientSession.issuedAt),
     expiresAt: DateTime.formatIso(clientSession.expiresAt),
     lastConnectedAt:
@@ -635,6 +1058,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
   revokingPairingLinkId,
   onRevoke,
 }: PairingLinkListRowProps) {
+  const projectOptions = useProjectOptions();
   const nowMs = useRelativeTimeTick(1_000);
   const expiresAtMs = useMemo(
     () => new Date(pairingLink.expiresAt).getTime(),
@@ -887,6 +1311,11 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
               {formatExpiresInLabel(pairingLink.expiresAt, nowMs)}
               <span aria-hidden> · </span>
               <AccessScopeSummary scopes={pairingLink.scopes} label="Pairing link scopes" />
+              <span aria-hidden> · </span>
+              <ProjectScopeSummary
+                projectScope={pairingLink.projectIds}
+                projects={projectOptions}
+              />
             </TooltipTrigger>
             <TooltipPopup side="top">{expiresAbsolute}</TooltipPopup>
           </Tooltip>
@@ -1001,6 +1430,11 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
               </DialogFooter>
             </DialogPopup>
           </Dialog>
+          <EditPairingLinkPermissionsDialog
+            pairingLink={pairingLink}
+            projects={projectOptions}
+            disabled={revokingPairingLinkId === pairingLink.id}
+          />
           <Button
             size="xs"
             variant="destructive-outline"
@@ -1028,6 +1462,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
   revokingClientSessionId,
   onRevokeSession,
 }: ConnectedClientListRowProps) {
+  const projectOptions = useProjectOptions();
   const nowMs = useRelativeTimeTick(1_000);
   const isLive = clientSession.current || clientSession.connected;
   const lastConnectedAt = clientSession.lastConnectedAt;
@@ -1076,18 +1511,30 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
               </>
             ) : null}
             <AccessScopeSummary scopes={clientSession.scopes} label="Client scopes" />
+            <span aria-hidden> · </span>
+            <ProjectScopeSummary
+              projectScope={clientSession.projectIds}
+              projects={projectOptions}
+            />
           </p>
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
           {!clientSession.current ? (
-            <Button
-              size="xs"
-              variant="destructive-outline"
-              disabled={revokingClientSessionId === clientSession.sessionId}
-              onClick={() => void onRevokeSession(clientSession.sessionId)}
-            >
-              {revokingClientSessionId === clientSession.sessionId ? "Revoking…" : "Revoke"}
-            </Button>
+            <>
+              <EditClientPermissionsDialog
+                clientSession={clientSession}
+                projects={projectOptions}
+                disabled={revokingClientSessionId === clientSession.sessionId}
+              />
+              <Button
+                size="xs"
+                variant="destructive-outline"
+                disabled={revokingClientSessionId === clientSession.sessionId}
+                onClick={() => void onRevokeSession(clientSession.sessionId)}
+              >
+                {revokingClientSessionId === clientSession.sessionId ? "Revoking…" : "Revoke"}
+              </Button>
+            </>
           ) : null}
         </div>
       </div>
@@ -1111,14 +1558,25 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
   const [pairingScopes, setPairingScopes] = useState<ReadonlyArray<AuthEnvironmentScope>>([
     ...AuthStandardClientScopes,
   ]);
+  const [pairingProjectScope, setPairingProjectScope] = useState<AuthProjectScope>(null);
   const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
+  const projectOptions = useProjectOptions();
+
+  const resetPairingForm = useCallback(() => {
+    setPairingLabel("");
+    setPairingScopes([...AuthStandardClientScopes]);
+    setPairingProjectScope(null);
+  }, []);
 
   const handleCreatePairingLink = useCallback(async () => {
     setIsCreatingPairingLink(true);
     try {
-      await createServerPairingCredential({ label: pairingLabel, scopes: pairingScopes });
-      setPairingLabel("");
-      setPairingScopes([...AuthStandardClientScopes]);
+      await createServerPairingCredential({
+        label: pairingLabel,
+        scopes: pairingScopes,
+        projectIds: pairingProjectScope,
+      });
+      resetPairingForm();
       setDialogOpen(false);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
@@ -1132,13 +1590,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
     } finally {
       setIsCreatingPairingLink(false);
     }
-  }, [pairingLabel, pairingScopes]);
-
-  const togglePairingScope = useCallback((scope: AuthEnvironmentScope, checked: boolean) => {
-    setPairingScopes((current) =>
-      checked ? [...current, scope] : current.filter((currentScope) => currentScope !== scope),
-    );
-  }, []);
+  }, [pairingLabel, pairingScopes, pairingProjectScope, resetPairingForm]);
 
   return (
     <div className="flex items-center gap-2">
@@ -1157,8 +1609,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
         onOpenChange={(open) => {
           setDialogOpen(open);
           if (!open) {
-            setPairingLabel("");
-            setPairingScopes([...AuthStandardClientScopes]);
+            resetPairingForm();
           }
         }}
       >
@@ -1191,62 +1642,14 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
                 autoFocus
               />
             </label>
-            <section className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-xs font-medium text-foreground">Permissions</h3>
-                  <p className="text-xs text-muted-foreground">
-                    Limit what the paired client can do.
-                  </p>
-                </div>
-                <div className="flex gap-1">
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={isCreatingPairingLink}
-                    onClick={() => setPairingScopes([AuthOrchestrationReadScope])}
-                  >
-                    Read only
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={isCreatingPairingLink}
-                    onClick={() => setPairingScopes([...AuthStandardClientScopes])}
-                  >
-                    Standard
-                  </Button>
-                </div>
-              </div>
-              <div className="divide-y divide-border/60 rounded-lg border border-input bg-muted/25">
-                {PAIRING_SCOPE_OPTIONS.map(({ scope, title, description }) => (
-                  <label
-                    key={scope}
-                    className="flex cursor-pointer items-start gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40"
-                  >
-                    <Checkbox
-                      className="mt-0.5"
-                      checked={pairingScopes.includes(scope)}
-                      disabled={isCreatingPairingLink}
-                      onCheckedChange={(checked) => togglePairingScope(scope, checked === true)}
-                    />
-                    <span className="min-w-0">
-                      <span className="block text-xs font-medium text-foreground">{title}</span>
-                      <span className="block text-xs leading-snug text-muted-foreground">
-                        {description}
-                      </span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-              {pairingScopes.length === 0 ? (
-                <p className="text-xs text-destructive">Select at least one permission.</p>
-              ) : pairingScopes.includes(AuthAccessWriteScope) ? (
-                <p className="text-xs text-warning">
-                  This client can create or revoke access for other devices.
-                </p>
-              ) : null}
-            </section>
+            <PairingPermissionsEditor
+              scopes={pairingScopes}
+              onScopesChange={setPairingScopes}
+              projectScope={pairingProjectScope}
+              onProjectScopeChange={setPairingProjectScope}
+              projects={projectOptions}
+              disabled={isCreatingPairingLink}
+            />
           </DialogPanel>
           <DialogFooter variant="bare">
             <Button
@@ -1257,7 +1660,11 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
               Cancel
             </Button>
             <Button
-              disabled={isCreatingPairingLink || pairingScopes.length === 0}
+              disabled={
+                isCreatingPairingLink ||
+                pairingScopes.length === 0 ||
+                !isProjectScopeValid(pairingProjectScope)
+              }
               onClick={() => void handleCreatePairingLink()}
             >
               {isCreatingPairingLink ? "Creating…" : "Create link"}

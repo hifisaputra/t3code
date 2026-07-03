@@ -5,6 +5,7 @@ import {
   type AuthClientMetadata,
   type AuthClientSession,
   type AuthEnvironmentScope,
+  type AuthProjectScope,
   type ServerAuthSessionMethod,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -40,6 +41,7 @@ export interface IssuedSession {
   readonly client: AuthClientMetadata;
   readonly expiresAt: DateTime.DateTime;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly projectIds: AuthProjectScope;
   readonly proofKeyThumbprint?: string;
 }
 
@@ -51,6 +53,7 @@ export interface VerifiedSession {
   readonly expiresAt?: DateTime.DateTime;
   readonly subject: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly projectIds: AuthProjectScope;
   readonly proofKeyThumbprint?: string;
 }
 
@@ -87,6 +90,7 @@ export interface SessionStoreShape {
     readonly subject?: string;
     readonly method?: ServerAuthSessionMethod;
     readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+    readonly projectIds?: AuthProjectScope;
     readonly client?: AuthClientMetadata;
     readonly proofKeyThumbprint?: string;
   }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
@@ -117,6 +121,11 @@ export interface SessionStoreShape {
   readonly revokeAllExcept: (
     sessionId: AuthSessionId,
   ) => Effect.Effect<number, SessionCredentialInternalError>;
+  readonly updateScopes: (input: {
+    readonly sessionId: AuthSessionId;
+    readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+    readonly projectIds: AuthProjectScope;
+  }) => Effect.Effect<boolean, SessionCredentialInternalError>;
   readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
   readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
 }
@@ -229,6 +238,7 @@ export const make = Effect.fn("makeSessionStore")(function* () {
           sessionId: row.value.sessionId,
           subject: row.value.subject,
           scopes: row.value.scopes,
+          projectIds: row.value.projectIds,
           method: row.value.method,
           client: toClientMetadata(row.value.client),
           issuedAt: row.value.issuedAt,
@@ -328,10 +338,12 @@ export const make = Effect.fn("makeSessionStore")(function* () {
       );
       const signature = signPayload(encodedPayload, signingSecret);
       const client = input?.client ?? createDefaultClientMetadata();
+      const projectIds = input?.projectIds ?? null;
       yield* authSessions.create({
         sessionId,
         subject: claims.sub,
         scopes: claims.scopes,
+        projectIds,
         method: claims.method,
         client: {
           label: client.label ?? null,
@@ -349,6 +361,7 @@ export const make = Effect.fn("makeSessionStore")(function* () {
           sessionId,
           subject: claims.sub,
           scopes: claims.scopes,
+          projectIds,
           method: claims.method,
           client,
           issuedAt,
@@ -365,6 +378,7 @@ export const make = Effect.fn("makeSessionStore")(function* () {
         client,
         expiresAt: expiresAt,
         scopes: claims.scopes,
+        projectIds,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
       } satisfies IssuedSession;
     },
@@ -430,7 +444,11 @@ export const make = Effect.fn("makeSessionStore")(function* () {
         client: toClientMetadata(row.value.client),
         expiresAt: expiresAt.value,
         subject: claims.sub,
-        scopes: claims.scopes,
+        // Scopes and project restriction are read from the persisted row, not
+        // the signed claims, so that edits to a live client's permissions take
+        // effect on its next request without re-issuing the token.
+        scopes: row.value.scopes,
+        projectIds: row.value.projectIds,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
       } satisfies VerifiedSession;
     },
@@ -536,6 +554,7 @@ export const make = Effect.fn("makeSessionStore")(function* () {
         expiresAt: row.value.expiresAt,
         subject: row.value.subject,
         scopes: row.value.scopes,
+        projectIds: row.value.projectIds,
       } satisfies VerifiedSession;
     },
     Effect.mapError((cause) =>
@@ -559,6 +578,7 @@ export const make = Effect.fn("makeSessionStore")(function* () {
           sessionId: row.sessionId,
           subject: row.subject,
           scopes: row.scopes,
+          projectIds: row.projectIds,
           method: row.method,
           client: toClientMetadata(row.client),
           issuedAt: row.issuedAt,
@@ -622,6 +642,25 @@ export const make = Effect.fn("makeSessionStore")(function* () {
     Effect.mapError(toSessionCredentialInternalError("Failed to revoke other sessions.")),
   );
 
+  const updateScopes: SessionStoreShape["updateScopes"] = Effect.fn("SessionStore.updateScopes")(
+    function* (input) {
+      const updated = yield* authSessions.updateScopes({
+        sessionId: input.sessionId,
+        scopes: input.scopes,
+        projectIds: input.projectIds,
+      });
+      if (Option.isNone(updated)) {
+        return false;
+      }
+      const session = yield* loadActiveSession(input.sessionId);
+      if (Option.isSome(session)) {
+        yield* emitUpsert(session.value);
+      }
+      return true;
+    },
+    Effect.mapError(toSessionCredentialInternalError("Failed to update session scopes.")),
+  );
+
   return {
     cookieName,
     issue,
@@ -634,6 +673,7 @@ export const make = Effect.fn("makeSessionStore")(function* () {
     },
     revoke,
     revokeAllExcept,
+    updateScopes,
     markConnected,
     markDisconnected,
   } satisfies SessionStoreShape;

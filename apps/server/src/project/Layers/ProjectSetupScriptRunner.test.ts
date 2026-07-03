@@ -162,4 +162,75 @@ describe("ProjectSetupScriptRunner", () => {
       data: "bun install\r",
     });
   });
+
+  it("opens the setup terminal in the script's working directory when set", async () => {
+    const open = vi.fn(() =>
+      Effect.succeed({
+        threadId: "thread-1",
+        terminalId: "setup-setup",
+        cwd: "/repo/worktrees/a/apps/web",
+        worktreePath: "/repo/worktrees/a",
+        status: "running" as const,
+        pid: 123,
+        history: "",
+        exitCode: null,
+        exitSignal: null,
+        label: "setup-setup",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const write = vi.fn(() => Effect.void);
+    const project = makeProject([
+      {
+        id: "setup",
+        name: "Setup",
+        command: "bun install",
+        icon: "configure",
+        runOnWorktreeCreate: true,
+        cwd: "apps/web",
+      },
+    ]);
+    const runner = await Effect.runPromise(
+      Effect.service(ProjectSetupScriptRunner).pipe(
+        Effect.provide(
+          ProjectSetupScriptRunnerLive.pipe(
+            Layer.provideMerge(makeProjectionSnapshotQueryLayer(project)),
+            Layer.provideMerge(
+              Layer.succeed(TerminalManager, {
+                open,
+                attachStream: () => Effect.die(new Error("unused")),
+                write,
+                resize: () => Effect.void,
+                clear: () => Effect.void,
+                restart: () => Effect.die(new Error("unused")),
+                close: () => Effect.void,
+                subscribe: () => Effect.succeed(() => undefined),
+                subscribeMetadata: () => Effect.succeed(() => undefined),
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    const result = await Effect.runPromise(
+      runner.runForThread({
+        threadId: "thread-1",
+        projectCwd: "/repo/project",
+        worktreePath: "/repo/worktrees/a",
+      }),
+    );
+
+    expect(result).toMatchObject({ status: "started", cwd: "/repo/worktrees/a/apps/web" });
+    expect(open).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      terminalId: "setup-setup",
+      cwd: "/repo/worktrees/a/apps/web",
+      worktreePath: "/repo/worktrees/a",
+      env: {
+        T3CODE_PROJECT_ROOT: "/repo/project",
+        T3CODE_WORKTREE_PATH: "/repo/worktrees/a",
+      },
+    });
+  });
 });

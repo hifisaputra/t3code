@@ -27,6 +27,8 @@ export {
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
   takePairingTokenFromUrl,
+  updateServerClientSession,
+  updateServerPairingLink,
   type ServerClientSessionRecord,
   type ServerPairingLinkRecord,
   __resetServerAuthBootstrapForTests,

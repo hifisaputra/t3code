@@ -1,4 +1,9 @@
-import { AuthEnvironmentScopes, AuthSessionId, ServerAuthSessionMethod } from "@t3tools/contracts";
+import {
+  AuthEnvironmentScopes,
+  AuthSessionId,
+  ProjectId,
+  ServerAuthSessionMethod,
+} from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
@@ -21,12 +26,20 @@ import {
   RevokeAuthSessionInput,
   RevokeOtherAuthSessionsInput,
   SetAuthSessionLastConnectedAtInput,
+  UpdateAuthSessionScopesInput,
 } from "../Services/AuthSessions.ts";
+
+/**
+ * Decodes the nullable `project_ids` JSON column. A `NULL` column decodes to
+ * `null`, meaning the session is unrestricted (all projects).
+ */
+const ProjectIdsColumn = Schema.NullOr(Schema.fromJsonString(Schema.Array(ProjectId)));
 
 const AuthSessionDbRow = Schema.Struct({
   sessionId: AuthSessionId,
   subject: Schema.String,
   scopes: Schema.fromJsonString(AuthEnvironmentScopes),
+  projectIds: ProjectIdsColumn,
   method: ServerAuthSessionMethod,
   clientLabel: Schema.NullOr(Schema.String),
   clientIpAddress: Schema.NullOr(Schema.String),
@@ -45,6 +58,7 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionReco
     sessionId: row.sessionId,
     subject: row.subject,
     scopes: row.scopes,
+    projectIds: row.projectIds,
     method: row.method,
     client: {
       label: row.clientLabel,
@@ -79,6 +93,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           session_id,
           subject,
           scopes,
+          project_ids,
           method,
           client_label,
           client_ip_address,
@@ -94,6 +109,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           ${input.sessionId},
           ${input.subject},
           ${JSON.stringify(input.scopes)},
+          ${input.projectIds === null ? null : JSON.stringify(input.projectIds)},
           ${input.method},
           ${input.client.label},
           ${input.client.ipAddress},
@@ -117,6 +133,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           session_id AS "sessionId",
           subject AS "subject",
           scopes AS "scopes",
+          project_ids AS "projectIds",
           method AS "method",
           client_label AS "clientLabel",
           client_ip_address AS "clientIpAddress",
@@ -142,6 +159,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           session_id AS "sessionId",
           subject AS "subject",
           scopes AS "scopes",
+          project_ids AS "projectIds",
           method AS "method",
           client_label AS "clientLabel",
           client_ip_address AS "clientIpAddress",
@@ -168,6 +186,35 @@ const makeAuthSessionRepository = Effect.gen(function* () {
         SET last_connected_at = ${lastConnectedAt}
         WHERE session_id = ${sessionId}
           AND revoked_at IS NULL
+      `,
+  });
+
+  const updateScopesSessionRow = SqlSchema.findOneOption({
+    Request: UpdateAuthSessionScopesInput,
+    Result: AuthSessionDbRow,
+    execute: ({ sessionId, scopes, projectIds }) =>
+      sql`
+        UPDATE auth_sessions
+        SET scopes = ${JSON.stringify(scopes)},
+          project_ids = ${projectIds === null ? null : JSON.stringify(projectIds)}
+        WHERE session_id = ${sessionId}
+          AND revoked_at IS NULL
+        RETURNING
+          session_id AS "sessionId",
+          subject AS "subject",
+          scopes AS "scopes",
+          project_ids AS "projectIds",
+          method AS "method",
+          client_label AS "clientLabel",
+          client_ip_address AS "clientIpAddress",
+          client_user_agent AS "clientUserAgent",
+          client_device_type AS "clientDeviceType",
+          client_os AS "clientOs",
+          client_browser AS "clientBrowser",
+          issued_at AS "issuedAt",
+          expires_at AS "expiresAt",
+          last_connected_at AS "lastConnectedAt",
+          revoked_at AS "revokedAt"
       `,
   });
 
@@ -266,6 +313,17 @@ const makeAuthSessionRepository = Effect.gen(function* () {
       ),
     );
 
+  const updateScopes: AuthSessionRepositoryShape["updateScopes"] = (input) =>
+    updateScopesSessionRow(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.updateScopes:query",
+          "AuthSessionRepository.updateScopes:decodeRow",
+        ),
+      ),
+      Effect.map((rowOption) => Option.map(rowOption, toAuthSessionRecord)),
+    );
+
   return {
     create,
     getById,
@@ -273,6 +331,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
     revoke,
     revokeAllExcept,
     setLastConnectedAt,
+    updateScopes,
   } satisfies AuthSessionRepositoryShape;
 });
 

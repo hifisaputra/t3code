@@ -15,13 +15,20 @@ export interface ReconnectBackoffConfig {
 /**
  * Sensible defaults for WebSocket reconnect backoff.
  *
- * - 1 s initial delay, doubling each retry, capped at 64 s, up to 7 retries.
+ * - 1 s initial delay, doubling each retry, capped at 5 s, up to 100 retries.
+ *
+ * Tuned for high-latency / lossy long-haul links (e.g. a remote VPS reached
+ * over the tailnet from another continent), where the live socket drops
+ * intermittently from packet loss, jitter, or direct<->DERP relay failover.
+ * A low delay cap keeps retries frequent (~every 5 s) so the UI reconnects
+ * within seconds of the link recovering, and a high retry count means it
+ * effectively never gives up and strands the user on a manual refresh.
  */
 export const DEFAULT_RECONNECT_BACKOFF: ReconnectBackoffConfig = {
   initialDelayMs: 1_000,
   backoffFactor: 2,
-  maxDelayMs: 64_000,
-  maxRetries: 7,
+  maxDelayMs: 5_000,
+  maxRetries: 100,
 };
 
 /**

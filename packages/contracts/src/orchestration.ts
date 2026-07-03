@@ -194,6 +194,9 @@ export const ProjectScript = Schema.Struct({
   command: TrimmedNonEmptyString,
   icon: ProjectScriptIcon,
   runOnWorktreeCreate: Schema.Boolean,
+  // Working directory to run the command in, relative to the project root (or
+  // absolute). Omitted means run at the project/worktree root.
+  cwd: Schema.optional(TrimmedNonEmptyString),
 });
 export type ProjectScript = typeof ProjectScript.Type;
 

@@ -1,6 +1,7 @@
 import {
   AuthClientMetadataDeviceType,
   AuthEnvironmentScopes,
+  AuthProjectScope,
   AuthSessionId,
   ServerAuthSessionMethod,
 } from "@t3tools/contracts";
@@ -25,6 +26,7 @@ export const AuthSessionRecord = Schema.Struct({
   sessionId: AuthSessionId,
   subject: Schema.String,
   scopes: AuthEnvironmentScopes,
+  projectIds: AuthProjectScope,
   method: ServerAuthSessionMethod,
   client: AuthSessionClientMetadataRecord,
   issuedAt: Schema.DateTimeUtcFromString,
@@ -38,12 +40,20 @@ export const CreateAuthSessionInput = Schema.Struct({
   sessionId: AuthSessionId,
   subject: Schema.String,
   scopes: AuthEnvironmentScopes,
+  projectIds: AuthProjectScope,
   method: ServerAuthSessionMethod,
   client: AuthSessionClientMetadataRecord,
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
 });
 export type CreateAuthSessionInput = typeof CreateAuthSessionInput.Type;
+
+export const UpdateAuthSessionScopesInput = Schema.Struct({
+  sessionId: AuthSessionId,
+  scopes: AuthEnvironmentScopes,
+  projectIds: AuthProjectScope,
+});
+export type UpdateAuthSessionScopesInput = typeof UpdateAuthSessionScopesInput.Type;
 
 export const GetAuthSessionByIdInput = Schema.Struct({
   sessionId: AuthSessionId,
@@ -92,6 +102,9 @@ export interface AuthSessionRepositoryShape {
   readonly setLastConnectedAt: (
     input: SetAuthSessionLastConnectedAtInput,
   ) => Effect.Effect<void, AuthSessionRepositoryError>;
+  readonly updateScopes: (
+    input: UpdateAuthSessionScopesInput,
+  ) => Effect.Effect<Option.Option<AuthSessionRecord>, AuthSessionRepositoryError>;
 }
 
 export class AuthSessionRepository extends Context.Service<

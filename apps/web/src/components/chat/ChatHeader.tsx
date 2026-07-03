@@ -19,6 +19,7 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
+import { type PackageScriptSuggestion } from "~/projectScripts";
 import { PreviewControl } from "../PreviewControl";
 import { NotificationsControl } from "../NotificationsControl";
 import { Toggle } from "../ui/toggle";
@@ -49,6 +50,7 @@ interface ChatHeaderProps {
   onAddProjectScript: (input: NewProjectScriptInput) => Promise<void>;
   onUpdateProjectScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void>;
   onDeleteProjectScript: (scriptId: string) => Promise<void>;
+  onLoadPackageScripts?: () => Promise<PackageScriptSuggestion[]>;
   onToggleTerminal: () => void;
   onToggleDiff: () => void;
   onToggleFiles: () => void;
@@ -89,6 +91,7 @@ export const ChatHeader = memo(function ChatHeader({
   onAddProjectScript,
   onUpdateProjectScript,
   onDeleteProjectScript,
+  onLoadPackageScripts,
   onToggleTerminal,
   onToggleDiff,
   onToggleFiles,
@@ -131,6 +134,7 @@ export const ChatHeader = memo(function ChatHeader({
             onAddScript={onAddProjectScript}
             onUpdateScript={onUpdateProjectScript}
             onDeleteScript={onDeleteProjectScript}
+            {...(onLoadPackageScripts ? { onLoadPackageScripts } : {})}
           />
         )}
         {showOpenInPicker && (

@@ -9,10 +9,13 @@ import {
   type AuthClientSession,
   type AuthCreatePairingCredentialInput,
   type AuthEnvironmentScope,
+  type AuthProjectScope,
   type AuthPairingLink,
   type AuthPairingCredentialResult,
   type AuthSessionId,
   type AuthSessionState,
+  type AuthUpdateClientSessionInput,
+  type AuthUpdatePairingLinkInput,
   type ServerAuthDescriptor,
   type ServerAuthSessionMethod,
   type AuthWebSocketTicketResult,
@@ -42,6 +45,7 @@ export interface IssuedPairingLink {
   readonly id: string;
   readonly credential: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly projectIds: AuthProjectScope;
   readonly subject: string;
   readonly label?: string;
   readonly createdAt: DateTime.Utc;
@@ -53,6 +57,7 @@ export interface IssuedBearerSession {
   readonly token: string;
   readonly method: "bearer-access-token";
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly projectIds: AuthProjectScope;
   readonly subject: string;
   readonly client: AuthClientMetadata;
   readonly expiresAt: DateTime.Utc;
@@ -63,6 +68,8 @@ export interface AuthenticatedSession {
   readonly subject: string;
   readonly method: ServerAuthSessionMethod;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  /** Project restriction; `null` means unrestricted (all projects). */
+  readonly projectIds: AuthProjectScope;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt?: DateTime.DateTime;
 }
@@ -121,6 +128,7 @@ export interface EnvironmentAuthShape {
     readonly ttl?: Duration.Duration;
     readonly label?: string;
     readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+    readonly projectIds?: AuthProjectScope;
     readonly subject?: string;
     readonly proofKeyThumbprint?: string;
   }) => Effect.Effect<IssuedPairingLink, ServerAuthInternalError>;
@@ -135,10 +143,14 @@ export interface EnvironmentAuthShape {
     readonly excludeSubjects?: ReadonlyArray<string>;
   }) => Effect.Effect<ReadonlyArray<AuthPairingLink>, ServerAuthInternalError>;
   readonly revokePairingLink: (id: string) => Effect.Effect<boolean, ServerAuthInternalError>;
+  readonly updatePairingLink: (
+    input: AuthUpdatePairingLinkInput,
+  ) => Effect.Effect<boolean, ServerAuthInternalError>;
   readonly issueSession: (input?: {
     readonly ttl?: Duration.Duration;
     readonly subject?: string;
     readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+    readonly projectIds?: AuthProjectScope;
     readonly label?: string;
   }) => Effect.Effect<IssuedBearerSession, ServerAuthInternalError>;
   readonly listSessions: () => Effect.Effect<
@@ -161,6 +173,10 @@ export interface EnvironmentAuthShape {
   readonly revokeOtherClientSessions: (
     currentSessionId: AuthSessionId,
   ) => Effect.Effect<number, ServerAuthInternalError>;
+  readonly updateClientSession: (
+    currentSessionId: AuthSessionId,
+    input: AuthUpdateClientSessionInput,
+  ) => Effect.Effect<boolean, ServerAuthForbiddenOperationError | ServerAuthInternalError>;
   readonly authenticateHttpRequest: (
     request: HttpServerRequest.HttpServerRequest,
   ) => Effect.Effect<
@@ -289,6 +305,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
         subject: session.subject,
         method: session.method,
         scopes: session.scopes,
+        projectIds: session.projectIds,
         ...(session.proofKeyThumbprint ? { proofKeyThumbprint: session.proofKeyThumbprint } : {}),
         ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
       })),
@@ -370,6 +387,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
             method: "browser-session-cookie",
             subject: grant.subject,
             scopes: grant.scopes,
+            projectIds: grant.projectIds,
             client: {
               ...requestMetadata,
               ...(grant.label ? { label: grant.label } : {}),
@@ -417,6 +435,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
                 method: input?.proofKeyThumbprint ? "dpop-access-token" : "bearer-access-token",
                 subject: grant.subject,
                 scopes: grantedScopes,
+                projectIds: grant.projectIds,
                 ...(input?.proofKeyThumbprint
                   ? {
                       proofKeyThumbprint: input.proofKeyThumbprint,
@@ -463,11 +482,13 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
 
   const issuePairingCredentialForSubject = (input: {
     readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+    readonly projectIds: AuthProjectScope;
     readonly subject: string;
     readonly label?: string;
   }) =>
     createPairingLink({
       scopes: input.scopes,
+      projectIds: input.projectIds,
       subject: input.subject,
       ...(input.label ? { label: input.label } : {}),
     }).pipe(
@@ -487,8 +508,10 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
   )(
     function* (input) {
       const createdAt = yield* DateTime.now;
+      const projectIds = input?.projectIds ?? null;
       const issued = yield* bootstrapCredentials.issueOneTimeToken({
         scopes: input?.scopes ?? AuthStandardClientScopes,
+        projectIds,
         subject: input?.subject ?? "one-time-token",
         ...(input?.ttl ? { ttl: input.ttl } : {}),
         ...(input?.label ? { label: input.label } : {}),
@@ -498,6 +521,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
         id: issued.id,
         credential: issued.credential,
         scopes: input?.scopes ?? AuthStandardClientScopes,
+        projectIds,
         subject: input?.subject ?? "one-time-token",
         ...(issued.label ? { label: issued.label } : {}),
         createdAt: DateTime.toUtc(createdAt),
@@ -531,12 +555,25 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
         Effect.withSpan("EnvironmentAuth.revokePairingLink"),
       );
 
+  const updatePairingLink: EnvironmentAuthShape["updatePairingLink"] = (input) =>
+    bootstrapCredentials
+      .updateScopes({
+        id: input.id,
+        scopes: input.scopes,
+        projectIds: input.projectIds,
+      })
+      .pipe(
+        Effect.mapError(toInternalError("Failed to update pairing link.")),
+        Effect.withSpan("EnvironmentAuth.updatePairingLink"),
+      );
+
   const issueSession: EnvironmentAuthShape["issueSession"] = (input) =>
     sessions
       .issue({
         subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
         method: "bearer-access-token",
         scopes: input?.scopes ?? AuthAdministrativeScopes,
+        projectIds: input?.projectIds ?? null,
         client: {
           ...(input?.label ? { label: input.label } : {}),
           deviceType: "bot",
@@ -551,6 +588,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
               token: issued.token,
               method: "bearer-access-token",
               scopes: issued.scopes,
+              projectIds: issued.projectIds,
               subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
               client: issued.client,
               expiresAt: DateTime.toUtc(issued.expiresAt),
@@ -588,6 +626,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
   const issuePairingCredential: EnvironmentAuthShape["issuePairingCredential"] = (input) =>
     issuePairingCredentialForSubject({
       scopes: input?.scopes ?? AuthStandardClientScopes,
+      projectIds: input?.projectIds ?? null,
       subject: "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
     }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));
@@ -595,6 +634,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
   const issueStartupPairingCredential: EnvironmentAuthShape["issueStartupPairingCredential"] = () =>
     issuePairingCredentialForSubject({
       scopes: AuthAdministrativeScopes,
+      projectIds: null,
       subject: INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT,
     }).pipe(Effect.withSpan("EnvironmentAuth.issueStartupPairingCredential"));
 
@@ -628,6 +668,26 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
     revokeOtherSessionsExcept(currentSessionId).pipe(
       Effect.withSpan("EnvironmentAuth.revokeOtherClientSessions"),
     );
+
+  const updateClientSession: EnvironmentAuthShape["updateClientSession"] = Effect.fn(
+    "EnvironmentAuth.updateClientSession",
+  )(function* (currentSessionId, input) {
+    // A client cannot edit its own grants — otherwise a client could widen its
+    // own scopes or projects. Editing other clients requires access:write,
+    // enforced at the HTTP layer.
+    if (currentSessionId === input.sessionId) {
+      return yield* new ServerAuthForbiddenOperationError({
+        reason: "current_session_revoke_not_allowed",
+      });
+    }
+    return yield* sessions
+      .updateScopes({
+        sessionId: input.sessionId,
+        scopes: input.scopes,
+        projectIds: input.projectIds,
+      })
+      .pipe(Effect.mapError(toInternalError("Failed to update client session.")));
+  });
 
   const issueStartupPairingUrl: EnvironmentAuthShape["issueStartupPairingUrl"] = (baseUrl) =>
     issueStartupPairingCredential().pipe(
@@ -675,6 +735,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
               subject: session.subject,
               method: session.method,
               scopes: session.scopes,
+              projectIds: session.projectIds,
               ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
             })),
             mapSessionVerificationErrors,
@@ -696,6 +757,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
     issueStartupPairingCredential,
     listPairingLinks,
     revokePairingLink,
+    updatePairingLink,
     issueSession,
     listSessions,
     revokeSession,
@@ -703,6 +765,7 @@ export const make = Effect.fn("makeEnvironmentAuth")(function* () {
     listClientSessions,
     revokeClientSession,
     revokeOtherClientSessions,
+    updateClientSession,
     authenticateHttpRequest,
     authenticateWebSocketUpgrade,
     issueWebSocketTicket,

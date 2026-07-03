@@ -364,6 +364,32 @@ export const authHttpApiLayer = HttpApiBuilder.group(
         ),
       )
       .handle(
+        "updatePairingLink",
+        Effect.fn("environment.auth.updatePairingLink")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const delegatedScopes = args.payload.scopes;
+            if (
+              delegatedScopes.length === 0 ||
+              new Set<AuthEnvironmentScope>(delegatedScopes).size !== delegatedScopes.length
+            ) {
+              return yield* failEnvironmentInvalidRequest("invalid_scope");
+            }
+            for (const delegatedScope of delegatedScopes) {
+              if (!session.scopes.has(delegatedScope)) {
+                return yield* failEnvironmentScopeRequired(delegatedScope);
+              }
+            }
+            const updated = yield* serverAuth.updatePairingLink(args.payload);
+            return { updated };
+          },
+          Effect.catchTag("ServerAuthInternalError", (error) =>
+            failEnvironmentInternal("pairing_link_update_failed", error),
+          ),
+        ),
+      )
+      .handle(
         "clients",
         Effect.fn("environment.auth.clients")(
           function* (args) {
@@ -393,6 +419,35 @@ export const authHttpApiLayer = HttpApiBuilder.group(
               failEnvironmentOperationForbidden(error.reason),
             ServerAuthInternalError: (error) =>
               failEnvironmentInternal("client_session_revoke_failed", error),
+          }),
+        ),
+      )
+      .handle(
+        "updateClient",
+        Effect.fn("environment.auth.updateClient")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const delegatedScopes = args.payload.scopes;
+            if (
+              delegatedScopes.length === 0 ||
+              new Set<AuthEnvironmentScope>(delegatedScopes).size !== delegatedScopes.length
+            ) {
+              return yield* failEnvironmentInvalidRequest("invalid_scope");
+            }
+            for (const delegatedScope of delegatedScopes) {
+              if (!session.scopes.has(delegatedScope)) {
+                return yield* failEnvironmentScopeRequired(delegatedScope);
+              }
+            }
+            const updated = yield* serverAuth.updateClientSession(session.sessionId, args.payload);
+            return { updated };
+          },
+          Effect.catchTags({
+            ServerAuthForbiddenOperationError: (error) =>
+              failEnvironmentOperationForbidden(error.reason),
+            ServerAuthInternalError: (error) =>
+              failEnvironmentInternal("client_session_update_failed", error),
           }),
         ),
       )

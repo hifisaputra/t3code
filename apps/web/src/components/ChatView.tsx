@@ -33,7 +33,11 @@ import {
   createModelSelection,
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
-import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
+import {
+  projectScriptCwd,
+  projectScriptRuntimeEnv,
+  resolveProjectScriptCwd,
+} from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import { nextTerminalId, resolveTerminalSessionLabel } from "@t3tools/shared/terminalLabels";
 import { Debouncer } from "@tanstack/react-pacer";
@@ -111,8 +115,14 @@ import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybinding
 import { type NewProjectScriptInput } from "./ProjectScriptsControl";
 import {
   commandForProjectScript,
+  detectScriptRunner,
   nextProjectScriptId,
+  parsePackageScripts,
+  parseWorkspacePackageScripts,
   projectScriptIdFromCommand,
+  workspaceGlobsFromPackageJson,
+  workspaceGlobsFromPnpmWorkspaceYaml,
+  type PackageScriptSuggestion,
 } from "~/projectScripts";
 import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
@@ -124,6 +134,7 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import {
+  readEnvironmentConnection,
   reconnectSavedEnvironment,
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
@@ -197,6 +208,9 @@ import {
 
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
   "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
+// Caps on how far we traverse a monorepo when discovering workspace scripts.
+const MAX_WORKSPACE_BASE_LISTINGS = 20;
+const MAX_WORKSPACE_PACKAGES = 100;
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -2202,7 +2216,8 @@ export default function ChatView(props: ChatViewProps) {
           return { ...current, [activeProject.id]: script.id };
         });
       }
-      const targetCwd = options?.cwd ?? gitCwd ?? activeProject.cwd;
+      const baseCwd = options?.cwd ?? gitCwd ?? activeProject.cwd;
+      const targetCwd = resolveProjectScriptCwd(baseCwd, script.cwd);
       const baseTerminalId =
         terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
       const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
@@ -2334,6 +2349,7 @@ export default function ChatView(props: ChatViewProps) {
         command: input.command,
         icon: input.icon,
         runOnWorktreeCreate: input.runOnWorktreeCreate,
+        ...(input.cwd ? { cwd: input.cwd } : {}),
       };
       const nextScripts = input.runOnWorktreeCreate
         ? [
@@ -2364,11 +2380,13 @@ export default function ChatView(props: ChatViewProps) {
       }
 
       const updatedScript: ProjectScript = {
-        ...existingScript,
+        id: existingScript.id,
         name: input.name,
         command: input.command,
         icon: input.icon,
         runOnWorktreeCreate: input.runOnWorktreeCreate,
+        // Rebuild from input so an emptied working directory clears the field.
+        ...(input.cwd ? { cwd: input.cwd } : {}),
       };
       const nextScripts = activeProject.scripts.map((script) =>
         script.id === scriptId
@@ -2421,6 +2439,74 @@ export default function ChatView(props: ChatViewProps) {
     },
     [activeProject, persistProjectScripts],
   );
+  const loadPackageScripts = useCallback(async (): Promise<PackageScriptSuggestion[]> => {
+    if (!activeProject) return [];
+    const projects = readEnvironmentConnection(environmentId)?.client.projects;
+    if (!projects) return [];
+    const cwd = activeProject.cwd;
+
+    const readText = async (relativePath: string): Promise<string | null> => {
+      try {
+        const result = await projects.readFile({ cwd, relativePath });
+        return result.encoding === "utf8" ? result.contents : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const rootManifest = await readText("package.json");
+    if (rootManifest === null) return [];
+
+    const suggestions = parsePackageScripts(rootManifest);
+
+    // Gather workspace globs from package.json `workspaces` and pnpm-workspace.yaml.
+    const globs = new Set(workspaceGlobsFromPackageJson(rootManifest));
+    const pnpmWorkspace = await readText("pnpm-workspace.yaml");
+    if (pnpmWorkspace) {
+      for (const glob of workspaceGlobsFromPnpmWorkspaceYaml(pnpmWorkspace)) globs.add(glob);
+    }
+    if (globs.size === 0) return suggestions;
+
+    // Resolve globs to candidate workspace directories.
+    const literalDirs = new Set<string>();
+    const baseDirsToList = new Set<string>();
+    for (const raw of globs) {
+      const glob = raw.trim().replace(/\/+$/, "");
+      if (glob.length === 0 || glob.startsWith("!")) continue;
+      const starIndex = glob.indexOf("*");
+      if (starIndex === -1) {
+        literalDirs.add(glob);
+      } else {
+        baseDirsToList.add(glob.slice(0, starIndex).replace(/\/+$/, ""));
+      }
+    }
+
+    const candidateDirs = new Set<string>(literalDirs);
+    await Promise.all(
+      [...baseDirsToList].slice(0, MAX_WORKSPACE_BASE_LISTINGS).map(async (base) => {
+        try {
+          const listing = await projects.listDirectory(
+            base.length > 0 ? { cwd, relativePath: base } : { cwd },
+          );
+          for (const entry of listing.entries) {
+            if (entry.kind === "directory") candidateDirs.add(entry.path);
+          }
+        } catch {
+          // Ignore directories we cannot list.
+        }
+      }),
+    );
+
+    const runner = detectScriptRunner(rootManifest);
+    const workspaceSuggestions = await Promise.all(
+      [...candidateDirs].slice(0, MAX_WORKSPACE_PACKAGES).map(async (dir) => {
+        const manifest = await readText(`${dir}/package.json`);
+        return manifest ? parseWorkspacePackageScripts(manifest, dir, runner) : [];
+      }),
+    );
+    for (const list of workspaceSuggestions) suggestions.push(...list);
+    return suggestions;
+  }, [activeProject, environmentId]);
 
   const handleRuntimeModeChange = useCallback(
     (mode: RuntimeMode) => {
@@ -3874,6 +3960,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddProjectScript={saveProjectScript}
           onUpdateProjectScript={updateProjectScript}
           onDeleteProjectScript={deleteProjectScript}
+          onLoadPackageScripts={loadPackageScripts}
           onToggleTerminal={toggleTerminalVisibility}
           onToggleDiff={onToggleDiff}
           onToggleFiles={onToggleFiles}

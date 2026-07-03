@@ -2,15 +2,22 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
-import { AuthEnvironmentScopes } from "@t3tools/contracts";
+import { AuthEnvironmentScopes, AuthProjectScope, ProjectId } from "@t3tools/contracts";
 
 import type { AuthPairingLinkRepositoryError } from "../Errors.ts";
+
+/**
+ * Decodes the nullable `project_ids` JSON column. A `NULL` column decodes to
+ * `null`, meaning the credential is unrestricted (all projects).
+ */
+const ProjectIdsColumn = Schema.NullOr(Schema.fromJsonString(Schema.Array(ProjectId)));
 
 export const AuthPairingLinkRecord = Schema.Struct({
   id: Schema.String,
   credential: Schema.String,
   method: Schema.Literals(["desktop-bootstrap", "one-time-token"]),
   scopes: Schema.fromJsonString(AuthEnvironmentScopes),
+  projectIds: ProjectIdsColumn,
   subject: Schema.String,
   label: Schema.NullOr(Schema.String),
   proofKeyThumbprint: Schema.NullOr(Schema.String),
@@ -26,6 +33,7 @@ export const CreateAuthPairingLinkInput = Schema.Struct({
   credential: Schema.String,
   method: Schema.Literals(["desktop-bootstrap", "one-time-token"]),
   scopes: AuthEnvironmentScopes,
+  projectIds: AuthProjectScope,
   subject: Schema.String,
   label: Schema.NullOr(Schema.String),
   proofKeyThumbprint: Schema.NullOr(Schema.String),
@@ -33,6 +41,13 @@ export const CreateAuthPairingLinkInput = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
 });
 export type CreateAuthPairingLinkInput = typeof CreateAuthPairingLinkInput.Type;
+
+export const UpdateAuthPairingLinkScopesInput = Schema.Struct({
+  id: Schema.String,
+  scopes: AuthEnvironmentScopes,
+  projectIds: AuthProjectScope,
+});
+export type UpdateAuthPairingLinkScopesInput = typeof UpdateAuthPairingLinkScopesInput.Type;
 
 export const ConsumeAuthPairingLinkInput = Schema.Struct({
   credential: Schema.String,
@@ -71,6 +86,9 @@ export interface AuthPairingLinkRepositoryShape {
   readonly revoke: (
     input: RevokeAuthPairingLinkInput,
   ) => Effect.Effect<boolean, AuthPairingLinkRepositoryError>;
+  readonly updateScopes: (
+    input: UpdateAuthPairingLinkScopesInput,
+  ) => Effect.Effect<Option.Option<AuthPairingLinkRecord>, AuthPairingLinkRepositoryError>;
   readonly getByCredential: (
     input: GetAuthPairingLinkByCredentialInput,
   ) => Effect.Effect<Option.Option<AuthPairingLinkRecord>, AuthPairingLinkRepositoryError>;

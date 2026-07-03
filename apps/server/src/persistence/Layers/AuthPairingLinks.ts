@@ -18,6 +18,7 @@ import {
   GetAuthPairingLinkByCredentialInput,
   ListActiveAuthPairingLinksInput,
   RevokeAuthPairingLinkInput,
+  UpdateAuthPairingLinkScopesInput,
 } from "../Services/AuthPairingLinks.ts";
 
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
@@ -39,6 +40,7 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           credential,
           method,
           scopes,
+          project_ids,
           subject,
           label,
           proof_key_thumbprint,
@@ -52,6 +54,7 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           ${input.credential},
           ${input.method},
           ${JSON.stringify(input.scopes)},
+          ${input.projectIds === null ? null : JSON.stringify(input.projectIds)},
           ${input.subject},
           ${input.label},
           ${input.proofKeyThumbprint},
@@ -83,6 +86,7 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           credential AS "credential",
           method AS "method",
           scopes AS "scopes",
+          project_ids AS "projectIds",
           subject AS "subject",
           label AS "label",
           proof_key_thumbprint AS "proofKeyThumbprint",
@@ -103,6 +107,7 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           credential AS "credential",
           method AS "method",
           scopes AS "scopes",
+          project_ids AS "projectIds",
           subject AS "subject",
           label AS "label",
           proof_key_thumbprint AS "proofKeyThumbprint",
@@ -132,6 +137,33 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
       `,
   });
 
+  const updateScopesPairingLinkRow = SqlSchema.findOneOption({
+    Request: UpdateAuthPairingLinkScopesInput,
+    Result: AuthPairingLinkRecord,
+    execute: ({ id, scopes, projectIds }) =>
+      sql`
+        UPDATE auth_pairing_links
+        SET scopes = ${JSON.stringify(scopes)},
+          project_ids = ${projectIds === null ? null : JSON.stringify(projectIds)}
+        WHERE id = ${id}
+          AND revoked_at IS NULL
+          AND consumed_at IS NULL
+        RETURNING
+          id AS "id",
+          credential AS "credential",
+          method AS "method",
+          scopes AS "scopes",
+          project_ids AS "projectIds",
+          subject AS "subject",
+          label AS "label",
+          proof_key_thumbprint AS "proofKeyThumbprint",
+          created_at AS "createdAt",
+          expires_at AS "expiresAt",
+          consumed_at AS "consumedAt",
+          revoked_at AS "revokedAt"
+      `,
+  });
+
   const getPairingLinkRowByCredential = SqlSchema.findOneOption({
     Request: GetAuthPairingLinkByCredentialInput,
     Result: AuthPairingLinkRecord,
@@ -142,6 +174,7 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           credential AS "credential",
           method AS "method",
           scopes AS "scopes",
+          project_ids AS "projectIds",
           subject AS "subject",
           label AS "label",
           proof_key_thumbprint AS "proofKeyThumbprint",
@@ -195,6 +228,16 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
       Effect.map((rows) => rows.length > 0),
     );
 
+  const updateScopes: AuthPairingLinkRepositoryShape["updateScopes"] = (input) =>
+    updateScopesPairingLinkRow(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthPairingLinkRepository.updateScopes:query",
+          "AuthPairingLinkRepository.updateScopes:decodeRow",
+        ),
+      ),
+    );
+
   const getByCredential: AuthPairingLinkRepositoryShape["getByCredential"] = (input) =>
     getPairingLinkRowByCredential(input).pipe(
       Effect.mapError(
@@ -210,6 +253,7 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
     consumeAvailable,
     listActive,
     revoke,
+    updateScopes,
     getByCredential,
   } satisfies AuthPairingLinkRepositoryShape;
 });
