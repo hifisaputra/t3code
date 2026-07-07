@@ -17,6 +17,7 @@ const VARIANT_CONFIG: Record<
     readonly iosIcon: string;
     readonly iosBundleIdentifier: string;
     readonly androidPackage: string;
+    readonly relyingParty?: string;
   }
 > = {
   development: {
@@ -25,6 +26,7 @@ const VARIANT_CONFIG: Record<
     iosIcon: "./assets/icon-composer-dev.icon",
     iosBundleIdentifier: "com.t3tools.t3code.dev",
     androidPackage: "com.t3tools.t3code.dev",
+    relyingParty: "clerk.t3.codes",
   },
   preview: {
     appName: "T3 Code Preview",
@@ -32,6 +34,7 @@ const VARIANT_CONFIG: Record<
     iosIcon: "./assets/icon-composer-prod.icon",
     iosBundleIdentifier: "com.t3tools.t3code.preview",
     androidPackage: "com.t3tools.t3code.preview",
+    relyingParty: "clerk.t3.codes",
   },
   production: {
     appName: "T3 Code",
@@ -39,6 +42,7 @@ const VARIANT_CONFIG: Record<
     iosIcon: "./assets/icon-composer-prod.icon",
     iosBundleIdentifier: "com.t3tools.t3code",
     androidPackage: "com.t3tools.t3code",
+    relyingParty: "clerk.t3.codes",
   },
 };
 
@@ -62,7 +66,11 @@ const config: ExpoConfig = {
   scheme: variant.scheme,
   version: "0.1.0",
   runtimeVersion: {
-    policy: process.env.MOBILE_VERSION_POLICY ?? "appVersion",
+    // Fingerprint (not appVersion) so an OTA only reaches binaries whose native
+    // project — native deps, config plugins, AND patches/ — matches the update.
+    // With appVersion, every 0.1.0 build shares a runtime version, so a JS update
+    // could land on a binary missing the native changes it needs and crash.
+    policy: process.env.MOBILE_VERSION_POLICY ?? "fingerprint",
   },
   orientation: "portrait",
   icon: "./assets/icon.png",
@@ -77,6 +85,14 @@ const config: ExpoConfig = {
     icon: variant.iosIcon,
     supportsTablet: true,
     bundleIdentifier: variant.iosBundleIdentifier,
+    // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
+    // does not fall back to a personal team (which cannot sign app groups,
+    // Sign in with Apple, or push notification entitlements).
+    appleTeamId: "ARK85ZXQ4Z",
+    associatedDomains: [
+      `applinks:${variant.relyingParty}`,
+      `webcredentials:${variant.relyingParty}`,
+    ],
     infoPlist: {
       NSAppTransportSecurity: {
         NSAllowsArbitraryLoads: true,
@@ -101,7 +117,6 @@ const config: ExpoConfig = {
     favicon: "./assets/favicon.png",
   },
   plugins: [
-    "expo-router",
     "expo-font",
     "expo-secure-store",
     ["@clerk/expo", { theme: "./clerk-theme.json" }],
@@ -139,6 +154,7 @@ const config: ExpoConfig = {
         },
       },
     ],
+    "./plugins/withIosCocoaPodsUuidCache.cjs",
     [
       "expo-widgets",
       {
@@ -155,6 +171,7 @@ const config: ExpoConfig = {
         ],
       },
     ],
+    "./plugins/withIosSceneLifecycle.cjs",
     "./plugins/withAndroidCleartextTraffic.cjs",
   ],
   extra: {
