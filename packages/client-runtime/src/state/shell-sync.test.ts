@@ -133,13 +133,23 @@ describe("environment shell synchronization", () => {
     }),
   );
 
-  it.effect("resumes a warm shell cache via afterSequence without an HTTP fetch", () =>
+  it.effect("refreshes a warm cache from a fresh HTTP snapshot and resumes at its sequence", () =>
     Effect.gen(function* () {
+      // A stale warm cache must NOT drive the resume cursor: the subscription
+      // base is re-established from a fresh HTTP snapshot so the catch-up stays
+      // small. Otherwise a device reconnecting after a long gap replays the whole
+      // backlog over the socket and freezes on the stale list even across reloads.
       const cachedSnapshot: OrchestrationShellSnapshot = {
         snapshotSequence: 5,
         projects: [],
         threads: [],
         updatedAt: "2026-06-06T00:00:00.000Z",
+      };
+      const freshSnapshot: OrchestrationShellSnapshot = {
+        snapshotSequence: 4200,
+        projects: [],
+        threads: [],
+        updatedAt: "2026-06-08T00:00:00.000Z",
       };
       const events = yield* Queue.unbounded<OrchestrationShellStreamItem>();
       const capturedAfterSequence = yield* SubscriptionRef.make<number | undefined>(undefined);
@@ -175,7 +185,9 @@ describe("environment shell synchronization", () => {
       });
       const snapshotLoader = ShellSnapshotLoader.of({
         load: () =>
-          SubscriptionRef.update(loaderCalls, (count) => count + 1).pipe(Effect.as(Option.none())),
+          SubscriptionRef.update(loaderCalls, (count) => count + 1).pipe(
+            Effect.as(Option.some(freshSnapshot)),
+          ),
       });
       yield* makeEnvironmentShellState().pipe(
         Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
@@ -183,14 +195,145 @@ describe("environment shell synchronization", () => {
         Effect.provideService(ShellSnapshotLoader, snapshotLoader),
       );
 
-      // Wait until the subscription is established from the warm cache.
+      // Wait until the subscription is established.
+      yield* SubscriptionRef.changes(capturedAfterSequence).pipe(
+        Stream.filter((value) => value !== undefined),
+        Stream.runHead,
+      );
+
+      // Resumes at the fresh HTTP snapshot's sequence, not the stale cached 5.
+      expect(yield* SubscriptionRef.get(capturedAfterSequence)).toBe(4200);
+      expect(yield* SubscriptionRef.get(loaderCalls)).toBe(1);
+    }),
+  );
+
+  it.effect("falls back to the cached afterSequence when the HTTP snapshot is unavailable", () =>
+    Effect.gen(function* () {
+      const cachedSnapshot: OrchestrationShellSnapshot = {
+        snapshotSequence: 5,
+        projects: [],
+        threads: [],
+        updatedAt: "2026-06-06T00:00:00.000Z",
+      };
+      const events = yield* Queue.unbounded<OrchestrationShellStreamItem>();
+      const capturedAfterSequence = yield* SubscriptionRef.make<number | undefined>(undefined);
+      const client = {
+        [ORCHESTRATION_WS_METHODS.subscribeShell]: (input: { readonly afterSequence?: number }) =>
+          Stream.unwrap(
+            SubscriptionRef.set(capturedAfterSequence, input.afterSequence).pipe(
+              Effect.as(Stream.fromQueue(events)),
+            ),
+          ),
+      } as unknown as WsRpcProtocolClient;
+      const supervisorState = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
+      const activeSession = yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(
+        Option.some(session(client)),
+      );
+      const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+        target: TARGET,
+        state: supervisorState,
+        session: activeSession,
+        prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
+        connect: Effect.void,
+        disconnect: Effect.void,
+        retryNow: Effect.void,
+      } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+      const cache = Persistence.EnvironmentCacheStore.of({
+        loadShell: () => Effect.succeed(Option.some(cachedSnapshot)),
+        saveShell: () => Effect.void,
+        loadThread: () => Effect.succeed(Option.none()),
+        saveThread: () => Effect.void,
+        removeThread: () => Effect.void,
+        clear: () => Effect.void,
+      });
+      // HTTP snapshot unavailable → fall back to the cached snapshot's sequence.
+      const snapshotLoader = ShellSnapshotLoader.of({
+        load: () => Effect.succeed(Option.none()),
+      });
+      yield* makeEnvironmentShellState().pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.provideService(Persistence.EnvironmentCacheStore, cache),
+        Effect.provideService(ShellSnapshotLoader, snapshotLoader),
+      );
+
       yield* SubscriptionRef.changes(capturedAfterSequence).pipe(
         Stream.filter((value) => value !== undefined),
         Stream.runHead,
       );
 
       expect(yield* SubscriptionRef.get(capturedAfterSequence)).toBe(5);
-      expect(yield* SubscriptionRef.get(loaderCalls)).toBe(0);
+    }),
+  );
+
+  // it.live (real clock) so the 250ms retry backoff actually elapses.
+  it.live("resubscribes and catches up after an expected shell subscription failure", () =>
+    Effect.gen(function* () {
+      // Regression: without retryExpectedFailureAfter on subscribeShell, a single
+      // expected failure permanently freezes the thread list on the stale cached
+      // snapshot until a full reload. The subscription must resubscribe and catch
+      // up to the live snapshot on its own.
+      const events = yield* Queue.unbounded<OrchestrationShellStreamItem>();
+      const subscribeCalls = yield* SubscriptionRef.make(0);
+      const client = {
+        [ORCHESTRATION_WS_METHODS.subscribeShell]: () =>
+          Stream.unwrap(
+            SubscriptionRef.updateAndGet(subscribeCalls, (count) => count + 1).pipe(
+              // First attempt fails with an expected (non-transport) error; later
+              // attempts deliver the live snapshot.
+              Effect.map((attempt) =>
+                attempt === 1
+                  ? Stream.fail(new Error("simulated expected shell failure"))
+                  : Stream.fromQueue(events),
+              ),
+            ),
+          ),
+      } as unknown as WsRpcProtocolClient;
+      const supervisorState = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
+      const activeSession = yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(
+        Option.some(session(client)),
+      );
+      const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+        target: TARGET,
+        state: supervisorState,
+        session: activeSession,
+        prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
+        connect: Effect.void,
+        disconnect: Effect.void,
+        retryNow: Effect.void,
+      } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+      const cache = Persistence.EnvironmentCacheStore.of({
+        loadShell: () => Effect.succeed(Option.none()),
+        saveShell: () => Effect.void,
+        loadThread: () => Effect.succeed(Option.none()),
+        saveThread: () => Effect.void,
+        removeThread: () => Effect.void,
+        clear: () => Effect.void,
+      });
+      const snapshotLoader = ShellSnapshotLoader.of({
+        load: () => Effect.succeed(Option.none()),
+      });
+      const shellState = yield* makeEnvironmentShellState().pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.provideService(Persistence.EnvironmentCacheStore, cache),
+        Effect.provideService(ShellSnapshotLoader, snapshotLoader),
+      );
+
+      // Wait for the resubscribe (second subscription attempt) after the failure.
+      yield* SubscriptionRef.changes(subscribeCalls).pipe(
+        Stream.filter((count) => count >= 2),
+        Stream.runHead,
+      );
+      // The recovered subscription delivers the live snapshot and the list catches up.
+      yield* Queue.offer(events, { kind: "snapshot", snapshot: LIVE_SHELL_SNAPSHOT });
+      yield* SubscriptionRef.changes(shellState).pipe(
+        Stream.filter((state) => state.status === "live"),
+        Stream.runHead,
+      );
+
+      const state = yield* SubscriptionRef.get(shellState);
+      expect(state.status).toBe("live");
+      expect(Option.getOrThrow(state.snapshot)).toEqual(LIVE_SHELL_SNAPSHOT);
+      expect(yield* SubscriptionRef.get(subscribeCalls)).toBeGreaterThanOrEqual(2);
     }),
   );
 });

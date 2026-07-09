@@ -151,28 +151,35 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
 
   yield* Effect.forkScoped(
     Effect.gen(function* () {
-      // Establish the base shell snapshot to resume from, minimizing bytes over
-      // the wire:
-      // - Warm cache: reuse the cached snapshot (zero network) and resume via
-      //   `afterSequence` so we only receive shell events since the cached
-      //   sequence.
-      // - Cold cache: load the full shell snapshot over HTTP (gzip-compressible,
-      //   and off the socket), then resume via `afterSequence`.
-      // If no base can be established we fall back to the socket-embedded
-      // snapshot so the shell still synchronizes. Overlapping/replayed events are
-      // deduped by sequence in applyItem.
-      const base = Option.isSome(cachedSnapshot)
-        ? cachedSnapshot
-        : yield* Effect.gen(function* () {
-            const prepared = yield* SubscriptionRef.changes(supervisor.prepared).pipe(
-              Stream.filter(Option.isSome),
-              Stream.map((current) => current.value),
-              Stream.runHead,
-            );
-            return Option.isSome(prepared)
-              ? yield* snapshotLoader.load(prepared.value)
-              : Option.none<OrchestrationShellSnapshot>();
-          });
+      // Render the cached snapshot immediately so the sidebar is instant.
+      if (Option.isSome(cachedSnapshot)) {
+        yield* applyItem({ kind: "snapshot", snapshot: cachedSnapshot.value });
+      }
+
+      // Establish the subscription base from a FRESH HTTP snapshot whenever the
+      // connection is prepared, then resume via `afterSequence` from that
+      // current sequence.
+      //
+      // We deliberately do NOT resume straight from the cached sequence. A device
+      // reconnecting after a long gap would otherwise have to replay the entire
+      // event backlog over the socket — every thread event (activity, message,
+      // turn…) becomes a shell upsert on the server — which on a slow/flaky link
+      // can fail to ever complete and freezes the thread list on the stale cache.
+      // Crucially this survives reloads: the cache (and thus the stale resume
+      // cursor) is persisted, so reloading just replays the same doomed catch-up.
+      // The full HTTP snapshot is a single gzip-compressible request off the
+      // socket, so the catch-up after it is trivial. Falls back to the cached
+      // snapshot, then the socket-embedded snapshot, when HTTP is unavailable.
+      // Overlapping/replayed events are deduped by sequence in applyItem.
+      const prepared = yield* SubscriptionRef.changes(supervisor.prepared).pipe(
+        Stream.filter(Option.isSome),
+        Stream.map((current) => current.value),
+        Stream.runHead,
+      );
+      const httpSnapshot = Option.isSome(prepared)
+        ? yield* snapshotLoader.load(prepared.value)
+        : Option.none<OrchestrationShellSnapshot>();
+      const base = Option.isSome(httpSnapshot) ? httpSnapshot : cachedSnapshot;
 
       if (Option.isSome(base)) {
         yield* applyItem({ kind: "snapshot", snapshot: base.value });
@@ -183,8 +190,13 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         onSome: (snapshot) => ({ afterSequence: snapshot.snapshotSequence }),
       });
 
+      // Resubscribe after an expected (application-level) failure instead of
+      // ending the stream, mirroring the per-thread subscription in threads.ts.
+      // Combined with the fresh-HTTP base above, the catch-up on each (re)connect
+      // stays small so it can actually complete.
       yield* subscribe(ORCHESTRATION_WS_METHODS.subscribeShell, subscribeInput, {
         onExpectedFailure: (cause) => setStreamError(Cause.squash(cause)),
+        retryExpectedFailureAfter: "250 millis",
       }).pipe(Stream.runForEach(applyItem));
     }),
   );
