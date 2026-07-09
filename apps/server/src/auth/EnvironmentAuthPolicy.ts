@@ -16,12 +16,16 @@ export class EnvironmentAuthPolicy extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
-  // A loopback bind is normally local-only, but with Tailscale Serve enabled the
-  // backend is reachable from other tailnet devices over HTTPS (Serve proxies the
-  // *.ts.net endpoint to 127.0.0.1), so it must be treated as remotely reachable
-  // to allow remote pairing.
+  // A loopback bind is normally local-only, but the backend can still be reached
+  // remotely when a proxy fronts it: Tailscale Serve (proxies the *.ts.net
+  // endpoint to 127.0.0.1), or an external trusted reverse proxy such as a
+  // Cloudflare Tunnel (`remoteReachable`). In those cases it must be treated as
+  // remotely reachable to allow remote pairing.
   const isRemoteReachable =
-    isWildcardHost(config.host) || !isLoopbackHost(config.host) || config.tailscaleServeEnabled;
+    isWildcardHost(config.host) ||
+    !isLoopbackHost(config.host) ||
+    config.tailscaleServeEnabled ||
+    config.remoteReachable;
 
   const policy =
     config.mode === "desktop"

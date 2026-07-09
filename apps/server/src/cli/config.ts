@@ -128,6 +128,10 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  remoteReachable: Config.boolean("T3CODE_REMOTE_REACHABLE").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
 });
 
 export interface CliServerFlags {
@@ -322,6 +326,10 @@ export const resolveServerConfig = (
       ),
       () => 443,
     );
+    const remoteReachable = Option.getOrElse(
+      Option.fromUndefinedOr(env.remoteReachable),
+      () => false,
+    );
     const staticDir = devUrl ? undefined : yield* ServerConfig.resolveStaticDir();
     const host = Option.getOrElse(
       resolveOptionPrecedence(
@@ -366,6 +374,7 @@ export const resolveServerConfig = (
       logWebSocketEvents,
       tailscaleServeEnabled,
       tailscaleServePort,
+      remoteReachable,
     };
 
     return config;

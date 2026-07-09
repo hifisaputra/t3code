@@ -75,6 +75,13 @@ export class ServerConfig extends Context.Service<
     readonly logWebSocketEvents: boolean;
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
+    /**
+     * Treat the backend as remotely reachable (so remote pairing works) even on
+     * a loopback bind, without configuring Tailscale Serve. Set this when running
+     * behind a trusted reverse proxy that terminates HTTPS and forwards to the
+     * loopback port (e.g. a Cloudflare Tunnel).
+     */
+    readonly remoteReachable: boolean;
   }
 >()("t3/config/ServerConfig") {
   /** @deprecated Import and use `layerTest` from this module. */
@@ -174,6 +181,7 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
     logWebSocketEvents: false,
     tailscaleServeEnabled: false,
     tailscaleServePort: 443,
+    remoteReachable: false,
     port: 0,
     host: undefined,
     desktopBootstrapToken: undefined,

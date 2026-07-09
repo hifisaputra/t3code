@@ -381,6 +381,7 @@ const buildAppUnderTest = (options?: {
       logWebSocketEvents: false,
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      remoteReachable: false,
       ...options?.config,
     };
     const layerConfig = ServerConfig.layer(config);
