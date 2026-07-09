@@ -26,6 +26,8 @@ import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
+/** Larger cap for base64 file downloads; bounds the size of a single websocket message. */
+const PROJECT_DOWNLOAD_FILE_MAX_BYTES = 50 * 1024 * 1024;
 
 export class WorkspaceFileSystemOperationError extends Schema.TaggedErrorClass<WorkspaceFileSystemOperationError>()(
   "WorkspaceFileSystemOperationError",
@@ -213,7 +215,11 @@ export const make = Effect.gen(function* () {
             });
           }
 
-          const bytesToRead = Math.min(stat.size, PROJECT_READ_FILE_MAX_BYTES);
+          // base64 mode (file download) reads raw bytes with a larger cap and
+          // allows binary; utf8 mode (editor/preview) caps small and rejects binary.
+          const isBase64 = input.encoding === "base64";
+          const maxBytes = isBase64 ? PROJECT_DOWNLOAD_FILE_MAX_BYTES : PROJECT_READ_FILE_MAX_BYTES;
+          const bytesToRead = Math.min(stat.size, maxBytes);
           const buffer = Buffer.alloc(bytesToRead);
           const { bytesRead } = yield* Effect.tryPromise({
             try: () => handle.read(buffer, 0, bytesToRead, 0),
@@ -228,7 +234,7 @@ export const make = Effect.gen(function* () {
               }),
           });
           const fileBytes = buffer.subarray(0, bytesRead);
-          if (fileBytes.includes(0)) {
+          if (!isBase64 && fileBytes.includes(0)) {
             return yield* new WorkspaceBinaryFileError({
               workspaceRoot: input.cwd,
               relativePath: input.relativePath,
@@ -238,9 +244,11 @@ export const make = Effect.gen(function* () {
 
           return {
             relativePath: target.relativePath,
-            contents: new TextDecoder("utf-8").decode(fileBytes),
+            contents: isBase64
+              ? Buffer.from(fileBytes).toString("base64")
+              : new TextDecoder("utf-8").decode(fileBytes),
             byteLength: stat.size,
-            truncated: stat.size > PROJECT_READ_FILE_MAX_BYTES,
+            truncated: stat.size > maxBytes,
           };
         }),
       (handle) =>
@@ -280,7 +288,11 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
-    yield* fileSystem.writeFileString(target.absolutePath, input.contents).pipe(
+    const writeOperation =
+      input.encoding === "base64"
+        ? fileSystem.writeFile(target.absolutePath, Buffer.from(input.contents, "base64"))
+        : fileSystem.writeFileString(target.absolutePath, input.contents);
+    yield* writeOperation.pipe(
       Effect.mapError(
         (cause) =>
           new WorkspaceFileSystemOperationError({

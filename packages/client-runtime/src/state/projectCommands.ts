@@ -102,5 +102,12 @@ export function createProjectEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.cwd, input.relativePath]),
       },
     }),
+    // One-shot read used for file downloads (typically base64). A command rather
+    // than a cached query atom so large binary payloads aren't retained in memory.
+    readFileForDownload: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:read-file-download",
+      tag: WS_METHODS.projectsReadFile,
+      scheduler: fileScheduler,
+    }),
   };
 }

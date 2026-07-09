@@ -12,6 +12,7 @@ import * as Schema from "effect/Schema";
 import type {
   FilesystemBrowseInput,
   FilesystemBrowseResult,
+  ProjectEntry,
   ProjectListEntriesInput,
   ProjectListEntriesResult,
   ProjectSearchEntriesInput,
@@ -96,6 +97,32 @@ export class WorkspaceEntries extends Context.Service<
     readonly refresh: (cwd: string) => Effect.Effect<void>;
   }
 >()("t3/workspace/WorkspaceEntries") {}
+
+/**
+ * `.env` files are almost always gitignored, so the workspace search index
+ * (which honors ignore rules) never surfaces them in the file tree. Detect the
+ * common `.env` / `.env.<name>` files so they can be merged back into a listing
+ * even though the index dropped them. `.env.example`-style files that aren't
+ * ignored are already indexed and get de-duplicated on merge.
+ */
+function isEnvFileName(name: string): boolean {
+  return name === ".env" || (name.startsWith(".env.") && name.length > ".env.".length);
+}
+
+const collectRootEnvEntries = Effect.fn("WorkspaceEntries.collectRootEnvEntries")(function* (
+  workspaceRoot: string,
+): Effect.fn.Return<ProjectEntry[]> {
+  const dirents = yield* Effect.tryPromise(() =>
+    NodeFSP.readdir(workspaceRoot, { withFileTypes: true }),
+  ).pipe(Effect.orElseSucceed(() => []));
+  const entries: ProjectEntry[] = [];
+  for (const dirent of dirents) {
+    if (dirent.isFile() && isEnvFileName(dirent.name)) {
+      entries.push({ path: dirent.name, kind: "file" });
+    }
+  }
+  return entries;
+});
 
 function expandHomePath(input: string, path: Path.Path): string {
   if (input === "~") {
@@ -244,10 +271,26 @@ export const make = Effect.gen(function* () {
   const list: WorkspaceEntries["Service"]["list"] = Effect.fn("WorkspaceEntries.list")(
     function* (input) {
       const normalizedCwd = yield* normalizeWorkspaceRoot(input.cwd);
-      return yield* Effect.gen(function* () {
+      const indexed = yield* Effect.gen(function* () {
         const searchIndex = yield* WorkspaceSearchIndex.WorkspaceSearchIndex;
         return yield* searchIndex.list();
       }).pipe(Effect.provide(workspaceSearchIndexes.get(normalizedCwd)));
+
+      const envEntries = yield* collectRootEnvEntries(normalizedCwd);
+      if (envEntries.length === 0) {
+        return indexed;
+      }
+      const indexedPaths = new Set(indexed.entries.map((entry) => entry.path));
+      const additions = envEntries.filter((entry) => !indexedPaths.has(entry.path));
+      if (additions.length === 0) {
+        return indexed;
+      }
+      return {
+        entries: [...indexed.entries, ...additions].toSorted((left, right) =>
+          left.path.localeCompare(right.path),
+        ),
+        truncated: indexed.truncated,
+      };
     },
   );
 

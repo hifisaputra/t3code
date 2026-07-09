@@ -166,6 +166,28 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
       }),
     );
 
+    it.effect("returns binary files as base64 when encoding is base64 (for download)", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const rawBytes = Uint8Array.from([0x00, 0x01, 0xff, 0x61, 0x62]);
+        yield* fileSystem.writeFile(path.join(cwd, "asset.bin"), rawBytes);
+
+        const result = yield* workspaceFileSystem.readFile({
+          cwd,
+          relativePath: "asset.bin",
+          encoding: "base64",
+        });
+
+        expect(result.contents).toBe(Buffer.from(rawBytes).toString("base64"));
+        expect(Array.from(Buffer.from(result.contents, "base64"))).toEqual(Array.from(rawBytes));
+        expect(result.byteLength).toBe(rawBytes.length);
+        expect(result.truncated).toBe(false);
+      }),
+    );
+
     it.effect("preserves the real cause and path for I/O failures", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -209,6 +231,29 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
 
         expect(result).toEqual({ relativePath: "plans/effect-rpc.md" });
         expect(saved).toBe("# Plan\n");
+      }),
+    );
+
+    it.effect("writes base64-encoded uploads as raw bytes", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        // Bytes that are not valid UTF-8 (includes a NUL and a lone 0xff).
+        const rawBytes = Uint8Array.from([0x00, 0x01, 0xff, 0x61, 0x62]);
+        const result = yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "assets/logo.bin",
+          contents: Buffer.from(rawBytes).toString("base64"),
+          encoding: "base64",
+        });
+        const saved = yield* fileSystem
+          .readFile(path.join(cwd, "assets/logo.bin"))
+          .pipe(Effect.orDie);
+
+        expect(result).toEqual({ relativePath: "assets/logo.bin" });
+        expect(Array.from(saved)).toEqual(Array.from(rawBytes));
       }),
     );
 

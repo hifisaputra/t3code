@@ -21,6 +21,7 @@ import { OpenInPicker } from "~/components/chat/OpenInPicker";
 import { useClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
+import { base64ToBytes } from "~/lib/base64";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { cn } from "~/lib/utils";
 import { isPreviewSupportedInRuntime } from "~/previewStateStore";
@@ -52,7 +53,12 @@ import { installFileEditorDismissal } from "./fileEditorDismissal";
 import { LocalCommentAnnotation } from "./LocalCommentAnnotation";
 import { projectFileCacheKey } from "./fileContentRevision";
 import { fileBreadcrumbs } from "./filePath";
-import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
+import {
+  imagePreviewMimeType,
+  isImagePreviewFile,
+  isMarkdownPreviewFile,
+  setMarkdownTaskChecked,
+} from "./filePreviewMode";
 import { FileSaveCoordinator } from "./fileSaveCoordinator";
 import {
   confirmProjectFileQueryData,
@@ -606,6 +612,107 @@ function initialExplorerOpen(): boolean {
   }
 }
 
+interface ImagePreviewState {
+  readonly url: string | null;
+  readonly error: string | null;
+  readonly isLoading: boolean;
+}
+
+/**
+ * Loads an image file's bytes over the workspace read RPC (base64) and exposes a
+ * temporary object URL for it. Revokes the URL when the path changes or unmounts.
+ */
+function useWorkspaceImageObjectUrl(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string | null,
+): ImagePreviewState {
+  const readForDownload = useAtomCommand(projectEnvironment.readFileForDownload, {
+    reportFailure: false,
+  });
+  const [state, setState] = useState<ImagePreviewState>({
+    url: null,
+    error: null,
+    isLoading: relativePath !== null,
+  });
+
+  useEffect(() => {
+    if (relativePath === null) {
+      setState({ url: null, error: null, isLoading: false });
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setState({ url: null, error: null, isLoading: true });
+    void (async () => {
+      const result = await readForDownload({
+        environmentId,
+        input: { cwd, relativePath, encoding: "base64" },
+      });
+      if (cancelled) return;
+      if (result._tag !== "Success") {
+        setState({ url: null, error: "Unable to load image.", isLoading: false });
+        return;
+      }
+      if (result.value.truncated) {
+        setState({
+          url: null,
+          error: "Image is too large to preview (over 50MB).",
+          isLoading: false,
+        });
+        return;
+      }
+      const mimeType = imagePreviewMimeType(relativePath) ?? "application/octet-stream";
+      objectUrl = URL.createObjectURL(
+        new Blob([base64ToBytes(result.value.contents)], { type: mimeType }),
+      );
+      setState({ url: objectUrl, error: null, isLoading: false });
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [cwd, environmentId, readForDownload, relativePath]);
+
+  return state;
+}
+
+function ImagePreviewSurface({
+  environmentId,
+  cwd,
+  relativePath,
+}: {
+  environmentId: EnvironmentId;
+  cwd: string;
+  relativePath: string;
+}) {
+  const { url, error, isLoading } = useWorkspaceImageObjectUrl(environmentId, cwd, relativePath);
+
+  if (error !== null) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive">
+        {error}
+      </div>
+    );
+  }
+  if (isLoading || url === null) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
+        <LoaderCircle className="size-5 animate-spin" />
+      </div>
+    );
+  }
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-muted/20 p-4">
+      <img
+        src={url}
+        alt={relativePath}
+        className="max-h-full max-w-full object-contain shadow-sm"
+      />
+    </div>
+  );
+}
+
 export default function FilePreviewPanel({
   environmentId,
   cwd,
@@ -630,7 +737,9 @@ export default function FilePreviewPanel({
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
   });
-  const file = useProjectFileQuery(environmentId, cwd, relativePath);
+  const isImage = relativePath !== null && isImagePreviewFile(relativePath);
+  // Images are rendered by ImagePreviewSurface; skip the text read (it would reject the binary).
+  const file = useProjectFileQuery(environmentId, cwd, isImage ? null : relativePath);
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
   const [markdownView, setMarkdownView] = useState<{
     path: string | null;
@@ -818,7 +927,14 @@ export default function FilePreviewPanel({
             relativePath ? "flex" : "hidden",
           )}
         >
-          {relativePath && file.error && file.data === null ? (
+          {relativePath && isImage ? (
+            <ImagePreviewSurface
+              key={relativePath}
+              environmentId={environmentId}
+              cwd={cwd}
+              relativePath={relativePath}
+            />
+          ) : relativePath && file.error && file.data === null ? (
             <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-destructive">
               {file.error}
             </div>

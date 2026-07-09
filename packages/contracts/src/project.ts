@@ -116,9 +116,19 @@ export class ProjectListEntriesError extends Schema.TaggedErrorClass<ProjectList
   }
 }
 
+export const ProjectReadFileEncoding = Schema.Literals(["utf8", "base64"]);
+export type ProjectReadFileEncoding = typeof ProjectReadFileEncoding.Type;
+
 export const ProjectReadFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_READ_FILE_PATH_MAX_LENGTH)),
+  /**
+   * How `contents` should be encoded in the result. `utf8` (the default) returns
+   * text and rejects binary files — used by the editor/preview. `base64` returns
+   * the raw bytes base64-encoded and allows binary files with a larger size cap —
+   * used to download a file to the client.
+   */
+  encoding: Schema.optional(ProjectReadFileEncoding),
 });
 export type ProjectReadFileInput = typeof ProjectReadFileInput.Type;
 
@@ -187,10 +197,19 @@ export class ProjectReadFileError extends Schema.TaggedErrorClass<ProjectReadFil
   }
 }
 
+export const ProjectWriteFileEncoding = Schema.Literals(["utf8", "base64"]);
+export type ProjectWriteFileEncoding = typeof ProjectWriteFileEncoding.Type;
+
 export const ProjectWriteFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
   contents: Schema.String,
+  /**
+   * How `contents` is encoded. `utf8` (the default) writes the string as text;
+   * `base64` decodes it to raw bytes first, so binary uploads round-trip
+   * without corruption.
+   */
+  encoding: Schema.optional(ProjectWriteFileEncoding),
 });
 export type ProjectWriteFileInput = typeof ProjectWriteFileInput.Type;
 

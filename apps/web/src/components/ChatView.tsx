@@ -2774,16 +2774,24 @@ function ChatViewContent(props: ChatViewProps) {
     useRightPanelStore.getState().open(activeThreadRef, "diff");
     onDiffPanelOpen?.();
   }, [activeThreadRef, isGitRepo, isServerThread, onDiffPanelOpen]);
+  // Open the file manager / a file full screen by default (chat column collapses
+  // to w-0). Skipped in the inline/mobile sheet layout where maximize doesn't apply.
+  const maximizeRightPanelByDefault = useCallback(() => {
+    if (shouldUsePlanSidebarSheet) return;
+    setMaximizedRightPanelThreadKey(routeThreadKey);
+  }, [routeThreadKey, shouldUsePlanSidebarSheet]);
   const addFilesSurface = useCallback(() => {
     if (!activeThreadRef || !activeProject) return;
     useRightPanelStore.getState().open(activeThreadRef, "files");
-  }, [activeProject, activeThreadRef]);
+    maximizeRightPanelByDefault();
+  }, [activeProject, activeThreadRef, maximizeRightPanelByDefault]);
   const openFileSurface = useCallback(
     (relativePath: string) => {
       if (!activeThreadRef || !activeProject) return;
       useRightPanelStore.getState().openFile(activeThreadRef, relativePath);
+      maximizeRightPanelByDefault();
     },
-    [activeProject, activeThreadRef],
+    [activeProject, activeThreadRef, maximizeRightPanelByDefault],
   );
   const togglePreviewPanel = useCallback(() => {
     if (!activeThreadRef || !isPreviewSupportedInRuntime()) return;

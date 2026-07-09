@@ -116,6 +116,31 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         expect(result.truncated).toBe(false);
       }),
     );
+
+    it.effect("surfaces gitignored root .env files that the index drops", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-env-", git: true });
+        yield* writeTextFile(cwd, ".gitignore", ".env\n.env.*\n!.env.example\n");
+        yield* writeTextFile(cwd, "src/index.ts", "export {};\n");
+        yield* writeTextFile(cwd, ".env", "SECRET=1\n");
+        yield* writeTextFile(cwd, ".env.local", "LOCAL=1\n");
+        yield* writeTextFile(cwd, ".env.example", "SECRET=\n");
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const listed = yield* workspaceEntries.list({ cwd });
+        const listedPaths = listed.entries.map((entry) => entry.path);
+
+        // Gitignored .env files are merged back into the tree listing.
+        expect(listedPaths).toContain(".env");
+        expect(listedPaths).toContain(".env.local");
+        // The non-ignored example file is indexed and must not be duplicated by the merge.
+        expect(listedPaths.filter((entryPath) => entryPath === ".env.example")).toHaveLength(1);
+
+        // Sanity check: the raw ignore-honoring index still omits the gitignored .env.
+        const searched = yield* searchWorkspaceEntries({ cwd, query: "", limit: 100 });
+        expect(searched.entries.map((entry) => entry.path)).not.toContain(".env");
+      }),
+    );
   });
 
   describe("search", () => {
