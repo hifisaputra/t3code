@@ -37,7 +37,11 @@ import {
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
-import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
+import {
+  projectScriptCwd,
+  projectScriptRuntimeEnv,
+  resolveProjectScriptCwd,
+} from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import { nextTerminalId, resolveTerminalSessionLabel } from "@t3tools/shared/terminalLabels";
 import { Debouncer } from "@tanstack/react-pacer";
@@ -56,6 +60,7 @@ import {
 import { useNavigate } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import {
+  executeAtomQuery,
   isAtomCommandInterrupted,
   mapAtomCommandResult,
   settlePromise,
@@ -63,6 +68,7 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
@@ -145,9 +151,20 @@ import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybinding
 import { type NewProjectScriptInput } from "./ProjectScriptsControl";
 import {
   commandForProjectScript,
+  detectScriptRunner,
   nextProjectScriptId,
+  parsePackageScripts,
+  parseWorkspacePackageScripts,
   projectScriptIdFromCommand,
+  workspaceGlobsFromPackageJson,
+  workspaceGlobsFromPnpmWorkspaceYaml,
+  type PackageScriptSuggestion,
 } from "~/projectScripts";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import {
+  getProjectEntriesQueryAtom,
+  getProjectFileQueryAtom,
+} from "./files/projectFilesQueryState";
 import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
 import { useEnvironmentSettings } from "../hooks/useSettings";
@@ -332,6 +349,8 @@ function formatOutgoingPrompt(params: {
 }
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
+// Cap how many workspace package.json manifests we read when auto-detecting scripts.
+const MAX_WORKSPACE_PACKAGES = 100;
 
 type ChatViewProps =
   | {
@@ -2452,7 +2471,8 @@ function ChatViewContent(props: ChatViewProps) {
           return { ...current, [activeProject.id]: script.id };
         });
       }
-      const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
+      const baseCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
+      const targetCwd = resolveProjectScriptCwd(baseCwd, script.cwd);
       const baseTerminalId =
         terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
       const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
@@ -2594,6 +2614,75 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [environmentId, updateProject, upsertKeybinding],
   );
+  const loadPackageScripts = useCallback(async (): Promise<PackageScriptSuggestion[]> => {
+    if (!activeProject) return [];
+    const cwd = activeProject.workspaceRoot;
+
+    const readText = async (relativePath: string): Promise<string | null> => {
+      const result = await executeAtomQuery(
+        appAtomRegistry,
+        getProjectFileQueryAtom(environmentId, cwd, relativePath),
+        { reportDefect: false, reportFailure: false },
+      );
+      return Option.getOrNull(AsyncResult.value(result))?.contents ?? null;
+    };
+
+    const rootManifest = await readText("package.json");
+    if (rootManifest === null) return [];
+
+    const suggestions = parsePackageScripts(rootManifest);
+
+    // Gather workspace globs from package.json `workspaces` and pnpm-workspace.yaml.
+    const globs = new Set(workspaceGlobsFromPackageJson(rootManifest));
+    const pnpmWorkspace = await readText("pnpm-workspace.yaml");
+    if (pnpmWorkspace) {
+      for (const glob of workspaceGlobsFromPnpmWorkspaceYaml(pnpmWorkspace)) globs.add(glob);
+    }
+    if (globs.size === 0) return suggestions;
+
+    // The workspace listing is a recursive, gitignore-aware tree, so resolve globs against it
+    // rather than listing each base directory separately.
+    const listing = await executeAtomQuery(
+      appAtomRegistry,
+      getProjectEntriesQueryAtom(environmentId, cwd),
+      { reportDefect: false, reportFailure: false },
+    );
+    const directoryPaths = (Option.getOrNull(AsyncResult.value(listing))?.entries ?? [])
+      .filter((entry) => entry.kind === "directory")
+      .map((entry) => entry.path.replace(/\/+$/, ""));
+
+    const candidateDirs = new Set<string>();
+    for (const raw of globs) {
+      const glob = raw.trim().replace(/\/+$/, "");
+      if (glob.length === 0 || glob.startsWith("!")) continue;
+      const starIndex = glob.indexOf("*");
+      if (starIndex === -1) {
+        candidateDirs.add(glob);
+        continue;
+      }
+      // Glob like `packages/*`: match direct children of the base directory.
+      const base = glob.slice(0, starIndex).replace(/\/+$/, "");
+      for (const dir of directoryPaths) {
+        if (base.length === 0) {
+          if (!dir.includes("/")) candidateDirs.add(dir);
+        } else if (dir.startsWith(`${base}/`)) {
+          const remainder = dir.slice(base.length + 1);
+          if (remainder.length > 0 && !remainder.includes("/")) candidateDirs.add(dir);
+        }
+      }
+    }
+
+    const runner = detectScriptRunner(rootManifest);
+    const workspaceSuggestions = await Promise.all(
+      [...candidateDirs].slice(0, MAX_WORKSPACE_PACKAGES).map(async (dir) => {
+        const manifest = await readText(`${dir}/package.json`);
+        return manifest ? parseWorkspacePackageScripts(manifest, dir, runner) : [];
+      }),
+    );
+    for (const list of workspaceSuggestions) suggestions.push(...list);
+    return suggestions;
+  }, [activeProject, environmentId]);
+
   const saveProjectScript = useCallback(
     async (input: NewProjectScriptInput): Promise<AtomCommandResult<void, unknown>> => {
       if (!activeProject) {
@@ -2609,6 +2698,7 @@ function ChatViewContent(props: ChatViewProps) {
         command: input.command,
         icon: input.icon,
         runOnWorktreeCreate: input.runOnWorktreeCreate,
+        ...(input.cwd ? { cwd: input.cwd } : {}),
       };
       const nextScripts = input.runOnWorktreeCreate
         ? [
@@ -2643,12 +2733,14 @@ function ChatViewContent(props: ChatViewProps) {
         return AsyncResult.failure(Cause.fail(new Error("Script not found.")));
       }
 
+      const { cwd: _previousCwd, ...restExistingScript } = existingScript;
       const updatedScript: ProjectScript = {
-        ...existingScript,
+        ...restExistingScript,
         name: input.name,
         command: input.command,
         icon: input.icon,
         runOnWorktreeCreate: input.runOnWorktreeCreate,
+        ...(input.cwd ? { cwd: input.cwd } : {}),
       };
       const nextScripts = activeProject.scripts.map((script) =>
         script.id === scriptId
@@ -5061,6 +5153,7 @@ function ChatViewContent(props: ChatViewProps) {
             onAddProjectScript={saveProjectScript}
             onUpdateProjectScript={updateProjectScript}
             onDeleteProjectScript={deleteProjectScript}
+            onLoadProjectPackageScripts={loadPackageScripts}
           />
         </header>
 
