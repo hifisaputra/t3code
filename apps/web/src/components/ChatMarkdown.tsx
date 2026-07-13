@@ -80,8 +80,10 @@ import {
   isBrowserPreviewFile,
   openFileInPreview,
   openUrlInPreview,
+  resolveWorkspaceFileAssetUrl,
   BrowserPreviewUnavailableError,
 } from "../browser/openFileInPreview";
+import { isElectron } from "../env";
 
 class CodeHighlightErrorBoundary extends React.Component<
   { fallback: ReactNode; children: ReactNode },
@@ -1316,10 +1318,37 @@ function ChatMarkdown({
           ),
         );
       }
+      const httpBaseUrl = preparedConnection.value.httpBaseUrl;
+      if (!isElectron) {
+        // There is no in-app browser on web, so open the backend-served file in
+        // a new tab. Open the tab synchronously (still within the click gesture)
+        // so it isn't blocked as a popup, then point it at the resolved asset
+        // URL once it's available.
+        const tab = typeof window === "undefined" ? null : window.open("", "_blank");
+        if (tab) tab.opener = null;
+        return (async () => {
+          const assetUrlResult = await resolveWorkspaceFileAssetUrl({
+            threadRef,
+            filePath: path,
+            httpBaseUrl,
+            createAssetUrl,
+          });
+          if (assetUrlResult._tag === "Failure") {
+            tab?.close();
+            return assetUrlResult;
+          }
+          if (tab) {
+            tab.location.href = assetUrlResult.value;
+          } else {
+            window.open(assetUrlResult.value, "_blank", "noopener,noreferrer");
+          }
+          return AsyncResult.success(undefined);
+        })();
+      }
       return openFileInPreview({
         threadRef,
         filePath: path,
-        httpBaseUrl: preparedConnection.value.httpBaseUrl,
+        httpBaseUrl,
         createAssetUrl,
         openPreview,
       });
@@ -1474,9 +1503,7 @@ function ChatMarkdown({
             threadRef={threadRef}
             onOpen={openInPreferredEditor}
             onOpenInBrowser={
-              threadRef &&
-              isPreviewSupportedInRuntime() &&
-              isBrowserPreviewFile(fileLinkMeta.filePath)
+              threadRef && isBrowserPreviewFile(fileLinkMeta.filePath)
                 ? () => openMarkdownFileInPreview(fileLinkMeta.filePath)
                 : undefined
             }

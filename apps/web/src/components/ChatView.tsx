@@ -134,6 +134,7 @@ import {
   useThreadPreviewState,
 } from "../previewStateStore";
 import { addBrowserSurface } from "./preview/addBrowserSurface";
+import { openUrlInPreview } from "../browser/openFileInPreview";
 import { closePreviewSession } from "./preview/closePreviewSession";
 import { subscribePreviewAction } from "./preview/previewActionBus";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
@@ -2471,6 +2472,14 @@ function ChatViewContent(props: ChatViewProps) {
           return { ...current, [activeProject.id]: script.id };
         });
       }
+      // When the action opts into auto-opening its preview, do it on web here —
+      // synchronously, still within the run click gesture, so the new tab isn't
+      // blocked as a popup. The desktop in-app preview is opened further below,
+      // once the terminal has started. (autoOpenPreview is only ever persisted
+      // together with a previewUrl, but guard on both to be safe.)
+      if (!isElectron && script.autoOpenPreview && script.previewUrl) {
+        window.open(script.previewUrl, "_blank", "noopener,noreferrer");
+      }
       const baseCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
       const targetCwd = resolveProjectScriptCwd(baseCwd, script.cwd);
       const baseTerminalId =
@@ -2552,6 +2561,17 @@ function ChatViewContent(props: ChatViewProps) {
           error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
         );
       }
+
+      // On desktop, auto-open the configured preview in the in-app browser now
+      // that the action's terminal is running. (The web path opened a new tab
+      // above, before any await, to survive popup blocking.)
+      if (isElectron && script.autoOpenPreview && script.previewUrl) {
+        void openUrlInPreview({
+          threadRef: activeThreadRef,
+          url: script.previewUrl,
+          openPreview,
+        });
+      }
     },
     [
       activeProject,
@@ -2566,6 +2586,7 @@ function ChatViewContent(props: ChatViewProps) {
       setLastInvokedScriptByProjectId,
       environmentId,
       openTerminal,
+      openPreview,
       activeKnownTerminalIds,
       runningTerminalIds,
       terminalUiState.activeTerminalId,
@@ -2699,6 +2720,8 @@ function ChatViewContent(props: ChatViewProps) {
         icon: input.icon,
         runOnWorktreeCreate: input.runOnWorktreeCreate,
         ...(input.cwd ? { cwd: input.cwd } : {}),
+        ...(input.previewUrl ? { previewUrl: input.previewUrl } : {}),
+        ...(input.previewUrl && input.autoOpenPreview ? { autoOpenPreview: true } : {}),
       };
       const nextScripts = input.runOnWorktreeCreate
         ? [
@@ -2733,7 +2756,12 @@ function ChatViewContent(props: ChatViewProps) {
         return AsyncResult.failure(Cause.fail(new Error("Script not found.")));
       }
 
-      const { cwd: _previousCwd, ...restExistingScript } = existingScript;
+      const {
+        cwd: _previousCwd,
+        previewUrl: _previousPreviewUrl,
+        autoOpenPreview: _previousAutoOpenPreview,
+        ...restExistingScript
+      } = existingScript;
       const updatedScript: ProjectScript = {
         ...restExistingScript,
         name: input.name,
@@ -2741,6 +2769,8 @@ function ChatViewContent(props: ChatViewProps) {
         icon: input.icon,
         runOnWorktreeCreate: input.runOnWorktreeCreate,
         ...(input.cwd ? { cwd: input.cwd } : {}),
+        ...(input.previewUrl ? { previewUrl: input.previewUrl } : {}),
+        ...(input.previewUrl && input.autoOpenPreview ? { autoOpenPreview: true } : {}),
       };
       const nextScripts = activeProject.scripts.map((script) =>
         script.id === scriptId

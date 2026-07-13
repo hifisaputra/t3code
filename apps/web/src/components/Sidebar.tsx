@@ -90,6 +90,7 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../termina
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
 import { openDiscoveredPort } from "./preview/openDiscoveredPort";
+import { resolveDiscoveredServerUrl } from "../browser/browserTargetResolver";
 import { useAtomCommand } from "../state/use-atom-command";
 import { previewEnvironment } from "../state/preview";
 import {
@@ -422,6 +423,13 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     ),
   );
   const threadProjectCwd = threadProject?.workspaceRoot ?? null;
+  // A user-configured action preview URL (e.g. a publicly reachable dev-server
+  // address) is preferred over the raw discovered localhost port when opening
+  // the preview on web, where the backend's own loopback is not reachable.
+  const configuredPreviewUrl = useMemo(
+    () => threadProject?.scripts.find((script) => script.previewUrl)?.previewUrl ?? null,
+    [threadProject],
+  );
   const gitCwd = thread.worktreePath ?? threadProjectCwd ?? props.projectCwd;
   const gitStatus = useEnvironmentQuery(
     thread.branch != null && gitCwd !== null
@@ -439,6 +447,18 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
       event.preventDefault();
       event.stopPropagation();
       navigateToThread(threadRef);
+      // The in-app preview browser only renders on the desktop build. On web,
+      // open the preview in a new browser tab instead. Prefer the action's
+      // configured preview URL (reachable remotely) over the backend's own
+      // localhost port, which the remote browser cannot reach. Do this
+      // synchronously within the click handler so the user gesture is preserved
+      // and the tab isn't blocked as a popup.
+      if (!isElectron) {
+        const url =
+          configuredPreviewUrl ?? resolveDiscoveredServerUrl(threadRef.environmentId, port.url);
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
       void (async () => {
         const result = await openDiscoveredPort({ threadRef, port, openPreview });
         if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
@@ -455,8 +475,12 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
         );
       })();
     },
-    [discoveredPorts, navigateToThread, openPreview, threadRef],
+    [configuredPreviewUrl, discoveredPorts, navigateToThread, openPreview, threadRef],
   );
+  const usesConfiguredPreviewGlobe = !isElectron && configuredPreviewUrl !== null;
+  const previewGlobeTarget = usesConfiguredPreviewGlobe
+    ? configuredPreviewUrl
+    : `localhost:${discoveredPorts[0]?.port ?? ""}`;
   const isThreadRunning =
     thread.session?.status === "running" && thread.session.activeTurnId != null;
   const threadStatus = resolveThreadStatusPill({
@@ -745,7 +769,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 render={
                   <button
                     type="button"
-                    aria-label={`Open localhost:${discoveredPorts[0]?.port ?? ""}`}
+                    aria-label={`Open ${previewGlobeTarget}`}
                     className="inline-flex cursor-pointer items-center justify-center text-emerald-600 outline-hidden focus-visible:ring-1 focus-visible:ring-ring dark:text-emerald-400"
                     onClick={handleOpenDiscoveredPort}
                   />
@@ -754,8 +778,10 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 <Globe2Icon className="size-3" />
               </TooltipTrigger>
               <TooltipPopup side="top">
-                Open localhost:{discoveredPorts[0]?.port}
-                {discoveredPorts.length > 1 ? ` (+${discoveredPorts.length - 1})` : ""}
+                Open {previewGlobeTarget}
+                {!usesConfiguredPreviewGlobe && discoveredPorts.length > 1
+                  ? ` (+${discoveredPorts.length - 1})`
+                  : ""}
               </TooltipPopup>
             </Tooltip>
           )}
