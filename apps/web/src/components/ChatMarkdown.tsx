@@ -15,6 +15,7 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import React, {
@@ -1230,6 +1231,102 @@ function areMarkdownFileLinkPropsEqual(
   );
 }
 
+type WorkspaceImageUrlResolver = (filePath: string) => Promise<string | null>;
+
+interface WorkspaceMarkdownImageProps extends React.ComponentProps<"img"> {
+  filePath: string;
+  displayPath: string;
+  alt: string;
+  resolveUrl: WorkspaceImageUrlResolver;
+}
+
+/**
+ * Renders a workspace-relative markdown image (`![alt](./shot.png)`) by minting a
+ * signed, backend-served asset URL for it. Asset tokens are short-lived, so the URL
+ * is resolved at render time rather than baked into the message text.
+ */
+const WorkspaceMarkdownImage = memo(function WorkspaceMarkdownImage({
+  filePath,
+  displayPath,
+  alt,
+  resolveUrl,
+  className,
+  ...props
+}: WorkspaceMarkdownImageProps) {
+  const [assetUrl, setAssetUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAssetUrl(null);
+    setFailed(false);
+    void (async () => {
+      try {
+        const url = await resolveUrl(filePath);
+        if (cancelled) return;
+        if (url === null) {
+          setFailed(true);
+          return;
+        }
+        setAssetUrl(url);
+      } catch (cause) {
+        if (cancelled) return;
+        reportMarkdownActionFailure(
+          { operation: "resolve-markdown-image", target: filePath },
+          cause,
+        );
+        setFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [filePath, resolveUrl]);
+
+  // Unresolvable (missing file, disconnected environment, expired token) — degrade to
+  // the alt text rather than a broken-image icon.
+  if (failed) {
+    return (
+      <span className="chat-markdown-image-fallback text-xs text-muted-foreground">
+        {alt || displayPath}
+      </span>
+    );
+  }
+
+  if (assetUrl === null) {
+    return (
+      <span
+        className="chat-markdown-image-loading inline-block h-4 w-24 animate-pulse rounded-sm bg-muted align-middle"
+        aria-busy="true"
+        aria-label={alt || displayPath}
+      />
+    );
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <img
+            {...props}
+            src={assetUrl}
+            alt={alt}
+            loading="lazy"
+            className={cn(
+              "chat-markdown-image my-2 h-auto max-w-full rounded-md border border-border/60",
+              className,
+            )}
+            onError={() => setFailed(true)}
+          />
+        }
+      />
+      <TooltipPopup side="top" className="font-mono text-[11px] leading-tight">
+        {displayPath}
+      </TooltipPopup>
+    </Tooltip>
+  );
+});
+
 function ChatMarkdown({
   text,
   cwd,
@@ -1355,8 +1452,68 @@ function ChatMarkdown({
     },
     [createAssetUrl, openPreview, preparedConnection, threadRef],
   );
+  /**
+   * Mint a signed asset URL for a workspace image, or null when it can't be served
+   * (no thread context, disconnected environment, or the path escapes the workspace
+   * root — the backend rejects those).
+   */
+  const resolveWorkspaceImageUrl = useCallback<WorkspaceImageUrlResolver>(
+    async (filePath) => {
+      if (!threadRef || preparedConnection._tag === "None") return null;
+      const result = await resolveWorkspaceFileAssetUrl({
+        threadRef,
+        filePath,
+        httpBaseUrl: preparedConnection.value.httpBaseUrl,
+        createAssetUrl,
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          reportMarkdownActionFailure(
+            { operation: "resolve-markdown-image", target: filePath },
+            result.cause,
+          );
+        }
+        return null;
+      }
+      return result.value;
+    },
+    [createAssetUrl, preparedConnection, threadRef],
+  );
+  const canRenderWorkspaceImages = Boolean(threadRef) && preparedConnection._tag === "Some";
   const markdownComponents = useMemo<Components>(
     () => ({
+      img({ node: _node, src, alt, ...props }) {
+        const altText = alt ?? "";
+        const rawSrc = typeof src === "string" ? src : "";
+        // Only workspace-relative paths are rewritten; http(s) images already render
+        // natively and are left untouched.
+        const imageMeta = rawSrc
+          ? resolveMarkdownFileLinkMeta(normalizeMarkdownLinkHrefKey(rawSrc), cwd)
+          : null;
+        if (
+          !imageMeta ||
+          !canRenderWorkspaceImages ||
+          !isWorkspaceImagePreviewPath(imageMeta.filePath)
+        ) {
+          // The sanitizer drops disallowed protocols (data:, javascript:) by removing
+          // `src` entirely — keep it absent rather than emitting src="", which makes
+          // browsers re-request the current page.
+          return rawSrc ? (
+            <img {...props} src={rawSrc} alt={altText} />
+          ) : (
+            <img {...props} alt={altText} />
+          );
+        }
+        return (
+          <WorkspaceMarkdownImage
+            {...props}
+            filePath={imageMeta.filePath}
+            displayPath={imageMeta.displayPath}
+            alt={altText || imageMeta.basename}
+            resolveUrl={resolveWorkspaceImageUrl}
+          />
+        );
+      },
       p({ node: _node, children, ...props }) {
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
@@ -1547,6 +1704,8 @@ function ChatMarkdown({
       },
     }),
     [
+      canRenderWorkspaceImages,
+      cwd,
       diffThemeName,
       fileLinkParentSuffixByPath,
       isStreaming,
@@ -1556,6 +1715,7 @@ function ChatMarkdown({
       openExternalLinkInPreview,
       openMarkdownFileInPreview,
       resolvedTheme,
+      resolveWorkspaceImageUrl,
       skills,
       text,
       threadRef,
