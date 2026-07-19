@@ -87,6 +87,7 @@ import { ContextWindowMeter } from "./ContextWindowMeter";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../pierre-icons";
 import { cn, randomUUID } from "~/lib/utils";
+import { compressComposerImage } from "~/lib/imageCompression";
 import { Separator } from "../ui/separator";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -95,6 +96,7 @@ import { toastManager } from "../ui/toast";
 import {
   BotIcon,
   CircleAlertIcon,
+  ImagePlusIcon,
   ListTodoIcon,
   PencilRulerIcon,
   type LucideIcon,
@@ -899,6 +901,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const mobileComposerExpandReleaseFrameRef = useRef<number | null>(null);
   const mobileComposerExpandInFlightRef = useRef(false);
   const dragDepthRef = useRef(0);
+  const composerImageInputRef = useRef<HTMLInputElement>(null);
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -1760,7 +1763,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Callbacks: images
   // ------------------------------------------------------------------
-  const addComposerImages = (files: File[]) => {
+  const addComposerImages = async (files: File[]) => {
     if (!activeThreadId || files.length === 0) return;
     if (pendingUserInputs.length > 0) {
       toastManager.add({
@@ -1769,10 +1772,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       return;
     }
+    // Compress image files up-front. A fullscreen screenshot as PNG blows both
+    // the localStorage draft quota and the WebSocket send-frame limit; WebP
+    // re-encoding shrinks it enough to travel reliably. Non-images and any
+    // compression failures pass through unchanged (see imageCompression.ts).
+    const prepared = await Promise.all(
+      files.map((file) =>
+        file.type.startsWith("image/") ? compressComposerImage(file) : Promise.resolve(file),
+      ),
+    );
+    // `addComposerImages` is async now; bail if the thread went away while we
+    // were encoding.
+    if (!activeThreadId) return;
     const nextImages: ComposerImageAttachment[] = [];
     let nextImageCount = composerImagesRef.current.length;
     let error: string | null = null;
-    for (const file of files) {
+    for (const file of prepared) {
       if (!file.type.startsWith("image/")) {
         error = `Unsupported file type for '${file.name}'. Please attach image files only.`;
         continue;
@@ -1818,7 +1833,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
     if (imageFiles.length === 0) return;
     event.preventDefault();
-    addComposerImages(imageFiles);
+    void addComposerImages(imageFiles);
+  };
+
+  const onComposerImageFilesSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const files = Array.from(input.files ?? []);
+    // Reset immediately so selecting the same file twice in a row still fires
+    // onChange.
+    input.value = "";
+    if (files.length === 0) return;
+    void addComposerImages(files);
+    focusComposer();
+  };
+
+  const openComposerImagePicker = () => {
+    composerImageInputRef.current?.click();
   };
 
   const onComposerDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
@@ -1852,7 +1882,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     dragDepthRef.current = 0;
     setIsDragOverComposer(false);
     const files = Array.from(event.dataTransfer.files);
-    addComposerImages(files);
+    void addComposerImages(files);
     focusComposer();
   };
   const handleInterruptPrimaryAction = useCallback(() => {
@@ -2470,6 +2500,34 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               )}
             >
               <div className="-m-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <input
+                  ref={composerImageInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  tabIndex={-1}
+                  aria-hidden="true"
+                  onChange={onComposerImageFilesSelected}
+                />
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="shrink-0 text-muted-foreground/70 hover:text-foreground/80"
+                        aria-label="Attach image"
+                        disabled={!activeThreadId || pendingUserInputs.length > 0}
+                        onClick={openComposerImagePicker}
+                      />
+                    }
+                  >
+                    <ImagePlusIcon />
+                  </TooltipTrigger>
+                  <TooltipPopup side="top">Attach image</TooltipPopup>
+                </Tooltip>
                 <ProviderModelPicker
                   compact={isComposerFooterCompact}
                   activeInstanceId={selectedInstanceId}
