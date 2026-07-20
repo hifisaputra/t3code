@@ -328,10 +328,17 @@ function EditableFileSurface({
     relativePath,
     onPendingChange,
   });
+  // The editor owns the buffer while the user types. Its onChange writes contents back into the
+  // file atom, which re-renders this component with those same contents; deriving the <File>
+  // cacheKey from them would make every keystroke look like an external document swap, and the
+  // editor answers that by rebuilding its TextDocument and wiping the caret. Track what the
+  // editor last emitted so we can tell our own echo apart from a genuine external revision.
+  const editorContentsRef = useRef<string | null>(null);
   const editor = useMemo(
     () =>
       new Editor<FileCommentAnnotationGroup>({
         onChange: (file, nextLineAnnotations) => {
+          editorContentsRef.current = file.contents;
           setProjectFileQueryData(environmentId, cwd, relativePath, file.contents);
           saveCoordinator.change(file.contents);
           if (nextLineAnnotations) {
@@ -502,6 +509,24 @@ function EditableFileSurface({
     [onPostRender, selectedRange],
   );
 
+  // Pin the file object to the last externally-loaded revision. While the incoming contents are
+  // just the editor's own edits round-tripping through the atom, we hand back the identical
+  // object so the editor keeps its live buffer, selection and caret. A revision that did not
+  // come from this editor (reload from disk, checkout, external write) produces a fresh object
+  // and the reset is then the correct behaviour.
+  const pinnedFileRef = useRef<{ name: string; contents: string; cacheKey: string } | null>(null);
+  const pinnedFile = pinnedFileRef.current;
+  const file =
+    pinnedFile !== null &&
+    (contents === pinnedFile.contents || contents === editorContentsRef.current)
+      ? pinnedFile
+      : {
+          name: relativePath,
+          contents,
+          cacheKey: projectFileCacheKey(cwd, relativePath, contents),
+        };
+  pinnedFileRef.current = file;
+
   return (
     <EditorProvider editor={editor}>
       <div ref={surfaceRef} className="flex min-h-0 flex-1">
@@ -513,11 +538,7 @@ function EditableFileSurface({
           }}
         >
           <File<FileCommentAnnotationGroup>
-            file={{
-              name: relativePath,
-              contents,
-              cacheKey: projectFileCacheKey(cwd, relativePath, contents),
-            }}
+            file={file}
             options={{
               disableFileHeader: true,
               enableGutterUtility: !hasOpenCommentForm,
