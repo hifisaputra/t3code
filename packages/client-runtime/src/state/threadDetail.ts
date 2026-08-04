@@ -22,6 +22,61 @@ const EMPTY_ACTIVITIES: ReadonlyArray<OrchestrationThreadActivity> = Object.free
 const EMPTY_PROPOSED_PLANS: ReadonlyArray<OrchestrationProposedPlan> = Object.freeze([]);
 const EMPTY_CHECKPOINTS: ReadonlyArray<OrchestrationCheckpointSummary> = Object.freeze([]);
 
+interface ThreadLifecycle {
+  readonly session: OrchestrationSession | null;
+  readonly latestTurn: OrchestrationLatestTurn | null;
+}
+
+/**
+ * True when ISO timestamp `a` is strictly later than `b`. Both are server-stamped
+ * so they share a clock; parse to epoch millis so mixed second/millisecond
+ * precision (e.g. `…:00Z` vs `…:00.500Z`) orders correctly instead of by the
+ * lexical accident that `Z` > `.`. Unparseable input falls back to lexical order,
+ * which is still correct for well-formed ISO-8601 UTC strings.
+ */
+function isStrictlyAfter(a: string, b: string): boolean {
+  const at = Date.parse(a);
+  const bt = Date.parse(b);
+  if (Number.isNaN(at) || Number.isNaN(bt)) {
+    return a > b;
+  }
+  return at > bt;
+}
+
+/**
+ * Pick the fresher turn lifecycle between the detail and shell channels.
+ *
+ * The session status and latest turn are replicated over both the per-thread
+ * detail subscription and the sidebar shell stream. The detail subscription
+ * applies `thread.session-set` directly and commonly observes the running→ready
+ * transition first; the shell stream re-derives it from a coarse, reconnect-prone
+ * feed that (on a slow link) can fail to deliver the terminal event, leaving the
+ * composer stuck showing "stop" until a manual refresh reloads the shell snapshot.
+ *
+ * Both channels carry the same server-stamped `session.updatedAt`, so the newer
+ * one wins. The shell wins ties (equal `updatedAt` ⇒ identical session) so this is
+ * a no-op whenever the two are in sync, and it preserves the "stale detail after
+ * reconnect yields to a newer shell" guarantee (a stale detail has an older
+ * timestamp). `latestTurn` travels with the chosen session so the two never
+ * disagree — e.g. a "ready" session paired with a still-"running" latest turn.
+ */
+function freshestLifecycle(
+  detail: EnvironmentThread,
+  shell: EnvironmentThreadShell,
+): ThreadLifecycle {
+  const detailSession = detail.session;
+  const shellSession = shell.session;
+  if (detailSession === null) {
+    return { session: shellSession, latestTurn: shell.latestTurn };
+  }
+  if (shellSession === null) {
+    return { session: detailSession, latestTurn: detail.latestTurn };
+  }
+  return isStrictlyAfter(detailSession.updatedAt, shellSession.updatedAt)
+    ? { session: detailSession, latestTurn: detail.latestTurn }
+    : { session: shellSession, latestTurn: shell.latestTurn };
+}
+
 /**
  * Combine detail-only collections with the shell's authoritative thread metadata.
  *
@@ -30,6 +85,10 @@ const EMPTY_CHECKPOINTS: ReadonlyArray<OrchestrationCheckpointSummary> = Object.
  * consumers must use the shell branch/worktree/project fields so they do not target
  * a stale checkout while retaining messages, activities, plans, and checkpoints
  * from the detail subscription.
+ *
+ * The turn lifecycle (session + latestTurn) is the exception: it is a value
+ * replicated over both channels rather than shell-only metadata, so it must reflect
+ * whichever channel observed the newer state — see {@link freshestLifecycle}.
  */
 export function mergeEnvironmentThread(
   detail: EnvironmentThread | null,
@@ -42,6 +101,8 @@ export function mergeEnvironmentThread(
     return detail;
   }
 
+  const lifecycle = freshestLifecycle(detail, shell);
+
   return {
     ...detail,
     environmentId: shell.environmentId,
@@ -53,11 +114,11 @@ export function mergeEnvironmentThread(
     interactionMode: shell.interactionMode,
     branch: shell.branch,
     worktreePath: shell.worktreePath,
-    latestTurn: shell.latestTurn,
+    latestTurn: lifecycle.latestTurn,
     createdAt: shell.createdAt,
     updatedAt: shell.updatedAt,
     archivedAt: shell.archivedAt,
-    session: shell.session,
+    session: lifecycle.session,
   };
 }
 

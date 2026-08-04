@@ -3,6 +3,8 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
+  type OrchestrationSession,
   type OrchestrationShellSnapshot,
   type OrchestrationThread,
 } from "@t3tools/contracts";
@@ -225,6 +227,107 @@ describe("environment entity projections", () => {
       worktreePath: "/repo/current-worktree",
     });
     expect(merged?.messages).toBe(messages);
+  });
+
+  const makeSession = (
+    status: OrchestrationSession["status"],
+    updatedAt: string,
+    activeTurnId: OrchestrationSession["activeTurnId"] = null,
+  ): OrchestrationSession => ({
+    threadId: THREAD_ID,
+    status,
+    providerName: "codex",
+    runtimeMode: "full-access",
+    activeTurnId,
+    lastError: null,
+    updatedAt,
+  });
+
+  const detailThread = (
+    session: OrchestrationSession | null,
+    latestTurn: OrchestrationThread["latestTurn"],
+  ): OrchestrationThread & { readonly environmentId: EnvironmentId } => ({
+    ...THREAD_SHELL,
+    environmentId: ENVIRONMENT_ID,
+    deletedAt: null,
+    messages: [],
+    proposedPlans: [],
+    activities: [],
+    checkpoints: [],
+    session,
+    latestTurn,
+  });
+
+  it("adopts the detail session when it reports a newer turn state than the shell", () => {
+    // The turn just finished: the per-thread detail subscription applied the
+    // running→ready `thread.session-set`, but the coarse shell stream is still
+    // stuck on the earlier "running" session. The composer must see "ready" so it
+    // flips the stop button back to send without a manual page refresh.
+    const detail = detailThread(makeSession("ready", "2026-06-01T00:00:05.000Z"), {
+      turnId: TurnId.make("turn-1"),
+      state: "completed",
+      requestedAt: "2026-06-01T00:00:00.000Z",
+      startedAt: "2026-06-01T00:00:00.000Z",
+      completedAt: "2026-06-01T00:00:05.000Z",
+      assistantMessageId: null,
+    });
+    const shell = {
+      ...THREAD_SHELL,
+      environmentId: ENVIRONMENT_ID,
+      session: makeSession("running", "2026-06-01T00:00:01.000Z", TurnId.make("turn-1")),
+      latestTurn: {
+        turnId: TurnId.make("turn-1"),
+        state: "running" as const,
+        requestedAt: "2026-06-01T00:00:00.000Z",
+        startedAt: "2026-06-01T00:00:00.000Z",
+        completedAt: null,
+        assistantMessageId: null,
+      },
+    };
+
+    const merged = mergeEnvironmentThread(detail, shell);
+
+    expect(merged?.session?.status).toBe("ready");
+    // latestTurn travels with the chosen session so the two never disagree.
+    expect(merged?.latestTurn?.state).toBe("completed");
+  });
+
+  it("keeps the shell session when a stale detail lags behind after reconnect", () => {
+    // Reverse case: a cached detail briefly outlives a fresher shell snapshot on
+    // reconnect. Its older timestamp must yield to the newer shell so we do not
+    // resurrect a superseded "running" state.
+    const detail = detailThread(makeSession("running", "2026-06-01T00:00:01.000Z"), {
+      turnId: TurnId.make("turn-1"),
+      state: "running" as const,
+      requestedAt: "2026-06-01T00:00:00.000Z",
+      startedAt: "2026-06-01T00:00:00.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    });
+    const shell = {
+      ...THREAD_SHELL,
+      environmentId: ENVIRONMENT_ID,
+      session: makeSession("ready", "2026-06-01T00:00:05.000Z"),
+      latestTurn: null,
+    };
+
+    const merged = mergeEnvironmentThread(detail, shell);
+
+    expect(merged?.session?.status).toBe("ready");
+    expect(merged?.latestTurn).toBeNull();
+  });
+
+  it("falls back to the shell session when the detail has none", () => {
+    const detail = detailThread(null, null);
+    const shell = {
+      ...THREAD_SHELL,
+      environmentId: ENVIRONMENT_ID,
+      session: makeSession("running", "2026-06-01T00:00:01.000Z"),
+    };
+
+    const merged = mergeEnvironmentThread(detail, shell);
+
+    expect(merged?.session?.status).toBe("running");
   });
 
   it("preserves untouched project and thread identities across unrelated shell updates", () => {
