@@ -1,7 +1,17 @@
-import { memo, useCallback, useEffect, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
+
+/** Ignore incidental drags; only a deliberate horizontal swipe pages the lightbox. */
+const SWIPE_THRESHOLD_PX = 48;
 
 interface ExpandedImageDialogProps {
   preview: ExpandedImagePreview;
@@ -18,6 +28,35 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   const navigateImage = useCallback((direction: -1 | 1) => {
     setImageOffset((current) => current + direction);
   }, []);
+
+  // Horizontal swipe to page through images — the keyboard arrows are unreachable on
+  // the touch devices this UI is regularly used from.
+  const swipeStartXRef = useRef<number | null>(null);
+  // A swipe that ends on the backdrop still fires a click, which would close the
+  // dialog the user was only paging through.
+  const swipeHandledRef = useRef(false);
+  const onSwipeStart = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    swipeStartXRef.current = event.pointerType === "mouse" ? null : event.clientX;
+  }, []);
+  const onSwipeEnd = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      const startX = swipeStartXRef.current;
+      swipeStartXRef.current = null;
+      if (startX === null || preview.images.length <= 1) return;
+      const distance = event.clientX - startX;
+      if (Math.abs(distance) < SWIPE_THRESHOLD_PX) return;
+      swipeHandledRef.current = true;
+      navigateImage(distance < 0 ? 1 : -1);
+    },
+    [navigateImage, preview.images.length],
+  );
+  const onBackdropClick = useCallback(() => {
+    if (swipeHandledRef.current) {
+      swipeHandledRef.current = false;
+      return;
+    }
+    onClose();
+  }, [onClose]);
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -52,12 +91,17 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
       role="dialog"
       aria-modal="true"
       aria-label="Expanded image preview"
+      onPointerDown={onSwipeStart}
+      onPointerUp={onSwipeEnd}
+      onPointerCancel={() => {
+        swipeStartXRef.current = null;
+      }}
     >
       <button
         type="button"
         className="absolute inset-0 z-0 cursor-zoom-out"
         aria-label="Close image preview"
-        onClick={onClose}
+        onClick={onBackdropClick}
       />
       {preview.images.length > 1 && (
         <Button

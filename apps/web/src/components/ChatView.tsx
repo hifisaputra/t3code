@@ -219,7 +219,7 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
-import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
+import { closeImageLightbox, openImageLightbox } from "./chat/imageLightboxStore";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { ChatHeader } from "./chat/ChatHeader";
@@ -1118,7 +1118,6 @@ function ChatViewContent(props: ChatViewProps) {
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
   optimisticUserMessagesRef.current = optimisticUserMessages;
@@ -3685,12 +3684,8 @@ function ChatViewContent(props: ChatViewProps) {
       return [];
     });
     resetLocalDispatch();
-    setExpandedImage(null);
+    closeImageLightbox();
   }, [draftId, resetLocalDispatch, threadId]);
-
-  const closeExpandedImage = useCallback(() => {
-    setExpandedImage(null);
-  }, []);
 
   const activeWorktreePath = activeThread?.worktreePath ?? null;
   const derivedEnvMode: DraftThreadEnvMode = resolveEffectiveEnvMode({
@@ -5014,7 +5009,7 @@ function ChatViewContent(props: ChatViewProps) {
   };
 
   const onExpandTimelineImage = useCallback((preview: ExpandedImagePreview) => {
-    setExpandedImage(preview);
+    openImageLightbox(preview);
   }, []);
   const onOpenTurnDiff = useCallback(
     (turnId: TurnId, filePath?: string) => {
@@ -5480,14 +5475,6 @@ function ChatViewContent(props: ChatViewProps) {
           </RightPanelTabs>
         </RightPanelSheet>
       ) : null}
-
-      {expandedImage && (
-        <ExpandedImageDialog
-          key={`${expandedImage.images[expandedImage.index]?.src ?? "image"}:${expandedImage.index}`}
-          preview={expandedImage}
-          onClose={closeExpandedImage}
-        />
-      )}
     </div>
   );
 }

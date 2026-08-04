@@ -23,9 +23,11 @@ import React, {
   Suspense,
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
+  createContext,
   isValidElement,
   use,
   useCallback,
+  useContext,
   memo,
   useEffect,
   useMemo,
@@ -61,11 +63,7 @@ import {
   serializeTableElementToCsv,
   serializeTableElementToMarkdown,
 } from "../markdown-clipboard";
-import {
-  normalizeMarkdownLinkDestination,
-  resolveMarkdownFileLinkMeta,
-  rewriteMarkdownFileUriHref,
-} from "../markdown-links";
+import { resolveMarkdownFileLinkMeta, rewriteMarkdownFileUriHref } from "../markdown-links";
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
 import { useRightPanelStore } from "../rightPanelStore";
@@ -77,6 +75,17 @@ import { previewEnvironment } from "../state/preview";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { isPreviewSupportedInRuntime } from "../previewStateStore";
+import { IMAGE_GALLERY_MARKER, remarkImageGallery } from "./chat/remarkImageGallery";
+import {
+  buildChatMarkdownImageCollection,
+  extractMarkdownImageRefs,
+  isExternalImageHref,
+  normalizeMarkdownLinkHrefKey,
+  openMarkdownImageLightbox,
+  EMPTY_IMAGE_SRC_BY_HREF,
+  type ChatMarkdownImageCollection,
+  type MarkdownImageRef,
+} from "./chat/chatMarkdownImages";
 import {
   isBrowserPreviewFile,
   openFileInPreview,
@@ -160,6 +169,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
     ...defaultSchema.attributes,
     "*": (defaultSchema.attributes?.["*"] ?? []).filter((attribute) => attribute !== "title"),
     code: [...(defaultSchema.attributes?.code ?? []), "dataCodeMeta"],
+    p: [...(defaultSchema.attributes?.p ?? []), IMAGE_GALLERY_MARKER],
   },
   protocols: {
     ...defaultSchema.protocols,
@@ -805,11 +815,6 @@ function extractMarkdownLinkHrefs(text: string): string[] {
   return hrefs;
 }
 
-function normalizeMarkdownLinkHrefKey(href: string): string {
-  const normalizedHref = normalizeMarkdownLinkDestination(href);
-  return rewriteMarkdownFileUriHref(normalizedHref) ?? normalizedHref;
-}
-
 const MARKDOWN_LINK_FAVICON_CLASS_NAME = "block size-full shrink-0 select-none";
 
 /** Hosts whose favicon request already failed this session — skip straight to the globe. */
@@ -1233,61 +1238,72 @@ function areMarkdownFileLinkPropsEqual(
 
 type WorkspaceImageUrlResolver = (filePath: string) => Promise<string | null>;
 
-interface WorkspaceMarkdownImageProps extends React.ComponentProps<"img"> {
-  filePath: string;
+const EMPTY_IMAGE_HREFS: ReadonlyArray<string> = [];
+
+const ChatMarkdownImageCollectionContext = createContext<ChatMarkdownImageCollection | null>(null);
+
+/** Standalone images keep their natural width; gallery images fill a square grid cell. */
+const ChatMarkdownImageLayoutContext = createContext<"standalone" | "gallery">("standalone");
+
+/**
+ * Wider grids for bigger sets, but never so narrow that a cell stops being readable.
+ * `auto-fit` then reflows the row on narrow viewports.
+ */
+function galleryGridColumns(count: number): string {
+  const minCellPx = count >= 9 ? 108 : count >= 5 ? 132 : 160;
+  return `repeat(auto-fit, minmax(${minCellPx}px, 1fr))`;
+}
+
+interface ChatMarkdownImageProps extends React.ComponentProps<"img"> {
+  href: string;
   displayPath: string;
   alt: string;
-  resolveUrl: WorkspaceImageUrlResolver;
+  /** Workspace images show their path on hover; external URLs don't need the tooltip. */
+  showPathTooltip: boolean;
 }
 
 /**
- * Renders a workspace-relative markdown image (`![alt](./shot.png)`) by minting a
- * signed, backend-served asset URL for it. Asset tokens are short-lived, so the URL
- * is resolved at render time rather than baked into the message text.
+ * Renders one markdown image. Workspace-relative images (`![alt](.t3-images/shot.png)`)
+ * read their signed asset URL from the message-level batch in context — resolving them
+ * together is what lets a single message carry several images. Clicking opens the
+ * lightbox on the whole set.
  */
-const WorkspaceMarkdownImage = memo(function WorkspaceMarkdownImage({
-  filePath,
+const ChatMarkdownImage = memo(function ChatMarkdownImage({
+  href,
   displayPath,
   alt,
-  resolveUrl,
+  showPathTooltip,
   className,
   ...props
-}: WorkspaceMarkdownImageProps) {
-  const [assetUrl, setAssetUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+}: ChatMarkdownImageProps) {
+  const collection = useContext(ChatMarkdownImageCollectionContext);
+  const layout = useContext(ChatMarkdownImageLayoutContext);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const entry = collection?.entryByHref.get(href) ?? null;
+  const assetUrl = entry?.src ?? null;
+  const requestImage = collection?.request;
+  const isKnownImage = entry !== null;
 
+  // The up-front scan of the message text misses reference-style markdown and raw
+  // HTML images, so an unknown href asks to join the batch.
   useEffect(() => {
-    let cancelled = false;
-    setAssetUrl(null);
-    setFailed(false);
-    void (async () => {
-      try {
-        const url = await resolveUrl(filePath);
-        if (cancelled) return;
-        if (url === null) {
-          setFailed(true);
-          return;
-        }
-        setAssetUrl(url);
-      } catch (cause) {
-        if (cancelled) return;
-        reportMarkdownActionFailure(
-          { operation: "resolve-markdown-image", target: filePath },
-          cause,
-        );
-        setFailed(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [filePath, resolveUrl]);
+    if (!isKnownImage && requestImage && href) requestImage(href);
+  }, [href, isKnownImage, requestImage]);
+
+  const inGallery = layout === "gallery";
 
   // Unresolvable (missing file, disconnected environment, expired token) — degrade to
   // the alt text rather than a broken-image icon.
-  if (failed) {
+  if ((assetUrl === null && collection?.isSettled(href) === true) || failedSrc === assetUrl) {
     return (
-      <span className="chat-markdown-image-fallback text-xs text-muted-foreground">
+      <span
+        className={cn(
+          "chat-markdown-image-fallback text-xs text-muted-foreground",
+          // Keep the cell so the rest of the grid doesn't reflow around the gap.
+          inGallery &&
+            "flex aspect-square items-center justify-center rounded-md border border-border/60 p-2 text-center",
+        )}
+      >
         {alt || displayPath}
       </span>
     );
@@ -1296,30 +1312,56 @@ const WorkspaceMarkdownImage = memo(function WorkspaceMarkdownImage({
   if (assetUrl === null) {
     return (
       <span
-        className="chat-markdown-image-loading inline-block h-4 w-24 animate-pulse rounded-sm bg-muted align-middle"
+        className={cn(
+          "chat-markdown-image-loading animate-pulse bg-muted",
+          inGallery
+            ? "block aspect-square size-full rounded-md"
+            : "inline-block h-4 w-24 rounded-sm align-middle",
+        )}
         aria-busy="true"
         aria-label={alt || displayPath}
       />
     );
   }
 
+  const isGalleryCell = inGallery;
+  const image = (
+    <button
+      type="button"
+      className={cn(
+        "chat-markdown-image-button cursor-zoom-in border-0 bg-transparent p-0 text-left",
+        isGalleryCell
+          ? "block size-full overflow-hidden rounded-md border border-border/60"
+          : "block",
+      )}
+      aria-label={`Open ${alt || displayPath} in the image viewer`}
+      onClick={() => {
+        if (collection) openMarkdownImageLightbox(collection, href);
+      }}
+    >
+      <img
+        {...props}
+        src={assetUrl}
+        alt={alt}
+        loading="lazy"
+        className={cn(
+          "chat-markdown-image",
+          isGalleryCell
+            ? "aspect-square size-full object-cover transition-transform duration-200 hover:scale-[1.03]"
+            : "my-2 h-auto max-w-full rounded-md border border-border/60",
+          className,
+        )}
+        onError={() => setFailedSrc(assetUrl)}
+      />
+    </button>
+  );
+
+  // In a grid the path tooltip would fire on every cell the pointer crosses.
+  if (!showPathTooltip || isGalleryCell) return image;
+
   return (
     <Tooltip>
-      <TooltipTrigger
-        render={
-          <img
-            {...props}
-            src={assetUrl}
-            alt={alt}
-            loading="lazy"
-            className={cn(
-              "chat-markdown-image my-2 h-auto max-w-full rounded-md border border-border/60",
-              className,
-            )}
-            onError={() => setFailed(true)}
-          />
-        }
-      />
+      <TooltipTrigger render={image} />
       <TooltipPopup side="top" className="font-mono text-[11px] leading-tight">
         {displayPath}
       </TooltipPopup>
@@ -1480,21 +1522,118 @@ function ChatMarkdown({
     [createAssetUrl, preparedConnection, threadRef],
   );
   const canRenderWorkspaceImages = Boolean(threadRef) && preparedConnection._tag === "Some";
+  // Collect the message's images once, keyed by normalized destination. Recomputing the
+  // list from `text` on every streamed token would restart resolution, so the key string
+  // is what the memo below keys on: it only changes when the set of images changes.
+  const markdownImageRefsKey = useMemo(
+    () => JSON.stringify(extractMarkdownImageRefs(text)),
+    [text],
+  );
+  const markdownImageRefs = useMemo(
+    () => JSON.parse(markdownImageRefsKey) as MarkdownImageRef[],
+    [markdownImageRefsKey],
+  );
+  // Images the `![](…)` scan cannot see (reference-style markdown, raw HTML) register
+  // themselves as they render and join the same batch.
+  const [requestedImageHrefs, setRequestedImageHrefs] =
+    useState<ReadonlyArray<string>>(EMPTY_IMAGE_HREFS);
+  const requestImageHref = useCallback((href: string) => {
+    setRequestedImageHrefs((current) => (current.includes(href) ? current : [...current, href]));
+  }, []);
+  const markdownImageEntryRefs = useMemo<ReadonlyArray<MarkdownImageRef>>(() => {
+    const knownHrefs = new Set(markdownImageRefs.map((ref) => ref.href));
+    return [
+      ...markdownImageRefs,
+      ...requestedImageHrefs
+        .filter((href) => !knownHrefs.has(href))
+        .map((href) => ({ href, alt: "" })),
+    ];
+  }, [markdownImageRefs, requestedImageHrefs]);
+  const workspaceImageTargets = useMemo(() => {
+    return markdownImageEntryRefs.flatMap((ref) => {
+      const meta = resolveMarkdownFileLinkMeta(ref.href, cwd);
+      return meta && isWorkspaceImagePreviewPath(meta.filePath)
+        ? [{ href: ref.href, filePath: meta.filePath }]
+        : [];
+    });
+  }, [cwd, markdownImageEntryRefs]);
+  const [workspaceImageSrcByHref, setWorkspaceImageSrcByHref] =
+    useState<ReadonlyMap<string, string | null>>(EMPTY_IMAGE_SRC_BY_HREF);
+  const workspaceImageSrcRef = useRef(EMPTY_IMAGE_SRC_BY_HREF);
+  const workspaceImageResolverRef = useRef<WorkspaceImageUrlResolver | null>(null);
+  // Mint the asset URLs for every workspace image in the message as one batch, one
+  // request at a time. Doing it here rather than inside each <img> keeps a message with
+  // many images from firing a burst of concurrent RPCs, and survives the component
+  // remounts that streaming causes.
+  useEffect(() => {
+    // A new resolver means a new connection (or thread) — drop what the old one resolved
+    // so reconnects retry instead of being stuck on stale failures.
+    if (workspaceImageResolverRef.current !== resolveWorkspaceImageUrl) {
+      workspaceImageResolverRef.current = resolveWorkspaceImageUrl;
+      workspaceImageSrcRef.current = EMPTY_IMAGE_SRC_BY_HREF;
+      setWorkspaceImageSrcByHref(EMPTY_IMAGE_SRC_BY_HREF);
+    }
+    if (!canRenderWorkspaceImages || workspaceImageTargets.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      for (const target of workspaceImageTargets) {
+        if (cancelled) return;
+        if (workspaceImageSrcRef.current.has(target.href)) continue;
+        const url = await resolveWorkspaceImageUrl(target.filePath).catch((cause: unknown) => {
+          reportMarkdownActionFailure(
+            { operation: "resolve-markdown-image", target: target.filePath },
+            cause,
+          );
+          return null;
+        });
+        if (cancelled) return;
+        const next = new Map(workspaceImageSrcRef.current);
+        next.set(target.href, url);
+        workspaceImageSrcRef.current = next;
+        setWorkspaceImageSrcByHref(next);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [canRenderWorkspaceImages, resolveWorkspaceImageUrl, workspaceImageTargets]);
+  const markdownImageCollection = useMemo<ChatMarkdownImageCollection>(() => {
+    const entries = markdownImageEntryRefs.map((ref) => {
+      const meta = resolveMarkdownFileLinkMeta(ref.href, cwd);
+      const isWorkspaceImage = Boolean(meta && isWorkspaceImagePreviewPath(meta.filePath));
+      const src =
+        isWorkspaceImage && canRenderWorkspaceImages
+          ? (workspaceImageSrcByHref.get(ref.href) ?? null)
+          : isExternalImageHref(ref.href)
+            ? ref.href
+            : null;
+      return { href: ref.href, name: ref.alt || meta?.basename || ref.href, src };
+    });
+    return buildChatMarkdownImageCollection(
+      entries,
+      (href) => workspaceImageSrcByHref.has(href),
+      requestImageHref,
+    );
+  }, [
+    canRenderWorkspaceImages,
+    cwd,
+    markdownImageEntryRefs,
+    requestImageHref,
+    workspaceImageSrcByHref,
+  ]);
   const markdownComponents = useMemo<Components>(
     () => ({
       img({ node: _node, src, alt, ...props }) {
         const altText = alt ?? "";
         const rawSrc = typeof src === "string" ? src : "";
+        const href = rawSrc ? normalizeMarkdownLinkHrefKey(rawSrc) : "";
         // Only workspace-relative paths are rewritten; http(s) images already render
-        // natively and are left untouched.
-        const imageMeta = rawSrc
-          ? resolveMarkdownFileLinkMeta(normalizeMarkdownLinkHrefKey(rawSrc), cwd)
-          : null;
-        if (
-          !imageMeta ||
-          !canRenderWorkspaceImages ||
-          !isWorkspaceImagePreviewPath(imageMeta.filePath)
-        ) {
+        // natively and are left untouched apart from becoming lightbox-openable.
+        const imageMeta = href ? resolveMarkdownFileLinkMeta(href, cwd) : null;
+        const isWorkspaceImage =
+          Boolean(imageMeta && isWorkspaceImagePreviewPath(imageMeta.filePath)) &&
+          canRenderWorkspaceImages;
+        if (!isWorkspaceImage && !isExternalImageHref(href)) {
           // The sanitizer drops disallowed protocols (data:, javascript:) by removing
           // `src` entirely — keep it absent rather than emitting src="", which makes
           // browsers re-request the current page.
@@ -1505,16 +1644,31 @@ function ChatMarkdown({
           );
         }
         return (
-          <WorkspaceMarkdownImage
+          <ChatMarkdownImage
             {...props}
-            filePath={imageMeta.filePath}
-            displayPath={imageMeta.displayPath}
-            alt={altText || imageMeta.basename}
-            resolveUrl={resolveWorkspaceImageUrl}
+            href={href}
+            displayPath={isWorkspaceImage && imageMeta ? imageMeta.displayPath : href}
+            alt={altText || (isWorkspaceImage ? (imageMeta?.basename ?? "") : "")}
+            showPathTooltip={isWorkspaceImage}
           />
         );
       },
-      p({ node: _node, children, ...props }) {
+      p({ node, children, ...props }) {
+        // A run of image-only paragraphs was merged by remarkImageGallery — render the
+        // set as a grid instead of a column of full-width images.
+        const galleryCount = Number(node?.properties?.[IMAGE_GALLERY_MARKER] ?? 0);
+        if (galleryCount >= 2) {
+          return (
+            <div
+              className="chat-markdown-image-gallery my-2 grid gap-1.5"
+              style={{ gridTemplateColumns: galleryGridColumns(galleryCount) }}
+            >
+              <ChatMarkdownImageLayoutContext.Provider value="gallery">
+                {children}
+              </ChatMarkdownImageLayoutContext.Provider>
+            </div>
+          );
+        }
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
       li({ node, children, ...props }) {
@@ -1715,7 +1869,6 @@ function ChatMarkdown({
       openExternalLinkInPreview,
       openMarkdownFileInPreview,
       resolvedTheme,
-      resolveWorkspaceImageUrl,
       skills,
       text,
       threadRef,
@@ -1730,18 +1883,20 @@ function ChatMarkdown({
       )}
       onCopy={handleCopy}
     >
-      <ReactMarkdown
-        remarkPlugins={
-          lineBreaks
-            ? [remarkGfm, remarkBreaks, remarkPreserveCodeMeta]
-            : [remarkGfm, remarkPreserveCodeMeta]
-        }
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA]]}
-        components={markdownComponents}
-        urlTransform={markdownUrlTransform}
-      >
-        {text}
-      </ReactMarkdown>
+      <ChatMarkdownImageCollectionContext.Provider value={markdownImageCollection}>
+        <ReactMarkdown
+          remarkPlugins={
+            lineBreaks
+              ? [remarkGfm, remarkBreaks, remarkPreserveCodeMeta, remarkImageGallery]
+              : [remarkGfm, remarkPreserveCodeMeta, remarkImageGallery]
+          }
+          rehypePlugins={[rehypeRaw, [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA]]}
+          components={markdownComponents}
+          urlTransform={markdownUrlTransform}
+        >
+          {text}
+        </ReactMarkdown>
+      </ChatMarkdownImageCollectionContext.Provider>
     </div>
   );
 }
