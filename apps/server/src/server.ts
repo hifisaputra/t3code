@@ -343,6 +343,24 @@ const RuntimeServicesLive = ServerRuntimeStartup.layer.pipe(
   Layer.provideMerge(RuntimeDependenciesLive),
 );
 
+/**
+ * Preview automation only has a host in the Electron desktop app — the web
+ * client bails out of `PreviewAutomationHosts` unless `isElectron`, because it
+ * drives Electron `<webview>` elements via `executeJavaScript()` and a browser
+ * has no cross-origin equivalent. On a browser-only deployment the server still
+ * advertises all 13 `preview_*` MCP tools to every agent session, so models
+ * reach for them and every call dies with
+ * `PreviewAutomationNoAvailableHostError`.
+ *
+ * Setting `T3CODE_DISABLE_PREVIEW_MCP=1` leaves the registry unmounted, which
+ * makes `McpSessionRegistry.issueActiveMcpCredential` return `undefined` and
+ * every provider adapter (Claude, Codex, Cursor, Grok, OpenCode) skip its
+ * `mcpServers` block — the tools are never advertised in the first place.
+ */
+const previewMcpDisabled = /^(1|true|yes)$/i.test(
+  process.env.T3CODE_DISABLE_PREVIEW_MCP?.trim() ?? "",
+);
+
 export const makeRoutesLayer = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -357,7 +375,9 @@ export const makeRoutesLayer = Layer.mergeAll(
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
   ),
-  McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
+  previewMcpDisabled
+    ? Layer.empty
+    : McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
 ).pipe(Layer.provide(PreviewAutomationBroker.layer), Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(
