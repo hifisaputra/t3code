@@ -11,7 +11,12 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
-import { ASSET_ROUTE_PREFIX, issueAssetUrl, resolveAsset } from "./AssetAccess.ts";
+import {
+  ASSET_ROUTE_PREFIX,
+  assetTokenExpiresAt,
+  issueAssetUrl,
+  resolveAsset,
+} from "./AssetAccess.ts";
 
 const configLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-asset-access-test-",
@@ -174,6 +179,40 @@ describe("AssetAccess", () => {
       });
       expect(yield* resolveAsset(token, "other.png")).toBeNull();
       expect(yield* resolveAsset(token, "../icon.png")).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it("pins token expiry to the issue bucket so repeated mints share a URL", () => {
+    const bucketMs = 15 * 60 * 1000;
+    const base = 12 * bucketMs;
+
+    expect(assetTokenExpiresAt(base)).toBe(assetTokenExpiresAt(base + bucketMs - 1));
+    expect(assetTokenExpiresAt(base + bucketMs)).toBeGreaterThan(assetTokenExpiresAt(base));
+    // A bucketed token still carries most of its hour of validity.
+    expect(assetTokenExpiresAt(base + bucketMs - 1) - (base + bucketMs - 1)).toBeGreaterThan(
+      45 * 60 * 1000,
+    );
+  });
+
+  it.effect("mints an identical URL for the same file so the browser cache is reusable", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-stable-",
+      });
+      const imagePath = path.join(root, "shot.png");
+      yield* fileSystem.writeFile(imagePath, new Uint8Array([137, 80, 78, 71]));
+      const resource = {
+        _tag: "workspace-file",
+        threadId: ThreadId.make("thread-1"),
+        path: imagePath,
+      } as const;
+
+      const first = yield* issueAssetUrl({ resource, workspaceRoot: root });
+      const second = yield* issueAssetUrl({ resource, workspaceRoot: root });
+
+      expect(second.relativeUrl).toBe(first.relativeUrl);
     }).pipe(Effect.provide(testLayer)),
   );
 

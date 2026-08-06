@@ -44,6 +44,25 @@ export const FALLBACK_PROJECT_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/
 
 const SIGNING_SECRET_NAME = "asset-access-signing-key";
 const ASSET_TOKEN_TTL_MS = 60 * 60 * 1000;
+/**
+ * Clients re-mint URLs for the same file constantly — reconnects, remounts, thread
+ * switches. Quantizing the issue time keeps the signed payload (and therefore the whole
+ * URL) byte-identical within a window, so those re-mints hit the browser cache instead of
+ * re-downloading the file behind a freshly signed token. The tradeoff is that a token can
+ * be up to one bucket short of the full TTL.
+ */
+const ASSET_TOKEN_ISSUE_BUCKET_MS = 15 * 60 * 1000;
+
+/**
+ * Expiry for a token issued at `nowMs`, pinned to the current issue bucket so repeated
+ * mints inside the bucket produce the same URL.
+ */
+export function assetTokenExpiresAt(nowMs: number): number {
+  return (
+    Math.floor(nowMs / ASSET_TOKEN_ISSUE_BUCKET_MS) * ASSET_TOKEN_ISSUE_BUCKET_MS +
+    ASSET_TOKEN_TTL_MS
+  );
+}
 const PREVIEW_ASSET_EXTENSIONS = new Set([
   ...WORKSPACE_BROWSER_PREVIEW_EXTENSIONS,
   ...WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
@@ -171,7 +190,7 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
-  const expiresAt = (yield* Clock.currentTimeMillis) + ASSET_TOKEN_TTL_MS;
+  const expiresAt = assetTokenExpiresAt(yield* Clock.currentTimeMillis);
   let claims: AssetClaims;
   let fileName: string;
 

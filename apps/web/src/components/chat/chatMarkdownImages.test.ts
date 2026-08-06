@@ -5,6 +5,7 @@ import {
   extractMarkdownImageRefs,
   isExternalImageHref,
   openMarkdownImageLightbox,
+  retainResolvedImageSrc,
 } from "./chatMarkdownImages";
 import { useImageLightboxStore } from "./imageLightboxStore";
 
@@ -57,21 +58,39 @@ describe("isExternalImageHref", () => {
   );
 });
 
+describe("retainResolvedImageSrc", () => {
+  it("keeps resolved URLs across a reconnect so the browser cache still applies", () => {
+    const current = new Map([
+      ["one.png", "https://host/assets/one"],
+      ["two.png", null],
+    ]);
+
+    expect([...retainResolvedImageSrc(current)]).toEqual([["one.png", "https://host/assets/one"]]);
+  });
+
+  it("returns the same map when there is no failure to retry", () => {
+    const current = new Map([["one.png", "https://host/assets/one"]]);
+
+    expect(retainResolvedImageSrc(current)).toBe(current);
+  });
+});
+
 describe("openMarkdownImageLightbox", () => {
   beforeEach(() => {
     useImageLightboxStore.getState().close();
   });
 
   const collection = () =>
-    buildChatMarkdownImageCollection(
-      [
+    buildChatMarkdownImageCollection({
+      entries: [
         { href: "one.png", name: "first", src: "https://host/assets/one" },
         { href: "pending.png", name: "pending", src: null },
         { href: "two.png", name: "second", src: "https://host/assets/two" },
       ],
-      () => true,
-      () => {},
-    );
+      isSettled: () => true,
+      request: () => {},
+      retry: () => {},
+    });
 
   it("opens the whole message's resolved images at the clicked one", () => {
     openMarkdownImageLightbox(collection(), "two.png");

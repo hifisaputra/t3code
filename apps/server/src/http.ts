@@ -30,6 +30,13 @@ import {
   FALLBACK_PROJECT_FAVICON_SVG,
   resolveAsset,
 } from "./assets/AssetAccess.ts";
+import {
+  ASSET_CACHE_CONTROL,
+  assetCacheHeaders,
+  assetValidators,
+  isAssetNotModified,
+  type AssetValidators,
+} from "./assets/assetCaching.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { traceRelayRequest } from "./cloud/traceRelayRequest.ts";
@@ -201,16 +208,34 @@ export const assetRouteLayer = HttpRouter.add(
         status: 200,
         contentType: "image/svg+xml",
         headers: {
-          "Cache-Control": "private, max-age=3600",
+          "Cache-Control": ASSET_CACHE_CONTROL,
           "X-Content-Type-Options": "nosniff",
         },
       });
     }
 
+    // A re-minted token yields a URL the browser has never seen, so revalidation is what
+    // keeps an unchanged image from being sent again over a slow link.
+    const fileSystem = yield* FileSystem.FileSystem;
+    const validators = yield* fileSystem.stat(asset.path).pipe(
+      Effect.map((info) => Option.some(assetValidators(info))),
+      Effect.orElseSucceed(() => Option.none<AssetValidators>()),
+    );
+    if (Option.isSome(validators) && isAssetNotModified(request.headers, validators.value)) {
+      return HttpServerResponse.empty({
+        status: 304,
+        headers: {
+          ...assetCacheHeaders(validators.value),
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+
+    // The file response derives `ETag`/`Last-Modified` from the same metadata.
     return yield* HttpServerResponse.file(asset.path, {
       status: 200,
       headers: {
-        "Cache-Control": "private, max-age=3600",
+        "Cache-Control": ASSET_CACHE_CONTROL,
         "X-Content-Type-Options": "nosniff",
       },
     }).pipe(

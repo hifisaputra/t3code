@@ -3,8 +3,6 @@ import { openImageLightbox } from "./imageLightboxStore";
 
 const MARKDOWN_IMAGE_PATTERN = /!\[([^\]]*)]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
 
-export const EMPTY_IMAGE_SRC_BY_HREF: ReadonlyMap<string, string | null> = new Map();
-
 export function normalizeMarkdownLinkHrefKey(href: string): string {
   const normalizedHref = normalizeMarkdownLinkDestination(href);
   return rewriteMarkdownFileUriHref(normalizedHref) ?? normalizedHref;
@@ -41,6 +39,20 @@ export function extractMarkdownImageRefs(text: string): MarkdownImageRef[] {
   return refs;
 }
 
+/**
+ * What to keep when the connection is replaced: the URLs that resolved, and nothing else.
+ * A minted asset URL stays valid across a reconnect, so re-minting it would only change
+ * every `src` on screen and re-download images the browser already has — while a failure
+ * is exactly what the new connection should be given a chance to resolve. Returns the
+ * same map when there is nothing to drop, so callers can skip a needless render.
+ */
+export function retainResolvedImageSrc(
+  current: ReadonlyMap<string, string | null>,
+): ReadonlyMap<string, string | null> {
+  const resolved = new Map([...current].filter(([, src]) => src !== null));
+  return resolved.size === current.size ? current : resolved;
+}
+
 /** A markdown image whose displayable source has been (or is being) resolved. */
 export interface ChatMarkdownImageEntry {
   readonly href: string;
@@ -60,18 +72,27 @@ export interface ChatMarkdownImageCollection {
    * (`![a][ref]`) and images inside raw HTML never match the `![](…)` pattern.
    */
   readonly request: (href: string) => void;
+  /**
+   * Report that the resolved URL failed to load, so a fresh one is minted. Resolved URLs
+   * are otherwise kept across reconnects, and an expired or revoked token is the one case
+   * where re-minting is worth the re-download. Capped, so a genuinely broken image settles
+   * on the fallback instead of retrying forever.
+   */
+  readonly retry: (href: string) => void;
 }
 
-export function buildChatMarkdownImageCollection(
-  entries: ReadonlyArray<ChatMarkdownImageEntry>,
-  isSettled: (href: string) => boolean,
-  request: (href: string) => void,
-): ChatMarkdownImageCollection {
+export function buildChatMarkdownImageCollection(input: {
+  readonly entries: ReadonlyArray<ChatMarkdownImageEntry>;
+  readonly isSettled: (href: string) => boolean;
+  readonly request: (href: string) => void;
+  readonly retry: (href: string) => void;
+}): ChatMarkdownImageCollection {
   return {
-    entries,
-    entryByHref: new Map(entries.map((entry) => [entry.href, entry])),
-    isSettled,
-    request,
+    entries: input.entries,
+    entryByHref: new Map(input.entries.map((entry) => [entry.href, entry])),
+    isSettled: input.isSettled,
+    request: input.request,
+    retry: input.retry,
   };
 }
 

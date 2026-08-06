@@ -57,16 +57,22 @@ export type CreateAssetUrlMutation<AssetError> = (input: {
   readonly input: { readonly resource: AssetResource };
 }) => Promise<AtomCommandResult<AssetCreateUrlResult, AssetError>>;
 
+/** An absolute asset URL together with the moment its signed token stops being accepted. */
+export interface ResolvedFileAsset {
+  readonly url: string;
+  readonly expiresAt: number;
+}
+
 /**
- * Resolve a workspace file to an absolute, backend-served asset URL. Shared by
- * the desktop in-app preview and the web "open in a new tab" path.
+ * Resolve a workspace file to an absolute, backend-served asset URL and the token's
+ * expiry — callers that cache the URL need to know how long it stays usable.
  */
-export async function resolveWorkspaceFileAssetUrl<AssetError>(input: {
+export async function resolveWorkspaceFileAsset<AssetError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
   readonly httpBaseUrl: string;
   readonly createAssetUrl: CreateAssetUrlMutation<AssetError>;
-}): Promise<AtomCommandResult<string, AssetError>> {
+}): Promise<AtomCommandResult<ResolvedFileAsset, AssetError>> {
   const assetResult = await input.createAssetUrl({
     environmentId: input.threadRef.environmentId,
     input: {
@@ -86,7 +92,17 @@ export async function resolveWorkspaceFileAssetUrl<AssetError>(input: {
       Cause.die(new Error("The environment returned an invalid asset URL.")),
     );
   }
-  return AsyncResult.success(assetUrl);
+  return AsyncResult.success({ url: assetUrl, expiresAt: assetResult.value.expiresAt });
+}
+
+/** {@link resolveWorkspaceFileAsset} for callers that only need the URL. */
+export async function resolveWorkspaceFileAssetUrl<AssetError>(input: {
+  readonly threadRef: ScopedThreadRef;
+  readonly filePath: string;
+  readonly httpBaseUrl: string;
+  readonly createAssetUrl: CreateAssetUrlMutation<AssetError>;
+}): Promise<AtomCommandResult<string, AssetError>> {
+  return mapAtomCommandResult(await resolveWorkspaceFileAsset(input), (asset) => asset.url);
 }
 
 export async function openFileInPreview<AssetError, PreviewError>(input: {

@@ -82,14 +82,22 @@ import {
   isExternalImageHref,
   normalizeMarkdownLinkHrefKey,
   openMarkdownImageLightbox,
-  EMPTY_IMAGE_SRC_BY_HREF,
+  retainResolvedImageSrc,
   type ChatMarkdownImageCollection,
   type MarkdownImageRef,
 } from "./chat/chatMarkdownImages";
 import {
+  forgetWorkspaceImageUrl,
+  readCachedWorkspaceImageSrc,
+  readWorkspaceImageUrl,
+  rememberWorkspaceImageUrl,
+  workspaceImageCacheKey,
+} from "./chat/workspaceImageUrlCache";
+import {
   isBrowserPreviewFile,
   openFileInPreview,
   openUrlInPreview,
+  resolveWorkspaceFileAsset,
   resolveWorkspaceFileAssetUrl,
   BrowserPreviewUnavailableError,
 } from "../browser/openFileInPreview";
@@ -1240,6 +1248,9 @@ type WorkspaceImageUrlResolver = (filePath: string) => Promise<string | null>;
 
 const EMPTY_IMAGE_HREFS: ReadonlyArray<string> = [];
 
+/** Two attempts cover an expired token; beyond that the image is genuinely gone. */
+const MAX_IMAGE_RESOLVE_ATTEMPTS = 2;
+
 const ChatMarkdownImageCollectionContext = createContext<ChatMarkdownImageCollection | null>(null);
 
 /** Standalone images keep their natural width; gallery images fill a square grid cell. */
@@ -1351,7 +1362,12 @@ const ChatMarkdownImage = memo(function ChatMarkdownImage({
             : "my-2 h-auto max-w-full rounded-md border border-border/60",
           className,
         )}
-        onError={() => setFailedSrc(assetUrl)}
+        onError={() => {
+          setFailedSrc(assetUrl);
+          // A URL kept from an earlier mount can outlive its token; asking for a fresh one
+          // swaps `assetUrl` and clears the fallback below on the next render.
+          collection?.retry(href);
+        }}
       />
     </button>
   );
@@ -1502,7 +1518,13 @@ function ChatMarkdown({
   const resolveWorkspaceImageUrl = useCallback<WorkspaceImageUrlResolver>(
     async (filePath) => {
       if (!threadRef || preparedConnection._tag === "None") return null;
-      const result = await resolveWorkspaceFileAssetUrl({
+      // A URL minted for this file by any earlier mount is still good, and reusing it is
+      // what keeps the browser cache warm — a fresh token is a fresh URL, and a fresh URL
+      // is a full re-download.
+      const cacheKey = workspaceImageCacheKey(threadRef.environmentId, filePath);
+      const cachedUrl = readWorkspaceImageUrl(cacheKey);
+      if (cachedUrl !== null) return cachedUrl;
+      const result = await resolveWorkspaceFileAsset({
         threadRef,
         filePath,
         httpBaseUrl: preparedConnection.value.httpBaseUrl,
@@ -1517,7 +1539,8 @@ function ChatMarkdown({
         }
         return null;
       }
-      return result.value;
+      rememberWorkspaceImageUrl(cacheKey, result.value);
+      return result.value.url;
     },
     [createAssetUrl, preparedConnection, threadRef],
   );
@@ -1557,21 +1580,32 @@ function ChatMarkdown({
         : [];
     });
   }, [cwd, markdownImageEntryRefs]);
-  const [workspaceImageSrcByHref, setWorkspaceImageSrcByHref] =
-    useState<ReadonlyMap<string, string | null>>(EMPTY_IMAGE_SRC_BY_HREF);
-  const workspaceImageSrcRef = useRef(EMPTY_IMAGE_SRC_BY_HREF);
+  // Asset URLs are minted by the thread's environment, not whichever one is on screen.
+  const imageEnvironmentId = threadRef?.environmentId ?? null;
+  // Seed from the process-wide cache so a thread the user already visited paints its
+  // images on the first render, with no round trip and no cache-busting re-mint.
+  const [workspaceImageSrcByHref, setWorkspaceImageSrcByHref] = useState<
+    ReadonlyMap<string, string | null>
+  >(() => readCachedWorkspaceImageSrc(imageEnvironmentId, workspaceImageTargets));
+  const workspaceImageSrcRef = useRef(workspaceImageSrcByHref);
   const workspaceImageResolverRef = useRef<WorkspaceImageUrlResolver | null>(null);
+  const imageResolveAttemptsRef = useRef<Map<string, number>>(new Map());
+  const [imageResolveNonce, setImageResolveNonce] = useState(0);
+  const applyWorkspaceImageSrc = useCallback((next: ReadonlyMap<string, string | null>) => {
+    workspaceImageSrcRef.current = next;
+    setWorkspaceImageSrcByHref(next);
+  }, []);
   // Mint the asset URLs for every workspace image in the message as one batch, one
   // request at a time. Doing it here rather than inside each <img> keeps a message with
   // many images from firing a burst of concurrent RPCs, and survives the component
   // remounts that streaming causes.
   useEffect(() => {
-    // A new resolver means a new connection (or thread) — drop what the old one resolved
-    // so reconnects retry instead of being stuck on stale failures.
+    // A new resolver means a new connection (or thread): the failures are worth retrying,
+    // the resolved URLs are worth keeping.
     if (workspaceImageResolverRef.current !== resolveWorkspaceImageUrl) {
       workspaceImageResolverRef.current = resolveWorkspaceImageUrl;
-      workspaceImageSrcRef.current = EMPTY_IMAGE_SRC_BY_HREF;
-      setWorkspaceImageSrcByHref(EMPTY_IMAGE_SRC_BY_HREF);
+      const retained = retainResolvedImageSrc(workspaceImageSrcRef.current);
+      if (retained !== workspaceImageSrcRef.current) applyWorkspaceImageSrc(retained);
     }
     if (!canRenderWorkspaceImages || workspaceImageTargets.length === 0) return;
     let cancelled = false;
@@ -1589,14 +1623,37 @@ function ChatMarkdown({
         if (cancelled) return;
         const next = new Map(workspaceImageSrcRef.current);
         next.set(target.href, url);
-        workspaceImageSrcRef.current = next;
-        setWorkspaceImageSrcByHref(next);
+        applyWorkspaceImageSrc(next);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [canRenderWorkspaceImages, resolveWorkspaceImageUrl, workspaceImageTargets]);
+  }, [
+    applyWorkspaceImageSrc,
+    canRenderWorkspaceImages,
+    imageResolveNonce,
+    resolveWorkspaceImageUrl,
+    workspaceImageTargets,
+  ]);
+  // An image whose URL the browser rejected — an expired or revoked token — is the one
+  // case worth re-minting for. Forgetting the cached URL sends the batch above back out.
+  const retryImageHref = useCallback(
+    (href: string) => {
+      const attempts = imageResolveAttemptsRef.current.get(href) ?? 0;
+      if (attempts >= MAX_IMAGE_RESOLVE_ATTEMPTS) return;
+      imageResolveAttemptsRef.current.set(href, attempts + 1);
+      const meta = resolveMarkdownFileLinkMeta(href, cwd);
+      if (meta && imageEnvironmentId && isWorkspaceImagePreviewPath(meta.filePath)) {
+        forgetWorkspaceImageUrl(workspaceImageCacheKey(imageEnvironmentId, meta.filePath));
+      }
+      const next = new Map(workspaceImageSrcRef.current);
+      next.delete(href);
+      applyWorkspaceImageSrc(next);
+      setImageResolveNonce((nonce) => nonce + 1);
+    },
+    [applyWorkspaceImageSrc, cwd, imageEnvironmentId],
+  );
   const markdownImageCollection = useMemo<ChatMarkdownImageCollection>(() => {
     const entries = markdownImageEntryRefs.map((ref) => {
       const meta = resolveMarkdownFileLinkMeta(ref.href, cwd);
@@ -1609,16 +1666,18 @@ function ChatMarkdown({
             : null;
       return { href: ref.href, name: ref.alt || meta?.basename || ref.href, src };
     });
-    return buildChatMarkdownImageCollection(
+    return buildChatMarkdownImageCollection({
       entries,
-      (href) => workspaceImageSrcByHref.has(href),
-      requestImageHref,
-    );
+      isSettled: (href) => workspaceImageSrcByHref.has(href),
+      request: requestImageHref,
+      retry: retryImageHref,
+    });
   }, [
     canRenderWorkspaceImages,
     cwd,
     markdownImageEntryRefs,
     requestImageHref,
+    retryImageHref,
     workspaceImageSrcByHref,
   ]);
   const markdownComponents = useMemo<Components>(
