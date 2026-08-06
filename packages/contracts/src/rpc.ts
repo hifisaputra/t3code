@@ -13,7 +13,13 @@ import {
   FilesystemBrowseResult,
   FilesystemBrowseError,
 } from "./filesystem.ts";
-import { AssetAccessError, AssetCreateUrlInput, AssetCreateUrlResult } from "./assets.ts";
+import {
+  AssetAccessError,
+  AssetCreateUrlInput,
+  AssetCreateUrlResult,
+  AssetCreateUrlsInput,
+  AssetCreateUrlsResult,
+} from "./assets.ts";
 import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
@@ -160,6 +166,7 @@ export const WS_METHODS = {
   // Filesystem methods
   filesystemBrowse: "filesystem.browse",
   assetsCreateUrl: "assets.createUrl",
+  assetsCreateUrls: "assets.createUrls",
 
   // VCS methods
   vcsPull: "vcs.pull",
@@ -392,6 +399,16 @@ export const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
 export const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
   payload: AssetCreateUrlInput,
   success: AssetCreateUrlResult,
+  error: Schema.Union([AssetAccessError, EnvironmentAuthorizationError]),
+});
+
+/**
+ * Mint URLs for a set of resources in one round trip. A message full of images used to
+ * cost one request per image, which is what made opening an image-heavy thread drag.
+ */
+export const WsAssetsCreateUrlsRpc = Rpc.make(WS_METHODS.assetsCreateUrls, {
+  payload: AssetCreateUrlsInput,
+  success: AssetCreateUrlsResult,
   error: Schema.Union([AssetAccessError, EnvironmentAuthorizationError]),
 });
 
@@ -706,6 +723,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsAssetsCreateUrlRpc,
+  WsAssetsCreateUrlsRpc,
   WsSubscribeVcsStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,

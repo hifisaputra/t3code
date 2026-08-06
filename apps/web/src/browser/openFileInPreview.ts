@@ -1,11 +1,13 @@
 import type {
   AssetCreateUrlResult,
+  AssetCreateUrlsResult,
   AssetResource,
   EnvironmentId,
   PreviewOpenInput,
   PreviewSessionSnapshot,
   ScopedThreadRef,
 } from "@t3tools/contracts";
+import { ASSET_CREATE_URLS_MAX } from "@t3tools/contracts";
 import {
   type AtomCommandResult,
   mapAtomCommandResult,
@@ -93,6 +95,53 @@ export async function resolveWorkspaceFileAsset<AssetError>(input: {
     );
   }
   return AsyncResult.success({ url: assetUrl, expiresAt: assetResult.value.expiresAt });
+}
+
+export type CreateAssetUrlsMutation<AssetError> = (input: {
+  readonly environmentId: EnvironmentId;
+  readonly input: { readonly resources: ReadonlyArray<AssetResource> };
+}) => Promise<AtomCommandResult<AssetCreateUrlsResult, AssetError>>;
+
+/**
+ * Resolve many workspace files in one round trip — the shape a chat message needs, where
+ * asking per image cost one request each and dominated the time to first paint on a
+ * high-latency link. Returns one slot per requested path, in order; a file the server
+ * could not mint a URL for comes back as `null` rather than failing its neighbours.
+ * Requests beyond the protocol's batch size are split across as few calls as possible.
+ */
+export async function resolveWorkspaceFileAssets<AssetError>(input: {
+  readonly threadRef: ScopedThreadRef;
+  readonly filePaths: ReadonlyArray<string>;
+  readonly httpBaseUrl: string;
+  readonly createAssetUrls: CreateAssetUrlsMutation<AssetError>;
+}): Promise<AtomCommandResult<ReadonlyArray<ResolvedFileAsset | null>, AssetError>> {
+  const resolved: Array<ResolvedFileAsset | null> = [];
+  for (let start = 0; start < input.filePaths.length; start += ASSET_CREATE_URLS_MAX) {
+    const chunk = input.filePaths.slice(start, start + ASSET_CREATE_URLS_MAX);
+    const batchResult = await input.createAssetUrls({
+      environmentId: input.threadRef.environmentId,
+      input: {
+        resources: chunk.map((path) => ({
+          _tag: "workspace-file" as const,
+          threadId: input.threadRef.threadId,
+          path,
+        })),
+      },
+    });
+    if (batchResult._tag === "Failure") {
+      return AsyncResult.failure(batchResult.cause);
+    }
+    for (const [index] of chunk.entries()) {
+      const entry = batchResult.value.entries[index];
+      if (entry === undefined || entry._tag === "failed") {
+        resolved.push(null);
+        continue;
+      }
+      const assetUrl = resolveAssetUrl(input.httpBaseUrl, entry.relativeUrl);
+      resolved.push(assetUrl === null ? null : { url: assetUrl, expiresAt: entry.expiresAt });
+    }
+  }
+  return AsyncResult.success(resolved);
 }
 
 /** {@link resolveWorkspaceFileAsset} for callers that only need the URL. */

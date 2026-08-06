@@ -48,6 +48,7 @@ import {
   OrchestrationReplayEventsError,
   type FilesystemBrowseFailure,
   FilesystemBrowseError,
+  type AssetResource,
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
   EnvironmentAuthorizationError,
@@ -308,6 +309,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.assetsCreateUrl, AuthOrchestrationReadScope],
+  [WS_METHODS.assetsCreateUrls, AuthOrchestrationReadScope],
   [WS_METHODS.subscribeVcsStatus, AuthOrchestrationReadScope],
   [WS_METHODS.vcsRefreshStatus, AuthOrchestrationReadScope],
   [WS_METHODS.vcsPull, AuthOrchestrationOperateScope],
@@ -511,6 +513,67 @@ const makeWsRpcLayer = (
       const serverEventId = randomUUID.pipe(Effect.map(EventId.make));
       const serverCommandId = (tag: string) =>
         randomUUID.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
+
+      /**
+       * Workspace root a thread's files are served from. Shared by both asset RPCs; the
+       * batch form resolves it once per thread rather than once per requested image.
+       */
+      const resolveAssetWorkspaceRoot = Effect.fn("ws.resolveAssetWorkspaceRoot")(function* (
+        resource: AssetResource & { readonly _tag: "workspace-file" },
+      ) {
+        const contextError = (cause: unknown) =>
+          new AssetWorkspaceContextResolutionError({ resource, cause });
+        const thread = yield* projectionSnapshotQuery
+          .getThreadShellById(resource.threadId)
+          .pipe(Effect.mapError(contextError));
+        if (Option.isNone(thread)) {
+          return yield* new AssetWorkspaceContextNotFoundError({ resource });
+        }
+        const project = yield* projectionSnapshotQuery
+          .getProjectShellById(thread.value.projectId)
+          .pipe(Effect.mapError(contextError));
+        if (Option.isNone(project)) {
+          return yield* new AssetWorkspaceContextNotFoundError({ resource });
+        }
+        return thread.value.worktreePath ?? project.value.workspaceRoot;
+      });
+
+      /**
+       * Memoize workspace roots for the life of one request. A message's images all belong
+       * to the same thread, so a batch resolves its context once instead of per image.
+       */
+      const makeAssetWorkspaceRootResolver = () => {
+        const rootByThreadId = new Map<string, string>();
+        return (resource: AssetResource & { readonly _tag: "workspace-file" }) =>
+          Effect.suspend(() => {
+            const cached = rootByThreadId.get(resource.threadId);
+            return cached === undefined
+              ? resolveAssetWorkspaceRoot(resource).pipe(
+                  Effect.tap((root) =>
+                    Effect.sync(() => rootByThreadId.set(resource.threadId, root)),
+                  ),
+                )
+              : Effect.succeed(cached);
+          });
+      };
+
+      const issueAssetUrlForResource = Effect.fn("ws.issueAssetUrlForResource")(function* (
+        resource: AssetResource,
+        resolveWorkspaceRoot: (
+          resource: AssetResource & { readonly _tag: "workspace-file" },
+        ) => Effect.Effect<
+          string,
+          AssetWorkspaceContextNotFoundError | AssetWorkspaceContextResolutionError
+        > = resolveAssetWorkspaceRoot,
+      ) {
+        if (resource._tag !== "workspace-file") {
+          return yield* issueAssetUrl({ resource });
+        }
+        return yield* issueAssetUrl({
+          resource,
+          workspaceRoot: yield* resolveWorkspaceRoot(resource),
+        });
+      });
 
       const loadAuthAccessSnapshot = () =>
         Effect.all({
@@ -1474,48 +1537,35 @@ const makeWsRpcLayer = (
             { "rpc.aggregate": "workspace" },
           ),
         [WS_METHODS.assetsCreateUrl]: (input) =>
+          observeRpcEffect(WS_METHODS.assetsCreateUrl, issueAssetUrlForResource(input.resource), {
+            "rpc.aggregate": "workspace",
+          }),
+        [WS_METHODS.assetsCreateUrls]: (input) =>
           observeRpcEffect(
-            WS_METHODS.assetsCreateUrl,
+            WS_METHODS.assetsCreateUrls,
             Effect.gen(function* () {
-              if (input.resource._tag !== "workspace-file") {
-                return yield* issueAssetUrl({ resource: input.resource });
-              }
-              const thread = yield* projectionSnapshotQuery
-                .getThreadShellById(input.resource.threadId)
-                .pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new AssetWorkspaceContextResolutionError({
-                        resource: input.resource,
-                        cause,
-                      }),
+              const resolveWorkspaceRoot = makeAssetWorkspaceRootResolver();
+              // One unusable resource must not cost the caller every other URL in the
+              // batch, so each failure is reported in place and the rest still resolve.
+              const entries = yield* Effect.forEach(input.resources, (resource) =>
+                issueAssetUrlForResource(resource, resolveWorkspaceRoot).pipe(
+                  Effect.map(
+                    (issued) =>
+                      ({
+                        _tag: "resolved",
+                        relativeUrl: issued.relativeUrl,
+                        expiresAt: issued.expiresAt,
+                      }) as const,
                   ),
-                );
-              if (Option.isNone(thread)) {
-                return yield* new AssetWorkspaceContextNotFoundError({
-                  resource: input.resource,
-                });
-              }
-              const project = yield* projectionSnapshotQuery
-                .getProjectShellById(thread.value.projectId)
-                .pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new AssetWorkspaceContextResolutionError({
-                        resource: input.resource,
-                        cause,
-                      }),
+                  Effect.catch((cause) =>
+                    Effect.as(
+                      Effect.logDebug("Failed to mint a batched asset URL.", { resource, cause }),
+                      { _tag: "failed", reason: cause._tag } as const,
+                    ),
                   ),
-                );
-              if (Option.isNone(project)) {
-                return yield* new AssetWorkspaceContextNotFoundError({
-                  resource: input.resource,
-                });
-              }
-              return yield* issueAssetUrl({
-                resource: input.resource,
-                workspaceRoot: thread.value.worktreePath ?? project.value.workspaceRoot,
-              });
+                ),
+              );
+              return { entries };
             }),
             { "rpc.aggregate": "workspace" },
           ),

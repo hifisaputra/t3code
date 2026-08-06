@@ -50,9 +50,7 @@ function replaceExtension(name: string, extension: string): string {
   return `${base}.${extension}`;
 }
 
-async function loadImageBitmap(
-  file: File,
-): Promise<{
+async function loadImageBitmap(file: File): Promise<{
   readonly source: CanvasImageSource;
   readonly width: number;
   readonly height: number;

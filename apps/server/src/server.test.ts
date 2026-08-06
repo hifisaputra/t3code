@@ -1980,6 +1980,71 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("mints a whole message's asset URLs in one request, resolving the thread once", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-batch-",
+      });
+      const imagesDir = path.join(workspaceRoot, ".t3-images");
+      yield* fileSystem.makeDirectory(imagesDir, { recursive: true });
+      for (const name of ["one.png", "two.png"]) {
+        yield* fileSystem.writeFile(path.join(imagesDir, name), new Uint8Array([137, 80, 78, 71]));
+      }
+      const threadId = ThreadId.make("thread-asset-batch");
+      let threadLookups = 0;
+
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getThreadShellById: () =>
+              Effect.sync(() => {
+                threadLookups += 1;
+                return Option.some(makeDefaultOrchestrationThreadShell({ id: threadId }));
+              }),
+            getProjectShellById: () =>
+              Effect.succeed(
+                Option.some({
+                  id: defaultProjectId,
+                  title: "Asset Batch",
+                  workspaceRoot,
+                  defaultModelSelection: null,
+                  scripts: [],
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                  updatedAt: "2026-01-01T00:00:00.000Z",
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.assetsCreateUrls]({
+            resources: [
+              { _tag: "workspace-file", threadId, path: ".t3-images/one.png" },
+              { _tag: "workspace-file", threadId, path: ".t3-images/missing.png" },
+              { _tag: "workspace-file", threadId, path: ".t3-images/two.png" },
+            ],
+          }),
+        ),
+      );
+
+      assert.deepEqual(
+        result.entries.map((entry) => entry._tag),
+        ["resolved", "failed", "resolved"],
+      );
+      const [first, , third] = result.entries;
+      assertTrue(first?._tag === "resolved" && first.relativeUrl.endsWith("one.png"));
+      assertTrue(third?._tag === "resolved" && third.relativeUrl.endsWith("two.png"));
+      // The point of the batch: one request, and one thread lookup for the whole message
+      // rather than one per image.
+      assert.equal(threadLookups, 1);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("requires relay write scope to update agent activity publication", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();

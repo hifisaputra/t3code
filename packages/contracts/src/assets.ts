@@ -29,6 +29,44 @@ export const AssetCreateUrlResult = Schema.Struct({
 });
 export type AssetCreateUrlResult = typeof AssetCreateUrlResult.Type;
 
+/**
+ * Upper bound on one batch. A single chat message can carry a whole contact sheet, and
+ * the point of batching is to spend one round trip on it; anything past this is split
+ * into further batches by the caller.
+ */
+export const ASSET_CREATE_URLS_MAX = 64;
+
+export const AssetCreateUrlsInput = Schema.Struct({
+  resources: Schema.Array(AssetResource).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(ASSET_CREATE_URLS_MAX),
+  ),
+});
+export type AssetCreateUrlsInput = typeof AssetCreateUrlsInput.Type;
+
+/**
+ * One resource's outcome. Resources are independent — a deleted screenshot fails on its
+ * own rather than taking down the URLs for every other image in the same message — so
+ * failures ride along in the success channel, in request order.
+ */
+export const AssetCreateUrlEntry = Schema.Union([
+  Schema.TaggedStruct("resolved", {
+    relativeUrl: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+    expiresAt: Schema.Number,
+  }),
+  Schema.TaggedStruct("failed", {
+    /** The `_tag` of the underlying `AssetAccessError`, for logging and triage. */
+    reason: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  }),
+]);
+export type AssetCreateUrlEntry = typeof AssetCreateUrlEntry.Type;
+
+export const AssetCreateUrlsResult = Schema.Struct({
+  /** One entry per requested resource, in the order they were requested. */
+  entries: Schema.Array(AssetCreateUrlEntry).check(Schema.isMaxLength(ASSET_CREATE_URLS_MAX)),
+});
+export type AssetCreateUrlsResult = typeof AssetCreateUrlsResult.Type;
+
 export class AssetWorkspaceContextNotFoundError extends Schema.TaggedErrorClass<AssetWorkspaceContextNotFoundError>()(
   "AssetWorkspaceContextNotFoundError",
   {

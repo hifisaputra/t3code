@@ -168,6 +168,14 @@ export const make = Effect.gen(function* () {
 
   const resolveSecretPath = (name: string) => path.join(serverConfig.secretsDir, `${name}.bin`);
 
+  /**
+   * Long-lived secrets obtained through `getOrCreateRandom` — the asset signing key is
+   * read once per minted URL, which was a file read per image in a chat message. Writes
+   * and removals go through this service, so they invalidate the entry; a secret replaced
+   * on disk by another process is not observed until the server restarts.
+   */
+  const managedSecrets = new Map<string, Uint8Array>();
+
   const get: ServerSecretStore["Service"]["get"] = (name) =>
     fileSystem.readFile(resolveSecretPath(name)).pipe(
       Effect.map((bytes) => Option.some(Uint8Array.from(bytes))),
@@ -217,6 +225,7 @@ export const make = Effect.gen(function* () {
           ),
         );
       }),
+      Effect.tap(() => Effect.sync(() => managedSecrets.delete(name))),
       Effect.withSpan("ServerSecretStore.set"),
     );
   };
@@ -245,6 +254,12 @@ export const make = Effect.gen(function* () {
   };
 
   const getOrCreateRandom: ServerSecretStore["Service"]["getOrCreateRandom"] = (name, bytes) =>
+    Effect.suspend(() => {
+      const cached = managedSecrets.get(name);
+      return cached ? Effect.succeed(cached) : loadOrCreateRandom(name, bytes);
+    });
+
+  const loadOrCreateRandom = (name: string, bytes: number) =>
     get(name).pipe(
       Effect.flatMap(
         Option.match({
@@ -283,6 +298,7 @@ export const make = Effect.gen(function* () {
             ),
         }),
       ),
+      Effect.tap((secret) => Effect.sync(() => managedSecrets.set(name, secret))),
       Effect.withSpan("ServerSecretStore.getOrCreateRandom"),
     );
 
@@ -298,6 +314,7 @@ export const make = Effect.gen(function* () {
               }),
             ),
       ),
+      Effect.tap(() => Effect.sync(() => managedSecrets.delete(name))),
       Effect.withSpan("ServerSecretStore.remove"),
     );
 

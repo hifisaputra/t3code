@@ -39,7 +39,7 @@ export function useAssetUrls(
       preparedConnection._tag === "None"
         ? resources.map(() => null)
         : results.map((result) =>
-            AsyncResult.isSuccess(result)
+            AsyncResult.isSuccess(result) && result.value._tag === "resolved"
               ? resolveAssetUrl(preparedConnection.value.httpBaseUrl, result.value.relativeUrl)
               : null,
           ),

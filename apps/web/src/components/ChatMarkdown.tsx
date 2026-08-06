@@ -97,7 +97,7 @@ import {
   isBrowserPreviewFile,
   openFileInPreview,
   openUrlInPreview,
-  resolveWorkspaceFileAsset,
+  resolveWorkspaceFileAssets,
   resolveWorkspaceFileAssetUrl,
   BrowserPreviewUnavailableError,
 } from "../browser/openFileInPreview";
@@ -1244,7 +1244,10 @@ function areMarkdownFileLinkPropsEqual(
   );
 }
 
-type WorkspaceImageUrlResolver = (filePath: string) => Promise<string | null>;
+/** Resolves a set of workspace paths to displayable URLs, one slot per path, in order. */
+type WorkspaceImageUrlResolver = (
+  filePaths: ReadonlyArray<string>,
+) => Promise<ReadonlyArray<string | null>>;
 
 const EMPTY_IMAGE_HREFS: ReadonlyArray<string> = [];
 
@@ -1399,6 +1402,9 @@ function ChatMarkdown({
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
   });
+  const createAssetUrls = useAtomQueryRunner(assetEnvironment.createUrlBatch, {
+    reportFailure: false,
+  });
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
   });
@@ -1511,38 +1517,49 @@ function ChatMarkdown({
     [createAssetUrl, openPreview, preparedConnection, threadRef],
   );
   /**
-   * Mint a signed asset URL for a workspace image, or null when it can't be served
-   * (no thread context, disconnected environment, or the path escapes the workspace
-   * root — the backend rejects those).
+   * Mint signed asset URLs for the message's workspace images — cached ones for free, the
+   * rest in a single round trip. A path resolves to null when it can't be served (no
+   * thread context, disconnected environment, or the path escapes the workspace root).
    */
-  const resolveWorkspaceImageUrl = useCallback<WorkspaceImageUrlResolver>(
-    async (filePath) => {
-      if (!threadRef || preparedConnection._tag === "None") return null;
+  const resolveWorkspaceImageUrls = useCallback<WorkspaceImageUrlResolver>(
+    async (filePaths) => {
+      if (!threadRef || preparedConnection._tag === "None") return filePaths.map(() => null);
       // A URL minted for this file by any earlier mount is still good, and reusing it is
       // what keeps the browser cache warm — a fresh token is a fresh URL, and a fresh URL
       // is a full re-download.
-      const cacheKey = workspaceImageCacheKey(threadRef.environmentId, filePath);
-      const cachedUrl = readWorkspaceImageUrl(cacheKey);
-      if (cachedUrl !== null) return cachedUrl;
-      const result = await resolveWorkspaceFileAsset({
+      const cacheKeys = filePaths.map((filePath) =>
+        workspaceImageCacheKey(threadRef.environmentId, filePath),
+      );
+      const cached = cacheKeys.map((cacheKey) => readWorkspaceImageUrl(cacheKey));
+      const missingIndexes = cached.flatMap((url, index) => (url === null ? [index] : []));
+      if (missingIndexes.length === 0) return cached;
+
+      const missingPaths = missingIndexes.map((index) => filePaths[index] as string);
+      const result = await resolveWorkspaceFileAssets({
         threadRef,
-        filePath,
+        filePaths: missingPaths,
         httpBaseUrl: preparedConnection.value.httpBaseUrl,
-        createAssetUrl,
+        createAssetUrls,
       });
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
           reportMarkdownActionFailure(
-            { operation: "resolve-markdown-image", target: filePath },
+            { operation: "resolve-markdown-images", target: missingPaths.join(", ") },
             result.cause,
           );
         }
-        return null;
+        return cached;
       }
-      rememberWorkspaceImageUrl(cacheKey, result.value);
-      return result.value.url;
+      const resolved = [...cached];
+      missingIndexes.forEach((targetIndex, batchIndex) => {
+        const asset = result.value[batchIndex] ?? null;
+        if (asset === null) return;
+        rememberWorkspaceImageUrl(cacheKeys[targetIndex] as string, asset);
+        resolved[targetIndex] = asset.url;
+      });
+      return resolved;
     },
-    [createAssetUrl, preparedConnection, threadRef],
+    [createAssetUrls, preparedConnection, threadRef],
   );
   const canRenderWorkspaceImages = Boolean(threadRef) && preparedConnection._tag === "Some";
   // Collect the message's images once, keyed by normalized destination. Recomputing the
@@ -1595,36 +1612,41 @@ function ChatMarkdown({
     workspaceImageSrcRef.current = next;
     setWorkspaceImageSrcByHref(next);
   }, []);
-  // Mint the asset URLs for every workspace image in the message as one batch, one
-  // request at a time. Doing it here rather than inside each <img> keeps a message with
-  // many images from firing a burst of concurrent RPCs, and survives the component
+  // Mint the asset URLs for every workspace image in the message as one batch — one
+  // request for the whole message, not one per image. Doing it here rather than inside
+  // each <img> is what makes that batching possible, and it survives the component
   // remounts that streaming causes.
   useEffect(() => {
     // A new resolver means a new connection (or thread): the failures are worth retrying,
     // the resolved URLs are worth keeping.
-    if (workspaceImageResolverRef.current !== resolveWorkspaceImageUrl) {
-      workspaceImageResolverRef.current = resolveWorkspaceImageUrl;
+    if (workspaceImageResolverRef.current !== resolveWorkspaceImageUrls) {
+      workspaceImageResolverRef.current = resolveWorkspaceImageUrls;
       const retained = retainResolvedImageSrc(workspaceImageSrcRef.current);
       if (retained !== workspaceImageSrcRef.current) applyWorkspaceImageSrc(retained);
     }
-    if (!canRenderWorkspaceImages || workspaceImageTargets.length === 0) return;
+    if (!canRenderWorkspaceImages) return;
+    const pending = workspaceImageTargets.filter(
+      (target) => !workspaceImageSrcRef.current.has(target.href),
+    );
+    if (pending.length === 0) return;
     let cancelled = false;
     void (async () => {
-      for (const target of workspaceImageTargets) {
-        if (cancelled) return;
-        if (workspaceImageSrcRef.current.has(target.href)) continue;
-        const url = await resolveWorkspaceImageUrl(target.filePath).catch((cause: unknown) => {
+      const urls = await resolveWorkspaceImageUrls(pending.map((target) => target.filePath)).catch(
+        (cause: unknown) => {
           reportMarkdownActionFailure(
-            { operation: "resolve-markdown-image", target: target.filePath },
+            {
+              operation: "resolve-markdown-images",
+              target: pending.map((t) => t.filePath).join(", "),
+            },
             cause,
           );
-          return null;
-        });
-        if (cancelled) return;
-        const next = new Map(workspaceImageSrcRef.current);
-        next.set(target.href, url);
-        applyWorkspaceImageSrc(next);
-      }
+          return pending.map(() => null);
+        },
+      );
+      if (cancelled) return;
+      const next = new Map(workspaceImageSrcRef.current);
+      pending.forEach((target, index) => next.set(target.href, urls[index] ?? null));
+      applyWorkspaceImageSrc(next);
     })();
     return () => {
       cancelled = true;
@@ -1633,7 +1655,7 @@ function ChatMarkdown({
     applyWorkspaceImageSrc,
     canRenderWorkspaceImages,
     imageResolveNonce,
-    resolveWorkspaceImageUrl,
+    resolveWorkspaceImageUrls,
     workspaceImageTargets,
   ]);
   // An image whose URL the browser rejected — an expired or revoked token — is the one

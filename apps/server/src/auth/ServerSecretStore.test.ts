@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as PlatformError from "effect/PlatformError";
 
@@ -17,6 +18,12 @@ const makeServerConfigLayer = () =>
 
 const makeServerSecretStoreLayer = () =>
   Layer.provide(ServerSecretStore.layer, makeServerConfigLayer());
+
+/** Keeps `ServerConfig` reachable so a test can reach the secret files on disk. */
+const makeObservableSecretStoreLayer = () => {
+  const configLayer = makeServerConfigLayer();
+  return ServerSecretStore.layer.pipe(Layer.provide(configLayer), Layer.provideMerge(configLayer));
+};
 
 const PermissionDeniedFileSystemLayer = Layer.effect(
   FileSystem.FileSystem,
@@ -164,6 +171,38 @@ it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
       const second = yield* secretStore.getOrCreateRandom("session-signing-key", 32);
 
       assert.deepEqual(Array.from(second), Array.from(first));
+    }).pipe(Effect.provide(makeServerSecretStoreLayer())),
+  );
+
+  it.effect("serves a managed secret from memory instead of re-reading it", () =>
+    Effect.gen(function* () {
+      const secretStore = yield* ServerSecretStore.ServerSecretStore;
+      const first = yield* secretStore.getOrCreateRandom("asset-access-signing-key", 32);
+      // Deleting the file behind the store's back proves the second call never touched it.
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      yield* fileSystem.remove(path.join(serverConfig.secretsDir, "asset-access-signing-key.bin"));
+
+      const second = yield* secretStore.getOrCreateRandom("asset-access-signing-key", 32);
+
+      assert.deepEqual(Array.from(second), Array.from(first));
+    }).pipe(Effect.provide(makeObservableSecretStoreLayer())),
+  );
+
+  it.effect("stops serving a cached secret once it is replaced or removed", () =>
+    Effect.gen(function* () {
+      const secretStore = yield* ServerSecretStore.ServerSecretStore;
+      const original = yield* secretStore.getOrCreateRandom("asset-access-signing-key", 32);
+
+      yield* secretStore.set("asset-access-signing-key", new Uint8Array(32).fill(7));
+      const afterSet = yield* secretStore.getOrCreateRandom("asset-access-signing-key", 32);
+      yield* secretStore.remove("asset-access-signing-key");
+      const afterRemove = yield* secretStore.getOrCreateRandom("asset-access-signing-key", 32);
+
+      assert.deepEqual(Array.from(afterSet), Array.from(new Uint8Array(32).fill(7)));
+      assert.notDeepEqual(Array.from(afterRemove), Array.from(afterSet));
+      assert.notDeepEqual(Array.from(afterRemove), Array.from(original));
     }).pipe(Effect.provide(makeServerSecretStoreLayer())),
   );
 

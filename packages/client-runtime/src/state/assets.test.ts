@@ -1,10 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
-import { EnvironmentId } from "@t3tools/contracts";
+import { ASSET_CREATE_URLS_MAX, EnvironmentId } from "@t3tools/contracts";
 import * as Layer from "effect/Layer";
 import { Atom } from "effect/unstable/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import {
+  chunkAssetResources,
   createAssetEnvironmentAtoms,
   InvalidAssetCollectionKeyError,
   parseAssetCollectionKey,
@@ -29,6 +30,33 @@ describe("asset collection keys", () => {
     const key = JSON.stringify(["environment-1", [{ _tag: "unknown" }]]);
 
     expect(() => parseAssetCollectionKey(key)).toThrowError(InvalidAssetCollectionKeyError);
+  });
+});
+
+describe("chunkAssetResources", () => {
+  const resourceAt = (index: number) =>
+    ({ _tag: "attachment", attachmentId: `attachment-${index}` }) as const;
+
+  it("keeps a request that fits in a single batch", () => {
+    const resources = Array.from({ length: ASSET_CREATE_URLS_MAX }, (_value, i) => resourceAt(i));
+
+    expect(chunkAssetResources(resources)).toEqual([resources]);
+  });
+
+  it("splits a larger request into as few batches as the protocol allows", () => {
+    const resources = Array.from({ length: ASSET_CREATE_URLS_MAX * 2 + 1 }, (_value, i) =>
+      resourceAt(i),
+    );
+
+    expect(chunkAssetResources(resources).map((chunk) => chunk.length)).toEqual([
+      ASSET_CREATE_URLS_MAX,
+      ASSET_CREATE_URLS_MAX,
+      1,
+    ]);
+  });
+
+  it("asks for nothing when there is nothing to resolve", () => {
+    expect(chunkAssetResources([])).toEqual([]);
   });
 });
 
