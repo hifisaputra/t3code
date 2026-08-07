@@ -50,13 +50,23 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     },
     [navigateImage, preview.images.length],
   );
+  /** True when this click is the tail of a swipe we already paged on. */
+  const consumeSwipe = useCallback(() => {
+    if (!swipeHandledRef.current) return false;
+    swipeHandledRef.current = false;
+    return true;
+  }, []);
   const onBackdropClick = useCallback(() => {
-    if (swipeHandledRef.current) {
-      swipeHandledRef.current = false;
-      return;
-    }
+    if (consumeSwipe()) return;
     onClose();
-  }, [onClose]);
+  }, [consumeSwipe, onClose]);
+  const onTapZoneClick = useCallback(
+    (direction: -1 | 1) => {
+      if (consumeSwipe()) return;
+      navigateImage(direction);
+    },
+    [consumeSwipe, navigateImage],
+  );
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -103,29 +113,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         aria-label="Close image preview"
         onClick={onBackdropClick}
       />
-      {preview.images.length > 1 && (
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          className="absolute left-2 top-1/2 z-20 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:left-6"
-          aria-label="Previous image"
-          onClick={() => navigateImage(-1)}
-        >
-          <ChevronLeftIcon className="size-5" />
-        </Button>
-      )}
       <div className="relative isolate z-10 max-h-[92vh] max-w-[92vw]">
-        <Button
-          type="button"
-          size="icon-xs"
-          variant="ghost"
-          className="absolute right-2 top-2"
-          onClick={onClose}
-          aria-label="Close image preview"
-        >
-          <XIcon />
-        </Button>
         <img
           src={item.src}
           alt={item.name}
@@ -138,17 +126,64 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         </p>
       </div>
       {preview.images.length > 1 && (
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          className="absolute right-2 top-1/2 z-20 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:right-6"
-          aria-label="Next image"
-          onClick={() => navigateImage(1)}
-        >
-          <ChevronRightIcon className="size-5" />
-        </Button>
+        <>
+          {/*
+            The arrow buttons are a hard target on a phone, so the outer third of
+            each side pages the gallery on tap — including where it overlaps the
+            image, which spans nearly the full width on a narrow screen. They sit
+            above the image but below the arrows and the close button, which do
+            the same thing on click and stay the accessible controls.
+          */}
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
+            className="absolute inset-y-0 left-0 z-20 w-1/3 cursor-pointer"
+            onClick={() => onTapZoneClick(-1)}
+          />
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
+            className="absolute inset-y-0 right-0 z-20 w-1/3 cursor-pointer"
+            onClick={() => onTapZoneClick(1)}
+          />
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="absolute left-2 top-1/2 z-30 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:left-6"
+            aria-label="Previous image"
+            onClick={() => navigateImage(-1)}
+          >
+            <ChevronLeftIcon className="size-5" />
+          </Button>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="absolute right-2 top-1/2 z-30 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:right-6"
+            aria-label="Next image"
+            onClick={() => navigateImage(1)}
+          >
+            <ChevronRightIcon className="size-5" />
+          </Button>
+        </>
       )}
+      {/*
+        Anchored to the viewport rather than the image corner so the tap zones
+        can never cover it.
+      */}
+      <Button
+        type="button"
+        size="icon"
+        variant="ghost"
+        className="absolute right-2 top-2 z-30 text-white/90 hover:bg-white/10 hover:text-white sm:right-4 sm:top-4"
+        onClick={onClose}
+        aria-label="Close image preview"
+      >
+        <XIcon className="size-5" />
+      </Button>
     </div>
   );
 });
