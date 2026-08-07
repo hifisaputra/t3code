@@ -1,11 +1,11 @@
 import { type ApprovalRequestId } from "@t3tools/contracts";
-import { memo, useEffect, useEffectEvent, useRef, useState } from "react";
+import { memo, useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { type PendingUserInput } from "../../session-logic";
 import {
   derivePendingUserInputProgress,
   type PendingUserInputDraftAnswer,
 } from "../../pendingUserInput";
-import { CheckIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 
 interface PendingUserInputPanelProps {
@@ -65,6 +65,10 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     questionId: string;
     optionLabel: string;
   } | null>(null);
+  // A long list of options can fill a phone screen, hiding the very message the question
+  // is about. Collapsing leaves a one-line reminder so the chat is readable while deciding.
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const optionsId = useId();
 
   useEffect(() => {
     onAdvanceRef.current = onAdvance;
@@ -90,6 +94,13 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     progress.customAnswer,
     progress.selectedOptionLabels,
   ]);
+
+  // Each question gets its own decision about whether it is in the way, and the next one
+  // should arrive ready to answer rather than hidden behind a collapsed bar.
+  const activeQuestionId = activeQuestion?.id ?? null;
+  useEffect(() => {
+    setIsCollapsed(false);
+  }, [activeQuestionId]);
 
   // Clear auto-advance timer on unmount
   useEffect(() => {
@@ -120,7 +131,8 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   // outside editable fields. Multi-select prompts toggle options in place; single-
   // select prompts keep the existing auto-advance behavior.
   useEffect(() => {
-    if (!activeQuestion || isResponding) return;
+    // Collapsed, the options are off screen — a stray digit must not answer for the user.
+    if (!activeQuestion || isResponding || isCollapsed) return;
     const handler = (event: globalThis.KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
@@ -144,7 +156,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [activeQuestion, isResponding]);
+  }, [activeQuestion, isCollapsed, isResponding]);
 
   if (!activeQuestion) {
     return null;
@@ -153,22 +165,55 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   const customAnswerActive = progress.customAnswer.trim().length > 0;
 
   return (
-    <div className="px-4 py-3 sm:px-5">
-      <div className="mb-2 flex items-center gap-3">
-        <span className="text-[11px] font-semibold tracking-widest text-muted-foreground/55 uppercase">
+    <div className={cn("px-4 sm:px-5", isCollapsed ? "py-2" : "py-3")}>
+      <div className={cn("flex items-center gap-3", isCollapsed ? null : "mb-2")}>
+        <span className="shrink-0 text-[11px] font-semibold tracking-widest text-muted-foreground/55 uppercase">
           {activeQuestion.header}
         </span>
         {prompt.questions.length > 1 ? (
-          <span className="flex h-5 items-center rounded-md bg-muted/60 px-1.5 text-[10px] font-medium tabular-nums text-muted-foreground/60">
+          <span className="flex h-5 shrink-0 items-center rounded-md bg-muted/60 px-1.5 text-[10px] font-medium tabular-nums text-muted-foreground/60">
             {questionIndex + 1}/{prompt.questions.length}
           </span>
         ) : null}
+        {/* Collapsed, the question keeps its own row rather than wrapping the header. */}
+        {isCollapsed ? (
+          <span className="min-w-0 flex-1 truncate text-sm text-foreground/70">
+            {activeQuestion.question}
+          </span>
+        ) : null}
+        <button
+          type="button"
+          className={cn(
+            "flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-primary/25 focus-visible:outline-none",
+            isCollapsed ? null : "ml-auto",
+          )}
+          aria-expanded={!isCollapsed}
+          aria-controls={optionsId}
+          aria-label={isCollapsed ? "Show answer options" : "Hide answer options to read the chat"}
+          onClick={() => setIsCollapsed((collapsed) => !collapsed)}
+        >
+          {isCollapsed ? (
+            <ChevronUpIcon className="size-4" />
+          ) : (
+            <ChevronDownIcon className="size-4" />
+          )}
+        </button>
       </div>
-      <p className="text-sm text-foreground/90">{activeQuestion.question}</p>
-      {activeQuestion.multiSelect ? (
-        <p className="mt-1 text-xs text-muted-foreground/65">Select one or more options.</p>
-      ) : null}
-      <div className="mt-3 space-y-1.5">
+      {isCollapsed ? null : (
+        <>
+          <p className="text-sm text-foreground/90">{activeQuestion.question}</p>
+          {activeQuestion.multiSelect ? (
+            <p className="mt-1 text-xs text-muted-foreground/65">Select one or more options.</p>
+          ) : null}
+        </>
+      )}
+      {/* Kept mounted while collapsed so `aria-controls` always resolves; capped so a long
+          option list scrolls instead of pushing the conversation off screen. */}
+      <div
+        id={optionsId}
+        hidden={isCollapsed}
+        className="mt-3 max-h-[40vh] space-y-1.5 overflow-y-auto overscroll-contain"
+      >
         {activeQuestion.options.map((option, index) => {
           const isOptimisticallySelected =
             optimisticSingleSelect?.questionId === activeQuestion.id &&
