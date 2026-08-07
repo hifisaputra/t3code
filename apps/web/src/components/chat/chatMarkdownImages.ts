@@ -53,6 +53,23 @@ export function retainResolvedImageSrc(
   return resolved.size === current.size ? current : resolved;
 }
 
+/**
+ * The `src` to render for one image, given the message's batch of resolved URLs.
+ *
+ * Deliberately takes no connection state. A signed asset URL outlives the socket that
+ * minted it, so a live connection is required to *mint* a URL but never to *show* one:
+ * gating this on the connection is what used to blank every image on a reconnect and
+ * re-download them when it came back.
+ */
+export function resolveChatMarkdownImageSrc(input: {
+  readonly href: string;
+  readonly isWorkspaceImage: boolean;
+  readonly resolvedByHref: ReadonlyMap<string, string | null>;
+}): string | null {
+  if (input.isWorkspaceImage) return input.resolvedByHref.get(input.href) ?? null;
+  return isExternalImageHref(input.href) ? input.href : null;
+}
+
 /** A markdown image whose displayable source has been (or is being) resolved. */
 export interface ChatMarkdownImageEntry {
   readonly href: string;

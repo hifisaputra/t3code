@@ -5,6 +5,7 @@ import {
   extractMarkdownImageRefs,
   isExternalImageHref,
   openMarkdownImageLightbox,
+  resolveChatMarkdownImageSrc,
   retainResolvedImageSrc,
 } from "./chatMarkdownImages";
 import { useImageLightboxStore } from "./imageLightboxStore";
@@ -108,5 +109,45 @@ describe("openMarkdownImageLightbox", () => {
     openMarkdownImageLightbox(collection(), "pending.png");
 
     expect(useImageLightboxStore.getState().preview).toBeNull();
+  });
+});
+
+describe("resolveChatMarkdownImageSrc", () => {
+  const resolvedByHref = new Map<string, string | null>([
+    ["shot.png", "https://host/assets/shot?token=abc"],
+    ["missing.png", null],
+  ]);
+
+  it("keeps showing a resolved workspace image — the caller must not gate this on the connection", () => {
+    // Regression: while the socket was down the src was forced to null, so every image
+    // on screen fell back to its alt text and re-downloaded once the socket returned.
+    expect(
+      resolveChatMarkdownImageSrc({ href: "shot.png", isWorkspaceImage: true, resolvedByHref }),
+    ).toBe("https://host/assets/shot?token=abc");
+  });
+
+  it("has no src for a workspace image the batch has not resolved", () => {
+    expect(
+      resolveChatMarkdownImageSrc({ href: "pending.png", isWorkspaceImage: true, resolvedByHref }),
+    ).toBeNull();
+    expect(
+      resolveChatMarkdownImageSrc({ href: "missing.png", isWorkspaceImage: true, resolvedByHref }),
+    ).toBeNull();
+  });
+
+  it("renders an http(s) image straight from its own URL", () => {
+    expect(
+      resolveChatMarkdownImageSrc({
+        href: "https://example.com/a.png",
+        isWorkspaceImage: false,
+        resolvedByHref,
+      }),
+    ).toBe("https://example.com/a.png");
+  });
+
+  it("has no src for a non-workspace path that is not a URL", () => {
+    expect(
+      resolveChatMarkdownImageSrc({ href: "./local.png", isWorkspaceImage: false, resolvedByHref }),
+    ).toBeNull();
   });
 });

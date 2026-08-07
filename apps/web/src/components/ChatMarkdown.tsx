@@ -82,6 +82,7 @@ import {
   isExternalImageHref,
   normalizeMarkdownLinkHrefKey,
   openMarkdownImageLightbox,
+  resolveChatMarkdownImageSrc,
   retainResolvedImageSrc,
   type ChatMarkdownImageCollection,
   type MarkdownImageRef,
@@ -1561,7 +1562,13 @@ function ChatMarkdown({
     },
     [createAssetUrls, preparedConnection, threadRef],
   );
-  const canRenderWorkspaceImages = Boolean(threadRef) && preparedConnection._tag === "Some";
+  // A workspace image is only meaningful inside a thread — that is what says which
+  // environment's workspace the path is relative to. It does not depend on the socket.
+  const hasWorkspaceImageContext = Boolean(threadRef);
+  // Minting a *new* URL does need a live connection. Showing one already minted does not:
+  // a signed asset URL outlives the socket that minted it, so an image on screen must
+  // survive a reconnect rather than collapse to its alt text and re-download after.
+  const canMintWorkspaceImageUrls = hasWorkspaceImageContext && preparedConnection._tag === "Some";
   // Collect the message's images once, keyed by normalized destination. Recomputing the
   // list from `text` on every streamed token would restart resolution, so the key string
   // is what the memo below keys on: it only changes when the set of images changes.
@@ -1624,7 +1631,7 @@ function ChatMarkdown({
       const retained = retainResolvedImageSrc(workspaceImageSrcRef.current);
       if (retained !== workspaceImageSrcRef.current) applyWorkspaceImageSrc(retained);
     }
-    if (!canRenderWorkspaceImages) return;
+    if (!canMintWorkspaceImageUrls) return;
     const pending = workspaceImageTargets.filter(
       (target) => !workspaceImageSrcRef.current.has(target.href),
     );
@@ -1653,7 +1660,7 @@ function ChatMarkdown({
     };
   }, [
     applyWorkspaceImageSrc,
-    canRenderWorkspaceImages,
+    canMintWorkspaceImageUrls,
     imageResolveNonce,
     resolveWorkspaceImageUrls,
     workspaceImageTargets,
@@ -1680,12 +1687,11 @@ function ChatMarkdown({
     const entries = markdownImageEntryRefs.map((ref) => {
       const meta = resolveMarkdownFileLinkMeta(ref.href, cwd);
       const isWorkspaceImage = Boolean(meta && isWorkspaceImagePreviewPath(meta.filePath));
-      const src =
-        isWorkspaceImage && canRenderWorkspaceImages
-          ? (workspaceImageSrcByHref.get(ref.href) ?? null)
-          : isExternalImageHref(ref.href)
-            ? ref.href
-            : null;
+      const src = resolveChatMarkdownImageSrc({
+        href: ref.href,
+        isWorkspaceImage,
+        resolvedByHref: workspaceImageSrcByHref,
+      });
       return { href: ref.href, name: ref.alt || meta?.basename || ref.href, src };
     });
     return buildChatMarkdownImageCollection({
@@ -1694,14 +1700,7 @@ function ChatMarkdown({
       request: requestImageHref,
       retry: retryImageHref,
     });
-  }, [
-    canRenderWorkspaceImages,
-    cwd,
-    markdownImageEntryRefs,
-    requestImageHref,
-    retryImageHref,
-    workspaceImageSrcByHref,
-  ]);
+  }, [cwd, markdownImageEntryRefs, requestImageHref, retryImageHref, workspaceImageSrcByHref]);
   const markdownComponents = useMemo<Components>(
     () => ({
       img({ node: _node, src, alt, ...props }) {
@@ -1713,7 +1712,7 @@ function ChatMarkdown({
         const imageMeta = href ? resolveMarkdownFileLinkMeta(href, cwd) : null;
         const isWorkspaceImage =
           Boolean(imageMeta && isWorkspaceImagePreviewPath(imageMeta.filePath)) &&
-          canRenderWorkspaceImages;
+          hasWorkspaceImageContext;
         if (!isWorkspaceImage && !isExternalImageHref(href)) {
           // The sanitizer drops disallowed protocols (data:, javascript:) by removing
           // `src` entirely — keep it absent rather than emitting src="", which makes
@@ -1939,7 +1938,7 @@ function ChatMarkdown({
       },
     }),
     [
-      canRenderWorkspaceImages,
+      hasWorkspaceImageContext,
       cwd,
       diffThemeName,
       fileLinkParentSuffixByPath,
