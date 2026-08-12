@@ -4,8 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ServerConfig from "../config.ts";
-import { resolveSessionCookieName } from "./utils.ts";
-import { isLoopbackHost, isWildcardHost } from "../startupAccess.ts";
+import { isRemoteReachableHost, resolveSessionCookieName } from "./utils.ts";
 
 export class EnvironmentAuthPolicy extends Context.Service<
   EnvironmentAuthPolicy,
@@ -22,10 +21,7 @@ export const make = Effect.gen(function* () {
   // Cloudflare Tunnel (`remoteReachable`). In those cases it must be treated as
   // remotely reachable to allow remote pairing.
   const isRemoteReachable =
-    isWildcardHost(config.host) ||
-    !isLoopbackHost(config.host) ||
-    config.tailscaleServeEnabled ||
-    config.remoteReachable;
+    isRemoteReachableHost(config.host) || config.tailscaleServeEnabled || config.remoteReachable;
 
   const policy =
     config.mode === "desktop"
@@ -50,6 +46,9 @@ export const make = Effect.gen(function* () {
     sessionCookieName: resolveSessionCookieName({
       mode: config.mode,
       port: config.port,
+      host: config.host,
+      instanceKey: config.stateDir,
+      development: config.devUrl !== undefined,
     }),
   };
 

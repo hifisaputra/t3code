@@ -11,6 +11,7 @@ import { HttpClient, HttpRouter } from "effect/unstable/http";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as ServerConfig from "./config.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
+import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import { assetRouteLayer } from "./http.ts";
@@ -21,7 +22,10 @@ const configLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
 const testLayer = Layer.mergeAll(
   configLayer,
   WorkspacePaths.layer,
-  ProjectFaviconResolver.layer.pipe(Layer.provide(WorkspacePaths.layer)),
+  ProjectFaviconResolver.layer.pipe(
+    Layer.provide(WorkspacePaths.layer),
+    Layer.provide(T3ProjectFileLoader.layer),
+  ),
   ServerSecretStore.layer.pipe(Layer.provide(configLayer)),
 ).pipe(Layer.provideMerge(NodeServices.layer), Layer.provideMerge(NodeHttpServer.layerTest));
 

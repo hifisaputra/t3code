@@ -3,7 +3,8 @@ import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { type LegendListRef } from "@legendapp/list/react-native";
 import type { EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
 import { CHAT_LIST_ANCHOR_OFFSET, resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
-import { SymbolView } from "expo-symbols";
+import { formatElapsed } from "@t3tools/shared/orchestrationTiming";
+import { SymbolView } from "../../components/AppSymbol";
 import { HeaderHeightContext } from "@react-navigation/elements";
 import { useNavigation } from "@react-navigation/native";
 import {
@@ -44,16 +45,12 @@ import {
 import { TouchableOpacity } from "react-native-gesture-handler";
 import ImageViewing from "react-native-image-viewing";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import Animated, {
-  FadeIn,
-  FadeInUp,
-  FadeOut,
-  LinearTransition,
-  type SharedValue,
-} from "react-native-reanimated";
+import Animated, { FadeIn, FadeInUp, type SharedValue } from "react-native-reanimated";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useFontFamily } from "../../lib/useFontFamily";
+import { scopedThreadKey } from "../../lib/scopedEntities";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
+import { hasWideMarkdownBlock } from "../../lib/wideMarkdownBlocks";
 import {
   hasNativeSelectableMarkdownText,
   SelectableMarkdownText,
@@ -67,6 +64,7 @@ import {
   parseReviewCommentMessageSegments,
   type ReviewInlineComment,
 } from "../review/reviewCommentSelection";
+import type { ReviewDiffTheme } from "../review/shikiReviewHighlighter";
 import { resolveNativeReviewDiffView } from "../diffs/nativeReviewDiffSurface";
 import {
   buildNativeReviewDiffData,
@@ -79,7 +77,9 @@ import { deriveCenteredContentHorizontalPadding, type LayoutVariant } from "../.
 import {
   resolveMarkdownFontSizes,
   resolveNativeMarkdownTypography,
+  scaledTypographyLineHeight,
 } from "../../lib/appearancePreferences";
+import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { useAppearanceCodeSurface } from "../settings/appearance/useAppearanceCodeSurface";
 import { markdownFileIconSource } from "@t3tools/mobile-markdown-text/file-icons";
@@ -90,7 +90,17 @@ import {
   type ThreadFeedLatestTurn,
 } from "../../lib/threadActivity";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
-import { ThreadWorkGroupToggle, ThreadWorkLog } from "./thread-work-log";
+import {
+  resolveThreadFeedLiveFollow,
+  type ThreadFeedLiveFollowEvent,
+} from "./thread-feed-live-follow";
+import {
+  collapsedWorkLogHeight,
+  ThreadWorkGroupToggle,
+  ThreadWorkLog,
+  WORK_GROUP_TOGGLE_HEIGHT,
+} from "./thread-work-log";
+import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
 import { useAssetUrl } from "../../state/assets";
 import { resolveWorkspaceRelativeFilePath } from "../files/filePath";
 
@@ -106,9 +116,15 @@ function formatMessageTime(input: string): string {
   return MESSAGE_TIME_FORMATTER.format(timestamp);
 }
 
-// Rows shift when content above them grows (streaming text, work-log folds);
-// animating the container position turns those jumps into slides.
-const FEED_ITEM_LAYOUT_TRANSITION = LinearTransition.duration(180);
+// Pre-measurement heights for getFixedItemSize, mirroring renderFeedEntry's
+// classNames. The fold row's min-h-11 (44px) stays taller than its single
+// text-sm line at every supported base font size (26px at the 22pt maximum),
+// so its height is a constant; a drifted value costs one correction on
+// measure, not a persistent offset.
+const TURN_FOLD_HEIGHT = 56; // min-h-11 (44) + mb-3 (12)
+// The working row has no min-height clamp — its height follows the scaled
+// text-xs line height (see workingRowHeight in ThreadFeed).
+const WORKING_ROW_VERTICAL_EXTRAS = 24; // py-1 (8) + mb-4 (16)
 
 // Entering animations must only play for rows born just now — LegendList
 // remounts rows when they scroll back into view, and replaying an entrance for
@@ -127,6 +143,7 @@ export interface ThreadFeedProps {
   readonly contentPresentation: ThreadContentPresentation;
   readonly agentLabel: string;
   readonly latestTurn: ThreadFeedLatestTurn | null;
+  readonly activeWorkStartedAt: string | null;
   readonly listRef: RefObject<LegendListRef | null>;
   readonly freeze: SharedValue<boolean>;
   readonly anchorMessageId: MessageId | null;
@@ -137,7 +154,13 @@ export interface ThreadFeedProps {
   readonly layoutVariant?: LayoutVariant;
   readonly usesAutomaticContentInsets?: boolean;
   readonly onHeaderMaterialVisibilityChange?: (visible: boolean) => void;
+  readonly onEndFollowEnabledChange?: (enabled: boolean) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
+  /** Non-null when older turns exist beyond the loaded window. */
+  readonly loadEarlier?: {
+    readonly loading: boolean;
+    readonly onLoadEarlier: () => void;
+  } | null;
 }
 
 function MessageAttachmentImage(props: {
@@ -202,6 +225,12 @@ const MARKDOWN_COLORS = {
     userFenceText: "#ffffff",
   },
 } as const;
+
+const MARKDOWN_MONO_FONT = Platform.select({
+  ios: "ui-monospace",
+  android: "monospace",
+  default: "monospace",
+});
 
 interface MarkdownStyleSets {
   readonly user: MarkdownStyleSet;
@@ -275,6 +304,122 @@ const MarkdownExternalLink = memo(function MarkdownExternalLink(props: {
   );
 });
 
+function MarkdownCodeBlock(props: {
+  readonly backgroundColor: string;
+  readonly borderColor: string;
+  readonly content: string;
+  readonly copyTintColor: ColorValue;
+  readonly headerTextColor: string;
+  readonly fontSize: number;
+  readonly highlightCode: boolean;
+  readonly language?: string | null;
+  readonly lineHeight: number;
+  readonly textColor: string;
+  readonly theme: ReviewDiffTheme;
+}) {
+  const content = props.content.replace(/\n$/, "");
+  const languageLabel = props.language?.trim() || "text";
+  const highlighted = useMarkdownCodeHighlight({
+    code: content,
+    enabled: props.highlightCode && Boolean(props.language?.trim()),
+    language: props.language,
+    theme: props.theme,
+  });
+  let tokenOffset = 0;
+
+  return (
+    <View
+      className="my-3 min-w-0 max-w-full self-stretch overflow-hidden rounded-lg border"
+      style={{ backgroundColor: props.backgroundColor, borderColor: props.borderColor }}
+    >
+      <View
+        className="flex-row items-center justify-between gap-2 border-b py-1 pr-1.5 pl-3.5"
+        style={{ borderBottomColor: props.borderColor }}
+      >
+        <NativeText
+          className="flex-1 font-mono uppercase opacity-70"
+          numberOfLines={1}
+          style={{
+            color: props.headerTextColor,
+            fontSize: props.fontSize,
+            ...(Platform.OS === "android" ? { includeFontPadding: false } : null),
+          }}
+        >
+          {languageLabel}
+        </NativeText>
+        <CopyTextButton
+          accessibilityLabel="Copy code"
+          text={content}
+          tintColor={props.copyTintColor}
+          buttonSize={32}
+          iconSize={16}
+        />
+      </View>
+      <ScrollView
+        horizontal
+        bounces={false}
+        nestedScrollEnabled={Platform.OS === "android"}
+        showsHorizontalScrollIndicator={false}
+        contentContainerClassName="px-3.5 py-3"
+      >
+        <NativeText
+          selectable
+          className="font-mono"
+          style={{
+            color: props.textColor,
+            fontSize: props.fontSize,
+            lineHeight: props.lineHeight,
+            ...(Platform.OS === "android" ? { includeFontPadding: false } : null),
+          }}
+        >
+          {highlighted
+            ? highlighted.map((line, lineIndex) => {
+                const lineStartOffset = tokenOffset;
+                const lineText = line.map((token) => token.content).join("");
+                const renderedLine = (
+                  <NativeText key={`line:${lineStartOffset}:${lineText}`}>
+                    {line.map((token) => {
+                      const startOffset = tokenOffset;
+                      tokenOffset += token.content.length;
+                      const fontStyle =
+                        token.fontStyle !== null && (token.fontStyle & 1) === 1
+                          ? ("italic" as const)
+                          : ("normal" as const);
+                      const fontWeight =
+                        token.fontStyle !== null && (token.fontStyle & 2) === 2
+                          ? ("700" as const)
+                          : ("400" as const);
+
+                      return (
+                        <NativeText
+                          key={`${startOffset}:${token.content}:${token.color ?? ""}:${
+                            token.fontStyle ?? ""
+                          }`}
+                          style={{
+                            color: token.color ?? props.textColor,
+                            fontStyle,
+                            fontWeight,
+                          }}
+                        >
+                          {token.content}
+                        </NativeText>
+                      );
+                    })}
+                    {lineIndex + 1 < highlighted.length ? "\n" : ""}
+                  </NativeText>
+                );
+                if (lineIndex + 1 < highlighted.length) {
+                  tokenOffset += 1;
+                }
+                return renderedLine;
+              })
+            : content}
+        </NativeText>
+      </ScrollView>
+    </View>
+  );
+}
+
 function useReviewCommentColors(): ReviewCommentColors {
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";
@@ -309,8 +454,11 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
     () => resolveNativeMarkdownTypography(appearance.baseFontSize),
     [appearance.baseFontSize],
   );
-  const colors = MARKDOWN_COLORS[colorScheme === "dark" ? "dark" : "light"];
+  const themeMode = colorScheme === "dark" ? "dark" : "light";
+  const colors = MARKDOWN_COLORS[themeMode];
+  const iconSubtleColor = String(useThemeColor("--color-icon-subtle"));
   const inlineSkillForeground = String(useThemeColor("--color-inline-skill-foreground"));
+  const userBubbleForegroundMuted = String(useThemeColor("--color-user-bubble-foreground-muted"));
   const regularFontFamily = useFontFamily("regular");
   const boldFontFamily = useFontFamily("bold");
 
@@ -338,6 +486,7 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
         link: markdownLinkColor,
         blockquote: markdownBlockquoteBorder,
         border: markdownHrColor,
+        surface: "transparent",
         surfaceLight: markdownBlockquoteBg,
         accent: markdownLinkColor,
         tableBorder: markdownHrColor,
@@ -366,7 +515,7 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
       fontFamilies: {
         regular: regularFontFamily,
         heading: boldFontFamily,
-        mono: "ui-monospace",
+        mono: MARKDOWN_MONO_FONT,
       },
       headingWeight: "700",
       borderRadius: {
@@ -420,7 +569,9 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
       inlineCodeTextColor: string,
       blockBackgroundColor: string,
       blockTextColor: string,
+      copyTintColor: ColorValue,
       preserveSoftBreaks: boolean,
+      highlightCode: boolean,
     ): CustomRenderers => ({
       link: ({ children, href = "" }) => {
         const presentation = resolveMarkdownLinkPresentation(href);
@@ -519,51 +670,20 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
             soft_break: () => <NativeText>{"\n"}</NativeText>,
           }
         : {}),
-      code_block: ({ content, language }) => (
-        <View
-          className="my-3 overflow-hidden rounded-[10px] border"
-          style={{
-            backgroundColor: blockBackgroundColor,
-            borderColor: markdownHrColor,
-          }}
-        >
-          {language ? (
-            <View
-              className="border-b px-3.5 py-2"
-              style={{
-                borderBottomColor: markdownHrColor,
-              }}
-            >
-              <NativeText
-                className="font-mono uppercase opacity-70"
-                style={{
-                  color: markdownBodyColor,
-                  fontSize: markdownFontSizes.codeBlockFontSize,
-                }}
-              >
-                {language}
-              </NativeText>
-            </View>
-          ) : null}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            bounces={false}
-            contentContainerClassName="px-3.5 py-3"
-          >
-            <NativeText
-              selectable
-              className="font-mono"
-              style={{
-                color: blockTextColor,
-                fontSize: markdownFontSizes.codeBlockFontSize,
-                lineHeight: markdownFontSizes.codeBlockLineHeight,
-              }}
-            >
-              {content}
-            </NativeText>
-          </ScrollView>
-        </View>
+      code_block: ({ content = "", language }) => (
+        <MarkdownCodeBlock
+          backgroundColor={blockBackgroundColor}
+          borderColor={markdownHrColor}
+          content={content}
+          copyTintColor={copyTintColor}
+          fontSize={markdownFontSizes.codeBlockFontSize}
+          headerTextColor={blockTextColor}
+          highlightCode={highlightCode}
+          language={language}
+          lineHeight={markdownFontSizes.codeBlockLineHeight}
+          textColor={blockTextColor}
+          theme={themeMode}
+        />
       ),
     });
 
@@ -621,7 +741,9 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
           markdownUserInlineCodeText,
           markdownUserFenceBg,
           markdownUserFenceText,
+          userBubbleForegroundMuted,
           true,
+          false,
         ),
         nativeTextStyle: {
           color: markdownUserBodyColor,
@@ -652,7 +774,9 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
           markdownInlineCodeText,
           markdownCodeBg,
           markdownCodeText,
+          iconSubtleColor,
           false,
+          true,
         ),
         nativeTextStyle: {
           color: markdownBodyColor,
@@ -679,11 +803,14 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
   }, [
     boldFontFamily,
     colors,
+    iconSubtleColor,
     inlineSkillForeground,
     markdownFontSizes,
     nativeMarkdownTypography,
     onLinkPress,
     regularFontFamily,
+    themeMode,
+    userBubbleForegroundMuted,
   ]);
 }
 
@@ -710,6 +837,10 @@ function renderFeedEntry(
 ) {
   const entry = info.item;
   const { markdownStyles, iconSubtleColor, userBubbleColor } = props;
+
+  if (entry.type === "working") {
+    return <WorkingTimelineRow startedAt={entry.createdAt} />;
+  }
 
   if (entry.type === "turn-fold") {
     return (
@@ -752,6 +883,12 @@ function renderFeedEntry(
     const timestampLabel = formatMessageTime(isUser ? message.createdAt : message.updatedAt);
     const attachments = message.attachments ?? [];
     const hasReviewCommentContext = message.text.includes("<review_comment");
+    // A bubble that sizes itself from its content cannot lay out a block whose
+    // intrinsic width overflows `maxWidth`: Android positions the bubble's
+    // children during the unclamped pass and never moves them once the width
+    // is clamped, so the paragraphs around the block end up drawn on top of
+    // each other. Pinning the width removes that pass.
+    const hasWideBlock = hasWideMarkdownBlock(message.text);
     const assistantTurnStillInProgress =
       message.role === "assistant" &&
       props.unsettledTurnId !== null &&
@@ -774,7 +911,11 @@ function renderFeedEntry(
             style={{
               backgroundColor: userBubbleColor,
               maxWidth: props.userBubbleMaxWidth,
-              ...(hasReviewCommentContext ? { width: props.reviewCommentBubbleWidth } : null),
+              ...(hasReviewCommentContext
+                ? { width: props.reviewCommentBubbleWidth }
+                : hasWideBlock
+                  ? { width: props.userBubbleMaxWidth }
+                  : null),
             }}
           >
             {message.text.trim().length > 0 ? (
@@ -887,6 +1028,32 @@ function renderFeedEntry(
     />
   );
 }
+
+const WorkingTimelineRow = memo(function WorkingTimelineRow(props: { readonly startedAt: string }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const intervalId = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1_000);
+    return () => clearInterval(intervalId);
+  }, [props.startedAt]);
+
+  const durationLabel = formatElapsed(props.startedAt, new Date(nowMs).toISOString()) ?? "0s";
+
+  return (
+    <View className="mb-4 flex-row items-center gap-2 px-1.5 py-1">
+      <View className="flex-row items-center gap-1">
+        <View className="h-1 w-1 rounded-full bg-neutral-400 dark:bg-neutral-500" />
+        <View className="h-1 w-1 rounded-full bg-neutral-400/80 dark:bg-neutral-500/80" />
+        <View className="h-1 w-1 rounded-full bg-neutral-400/60 dark:bg-neutral-500/60" />
+      </View>
+      <Text className="font-t3-medium text-xs tabular-nums text-neutral-600 dark:text-neutral-400">
+        Working for {durationLabel}
+      </Text>
+    </View>
+  );
+});
 
 function UserMessageContent(props: {
   readonly text: string;
@@ -1163,12 +1330,42 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const disclosureAnchorKeyRef = useRef<string | null>(null);
   const headerMaterialVisibleRef = useRef(false);
   const previousLatestTurnRef = useRef(props.latestTurn);
+  const userScrollSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { width: windowWidth } = useWindowDimensions();
+  const { appearance } = useAppearancePreferences();
   const [viewportWidth, setViewportWidth] = useState(() =>
     props.layoutVariant === "split" ? 0 : windowWidth,
   );
   const [viewportHeight, setViewportHeight] = useState(0);
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
+  // Live-follow latch. LegendList's maintainScrollAtEnd alone re-pins the feed
+  // whenever the viewport drifts back inside its geometric threshold, which
+  // yanked users off history they were reading every time a stream chunk grew
+  // a row. Follow breaks when the user scrolls up and away, and re-arms only
+  // when the list actually returns to the end (or on send / thread switch).
+  const [endFollowEnabled, setEndFollowEnabled] = useState(true);
+  const endFollowEnabledRef = useRef(true);
+  // A "user scroll session" spans from drag start through the end of its
+  // momentum; only motion inside a session can break follow, so MVCP
+  // compensations and programmatic scrolls never strand a follower.
+  const userScrollSessionRef = useRef(false);
+  const setEndFollow = useCallback(
+    (enabled: boolean) => {
+      if (endFollowEnabledRef.current === enabled) {
+        return;
+      }
+      endFollowEnabledRef.current = enabled;
+      setEndFollowEnabled(enabled);
+      props.onEndFollowEnabledChange?.(enabled);
+    },
+    [props.onEndFollowEnabledChange],
+  );
+  const transitionEndFollow = useCallback(
+    (event: ThreadFeedLiveFollowEvent) => {
+      setEndFollow(resolveThreadFeedLiveFollow(endFollowEnabledRef.current, event));
+    },
+    [setEndFollow],
+  );
   const [interactionState, setInteractionState] = useState<{
     readonly copiedRowId: string | null;
     readonly expandedWorkGroups: Record<string, boolean>;
@@ -1280,9 +1477,73 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       // UIKit's adjustedContentInset, so topContentInset is 0 here). Add the
       // header height back or the material toggles a full header too late.
       reportHeaderMaterialVisibility(event.nativeEvent.contentOffset.y + anchorTopInset > 6);
+      // LegendList recomputes its inset-aware end distance before invoking
+      // this handler, so getState() is current. Only the actual end re-arms
+      // follow: its broader maintain-scroll threshold is large enough for a
+      // streaming chunk to pull a user back before their upward drag escapes.
+      // A live user-scroll session still wins even if the first scroll event
+      // remains inside LegendList's at-end tolerance.
+      const listState = props.listRef.current?.getState();
+      if (listState) {
+        transitionEndFollow({
+          type: "scroll",
+          isAtEnd: listState.isAtEnd,
+          userScrollSessionActive: userScrollSessionRef.current,
+        });
+      }
     },
-    [reportHeaderMaterialVisibility, anchorTopInset],
+    [reportHeaderMaterialVisibility, anchorTopInset, props.listRef, transitionEndFollow],
   );
+  const clearUserScrollSettle = useCallback(() => {
+    if (userScrollSettleTimerRef.current !== null) {
+      clearTimeout(userScrollSettleTimerRef.current);
+      userScrollSettleTimerRef.current = null;
+    }
+  }, []);
+  const handleScrollBeginDrag = useCallback(() => {
+    clearUserScrollSettle();
+    userScrollSessionRef.current = true;
+    // Pause before the first scroll event. Otherwise a stream update can run
+    // maintainScrollAtEnd between touch-down and the drag leaving its threshold.
+    transitionEndFollow({ type: "user-scroll-begin" });
+  }, [clearUserScrollSettle, transitionEndFollow]);
+  const finishUserScroll = useCallback(
+    (releaseIsAtEnd?: boolean) => {
+      clearUserScrollSettle();
+      const userScrollSessionActive = userScrollSessionRef.current;
+      userScrollSessionRef.current = false;
+      transitionEndFollow({
+        type: "user-scroll-end",
+        // With no momentum, preserve the finger-release position. Streaming
+        // growth during the native momentum-detection window must not turn a
+        // release at the live edge into an opt-out from follow.
+        isAtEnd: releaseIsAtEnd ?? props.listRef.current?.getState().isAtEnd ?? false,
+        userScrollSessionActive,
+      });
+    },
+    [clearUserScrollSettle, props.listRef, transitionEndFollow],
+  );
+  // Finger-lift velocity is not a reliable momentum signal: a gentle fling
+  // can report zero and still decelerate. Give native momentum a short window
+  // to announce itself; if it does, onMomentumScrollBegin cancels this fallback
+  // and the session survives until the settled momentum-end position. This
+  // mirrors the native-event handoff used by the home thread list's scroll gate.
+  const handleScrollEndDrag = useCallback(() => {
+    clearUserScrollSettle();
+    const releaseIsAtEnd = props.listRef.current?.getState().isAtEnd ?? false;
+    userScrollSettleTimerRef.current = setTimeout(() => finishUserScroll(releaseIsAtEnd), 160);
+  }, [clearUserScrollSettle, finishUserScroll, props.listRef]);
+  const handleMomentumScrollBegin = useCallback(() => {
+    if (userScrollSessionRef.current) {
+      clearUserScrollSettle();
+    }
+  }, [clearUserScrollSettle]);
+  const handleMomentumScrollEnd = useCallback(() => {
+    finishUserScroll();
+  }, [finishUserScroll]);
+
+  useEffect(() => clearUserScrollSettle, [clearUserScrollSettle]);
+
   const handleViewportLayout = useCallback((event: LayoutChangeEvent) => {
     const nextWidth = Math.round(event.nativeEvent.layout.width);
     const nextHeight = Math.round(event.nativeEvent.layout.height);
@@ -1290,9 +1551,30 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     setViewportHeight((current) => (Math.abs(current - nextHeight) > 1 ? nextHeight : current));
   }, []);
 
+  // Thread identity is env-scoped: two environments can hold the same
+  // ThreadId, and keying resets (or the list mount) on the bare id would
+  // carry stale scroll/follow state across an environment switch.
+  const feedThreadKey = scopedThreadKey(props.environmentId, props.threadId);
+
   useEffect(() => {
     reportHeaderMaterialVisibility(false);
-  }, [props.threadId, reportHeaderMaterialVisibility]);
+  }, [feedThreadKey, reportHeaderMaterialVisibility]);
+
+  // A thread switch opens pinned to the end; a send explicitly returns to the
+  // live edge (ThreadDetailScreen scrolls the new message into place). Both
+  // re-arm follow regardless of where the user had scrolled before.
+  useEffect(() => {
+    clearUserScrollSettle();
+    userScrollSessionRef.current = false;
+    transitionEndFollow({ type: "reset" });
+  }, [clearUserScrollSettle, feedThreadKey, transitionEndFollow]);
+  useEffect(() => {
+    if (props.anchorMessageId !== null) {
+      clearUserScrollSettle();
+      userScrollSessionRef.current = false;
+      transitionEndFollow({ type: "reset" });
+    }
+  }, [clearUserScrollSettle, props.anchorMessageId, transitionEndFollow]);
 
   const expandedWorkGroupIds = useMemo(() => {
     const ids = new Set<string>();
@@ -1310,8 +1592,15 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         props.latestTurn,
         expandedTurnIds,
         expandedWorkGroupIds,
+        props.activeWorkStartedAt,
       ),
-    [expandedTurnIds, expandedWorkGroupIds, props.feed, props.latestTurn],
+    [
+      expandedTurnIds,
+      expandedWorkGroupIds,
+      props.activeWorkStartedAt,
+      props.feed,
+      props.latestTurn,
+    ],
   );
 
   // The empty↔filled key below remounts the list, which resets its imperative
@@ -1321,7 +1610,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   // initial scroll-to-end computes with a zero end inset and rests one
   // composer-height short of the end. Layout effect: it must land before the
   // list's first positioning tick or the one-shot initial scroll misses it.
-  const listMountKey = `${props.threadId}:${props.feed.length === 0 ? "empty" : "filled"}`;
+  const listMountKey = `${feedThreadKey}:${props.feed.length === 0 ? "empty" : "filled"}`;
   useLayoutEffect(() => {
     const bottom = props.contentInsetEndAdjustment.value;
     if (bottom > 0) {
@@ -1492,6 +1781,38 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     setExpandedImage({ uri, headers });
   }, []);
 
+  // Rows whose height is known before they ever render. Without this, every
+  // row above the viewport is assumed to be estimatedItemSize tall, and
+  // scrolling up through unmeasured content corrects each row's height as it
+  // mounts — the feed visibly jumps. Fixed sizes make the small chrome rows
+  // exact; message rows stay undefined and use LegendList's per-type running
+  // average once one of their type has been measured. Text-driven heights
+  // follow the configurable base font size via scaledTypographyLineHeight.
+  const workingRowHeight =
+    WORKING_ROW_VERTICAL_EXTRAS +
+    scaledTypographyLineHeight(MOBILE_TYPOGRAPHY.label, appearance.baseFontSize);
+  const getFixedItemSize = useCallback(
+    (entry: ThreadFeedEntry) => {
+      switch (entry.type) {
+        case "turn-fold":
+          return TURN_FOLD_HEIGHT;
+        case "work-toggle":
+          return WORK_GROUP_TOGGLE_HEIGHT;
+        case "working":
+          return workingRowHeight;
+        case "activity-group":
+          // Expanded rows append a variable detail block — fall back to
+          // measurement for those groups.
+          return entry.activities.some((activity) => expandedWorkRows[activity.id])
+            ? undefined
+            : collapsedWorkLogHeight(entry.activities, appearance.baseFontSize);
+        default:
+          return undefined;
+      }
+    },
+    [expandedWorkRows, workingRowHeight, appearance.baseFontSize],
+  );
+
   const renderItem = useCallback(
     (info: { item: ThreadFeedEntry; index: number }) =>
       renderFeedEntry(info, {
@@ -1581,7 +1902,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
                 }
               : { scrollIndicatorInsets: { top: topContentInset, bottom: 0 } })}
             {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
-            itemLayoutAnimation={FEED_ITEM_LAYOUT_TRANSITION}
             // Patched LegendList prop (patches/@legendapp__list@3.2.0.patch):
             // lets its scroll math clamp programmatic scrolls to -headerInset
             // instead of 0, so initialScrollAtEnd/maintainScrollAtEnd on short
@@ -1606,7 +1926,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             // anchor scrolls also lets it correct a scroll that landed on a
             // stale end target once the anchor row finishes measuring.
             maintainScrollAtEnd={
-              disclosureToggleSettling
+              disclosureToggleSettling || !endFollowEnabled
                 ? false
                 : {
                     animated: true,
@@ -1625,6 +1945,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             getItemType={(entry) =>
               entry.type === "message" ? `message:${entry.message.role}` : entry.type
             }
+            getFixedItemSize={getFixedItemSize}
+            // Measure rows well before they scroll into view so estimate→actual
+            // corrections land offscreen instead of under the user's finger.
+            drawDistance={500}
             keyboardShouldPersistTaps="always"
             keyboardDismissMode="none"
             keyboardLiftBehavior="whenAtEnd"
@@ -1644,11 +1968,33 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             // user overscroll back to the adjusted rest position.
             scrollToOverflowEnabled
             estimatedItemSize={180}
+            // Chat-style bottom alignment: when a thread is shorter than the
+            // viewport, pad above the content so messages rest just above the
+            // composer instead of under the header. No effect on threads that
+            // overflow the viewport (the padding clamps to zero).
+            alignItemsAtEnd
             initialScrollAtEnd
             onScroll={handleScroll}
+            onScrollBeginDrag={handleScrollBeginDrag}
+            onScrollEndDrag={handleScrollEndDrag}
+            onMomentumScrollBegin={handleMomentumScrollBegin}
+            onMomentumScrollEnd={handleMomentumScrollEnd}
             scrollEventThrottle={16}
             ListHeaderComponent={
-              usesNativeAutomaticInsets ? null : <View style={{ height: topContentInset }} />
+              <>
+                {usesNativeAutomaticInsets ? null : <View style={{ height: topContentInset }} />}
+                {props.loadEarlier != null ? (
+                  <Pressable
+                    onPress={props.loadEarlier.onLoadEarlier}
+                    disabled={props.loadEarlier.loading}
+                    className="items-center py-2"
+                  >
+                    <Text className="text-xs text-foreground-secondary">
+                      {props.loadEarlier.loading ? "Loading earlier turns…" : "Load earlier turns"}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </>
             }
             contentContainerStyle={{
               paddingTop: 12,
@@ -1656,7 +2002,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             }}
           />
         </View>
-        {props.feed.length === 0 && props.contentPresentation.kind === "ready" ? (
+        {props.feed.length === 0 &&
+        props.activeWorkStartedAt === null &&
+        props.contentPresentation.kind === "ready" ? (
           <View pointerEvents="none" style={StyleSheet.absoluteFill}>
             <ThreadFeedPlaceholder
               title="No conversation yet"

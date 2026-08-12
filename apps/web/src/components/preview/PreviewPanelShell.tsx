@@ -10,11 +10,13 @@ export type PreviewPanelMode = "inline" | "sheet" | "sidebar" | "embedded";
 
 const PREVIEW_PANEL_WIDTH_STORAGE_KEY = "t3code:preview-panel-width";
 const PREVIEW_PANEL_MIN_WIDTH = 360;
-/** Hard ceiling so a wide monitor can't yield a panel that swallows the chat. */
-const PREVIEW_PANEL_MAX_WIDTH_PX = 1400;
-/** Fraction of the viewport allowed; the panel is min(this · vw, MAX_PX). */
+/** Fraction of the viewport allowed, preserving the remaining space for chat. */
 const PREVIEW_PANEL_MAX_WIDTH_FRACTION = 0.7;
 const PREVIEW_PANEL_DEFAULT_WIDTH = 540;
+
+export function getPreviewPanelMaxWidth(viewportWidth: number): number {
+  return Math.floor(viewportWidth * PREVIEW_PANEL_MAX_WIDTH_FRACTION);
+}
 
 /**
  * Shell for the preview panel. In inline mode the panel is user-resizable
@@ -24,14 +26,23 @@ const PREVIEW_PANEL_DEFAULT_WIDTH = 540;
 export function PreviewPanelShell(props: {
   mode: PreviewPanelMode;
   maximized?: boolean;
+  /**
+   * Overrides the localStorage key used to persist the panel width. Callers
+   * embedding this shell for a different surface (e.g. the pull requests
+   * page) should pass their own key so resizing one panel doesn't clobber
+   * the other's remembered width.
+   */
+  widthStorageKey?: string;
+  /** Overrides the initial width (px) before the user has resized the panel. */
+  defaultWidth?: number;
   children: ReactNode;
 }) {
   const useDragRegion = isElectron && props.mode !== "sheet" && props.mode !== "embedded";
   const isInline = props.mode === "inline";
   const maxWidth = useViewportClampedMaxWidth();
   const { width, handlers } = useResizableWidth({
-    storageKey: PREVIEW_PANEL_WIDTH_STORAGE_KEY,
-    defaultWidth: PREVIEW_PANEL_DEFAULT_WIDTH,
+    storageKey: props.widthStorageKey ?? PREVIEW_PANEL_WIDTH_STORAGE_KEY,
+    defaultWidth: props.defaultWidth ?? PREVIEW_PANEL_DEFAULT_WIDTH,
     minWidth: PREVIEW_PANEL_MIN_WIDTH,
     maxWidth,
     edge: "left",
@@ -82,5 +93,5 @@ function useViewportClampedMaxWidth(): number {
       if (frame !== 0) window.cancelAnimationFrame(frame);
     };
   }, []);
-  return Math.min(PREVIEW_PANEL_MAX_WIDTH_PX, Math.floor(vw * PREVIEW_PANEL_MAX_WIDTH_FRACTION));
+  return getPreviewPanelMaxWidth(vw);
 }

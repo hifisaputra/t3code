@@ -9,6 +9,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
@@ -16,9 +17,11 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { connectionProjectionPhase } from "../connection/model.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
+import * as ConnectionWakeups from "../connection/wakeups.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
-import { subscribe } from "../rpc/client.ts";
+import { subscribeDynamic } from "../rpc/client.ts";
+import type { RpcSession } from "../rpc/session.ts";
 import { ShellSnapshotLoader } from "./shellSnapshotHttp.ts";
 import { applyShellStreamEvent } from "./shellReducer.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
@@ -50,6 +53,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   const supervisor = yield* EnvironmentSupervisor;
   const cache = yield* EnvironmentCacheStore;
   const snapshotLoader = yield* ShellSnapshotLoader;
+  const wakeups = yield* Effect.serviceOption(ConnectionWakeups.ConnectionWakeups);
   const environmentId = supervisor.target.environmentId;
   const cachedSnapshot = yield* cache.loadShell(environmentId).pipe(
     Effect.catch((error) =>
@@ -67,6 +71,9 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     status: shellStatusForSnapshot(cachedSnapshot),
     error: Option.none(),
   });
+  const awaitingCompletion = yield* Ref.make(false);
+  const lastAuthoritativeSession = yield* Ref.make<RpcSession | null>(null);
+  const activeSubscriptionSession = yield* Ref.make<RpcSession | null>(null);
   const persistence = yield* Queue.sliding<OrchestrationShellSnapshot>(1);
 
   const persist = Effect.fn("EnvironmentShellState.persist")(function* (
@@ -90,10 +97,14 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     Effect.forkScoped,
   );
 
-  const setDisconnected = SubscriptionRef.update(state, (current) => ({
-    ...current,
-    status: shellStatusForSnapshot(current.snapshot),
-  }));
+  const setDisconnected = Ref.set(awaitingCompletion, false).pipe(
+    Effect.andThen(
+      SubscriptionRef.update(state, (current) => ({
+        ...current,
+        status: shellStatusForSnapshot(current.snapshot),
+      })),
+    ),
+  );
   const setSynchronizing = SubscriptionRef.update(state, (current) => ({
     ...current,
     status: "synchronizing" as const,
@@ -109,7 +120,8 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         },
   );
   const setStreamError = (error: unknown) =>
-    Effect.logWarning("Could not synchronize the environment shell.").pipe(
+    Ref.set(awaitingCompletion, false).pipe(
+      Effect.andThen(Effect.logWarning("Could not synchronize the environment shell.")),
       Effect.annotateLogs({
         environmentId,
         ...safeErrorLogAttributes(error),
@@ -126,6 +138,16 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   const applyItem = Effect.fn("EnvironmentShellState.applyItem")(function* (
     item: OrchestrationShellStreamItem,
   ) {
+    if (item.kind === "synchronized") {
+      yield* Ref.set(awaitingCompletion, false);
+      yield* SubscriptionRef.update(state, (current) =>
+        Option.isSome(current.snapshot)
+          ? { ...current, status: "live" as const, error: Option.none() }
+          : current,
+      );
+      return;
+    }
+
     const current = yield* SubscriptionRef.get(state);
     const nextSnapshot =
       item.kind === "snapshot"
@@ -141,64 +163,94 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       return;
     }
 
+    const waiting = yield* Ref.get(awaitingCompletion);
     yield* SubscriptionRef.set(state, {
       snapshot: Option.some(nextSnapshot),
-      status: "live",
+      status: waiting ? "synchronizing" : "live",
       error: Option.none(),
     });
+    if (item.kind === "snapshot") {
+      const session = yield* Ref.get(activeSubscriptionSession);
+      if (session !== null) {
+        yield* Ref.set(lastAuthoritativeSession, session);
+      }
+    }
     yield* Queue.offer(persistence, nextSnapshot);
   });
 
+  const foregroundResubscriptions = Option.match(wakeups, {
+    onNone: () => Stream.never,
+    onSome: (service) =>
+      service.changes.pipe(Stream.filter(ConnectionWakeups.shouldResubscribeAfterWakeup)),
+  });
+
+  yield* setSynchronizing;
   yield* Effect.forkScoped(
-    Effect.gen(function* () {
-      // Render the cached snapshot immediately so the sidebar is instant.
-      if (Option.isSome(cachedSnapshot)) {
-        yield* applyItem({ kind: "snapshot", snapshot: cachedSnapshot.value });
-      }
+    subscribeDynamic(
+      ORCHESTRATION_WS_METHODS.subscribeShell,
+      Effect.fn("EnvironmentShellState.makeSubscribeInput")(function* (session) {
+        yield* Ref.set(activeSubscriptionSession, session);
+        const supportsCompletionMarker = yield* session.initialConfig.pipe(
+          Effect.map((config) => config.shellResumeCompletionMarker === true),
+          Effect.orElseSucceed(() => false),
+        );
+        yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
+        yield* setSynchronizing;
 
-      // Establish the subscription base from a FRESH HTTP snapshot whenever the
-      // connection is prepared, then resume via `afterSequence` from that
-      // current sequence.
-      //
-      // We deliberately do NOT resume straight from the cached sequence. A device
-      // reconnecting after a long gap would otherwise have to replay the entire
-      // event backlog over the socket — every thread event (activity, message,
-      // turn…) becomes a shell upsert on the server — which on a slow/flaky link
-      // can fail to ever complete and freezes the thread list on the stale cache.
-      // Crucially this survives reloads: the cache (and thus the stale resume
-      // cursor) is persisted, so reloading just replays the same doomed catch-up.
-      // The full HTTP snapshot is a single gzip-compressible request off the
-      // socket, so the catch-up after it is trivial. Falls back to the cached
-      // snapshot, then the socket-embedded snapshot, when HTTP is unavailable.
-      // Overlapping/replayed events are deduped by sequence in applyItem.
-      const prepared = yield* SubscriptionRef.changes(supervisor.prepared).pipe(
-        Stream.filter(Option.isSome),
-        Stream.map((current) => current.value),
-        Stream.runHead,
-      );
-      const httpSnapshot = Option.isSome(prepared)
-        ? yield* snapshotLoader.load(prepared.value)
-        : Option.none<OrchestrationShellSnapshot>();
-      const base = Option.isSome(httpSnapshot) ? httpSnapshot : cachedSnapshot;
+        // Foreground resubscriptions on the same live session can resume from
+        // the in-memory cursor. A new session reloads the authoritative HTTP
+        // snapshot so a valid cursor cannot preserve incomplete cached data.
+        const hasAuthoritativeSnapshot = (yield* Ref.get(lastAuthoritativeSession)) === session;
+        let canResume = hasAuthoritativeSnapshot;
+        let current = yield* SubscriptionRef.get(state);
+        if (!hasAuthoritativeSnapshot || Option.isNone(current.snapshot)) {
+          const prepared = yield* SubscriptionRef.get(supervisor.prepared).pipe(
+            Effect.flatMap(
+              Option.match({
+                onSome: Effect.succeed,
+                onNone: () =>
+                  SubscriptionRef.changes(supervisor.prepared).pipe(
+                    Stream.filter(Option.isSome),
+                    Stream.map((value) => value.value),
+                    Stream.runHead,
+                    Effect.map(Option.getOrThrow),
+                  ),
+              }),
+            ),
+          );
+          const httpSnapshot = yield* snapshotLoader.load(prepared);
+          if (Option.isSome(httpSnapshot)) {
+            yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.value });
+            canResume = true;
+            current = yield* SubscriptionRef.get(state);
+          }
+        }
 
-      if (Option.isSome(base)) {
-        yield* applyItem({ kind: "snapshot", snapshot: base.value });
-      }
-
-      const subscribeInput = Option.match(base, {
-        onNone: () => ({}),
-        onSome: (snapshot) => ({ afterSequence: snapshot.snapshotSequence }),
-      });
-
-      // Resubscribe after an expected (application-level) failure instead of
-      // ending the stream, mirroring the per-thread subscription in threads.ts.
-      // Combined with the fresh-HTTP base above, the catch-up on each (re)connect
-      // stays small so it can actually complete.
-      yield* subscribe(ORCHESTRATION_WS_METHODS.subscribeShell, subscribeInput, {
+        // If the authoritative refresh failed, omit the cached cursor so the
+        // socket fallback sends a complete snapshot for this new session.
+        if (!canResume || Option.isNone(current.snapshot)) {
+          return supportsCompletionMarker ? { requestCompletionMarker: true as const } : {};
+        }
+        if (!supportsCompletionMarker) {
+          // Without a completion marker there is no synchronized signal for a
+          // resumed subscription, so report live immediately, like threads.
+          yield* SubscriptionRef.update(state, (value) => ({
+            ...value,
+            status: "live" as const,
+            error: Option.none(),
+          }));
+        }
+        return {
+          afterSequence: current.snapshot.value.snapshotSequence,
+          ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+        };
+      }),
+      {
         onExpectedFailure: (cause) => setStreamError(Cause.squash(cause)),
         retryExpectedFailureAfter: "250 millis",
-      }).pipe(Stream.runForEach(applyItem));
-    }),
+        resubscribe: foregroundResubscriptions,
+      },
+    ).pipe(Stream.runForEach(applyItem)),
   );
   yield* SubscriptionRef.changes(supervisor.state).pipe(
     Stream.runForEach((connectionState) => {

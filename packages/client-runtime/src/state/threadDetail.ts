@@ -118,6 +118,14 @@ export function mergeEnvironmentThread(
     createdAt: shell.createdAt,
     updatedAt: shell.updatedAt,
     archivedAt: shell.archivedAt,
+    settledOverride: shell.settledOverride,
+    settledAt: shell.settledAt,
+    snoozedUntil: shell.snoozedUntil,
+    snoozedAt: shell.snoozedAt,
+    pinnedAt: shell.pinnedAt,
+    pinOrderKey: shell.pinOrderKey,
+    // `lifecycle` picks the fresher of the detail and shell channels; see
+    // pickFresherLifecycle above.
     session: lifecycle.session,
   };
 }
