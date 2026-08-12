@@ -16,7 +16,7 @@ export interface ProjectScriptInput {
   readonly previewUrl: Exclude<ProjectScript["previewUrl"], undefined> | null;
   readonly autoOpenPreview: boolean;
   /** Working directory for the command, relative to the project root (or absolute). */
-  readonly cwd?: ProjectScript["cwd"];
+  readonly cwd?: Exclude<ProjectScript["cwd"], undefined> | null;
 }
 
 export function buildProjectScript(id: string, input: ProjectScriptInput): ProjectScript {

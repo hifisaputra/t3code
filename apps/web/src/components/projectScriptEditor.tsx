@@ -16,14 +16,26 @@ import {
   PlayIcon,
   WrenchIcon,
 } from "lucide-react";
-import React, { type FormEvent, type KeyboardEvent, useEffect, useState } from "react";
+import React, {
+  type FormEvent,
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   keybindingValueForCommand,
   decodeProjectScriptKeybindingRule,
 } from "~/lib/projectScriptKeybindings";
 import { keybindingFromKeyboardEvent } from "~/components/settings/KeybindingsSettings.logic";
-import { commandForProjectScript, nextProjectScriptId } from "~/projectScripts";
+import {
+  commandForProjectScript,
+  nextProjectScriptId,
+  type PackageScriptSuggestion,
+} from "~/projectScripts";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -48,6 +60,7 @@ import { Label } from "./ui/label";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 export const SCRIPT_ICONS: Array<{ id: ProjectScriptIcon; label: string }> = [
   { id: "play", label: "Play" },
@@ -76,6 +89,11 @@ export function ScriptIcon({
 export interface NewProjectScriptInput {
   name: string;
   command: string;
+  /**
+   * Directory the command runs in, relative to the project (or worktree) root,
+   * or absolute. `null` runs it at the root.
+   */
+  cwd: string | null;
   icon: ProjectScriptIcon;
   runOnWorktreeCreate: boolean;
   keybinding: string | null;
@@ -90,6 +108,7 @@ export type ProjectScriptActionResult = AtomCommandResult<void, unknown>;
 export const EMPTY_PROJECT_SCRIPT_INPUT: NewProjectScriptInput = {
   name: "",
   command: "",
+  cwd: null,
   icon: "play",
   runOnWorktreeCreate: false,
   keybinding: null,
@@ -114,6 +133,7 @@ export function editorRequestForScript(
     initial: {
       name: script.name,
       command: script.command,
+      cwd: script.cwd ?? null,
       icon: script.icon,
       runOnWorktreeCreate: script.runOnWorktreeCreate,
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
@@ -134,6 +154,7 @@ export function ProjectScriptEditorDialog({
   onSubmit,
   onDelete,
   onClose,
+  onLoadPackageScripts,
 }: {
   request: ProjectScriptEditorRequest | null;
   /** Existing scripts, used to derive a unique id for new scripts. */
@@ -144,10 +165,16 @@ export function ProjectScriptEditorDialog({
   ) => Promise<ProjectScriptActionResult>;
   onDelete: (scriptId: string) => void;
   onClose: () => void;
+  /**
+   * Reads runnable scripts out of the project's package.json (and its
+   * workspaces) to offer as prefills. Omitted where no project is in scope.
+   */
+  onLoadPackageScripts?: () => Promise<PackageScriptSuggestion[]>;
 }) {
   const formId = React.useId();
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
+  const [cwd, setCwd] = useState("");
   const [icon, setIcon] = useState<ProjectScriptIcon>("play");
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const [runOnWorktreeCreate, setRunOnWorktreeCreate] = useState(false);
@@ -156,15 +183,70 @@ export function ProjectScriptEditorDialog({
   const [autoOpenPreview, setAutoOpenPreview] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [packageScripts, setPackageScripts] = useState<PackageScriptSuggestion[]>([]);
+  const [packageScriptsLoading, setPackageScriptsLoading] = useState(false);
+  const packageScriptsRequestRef = useRef(0);
 
   const isOpen = request !== null;
   const isEditing = request?.scriptId != null;
+
+  const existingCommands = useMemo(
+    () => new Set(scripts.map((script) => `${(script.cwd ?? "").trim()} ${script.command.trim()}`)),
+    [scripts],
+  );
+  // Hide package scripts that already have a matching action so we don't suggest duplicates.
+  const availablePackageScripts = useMemo(
+    () =>
+      packageScripts.filter(
+        (suggestion) =>
+          !existingCommands.has(`${(suggestion.cwd ?? "").trim()} ${suggestion.command.trim()}`),
+      ),
+    [packageScripts, existingCommands],
+  );
+
+  const loadPackageScriptsForDialog = useCallback(() => {
+    if (!onLoadPackageScripts) {
+      setPackageScripts([]);
+      setPackageScriptsLoading(false);
+      return;
+    }
+    // A stale in-flight read must not overwrite the results of a newer open.
+    const requestId = packageScriptsRequestRef.current + 1;
+    packageScriptsRequestRef.current = requestId;
+    setPackageScripts([]);
+    setPackageScriptsLoading(true);
+    Promise.resolve(onLoadPackageScripts())
+      .then((result) => {
+        if (packageScriptsRequestRef.current === requestId) {
+          setPackageScripts(result);
+        }
+      })
+      .catch(() => {
+        if (packageScriptsRequestRef.current === requestId) {
+          setPackageScripts([]);
+        }
+      })
+      .finally(() => {
+        if (packageScriptsRequestRef.current === requestId) {
+          setPackageScriptsLoading(false);
+        }
+      });
+  }, [onLoadPackageScripts]);
+
+  const applyPackageScript = (suggestion: PackageScriptSuggestion) => {
+    setName(suggestion.name);
+    setCommand(suggestion.command);
+    setCwd(suggestion.cwd ?? "");
+    setIcon(suggestion.icon);
+    setValidationError(null);
+  };
 
   // Hydrate the form whenever a new request opens the dialog.
   useEffect(() => {
     if (!request) return;
     setName(request.initial.name);
     setCommand(request.initial.command);
+    setCwd(request.initial.cwd ?? "");
     setIcon(request.initial.icon);
     setIconPickerOpen(false);
     setRunOnWorktreeCreate(request.initial.runOnWorktreeCreate);
@@ -172,7 +254,8 @@ export function ProjectScriptEditorDialog({
     setPreviewUrl(request.initial.previewUrl ?? "");
     setAutoOpenPreview(request.initial.autoOpenPreview);
     setValidationError(request.error ?? null);
-  }, [request]);
+    loadPackageScriptsForDialog();
+  }, [request, loadPackageScriptsForDialog]);
 
   const captureKeybinding = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Tab") return;
@@ -214,9 +297,11 @@ export function ProjectScriptEditorDialog({
         command: commandForProjectScript(scriptIdForValidation),
       });
       const trimmedPreviewUrl = previewUrl.trim();
+      const trimmedCwd = cwd.trim();
       payload = {
         name: trimmedName,
         command: trimmedCommand,
+        cwd: trimmedCwd.length > 0 ? trimmedCwd : null,
         icon,
         runOnWorktreeCreate,
         keybinding: keybindingRule?.key ?? null,
@@ -247,6 +332,11 @@ export function ProjectScriptEditorDialog({
         onOpenChange={(open) => {
           if (!open) {
             setIconPickerOpen(false);
+            // Drop suggestions on close so a reopen re-reads rather than
+            // flashing the previous project's scripts.
+            packageScriptsRequestRef.current += 1;
+            setPackageScripts([]);
+            setPackageScriptsLoading(false);
             onClose();
           }
         }}
@@ -260,6 +350,42 @@ export function ProjectScriptEditorDialog({
           </DialogHeader>
           <DialogPanel>
             <form id={formId} className="space-y-4" onSubmit={submit}>
+              {(packageScriptsLoading || availablePackageScripts.length > 0) && (
+                <div className="space-y-1.5">
+                  <Label>From package.json</Label>
+                  {packageScriptsLoading ? (
+                    <p className="text-xs text-muted-foreground">Reading scripts…</p>
+                  ) : (
+                    <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
+                      {availablePackageScripts.map((suggestion) => (
+                        <Tooltip key={suggestion.name}>
+                          <TooltipTrigger
+                            render={
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="xs"
+                                onClick={() => applyPackageScript(suggestion)}
+                              />
+                            }
+                          >
+                            <ScriptIcon icon={suggestion.icon} className="size-3.5" />
+                            <span className="ml-1">{suggestion.name}</span>
+                          </TooltipTrigger>
+                          <TooltipPopup side="top">
+                            {suggestion.cwd
+                              ? `${suggestion.command} · in ${suggestion.cwd}`
+                              : suggestion.command}
+                          </TooltipPopup>
+                        </Tooltip>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Pick a script to prefill, or enter a custom command below.
+                  </p>
+                </div>
+              )}
               <div className="space-y-1.5">
                 <Label htmlFor="script-name">Name</Label>
                 <div className="flex items-center gap-2">
@@ -332,6 +458,19 @@ export function ProjectScriptEditorDialog({
                   value={command}
                   onChange={(event) => setCommand(event.target.value)}
                 />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="script-cwd">Working directory</Label>
+                <Input
+                  id="script-cwd"
+                  placeholder="Project root"
+                  value={cwd}
+                  onChange={(event) => setCwd(event.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Relative to the project root (e.g. <code>apps/web</code>). Leave empty to run at
+                  the root.
+                </p>
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="script-preview-url">Preview URL (optional)</Label>

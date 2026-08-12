@@ -632,6 +632,8 @@ function ProjectDetail({ group }: { group: SidebarProjectSnapshot }) {
       const payload: NewProjectScriptInput = {
         name: fileScript.name,
         command: fileScript.command,
+        // t3.json has no working-directory field; imported scripts run at the root.
+        cwd: null,
         icon: fileScript.icon ?? "play",
         runOnWorktreeCreate: fileScript.runOnWorktreeCreate ?? false,
         keybinding: null,

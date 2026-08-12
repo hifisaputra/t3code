@@ -10,7 +10,11 @@ import {
 import { ChevronDownIcon, DownloadIcon, PlusIcon, SettingsIcon } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
-import { commandForProjectScript, primaryProjectScript } from "~/projectScripts";
+import {
+  commandForProjectScript,
+  primaryProjectScript,
+  type PackageScriptSuggestion,
+} from "~/projectScripts";
 import { shortcutLabelForCommand } from "~/keybindings";
 import {
   EMPTY_PROJECT_SCRIPT_INPUT,
@@ -52,6 +56,8 @@ interface ProjectScriptsControlProps {
     input: NewProjectScriptInput,
   ) => Promise<ProjectScriptActionResult>;
   onDeleteScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
+  /** Reads runnable package.json scripts to offer as prefills in the editor. */
+  onLoadPackageScripts?: () => Promise<PackageScriptSuggestion[]>;
 }
 
 export default function ProjectScriptsControl({
@@ -63,6 +69,7 @@ export default function ProjectScriptsControl({
   onAddScript,
   onUpdateScript,
   onDeleteScript,
+  onLoadPackageScripts,
 }: ProjectScriptsControlProps) {
   const [actionsMenuOpen, setActionsMenuOpen] = useState({
     scripts: false,
@@ -111,6 +118,8 @@ export default function ProjectScriptsControl({
     const payload: NewProjectScriptInput = {
       name: fileScript.name,
       command: fileScript.command,
+      // t3.json has no working-directory field; imported scripts run at the root.
+      cwd: null,
       icon: fileScript.icon ?? "play",
       runOnWorktreeCreate: fileScript.runOnWorktreeCreate ?? false,
       keybinding: null,
@@ -293,6 +302,7 @@ export default function ProjectScriptsControl({
         onSubmit={submitScript}
         onDelete={(scriptId) => void onDeleteScript(scriptId)}
         onClose={() => setEditorRequest(null)}
+        {...(onLoadPackageScripts ? { onLoadPackageScripts } : {})}
       />
     </>
   );
