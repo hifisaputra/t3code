@@ -6,7 +6,12 @@ import {
   buildPrContentPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
-import { normalizeCliError, sanitizeThreadTitle } from "./TextGenerationUtils.ts";
+import {
+  normalizeCliError,
+  sanitizeCommitSubject,
+  sanitizePrTitle,
+  sanitizeThreadTitle,
+} from "./TextGenerationUtils.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 
 describe("buildCommitMessagePrompt", () => {
@@ -263,16 +268,60 @@ describe("sanitizeThreadTitle", () => {
     ).toBe("Multi-region GPU for renders");
   });
 
-  it("keeps an object that carries more than a title", () => {
-    expect(sanitizeThreadTitle('{"title": "Ship it", "body": "details"}')).toBe(
-      '{"title": "Ship it", "body": "details"}',
-    );
+  it("unwraps an envelope that also carries sibling fields", () => {
+    expect(sanitizeThreadTitle('{"title": "Ship it", "body": "details"}')).toBe("Ship it");
+  });
+
+  it("keeps an envelope with no title key", () => {
+    expect(sanitizeThreadTitle('{"subject": "Ship it"}')).toBe('{"subject": "Ship it"}');
   });
 
   it("keeps a title that merely looks like JSON", () => {
     expect(sanitizeThreadTitle('{"title" is not valid JSON here')).toBe(
       '{"title" is not valid JSON here',
     );
+  });
+});
+
+describe("sanitizeCommitSubject", () => {
+  it("unwraps a subject the model wrapped in its own JSON envelope", () => {
+    expect(
+      sanitizeCommitSubject('{"subject": "Add tag preset import", "body": "Longer detail."}'),
+    ).toBe("Add tag preset import");
+  });
+
+  it("unwraps a pretty-printed envelope before taking the first line", () => {
+    expect(
+      sanitizeCommitSubject('{\n  "subject": "Add tag preset import",\n  "body": "x"\n}'),
+    ).toBe("Add tag preset import");
+  });
+
+  it("keeps a subject with no subject key", () => {
+    expect(sanitizeCommitSubject('{"title": "Add tag preset import"}')).toBe(
+      '{"title": "Add tag preset import"}',
+    );
+  });
+
+  it("still trims a trailing period on an unwrapped subject", () => {
+    expect(sanitizeCommitSubject('{"subject": "Add tag preset import."}')).toBe(
+      "Add tag preset import",
+    );
+  });
+});
+
+describe("sanitizePrTitle", () => {
+  it("unwraps a title the model wrapped in its own JSON envelope", () => {
+    expect(sanitizePrTitle('{"title": "Import nyxlune tags", "body": "## Summary"}')).toBe(
+      "Import nyxlune tags",
+    );
+  });
+
+  it("keeps a title that merely looks like JSON", () => {
+    expect(sanitizePrTitle('{"title": broken')).toBe('{"title": broken');
+  });
+
+  it("falls back when the envelope unwraps to nothing", () => {
+    expect(sanitizePrTitle('{"title": "   "}')).toBe("Update project changes");
   });
 });
 

@@ -19,9 +19,39 @@ export function limitSection(value: string, maxChars: number): string {
   return `${truncated}\n\n[truncated]`;
 }
 
+/**
+ * Undo a model that answered the prompt's "return a JSON object with keys …"
+ * instruction *inside* one of the structured-output fields, so that a title
+ * arrives as `{"title": "Add gacha game characters to list"}` and a commit
+ * subject as `{"subject": "Add tag presets", "body": "…"}`. Providers that
+ * enforce a JSON schema still accept it — the wrapper is a valid string — so
+ * the sanitizers are the only shared place that can catch it.
+ *
+ * `key` is the field the value was destined for: only an envelope carrying
+ * that key unwraps, which keeps a value that merely happens to be JSON
+ * intact. Bounded so a doubly-wrapped value resolves but nothing can loop.
+ */
+function unwrapJsonWrappedField(raw: string, key: string): string {
+  let value = raw.trim();
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!value.startsWith("{")) return value;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return value;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return value;
+    const inner = (parsed as Record<string, unknown>)[key];
+    if (typeof inner !== "string") return value;
+    value = inner.trim();
+  }
+  return value;
+}
+
 /** Normalise a raw commit subject to imperative-mood, ≤72 chars, no trailing period. */
 export function sanitizeCommitSubject(raw: string): string {
-  const singleLine = raw.trim().split(/\r?\n/g)[0]?.trim() ?? "";
+  const singleLine = unwrapJsonWrappedField(raw, "subject").split(/\r?\n/g)[0]?.trim() ?? "";
   const withoutTrailingPeriod = singleLine.replace(/[.]+$/g, "").trim();
   if (withoutTrailingPeriod.length === 0) {
     return "Update project files";
@@ -35,45 +65,16 @@ export function sanitizeCommitSubject(raw: string): string {
 
 /** Normalise a raw PR title to a single line with a sensible fallback. */
 export function sanitizePrTitle(raw: string): string {
-  const singleLine = raw.trim().split(/\r?\n/g)[0]?.trim() ?? "";
+  const singleLine = unwrapJsonWrappedField(raw, "title").split(/\r?\n/g)[0]?.trim() ?? "";
   if (singleLine.length > 0) {
     return singleLine;
   }
   return "Update project changes";
 }
 
-/**
- * Undo a model that answered the "return JSON with exactly one key: title"
- * instruction *inside* the structured-output field, yielding a title of
- * `{"title": "Add gacha game characters to list"}`. Providers that enforce a
- * JSON schema still accept this — the wrapper is a valid string — so the only
- * place to catch it is here. Bounded so a title that legitimately contains
- * JSON cannot loop.
- */
-function unwrapJsonWrappedTitle(raw: string): string {
-  let value = raw.trim();
-  for (let depth = 0; depth < 3; depth += 1) {
-    if (!value.startsWith("{")) return value;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(value);
-    } catch {
-      return value;
-    }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return value;
-    const inner = (parsed as Record<string, unknown>).title;
-    // Only unwrap a lone `title` key: a richer object is not this bug, and
-    // discarding its other fields would silently lose information.
-    if (typeof inner !== "string" || Object.keys(parsed).length !== 1) return value;
-    value = inner.trim();
-  }
-  return value;
-}
-
 /** Normalise a raw thread title to a compact single-line sidebar-safe label. */
 export function sanitizeThreadTitle(raw: string): string {
-  const normalized = unwrapJsonWrappedTitle(raw)
-    .trim()
+  const normalized = unwrapJsonWrappedField(raw, "title")
     .split(/\r?\n/g)[0]
     ?.trim()
     .replace(/^['"`]+|['"`]+$/g, "")
