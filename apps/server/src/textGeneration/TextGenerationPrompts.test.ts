@@ -244,6 +244,36 @@ describe("sanitizeThreadTitle", () => {
       ),
     ).toBe("Reconnect failures after restart because the se...");
   });
+
+  it("unwraps a title the model wrapped in its own JSON envelope", () => {
+    expect(sanitizeThreadTitle('{"title": "Add gacha game characters to list"}')).toBe(
+      "Add gacha game characters to list",
+    );
+  });
+
+  it("unwraps a pretty-printed envelope", () => {
+    expect(sanitizeThreadTitle('{\n  "title": "Reroll job progress indicator"\n}')).toBe(
+      "Reroll job progress indicator",
+    );
+  });
+
+  it("unwraps a doubly-wrapped envelope", () => {
+    expect(
+      sanitizeThreadTitle('{"title": "{\\"title\\": \\"Multi-region GPU for renders\\"}"}'),
+    ).toBe("Multi-region GPU for renders");
+  });
+
+  it("keeps an object that carries more than a title", () => {
+    expect(sanitizeThreadTitle('{"title": "Ship it", "body": "details"}')).toBe(
+      '{"title": "Ship it", "body": "details"}',
+    );
+  });
+
+  it("keeps a title that merely looks like JSON", () => {
+    expect(sanitizeThreadTitle('{"title" is not valid JSON here')).toBe(
+      '{"title" is not valid JSON here',
+    );
+  });
 });
 
 describe("normalizeCliError", () => {

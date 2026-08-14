@@ -42,9 +42,37 @@ export function sanitizePrTitle(raw: string): string {
   return "Update project changes";
 }
 
+/**
+ * Undo a model that answered the "return JSON with exactly one key: title"
+ * instruction *inside* the structured-output field, yielding a title of
+ * `{"title": "Add gacha game characters to list"}`. Providers that enforce a
+ * JSON schema still accept this — the wrapper is a valid string — so the only
+ * place to catch it is here. Bounded so a title that legitimately contains
+ * JSON cannot loop.
+ */
+function unwrapJsonWrappedTitle(raw: string): string {
+  let value = raw.trim();
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!value.startsWith("{")) return value;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return value;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return value;
+    const inner = (parsed as Record<string, unknown>).title;
+    // Only unwrap a lone `title` key: a richer object is not this bug, and
+    // discarding its other fields would silently lose information.
+    if (typeof inner !== "string" || Object.keys(parsed).length !== 1) return value;
+    value = inner.trim();
+  }
+  return value;
+}
+
 /** Normalise a raw thread title to a compact single-line sidebar-safe label. */
 export function sanitizeThreadTitle(raw: string): string {
-  const normalized = raw
+  const normalized = unwrapJsonWrappedTitle(raw)
     .trim()
     .split(/\r?\n/g)[0]
     ?.trim()
