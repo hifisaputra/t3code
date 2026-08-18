@@ -66,6 +66,8 @@ import { useOpenInPreferredEditor } from "../editorPreferences";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
+import { isMermaidFenceLanguage } from "../lib/mermaidDiagrams";
+import { MermaidDiagram } from "./chat/MermaidDiagram";
 import { getSyntaxHighlighterPromise } from "../lib/syntaxHighlighting";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { useTheme } from "../hooks/useTheme";
@@ -2081,25 +2083,40 @@ function ChatMarkdown({
 
         const language = extractFenceLanguage(codeBlock.className);
         const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
-        return (
+        const highlightedSource = (
+          <RenderErrorBoundary fallback={<pre {...props}>{children}</pre>}>
+            <Suspense fallback={<pre {...props}>{children}</pre>}>
+              <SuspenseShikiCodeBlock
+                className={codeBlock.className}
+                code={codeBlock.code}
+                themeName={diffThemeName}
+                isStreaming={isStreaming}
+              />
+            </Suspense>
+          </RenderErrorBoundary>
+        );
+        const sourceBlock = (
           <MarkdownCodeBlock
             code={codeBlock.code}
             language={language}
             fenceTitle={fenceTitle}
             theme={resolvedTheme}
           >
-            <RenderErrorBoundary fallback={<pre {...props}>{children}</pre>}>
-              <Suspense fallback={<pre {...props}>{children}</pre>}>
-                <SuspenseShikiCodeBlock
-                  className={codeBlock.className}
-                  code={codeBlock.code}
-                  themeName={diffThemeName}
-                  isStreaming={isStreaming}
-                />
-              </Suspense>
-            </RenderErrorBoundary>
+            {highlightedSource}
           </MarkdownCodeBlock>
         );
+        // A ```mermaid fence is a picture the agent drew — render it, and keep its source
+        // one toggle away. Anything Mermaid cannot draw stays an ordinary code block.
+        if (isMermaidFenceLanguage(language)) {
+          return (
+            <RenderErrorBoundary fallback={sourceBlock}>
+              <MermaidDiagram code={codeBlock.code} theme={resolvedTheme} isStreaming={isStreaming}>
+                {highlightedSource}
+              </MermaidDiagram>
+            </RenderErrorBoundary>
+          );
+        }
+        return sourceBlock;
       },
     };
   }, [

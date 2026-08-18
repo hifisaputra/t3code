@@ -47,7 +47,8 @@ function wrapInlineCode(code: string): string {
   return `${fence}${pad}${code}${pad}${fence}`;
 }
 
-function codeFenceFor(code: string): string {
+/** The shortest fence that can hold this code — longer than any run of backticks inside it. */
+export function codeFenceFor(code: string): string {
   const longestRun = [...(code.match(/`{3,}/g) ?? [])].reduce(
     (max, run) => Math.max(max, run.length),
     0,
