@@ -17,6 +17,28 @@ export const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100vh - 18rem)";
 export const TIMELINE_CONTENT_MAX_WIDTH = 768;
 export const TIMELINE_MINIMAP_PERSISTENT_GUTTER = 48;
 
+/**
+ * The minimap rail overlays the left gutter at `w-18`, so wide content that
+ * breaks out of the reading column keeps that much clear on *both* sides —
+ * symmetric so the broken-out block stays centred on the column it came from.
+ */
+export const TIMELINE_WIDE_CONTENT_SIDE_RESERVE = 72;
+
+/**
+ * Cap for content that breaks out of the reading column (wide tables). Falls
+ * back to the column itself whenever the gutters cannot fit the minimap
+ * reserve, so narrow panes and phones render exactly as they do today.
+ */
+export function resolveTimelineWideContentWidth(contentWidth: number): number {
+  if (!Number.isFinite(contentWidth) || contentWidth <= 0) {
+    return TIMELINE_CONTENT_MAX_WIDTH;
+  }
+
+  const columnWidth = Math.min(contentWidth, TIMELINE_CONTENT_MAX_WIDTH);
+  const breakoutWidth = contentWidth - TIMELINE_WIDE_CONTENT_SIDE_RESERVE * 2;
+  return Math.max(columnWidth, Math.floor(breakoutWidth));
+}
+
 export interface TimelineEndState {
   readonly isAtEnd?: boolean;
   readonly contentLength?: number;

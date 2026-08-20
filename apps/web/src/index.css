@@ -1824,6 +1824,29 @@ label:has(> select#reasoning-effort) select {
   margin: 0.65rem 0;
 }
 
+/* Tables are the one block that regularly wants more room than the reading
+   column. Inside a wide-content region they break out symmetrically into the
+   side gutters, up to --chat-wide-content-width (published by the timeline,
+   and already holding the minimap rail clear). `fit-content` keeps a table
+   that fits the column exactly where it is; `left`/`translateX` re-centre the
+   wider box without anyone having to know its resolved width. Past the cap the
+   table keeps scrolling inside its own scroll area as before. */
+.chat-wide-content .chat-markdown .chat-markdown-table-container {
+  position: relative;
+  left: 50%;
+  width: fit-content;
+  min-width: 100%;
+  max-width: var(--chat-wide-content-width, 100%);
+  transform: translateX(-50%);
+}
+
+/* The timeline row clips horizontally so stray content cannot bleed into the
+   gutters; a broken-out table is exactly that bleed, deliberately. The list
+   itself still hides horizontal overflow, so nothing can reach the window. */
+.chat-timeline-row:has(.chat-wide-content .chat-markdown-table-container) {
+  overflow-x: visible;
+}
+
 .chat-markdown h1,
 .chat-markdown h2,
 .chat-markdown h3,

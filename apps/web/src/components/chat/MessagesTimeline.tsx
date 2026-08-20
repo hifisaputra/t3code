@@ -83,6 +83,7 @@ import {
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
+  resolveTimelineWideContentWidth,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
   TIMELINE_MINIMAP_MIN_ITEMS,
@@ -487,6 +488,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         current === nextHasPersistentGutter ? current : nextHasPersistentGutter,
       );
       setMinimapHitStripWidth(resolveTimelineMinimapHitStripWidth(viewportWidth));
+
+      // Published for content that breaks out of the reading column (wide
+      // tables). The scroll view's own padding and scrollbar gutter are
+      // already out of clientWidth, so this is the widest a row may paint.
+      const scroller =
+        timelineViewportElement.querySelector<HTMLElement>(".chat-timeline-scroller");
+      timelineViewportElement.style.setProperty(
+        "--chat-wide-content-width",
+        `${resolveTimelineWideContentWidth(
+          scroller ? resolveElementContentWidth(scroller) : viewportWidth,
+        )}px`,
+      );
     };
 
     const frame = requestAnimationFrame(measure);
@@ -550,7 +563,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip" data-timeline-root="true">
+      <div
+        className="chat-timeline-row mx-auto w-full min-w-0 max-w-3xl overflow-x-clip"
+        data-timeline-root="true"
+      >
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -590,7 +606,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             maintainVisibleContentPosition={maintainVisibleContentPosition}
             onScroll={handleScroll}
             className={cn(
-              "scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
+              "chat-timeline-scroller scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
               topFadeEnabled && "chat-timeline-scroll-fade",
             )}
             ListHeaderComponent={
@@ -628,6 +644,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     </TimelineRowCtx>
   );
 });
+
+function resolveElementContentWidth(element: HTMLElement) {
+  const style = getComputedStyle(element);
+  const horizontalPadding =
+    (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
+  return Math.max(0, element.clientWidth - horizontalPadding);
+}
 
 function keyExtractor(item: MessagesTimelineRow) {
   return item.id;
@@ -1113,7 +1136,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
   return (
     <>
-      <div className="relative min-w-0 px-1 py-0.5">
+      <div className="chat-wide-content relative min-w-0 px-1 py-0.5">
         <ChatMarkdown
           text={messageText}
           cwd={ctx.markdownCwd}

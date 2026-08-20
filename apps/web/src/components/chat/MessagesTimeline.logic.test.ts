@@ -5,6 +5,8 @@ import {
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
+  resolveTimelineWideContentWidth,
+  TIMELINE_CONTENT_MAX_WIDTH,
 } from "./MessagesTimeline.logic";
 
 describe("computeMessageDurationStart", () => {
@@ -1169,5 +1171,27 @@ describe("computeStableMessagesTimelineRows", () => {
 
     expect(reordered).not.toBe(initial);
     expect(reordered.result).toEqual([initial.result[1], initial.result[0]]);
+  });
+});
+
+describe("resolveTimelineWideContentWidth", () => {
+  it("stays on the reading column when the gutters cannot clear the minimap", () => {
+    expect(resolveTimelineWideContentWidth(900)).toBe(TIMELINE_CONTENT_MAX_WIDTH);
+    expect(resolveTimelineWideContentWidth(TIMELINE_CONTENT_MAX_WIDTH)).toBe(
+      TIMELINE_CONTENT_MAX_WIDTH,
+    );
+  });
+
+  it("never exceeds the pane when it is narrower than the reading column", () => {
+    expect(resolveTimelineWideContentWidth(420)).toBe(420);
+  });
+
+  it("breaks out to the content width less the minimap reserve on both sides", () => {
+    expect(resolveTimelineWideContentWidth(1400)).toBe(1256);
+  });
+
+  it("falls back to the reading column for an unmeasured pane", () => {
+    expect(resolveTimelineWideContentWidth(0)).toBe(TIMELINE_CONTENT_MAX_WIDTH);
+    expect(resolveTimelineWideContentWidth(Number.NaN)).toBe(TIMELINE_CONTENT_MAX_WIDTH);
   });
 });
