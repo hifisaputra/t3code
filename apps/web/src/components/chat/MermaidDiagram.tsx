@@ -1,4 +1,11 @@
-import { CheckIcon, CodeIcon, CopyIcon, TriangleAlertIcon, WorkflowIcon } from "lucide-react";
+import {
+  CheckIcon,
+  CodeIcon,
+  CopyIcon,
+  Maximize2Icon,
+  TriangleAlertIcon,
+  WorkflowIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
@@ -9,6 +16,7 @@ import {
 } from "../../lib/mermaidDiagrams";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { openDiagramLightbox } from "./diagramLightboxStore";
 
 /**
  * How long the source has to stop changing before a streaming diagram is drawn. Mermaid
@@ -96,6 +104,11 @@ export function MermaidDiagram({ code, theme, isStreaming, children }: MermaidDi
       });
   }, [code]);
 
+  const svg = state.svg;
+  const handleExpand = useCallback(() => {
+    if (svg !== null) openDiagramLightbox({ svg, code });
+  }, [code, svg]);
+
   useEffect(
     () => () => {
       if (copiedTimerRef.current != null) {
@@ -112,6 +125,7 @@ export function MermaidDiagram({ code, theme, isStreaming, children }: MermaidDi
   const showsFailure = state.svg === null && state.error !== null && !isStreaming;
   const toggleLabel = showsDiagram ? "Show diagram source" : "Show diagram";
   const copyLabel = copied ? "Copied" : "Copy diagram source";
+  const expandLabel = "Expand diagram";
 
   return (
     <div
@@ -160,6 +174,25 @@ export function MermaidDiagram({ code, theme, isStreaming, children }: MermaidDi
               <TooltipPopup side="top">{toggleLabel}</TooltipPopup>
             </Tooltip>
           )}
+          {showsDiagram ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    className="chat-markdown-chrome-action"
+                    onClick={handleExpand}
+                    aria-label={expandLabel}
+                  />
+                }
+              >
+                <Maximize2Icon className="size-3" />
+              </TooltipTrigger>
+              <TooltipPopup side="top">{expandLabel}</TooltipPopup>
+            </Tooltip>
+          ) : null}
           <Tooltip>
             <TooltipTrigger
               render={
@@ -180,11 +213,16 @@ export function MermaidDiagram({ code, theme, isStreaming, children }: MermaidDi
         </span>
       </div>
       {showsDiagram ? (
-        <div
-          className="chat-markdown-mermaid"
+        // A diagram drawn to fit a chat column is often too small to read, so the block
+        // itself is the way into the full-screen, zoomable view.
+        <button
+          type="button"
+          className="chat-markdown-mermaid w-full cursor-zoom-in border-0 bg-transparent text-left"
           // Copying the message out of the rendered view would otherwise drop the diagram:
           // the clipboard serializer skips SVG. It copies back as the fence it came from.
           data-markdown-copy={mermaidFenceMarkdown(code)}
+          aria-label={expandLabel}
+          onClick={handleExpand}
           // Mermaid sanitizes the labels it draws (securityLevel: "strict") and the markup
           // it returns is its own SVG.
           dangerouslySetInnerHTML={{ __html: state.svg as string }}

@@ -2108,6 +2108,16 @@ label:has(> select#reasoning-effort) select {
   height: auto;
 }
 
+/* The expanded diagram. Mermaid writes an inline `max-width` sized for a chat column
+   onto the SVG it returns, which has to be overridden for the same markup to fill the
+   lightbox; the viewBox and `preserveAspectRatio` then letterbox it to fit. */
+.chat-diagram-lightbox-stage svg {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+  max-height: none !important;
+}
+
 /* Diagnostics-style tables: row separators only, uppercase headers, and a
    scroll-fade container for horizontal overflow. The root chat-markdown
    wrapping rules (overflow-wrap: anywhere) would let columns shrink to single

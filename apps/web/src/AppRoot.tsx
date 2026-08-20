@@ -1,6 +1,7 @@
 import { RouterProvider } from "@tanstack/react-router";
 
 import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
+import { DiagramLightboxHost } from "./components/chat/DiagramLightboxHost";
 import { ImageLightboxHost } from "./components/chat/ImageLightboxHost";
 import { PreviewAutomationHosts } from "./components/preview/PreviewAutomationHosts";
 import { AppAtomRegistryProvider } from "./rpc/atomRegistry";
@@ -18,6 +19,7 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
       <PreviewAutomationHosts />
       <ElectronBrowserHost />
       <ImageLightboxHost />
+      <DiagramLightboxHost />
     </AppAtomRegistryProvider>
   );
 }

@@ -26,6 +26,10 @@ describe("MermaidDiagram", () => {
     expect(renderUndrawn(false)).not.toContain("Show diagram source");
   });
 
+  it("offers no way to expand a diagram that has not drawn yet", () => {
+    expect(renderUndrawn(false)).not.toContain("Expand diagram");
+  });
+
   it("keeps its copy action while streaming", () => {
     expect(renderUndrawn(true)).toContain("Copy diagram source");
   });
