@@ -3,20 +3,47 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const testState = vi.hoisted(() => ({
+  /** Every resource the message resolved, in render order, by whichever path served it. */
   resources: [] as Array<unknown>,
+  /** One entry per batched request the message issued. */
+  batches: [] as Array<ReadonlyArray<unknown>>,
+  /** Resources that fell back to resolving one at a time. */
+  soloResources: [] as Array<unknown>,
+  batchedKeys: new Set<string>(),
   assetState: "success" as "success" | "loading" | "failure",
 }));
 
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
-vi.mock("../assets/assetUrls", () => ({
-  useAssetUrlRefresh: () => vi.fn(),
-  useAssetUrlState: (_environmentId: unknown, resource: unknown) => {
-    testState.resources.push(resource);
+vi.mock("../assets/assetUrls", () => {
+  const resourceKey = (resource: { _tag: string; threadId?: string; path?: string }) =>
+    `${resource._tag}\u0000${resource.threadId ?? ""}\u0000${resource.path ?? ""}`;
+  const state = () => {
     if (testState.assetState === "loading") return { _tag: "Loading" };
     if (testState.assetState === "failure") return { _tag: "Failure" };
     return { _tag: "Success", url: "https://signed.test/workspace-image.svg" };
-  },
-}));
+  };
+  return {
+    useAssetUrlRefresh: () => vi.fn(),
+    useAssetUrlState: (_environmentId: unknown, resource: unknown) => {
+      testState.resources.push(resource);
+      testState.soloResources.push(resource);
+      return state();
+    },
+    AssetUrlBatchProvider: (props: {
+      resources: ReadonlyArray<{ _tag: string }>;
+      children: unknown;
+    }) => {
+      testState.batches.push(props.resources);
+      for (const resource of props.resources) testState.batchedKeys.add(resourceKey(resource));
+      return props.children;
+    },
+    useBatchedAssetUrlState: (resource: { _tag: string }) => {
+      if (!testState.batchedKeys.has(resourceKey(resource))) return undefined;
+      testState.resources.push(resource);
+      return state();
+    },
+  };
+});
 vi.mock("../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
 vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
 vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
@@ -91,6 +118,9 @@ function firstInlineStyle(html: string): Record<string, string> {
 describe("ChatMarkdown workspace images", () => {
   beforeEach(() => {
     testState.resources = [];
+    testState.batches = [];
+    testState.soloResources = [];
+    testState.batchedKeys = new Set();
     testState.assetState = "success";
   });
 
@@ -296,5 +326,51 @@ describe("ChatMarkdown workspace images", () => {
     expect(html).toContain("max-w-[min(100%,30rem)]");
     expect(html).toContain("max-h-[30rem]");
     expect(html).not.toContain("Image unavailable");
+  });
+});
+
+describe("ChatMarkdown image batching", () => {
+  beforeEach(() => {
+    testState.resources = [];
+    testState.batches = [];
+    testState.soloResources = [];
+    testState.batchedKeys = new Set();
+    testState.assetState = "success";
+  });
+
+  it("mints a message full of images in one request rather than one per image", () => {
+    const count = 30;
+    render(
+      Array.from({ length: count }, (_, index) => `![shot ${index}](.t3/shot-${index}.png)`).join(
+        "\n\n",
+      ),
+    );
+
+    expect(testState.batches).toHaveLength(1);
+    expect(testState.batches[0]).toHaveLength(count);
+    // Every image read the batch; none fell back to resolving on its own.
+    expect(testState.soloResources).toEqual([]);
+    expect(testState.resources).toHaveLength(count);
+  });
+
+  it("resolves an image the scanner cannot see on its own", () => {
+    // A raw-HTML image is never matched by the inline-image scan.
+    render('<img src=".t3/inline.svg" alt="inline" />');
+
+    expect(testState.batches).toEqual([]);
+    expect(testState.soloResources).toEqual([
+      {
+        _tag: "media-file",
+        threadId: threadRef.threadId,
+        path: "C:\\Users\\shawn\\project\\.t3\\inline.svg",
+      },
+    ]);
+  });
+
+  it("does not open a batch for a message with no workspace images", () => {
+    render("Just prose and an ![external](https://example.test/a.png).");
+
+    expect(testState.batches).toEqual([]);
+    expect(testState.soloResources).toEqual([]);
   });
 });

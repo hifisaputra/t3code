@@ -140,7 +140,14 @@ import {
   type MarkdownFileLinkMeta,
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
-import { useAssetUrlRefresh, useAssetUrlState } from "../assets/assetUrls";
+import {
+  AssetUrlBatchProvider,
+  useAssetUrlRefresh,
+  useAssetUrlState,
+  useBatchedAssetUrlState,
+  type AssetUrlState,
+} from "../assets/assetUrls";
+import { collectChatMarkdownImageResources } from "./chat/chatMarkdownImageBatch";
 import { cn } from "../lib/utils";
 import { useRemoteOpenResolution, type RemoteOpenMode } from "../remoteOpen";
 import { useRightPanelStore } from "../rightPanelStore";
@@ -1333,7 +1340,7 @@ function ChatMarkdownVideo(props: {
 }
 
 /** Environment-hosted media loads through an exact-file signed asset URL. */
-export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props: {
+interface ChatMarkdownAssetImageProps {
   readonly environmentId: EnvironmentId;
   readonly resource: Extract<
     AssetResource,
@@ -1346,9 +1353,22 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
   readonly style?: CSSProperties | undefined;
   readonly workspaceRoot?: string | undefined;
   readonly onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
-}) {
-  const assetUrl = useAssetUrlState(props.environmentId, props.resource);
-  const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, props.resource);
+}
+
+/**
+ * Renders an asset-backed image or video from an already-resolved URL state.
+ *
+ * Split from resolution so the same markup serves both paths: a message's images read
+ * their state from one batched request, while anything outside a batch resolves on its
+ * own. See {@link ChatMarkdownAssetImage}.
+ */
+const ChatMarkdownAssetImageView = memo(function ChatMarkdownAssetImageView(
+  props: ChatMarkdownAssetImageProps & {
+    readonly assetUrl: AssetUrlState;
+    readonly refreshAssetUrl: () => Promise<void>;
+  },
+) {
+  const { assetUrl, refreshAssetUrl } = props;
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const resource = props.resource;
   const path =
@@ -1445,6 +1465,36 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
         onError={() => setFailedUrl(assetUrl.url)}
       />
     </MediaActions>
+  );
+});
+
+/** Resolves its own URL — the path for media no enclosing batch covers. */
+function ChatMarkdownAssetImageSolo(props: ChatMarkdownAssetImageProps) {
+  const assetUrl = useAssetUrlState(props.environmentId, props.resource);
+  const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, props.resource);
+  return (
+    <ChatMarkdownAssetImageView {...props} assetUrl={assetUrl} refreshAssetUrl={refreshAssetUrl} />
+  );
+}
+
+/**
+ * Environment-hosted media, loaded through an exact-file signed asset URL.
+ *
+ * Prefers the URL an enclosing {@link AssetUrlBatchProvider} already minted for this
+ * message, so a message carrying tens of images costs one request rather than one per
+ * image. Video keeps resolving on its own: its retry affordance re-mints a single
+ * resource, which a shared batch cannot do, and a message rarely carries many.
+ */
+export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(
+  props: ChatMarkdownAssetImageProps,
+) {
+  const batched = useBatchedAssetUrlState(props.resource);
+  const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, props.resource);
+  if (batched === undefined || props.kind === "video") {
+    return <ChatMarkdownAssetImageSolo {...props} />;
+  }
+  return (
+    <ChatMarkdownAssetImageView {...props} assetUrl={batched} refreshAssetUrl={refreshAssetUrl} />
   );
 });
 
@@ -2841,6 +2891,41 @@ function ChatMarkdown({
     [extraRemarkPlugins, lineBreaks],
   );
 
+  // Mint this message's image URLs as one request. Resolving them one at a time is what
+  // made an image-heavy message crawl: the cost is a round trip per image, so the last
+  // of tens of images lands long after the first.
+  const batchedImageResources = useMemo(
+    () =>
+      collectChatMarkdownImageResources({
+        text,
+        imageBaseDir: imageBaseDir ?? cwd,
+        threadRef,
+      }),
+    [cwd, imageBaseDir, text, threadRef],
+  );
+
+  const markdown = (
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : undefined}
+      skipHtml={false}
+      components={markdownComponents}
+      urlTransform={markdownUrlTransform}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+  // Without an environment there is nothing to mint against, and a message with no
+  // workspace images has nothing to batch — skip the provider rather than pay for it.
+  const renderedMarkdown =
+    environmentId === null || batchedImageResources.length === 0 ? (
+      markdown
+    ) : (
+      <AssetUrlBatchProvider environmentId={environmentId} resources={batchedImageResources}>
+        {markdown}
+      </AssetUrlBatchProvider>
+    );
+
   // react-markdown converts unparsed HTML nodes to text when skipHtml is false.
   // Keep that behavior explicit because literal mode depends on escaping the
   // complete source token instead of dropping it from the rendered message.
@@ -2852,15 +2937,7 @@ function ChatMarkdown({
       )}
       onCopy={handleCopy}
     >
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : undefined}
-        skipHtml={false}
-        components={markdownComponents}
-        urlTransform={markdownUrlTransform}
-      >
-        {text}
-      </ReactMarkdown>
+      {renderedMarkdown}
       {localMediaPreview ? (
         <ExpandedImageDialog
           preview={localMediaPreview}
