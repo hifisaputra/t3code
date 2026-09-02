@@ -196,6 +196,8 @@ export type ProjectReadFileEncoding = typeof ProjectReadFileEncoding.Type;
 
 export const ProjectReadFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
+  // Workspace-relative, or an absolute host path for a file outside the
+  // workspace. Only workspace-relative paths can be written back.
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_READ_FILE_PATH_MAX_LENGTH)),
   /**
    * How `contents` should be encoded in the result. `utf8` (the default) returns

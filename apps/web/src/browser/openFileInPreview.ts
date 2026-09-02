@@ -8,6 +8,7 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { ASSET_CREATE_URLS_MAX } from "@t3tools/contracts";
+import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 import {
   type AtomCommandResult,
   mapAtomCommandResult,
@@ -154,11 +155,19 @@ export async function resolveWorkspaceFileAssetUrl<AssetError>(input: {
   return mapAtomCommandResult(await resolveWorkspaceFileAsset(input), (asset) => asset.url);
 }
 
+/**
+ * Opens a browser document in the integrated browser. Inside the workspace the
+ * page may load sibling assets; a file outside it is served on its own.
+ */
 export async function openFileInPreview<AssetError, PreviewError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
+  readonly workspaceRoot: string | undefined;
   readonly httpBaseUrl: string;
-  readonly createAssetUrl: CreateAssetUrlMutation<AssetError>;
+  readonly createAssetUrl: (input: {
+    readonly environmentId: EnvironmentId;
+    readonly input: { readonly resource: AssetResource };
+  }) => Promise<AtomCommandResult<AssetCreateUrlResult, AssetError>>;
   readonly openPreview: OpenPreviewMutation<PreviewError>;
 }): Promise<AtomCommandResult<void, AssetError | PreviewError | BrowserPreviewUnavailableError>> {
   if (!isPreviewSupportedInRuntime()) {
@@ -170,18 +179,30 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
       ),
     );
   }
-  const assetUrlResult = await resolveWorkspaceFileAssetUrl({
-    threadRef: input.threadRef,
-    filePath: input.filePath,
-    httpBaseUrl: input.httpBaseUrl,
-    createAssetUrl: input.createAssetUrl,
+  const insideWorkspace =
+    mediaFileReference(input.filePath, input.workspaceRoot).relativePath !== undefined;
+  const assetResult = await input.createAssetUrl({
+    environmentId: input.threadRef.environmentId,
+    input: {
+      resource: {
+        _tag: insideWorkspace ? "workspace-file" : "media-file",
+        threadId: input.threadRef.threadId,
+        path: input.filePath,
+      },
+    },
   });
-  if (assetUrlResult._tag === "Failure") {
-    return AsyncResult.failure(assetUrlResult.cause);
+  if (assetResult._tag === "Failure") {
+    return AsyncResult.failure(assetResult.cause);
+  }
+  const assetUrl = resolveAssetUrl(input.httpBaseUrl, assetResult.value.relativeUrl);
+  if (assetUrl === null) {
+    return AsyncResult.failure(
+      Cause.die(new Error("The environment returned an invalid asset URL.")),
+    );
   }
   return openUrlInPreview({
     threadRef: input.threadRef,
-    url: assetUrlResult.value,
+    url: assetUrl,
     openPreview: input.openPreview,
   });
 }
