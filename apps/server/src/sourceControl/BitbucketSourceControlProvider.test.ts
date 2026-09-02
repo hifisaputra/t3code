@@ -8,7 +8,9 @@ import * as BitbucketSourceControlProvider from "./BitbucketSourceControlProvide
 
 function makeProvider(bitbucket: Partial<BitbucketApi.BitbucketApi["Service"]>) {
   return BitbucketSourceControlProvider.make.pipe(
-    Effect.provide(Layer.mock(BitbucketApi.BitbucketApi)(bitbucket)),
+    Effect.provide(
+      Layer.mock(BitbucketApi.BitbucketApi)({ credentialsConfigured: true, ...bitbucket }),
+    ),
   );
 }
 
@@ -147,5 +149,27 @@ it.effect("creates Bitbucket PRs through provider-neutral input names", () =>
       title: "Provider PR",
       bodyFile: "/tmp/body.md",
     });
+  }),
+);
+
+it.effect("lists no change requests without a credential, leaving the API untouched", () =>
+  Effect.gen(function* () {
+    let called = false;
+    const provider = yield* makeProvider({
+      credentialsConfigured: false,
+      listPullRequests: () => {
+        called = true;
+        return Effect.succeed([]);
+      },
+    });
+
+    const changeRequests = yield* provider.listChangeRequests({
+      cwd: "/repo",
+      headSelector: "feature/provider",
+      state: "all",
+    });
+
+    assert.deepStrictEqual(changeRequests, []);
+    assert.isFalse(called);
   }),
 );

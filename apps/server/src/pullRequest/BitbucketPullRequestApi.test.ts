@@ -11,6 +11,7 @@ const layer = it.layer(
   BitbucketPullRequestApi.layer.pipe(
     Layer.provide(
       Layer.mock(BitbucketApi.BitbucketApi)({
+        credentialsConfigured: true,
         request: mockedRequest,
       }),
     ),

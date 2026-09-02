@@ -36,6 +36,15 @@ export const make = Effect.gen(function* () {
   return SourceControlProvider.SourceControlProvider.of({
     kind: "bitbucket",
     listChangeRequests: (input) => {
+      // Without a credential Bitbucket answers 404 for every private
+      // repository, so a listing can only fail. Report "no change requests"
+      // instead of making the request: background callers (thread settlement
+      // sweeps a branch's pull request every minute) would otherwise log a
+      // failure forever. Explicit actions — getting or creating one — still
+      // hit the API and surface a real error the user can act on.
+      if (!bitbucket.credentialsConfigured) {
+        return Effect.succeed([]);
+      }
       const source = SourceControlProvider.sourceControlRefFromInput(input);
       return bitbucket
         .listPullRequests({

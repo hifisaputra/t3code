@@ -324,6 +324,16 @@ export class BitbucketApi extends Context.Service<
     readonly probeAuth: Effect.Effect<SourceControlProviderAuth, never>;
 
     /**
+     * Whether any Bitbucket credential is configured, read straight from the
+     * environment rather than probed. Callers that poll in the background use
+     * this to skip a request that could only ever come back 404: Bitbucket
+     * hides a private repository from an anonymous client instead of
+     * answering 401, so an unauthenticated lookup is indistinguishable from a
+     * missing repository and retrying it every sweep only produces noise.
+     */
+    readonly credentialsConfigured: boolean;
+
+    /**
      * One authenticated request, returning the body verbatim. Bitbucket answers most endpoints
      * with JSON and a few — a pull request diff, for one — with plain text, so the body is
      * handed back undecoded for the caller to read as it sees fit.
@@ -898,6 +908,9 @@ export const make = Effect.gen(function* () {
 
   return BitbucketApi.of({
     request,
+    credentialsConfigured:
+      Option.isSome(config.accessToken) ||
+      (Option.isSome(config.email) && Option.isSome(config.apiToken)),
     probeAuth: executeJson(
       "probeAuth",
       HttpClientRequest.get(apiUrl("/user")),
