@@ -377,30 +377,37 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
 
       if (Object.keys(serverPatch).length > 0) {
         const { sharedPatch, localPatch } = splitSharedServerPatch(serverPatch);
+        const targets = new Set(connectedEnvironmentIds);
+        if (environmentId) {
+          targets.add(environmentId);
+        }
+        // Each half is only "dropped" when it has keys and nowhere to put
+        // them: a shared-only patch still lands on every connected
+        // environment without a primary, so it must not warn.
+        const localDropped = Object.keys(localPatch).length > 0 && !environmentId;
+        const sharedDropped = Object.keys(sharedPatch).length > 0 && targets.size === 0;
+
         if (environmentId && Object.keys(localPatch).length > 0) {
           void persistServerSettings({
             environmentId,
             input: { patch: localPatch },
           });
-        } else {
-          // Dropping the write silently leaves the control looking saved.
-          toastManager.add({
-            type: "warning",
-            title: "Setting not saved",
-            description: PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
-          });
         }
-        if (Object.keys(sharedPatch).length > 0) {
-          const targets = new Set(connectedEnvironmentIds);
-          if (environmentId) {
-            targets.add(environmentId);
-          }
+        if (Object.keys(sharedPatch).length > 0 && targets.size > 0) {
           for (const targetId of targets) {
             void persistServerSettings({
               environmentId: targetId,
               input: { patch: sharedPatch },
             });
           }
+        }
+        if (localDropped || sharedDropped) {
+          // Dropping the write silently leaves the control looking saved.
+          toastManager.add({
+            type: "warning",
+            title: "Setting not saved",
+            description: PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
+          });
         }
       }
       if (Object.keys(clientPatch).length > 0) {
