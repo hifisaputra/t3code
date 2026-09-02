@@ -39,6 +39,7 @@ import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { useThreadActions } from "./useThreadActions";
+import { openThreadUsageStats } from "../components/chat/threadUsageStatsStore";
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -190,6 +191,13 @@ export function useThreadActionMenu(input: {
           }
         };
         switch (action) {
+          case "stats": {
+            openThreadUsageStats({
+              environmentId: threadRef.environmentId,
+              threadId: threadRef.threadId,
+            });
+            return;
+          }
           case "project-settings": {
             const project = projects.find(
               (candidate) =>

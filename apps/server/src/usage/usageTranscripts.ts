@@ -8,13 +8,29 @@
  */
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
+/**
+ * The subagent a record belongs to. `null` on the record means the session's
+ * main agent produced it; a present value means a subagent did, and `name` is
+ * `null` only when the provider ran one without naming it.
+ */
+export interface UsageSubagentAttribution {
+  readonly name: string | null;
+}
+
 export interface UsageRecord {
   readonly provider: UsageProviderKind;
   readonly timestampMs: number;
   readonly model: string;
+  /**
+   * Owning session. Claude stamps a subagent's records with its *parent*
+   * session id, so subagent usage attributes to the thread that spawned it
+   * without any extra bookkeeping.
+   */
   readonly sessionId: string;
   readonly totals: UsageTokenTotals;
   readonly reportedCostUsd: number | null;
+  /** Which agent inside the session produced this; `null` for the main agent. */
+  readonly subagent: UsageSubagentAttribution | null;
   /**
    * Key for cross-file de-duplication, or `null` when the record is inherently
    * unique and needs no dedup.
@@ -131,11 +147,27 @@ export function parseClaudeLine(line: string): UsageRecord | null {
 
   const cost = record["costUSD"];
 
+  // Subagent runs live in `<session>/subagents/*.jsonl` but stamp each record
+  // with the parent session id, so they aggregate into the parent for free.
+  // `attributionAgent` names the agent ("Explore", "package-builder"); a
+  // sidechain without one is still a subagent, just an anonymous one.
+  const attributionAgent = record["attributionAgent"];
+  const subagent =
+    record["isSidechain"] === true
+      ? {
+          name:
+            typeof attributionAgent === "string" && attributionAgent.length > 0
+              ? attributionAgent
+              : null,
+        }
+      : null;
+
   return {
     provider: "claude",
     timestampMs,
     model,
     sessionId: typeof record["sessionId"] === "string" ? record["sessionId"] : "",
+    subagent,
     totals: {
       uncachedInputTokens: int(usageRecord["input_tokens"]),
       cachedInputTokens: int(usageRecord["cache_read_input_tokens"]),
@@ -298,6 +330,13 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
 
   return {
     provider: "codex",
+    // Codex spawns a subagent as its own rollout linked by
+    // `source.subagent.thread_spawn.parent_thread_id` rather than marking
+    // records inside the parent, so per-agent attribution needs that link
+    // followed first. Until then a Codex record is reported as main-agent
+    // usage — never as an unnamed subagent, which would be a wrong breakdown
+    // rather than a missing one.
+    subagent: null,
     timestampMs,
     model: state.model,
     sessionId: state.sessionId,
@@ -428,6 +467,8 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
     return [
       {
         provider: "grok",
+        // Grok reports one usage total per turn with no subagent dimension.
+        subagent: null,
         timestampMs,
         model: "grok",
         sessionId,
@@ -474,6 +515,8 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
 
     results.push({
       provider: "grok",
+      // Grok reports one usage total per turn with no subagent dimension.
+      subagent: null,
       timestampMs,
       model: entry.model,
       sessionId,

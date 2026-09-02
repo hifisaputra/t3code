@@ -195,7 +195,13 @@ import {
   ResourceTelemetryRetryResult,
   ResourceTelemetrySnapshot,
 } from "./resourceTelemetry.ts";
-import { UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
+import {
+  ThreadUsageStats,
+  ThreadUsageStatsInput,
+  UsageReadError,
+  UsageSummary,
+  UsageSummaryInput,
+} from "./usage.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
   SourceControlCloneRepositoryInput,
@@ -296,6 +302,7 @@ export const WS_METHODS = {
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
+  serverGetThreadUsageStats: "server.getThreadUsageStats",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -461,6 +468,18 @@ export const WsServerRetryResourceTelemetryRpc = Rpc.make(WS_METHODS.serverRetry
 export const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSummary, {
   payload: UsageSummaryInput,
   success: UsageSummary,
+  error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
+});
+
+/**
+ * One thread's tokens and cost, including work it delegated to subagents.
+ *
+ * Separate from the summary RPC because it answers a different question and
+ * reads a different shape: a thread's sessions rather than a date window.
+ */
+export const WsServerGetThreadUsageStatsRpc = Rpc.make(WS_METHODS.serverGetThreadUsageStats, {
+  payload: ThreadUsageStatsInput,
+  success: ThreadUsageStats,
   error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
 });
 
@@ -1066,6 +1085,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
   WsServerGetUsageSummaryRpc,
+  WsServerGetThreadUsageStatsRpc,
   WsServerSignalProcessRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,

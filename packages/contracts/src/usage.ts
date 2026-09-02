@@ -14,7 +14,7 @@
  */
 import * as Schema from "effect/Schema";
 
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly. The
@@ -212,3 +212,83 @@ export class UsageReadError extends Schema.TaggedErrorClass<UsageReadError>()("U
     return `Usage read failed (${this.reason}): ${this.detail}`;
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Per-thread stats                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Where a thread's figures came from.
+ *
+ * `recorded` is usage T3 Code captured as the turns ran and keeps for the life
+ * of the thread. `transcript` is read back from the provider CLI's own session
+ * files, which are exact but only while the provider keeps them — Claude prunes
+ * old transcripts, so an old thread reports `unavailable` rather than zero.
+ */
+export const ThreadUsageSource = Schema.Literals(["recorded", "transcript", "unavailable"]);
+export type ThreadUsageSource = typeof ThreadUsageSource.Type;
+
+export const ThreadUsageTotals = Schema.Struct({
+  totals: UsageTokenTotals,
+  /** API-equivalent cost of these tokens, not money billed. See {@link UsageBucket}. */
+  costUsd: Schema.Number,
+  cacheSavingsUsd: Schema.Number,
+  /** Distinct assistant responses, after de-duplication. */
+  records: NonNegativeInt,
+  /** Responses whose tokens are counted but which no rate could price. */
+  unpricedRecords: NonNegativeInt,
+});
+export type ThreadUsageTotals = typeof ThreadUsageTotals.Type;
+
+/** One `(agent, model)` row. */
+export const ThreadUsageSlice = Schema.Struct({
+  /**
+   * Subagent name, or `null` both for the main agent and for a subagent the
+   * provider ran without naming one. Which it is follows from the field the
+   * slice arrived in, never from this value.
+   */
+  agentName: Schema.NullOr(TrimmedNonEmptyString),
+  model: TrimmedNonEmptyString,
+  totals: UsageTokenTotals,
+  costUsd: Schema.Number,
+  cacheSavingsUsd: Schema.Number,
+  records: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+});
+export type ThreadUsageSlice = typeof ThreadUsageSlice.Type;
+
+/**
+ * One thread's token and cost breakdown, including everything it delegated to
+ * subagents.
+ *
+ * Subagent work is counted because the provider stamps a subagent's records
+ * with its parent session, so delegated spend lands on the thread that caused
+ * it rather than vanishing.
+ */
+export const ThreadUsageStats = Schema.Struct({
+  threadId: ThreadId,
+  source: ThreadUsageSource,
+  /** Main agent plus every subagent. */
+  total: ThreadUsageTotals,
+  /** The thread's own agent, excluding delegated work. */
+  mainAgent: ThreadUsageTotals,
+  /** Everything delegated to subagents. */
+  subagents: ThreadUsageTotals,
+  /** Main-agent usage by model, largest cost first. */
+  mainAgentByModel: Schema.Array(ThreadUsageSlice),
+  /** Subagent usage by `(agent, model)`, largest cost first. */
+  subagentBreakdown: Schema.Array(ThreadUsageSlice),
+  firstRecordAt: Schema.NullOr(Schema.String),
+  lastRecordAt: Schema.NullOr(Schema.String),
+  pricing: UsagePricing,
+  /**
+   * Set when the figures are known to be short — a provider whose subagents are
+   * not yet attributable, or a thread whose transcripts were partly pruned. The
+   * UI shows it rather than presenting an incomplete total as exact.
+   */
+  incompleteReason: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ThreadUsageStats = typeof ThreadUsageStats.Type;
+
+export const ThreadUsageStatsInput = Schema.Struct({ threadId: ThreadId });
+export type ThreadUsageStatsInput = typeof ThreadUsageStatsInput.Type;

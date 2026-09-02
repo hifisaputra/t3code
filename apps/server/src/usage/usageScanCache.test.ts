@@ -13,6 +13,7 @@ import type { UsageRecord } from "./usageTranscripts.ts";
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
     provider: "claude",
+    subagent: null,
     timestampMs: 1_786_000_000_000,
     model: "claude-fable-5",
     sessionId: "session-a",

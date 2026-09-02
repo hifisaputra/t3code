@@ -185,7 +185,17 @@ const BackgroundLayerLive = BackgroundPolicy.layer.pipe(
   Layer.provideMerge(ServerSettingsLayerLive),
 );
 
-const UsageLayerLive = UsageService.layer.pipe(Layer.provide(ServerSettingsLayerLive));
+// Thread stats read the thread's provider session to find its transcript, so
+// usage now depends on the runtime repository as well as settings.
+const UsageLayerLive = UsageService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ServerSettingsLayerLive,
+      // Thread stats read the thread's provider session to find its transcript.
+      ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceLayerLive)),
+    ),
+  ),
+);
 
 const ResourceDiagnosticsLayerLive = Layer.mergeAll(
   ResourceTelemetryLayerLive,

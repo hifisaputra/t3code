@@ -21,6 +21,9 @@ import {
   type UsageSummary,
   type UsageSummaryInput,
   UsageReadError,
+  type ThreadUsageStats,
+  type ThreadUsageStatsInput,
+  type ThreadUsageTotals,
 } from "@t3tools/contracts";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
@@ -42,8 +45,16 @@ import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
+import { ProviderSessionRuntimeRepository } from "../persistence/ProviderSessionRuntime.ts";
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
+import { ThreadUsageAggregator } from "./threadUsageStats.ts";
 import {
+  claudeSessionIdsFromResumeCursor,
+  cwdFromRuntimePayload,
+  orderProjectDirs,
+} from "./threadUsageSources.ts";
+import {
+  listSessionTranscriptFiles,
   listTranscriptFiles,
   readDirectoryVolumeId,
   readTranscriptRecords,
@@ -85,6 +96,23 @@ const encodeRatesCache = Schema.encodeEffect(
   Schema.fromJsonString(RatesCacheFile as unknown as Schema.Codec<typeof RatesCacheFile.Type>),
 );
 
+const EMPTY_THREAD_USAGE_TOTALS: ThreadUsageTotals = {
+  totals: {
+    uncachedInputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+  },
+  costUsd: 0,
+  cacheSavingsUsd: 0,
+  records: 0,
+  unpricedRecords: 0,
+};
+
+/** Adapter keys whose transcripts attribute subagent work to a parent session. */
+const CLAUDE_ADAPTER_KEYS = new Set(["claudeAgent", "claude"]);
+
 /** The scan cache is narrowed by hand in `usageScanCache`, so JSON is enough here. */
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
@@ -94,6 +122,16 @@ export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
+    /**
+     * One thread's tokens and cost, including work it delegated to subagents.
+     *
+     * Lives here rather than in its own service so it shares this one's rate
+     * table, transcript-directory resolution, and incremental file cache; a
+     * separate service would re-fetch and re-parse all three.
+     */
+    readonly readThreadStats: (
+      input: ThreadUsageStatsInput,
+    ) => Effect.Effect<ThreadUsageStats, UsageReadError>;
   }
 >()("t3/usage/UsageService") {}
 
@@ -118,6 +156,25 @@ export const layerTest = Layer.succeed(
         },
         scanDurationMs: 0,
       }),
+    readThreadStats: (input) =>
+      Effect.succeed({
+        threadId: input.threadId,
+        source: "unavailable",
+        total: EMPTY_THREAD_USAGE_TOTALS,
+        mainAgent: EMPTY_THREAD_USAGE_TOTALS,
+        subagents: EMPTY_THREAD_USAGE_TOTALS,
+        mainAgentByModel: [],
+        subagentBreakdown: [],
+        firstRecordAt: null,
+        lastRecordAt: null,
+        pricing: {
+          status: "unavailable",
+          source: LITELLM_RATES_URL,
+          fetchedAt: null,
+          knownModels: 0,
+        },
+        incompleteReason: null,
+      }),
   }),
 );
 
@@ -128,6 +185,7 @@ export const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const hostEnvironment = yield* HostProcessEnvironment;
+  const runtimeRepository = yield* ProviderSessionRuntimeRepository;
 
   const fileCache: ScanCache = new Map();
   let cacheDirty = false;
@@ -570,7 +628,143 @@ export const make = Effect.gen(function* () {
     return yield* Deferred.await(deferred);
   });
 
-  return { readSummary } as const;
+  /* ------------------------------------------------------------------ */
+  /* Per-thread stats                                                    */
+  /* ------------------------------------------------------------------ */
+
+  const threadUsagePricing = (): UsageSummary["pricing"] => ({
+    status: ratesStatus,
+    source: LITELLM_RATES_URL,
+    fetchedAt:
+      ratesFetchedAtMs === null ? null : DateTime.formatIso(DateTime.makeUnsafe(ratesFetchedAtMs)),
+    knownModels: rates.size,
+  });
+
+  const threadUsageUnavailable = (
+    threadId: ThreadUsageStats["threadId"],
+    incompleteReason: string | null,
+  ): ThreadUsageStats => ({
+    threadId,
+    source: "unavailable",
+    total: EMPTY_THREAD_USAGE_TOTALS,
+    mainAgent: EMPTY_THREAD_USAGE_TOTALS,
+    subagents: EMPTY_THREAD_USAGE_TOTALS,
+    mainAgentByModel: [],
+    subagentBreakdown: [],
+    firstRecordAt: null,
+    lastRecordAt: null,
+    pricing: threadUsagePricing(),
+    incompleteReason,
+  });
+
+  const readThreadStats = Effect.fn("UsageService.readThreadStats")(function* (
+    input: ThreadUsageStatsInput,
+  ) {
+    // Stats stay readable without a rate table; models just report as unpriced.
+    yield* ensureRates().pipe(Effect.catchCause(() => Effect.void));
+
+    const runtime = yield* runtimeRepository.getByThreadId({ threadId: input.threadId }).pipe(
+      Effect.catchCause(
+        (cause) =>
+          new UsageReadError({
+            reason: "scanFailed",
+            detail: "The thread's provider session could not be read.",
+            cause: Cause.squash(cause),
+          }),
+      ),
+    );
+    if (Option.isNone(runtime)) {
+      return threadUsageUnavailable(input.threadId, "This thread has not run a turn yet.");
+    }
+
+    const row = runtime.value;
+    if (!CLAUDE_ADAPTER_KEYS.has(row.adapterKey)) {
+      // Codex links a subagent rollout to its parent through
+      // `source.subagent.thread_spawn.parent_thread_id` rather than marking
+      // records inside the parent, and Grok reports no per-agent dimension at
+      // all. A main-agent-only total for either would look complete while
+      // silently omitting delegated spend, so report nothing instead.
+      return threadUsageUnavailable(
+        input.threadId,
+        `Thread stats are not available for ${row.providerName} yet.`,
+      );
+    }
+
+    const sessionIds = claudeSessionIdsFromResumeCursor(row.resumeCursor);
+    if (sessionIds.length === 0) {
+      return threadUsageUnavailable(input.threadId, "This thread has not run a turn yet.");
+    }
+
+    const settings = yield* settingsService.getSettings.pipe(
+      Effect.catchCause(
+        (cause) =>
+          new UsageReadError({
+            reason: "scanFailed",
+            detail: "Server settings could not be read.",
+            cause: Cause.squash(cause),
+          }),
+      ),
+    );
+    const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent).pipe(
+      Effect.provideService(Path.Path, path),
+    );
+    const projectsDir = yield* resolveClaudeTranscriptDir(claudeHome);
+
+    const cwd = cwdFromRuntimePayload(row.runtimePayload);
+    const files = yield* Effect.promise(() =>
+      listSessionTranscriptFiles(projectsDir, sessionIds, (dirs) => orderProjectDirs(dirs, cwd)),
+    );
+    if (files.length === 0) {
+      return threadUsageUnavailable(
+        input.threadId,
+        "The provider no longer keeps this thread's transcript, so its usage cannot be recovered.",
+      );
+    }
+
+    const aggregator = new ThreadUsageAggregator(rates);
+    for (const file of files) {
+      const stat = yield* fileSystem.stat(file).pipe(Effect.catchCause(() => Effect.succeed(null)));
+      if (stat === null) continue;
+      const records = yield* readFileRecords(
+        file,
+        Number(stat.size),
+        stat.mtime.pipe(
+          Option.map((value) => value.getTime()),
+          Option.getOrElse(() => 0),
+        ),
+        "claude",
+      );
+      for (const record of records) {
+        // Located by session id, but a resumed transcript can carry records
+        // copied from another session; keep only this thread's own.
+        if (!sessionIds.includes(record.sessionId)) continue;
+        aggregator.add(record);
+      }
+    }
+
+    const result = aggregator.result();
+    return {
+      threadId: input.threadId,
+      source: "transcript",
+      total: result.total,
+      mainAgent: result.mainAgent,
+      subagents: result.subagents,
+      mainAgentByModel: result.mainAgentByModel,
+      subagentBreakdown: result.subagentBreakdown,
+      firstRecordAt:
+        result.firstRecordAtMs === null
+          ? null
+          : DateTime.formatIso(DateTime.makeUnsafe(result.firstRecordAtMs)),
+      lastRecordAt:
+        result.lastRecordAtMs === null
+          ? null
+          : DateTime.formatIso(DateTime.makeUnsafe(result.lastRecordAtMs)),
+      pricing: threadUsagePricing(),
+      incompleteReason: null,
+    } satisfies ThreadUsageStats;
+  });
+
+  return { readSummary, readThreadStats } as const;
 });
 
 export const layer = Layer.effect(UsageService, make);

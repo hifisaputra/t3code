@@ -835,6 +835,13 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverGetUsageSummary,
       staleTimeMs: 60_000,
     }),
+    // One thread's transcripts are a small slice of a full scan, but still real
+    // file reads; hold the result long enough that reopening the panel is free.
+    threadUsageStats: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:thread-usage-stats",
+      tag: WS_METHODS.serverGetThreadUsageStats,
+      staleTimeMs: 30_000,
+    }),
     configProjection,
     welcome: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:welcome",

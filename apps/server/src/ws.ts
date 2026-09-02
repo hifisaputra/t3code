@@ -1890,6 +1890,10 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.serverGetThreadUsageStats]: (input) =>
+          observeRpcEffect(WS_METHODS.serverGetThreadUsageStats, usage.readThreadStats(input), {
+            "rpc.aggregate": "server",
+          }),
         [WS_METHODS.serverRetryResourceTelemetry]: (_input) =>
           observeRpcEffect(WS_METHODS.serverRetryResourceTelemetry, resourceTelemetry.retry, {
             "rpc.aggregate": "server",

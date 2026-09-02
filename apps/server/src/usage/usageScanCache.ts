@@ -26,7 +26,7 @@ import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 // entries would keep serving double-counted records forever.
 // v3: entries carry the parse position and reducer state so a grown file
 // re-parses only its appended bytes instead of starting over.
-export const USAGE_SCAN_CACHE_VERSION = 3 as const;
+export const USAGE_SCAN_CACHE_VERSION = 4 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -61,6 +61,12 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  /**
+   * Which agent produced the record: `null` for the session's main agent,
+   * `-1` for a subagent the provider did not name, otherwise an index into
+   * the `agents` table.
+   */
+  agentIndex: number | null,
 ];
 
 interface SerializedFile {
@@ -78,10 +84,14 @@ interface SerializedFile {
   readonly cs: CodexScanState | null;
 }
 
+/** Agent slot for a subagent the provider ran without naming it. */
+const UNNAMED_SUBAGENT_INDEX = -1;
+
 interface SerializedCache {
   readonly version: number;
   readonly models: readonly string[];
   readonly sessions: readonly string[];
+  readonly agents: readonly string[];
   readonly files: Readonly<Record<string, SerializedFile>>;
 }
 
@@ -89,8 +99,10 @@ interface SerializedCache {
 export function encodeScanCache(cache: ScanCache): SerializedCache {
   const models: string[] = [];
   const sessions: string[] = [];
+  const agents: string[] = [];
   const modelIndex = new Map<string, number>();
   const sessionIndex = new Map<string, number>();
+  const agentIndex = new Map<string, number>();
 
   const intern = (table: string[], index: Map<string, number>, value: string): number => {
     const existing = index.get(value);
@@ -112,6 +124,11 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     record.totals.reasoningTokens,
     record.dedupeKey,
     record.reportedCostUsd,
+    record.subagent === null
+      ? null
+      : record.subagent.name === null
+        ? UNNAMED_SUBAGENT_INDEX
+        : intern(agents, agentIndex, record.subagent.name),
   ];
 
   const files: Record<string, SerializedFile> = {};
@@ -129,7 +146,7 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     };
   }
 
-  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, files };
+  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, agents, files };
 }
 
 function isRecordArray(value: unknown): value is readonly unknown[] {
@@ -149,6 +166,7 @@ export function decodeScanCache(document: unknown): ScanCache {
   const root = document as Partial<SerializedCache>;
   if (root.version !== USAGE_SCAN_CACHE_VERSION) return cache;
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
+  if (!isRecordArray(root.agents)) return cache;
   if (typeof root.files !== "object" || root.files === null) return cache;
 
   // The intern tables must be all strings: a numeric entry would pass the
@@ -156,7 +174,9 @@ export function decodeScanCache(document: unknown): ScanCache {
   // at lookupRate. A corrupt table rejects the whole cache.
   if (!root.models.every((value) => typeof value === "string")) return cache;
   if (!root.sessions.every((value) => typeof value === "string")) return cache;
+  if (!root.agents.every((value) => typeof value === "string")) return cache;
   const models = root.models as readonly string[];
+  const agents = root.agents as readonly string[];
   const sessions = root.sessions as readonly string[];
 
   // Any corrupt row disqualifies the whole entry. Keeping the survivors
@@ -168,7 +188,7 @@ export function decodeScanCache(document: unknown): ScanCache {
   ): UsageRecord[] | null => {
     const records: UsageRecord[] = [];
     for (const row of rows) {
-      if (!isRecordArray(row) || row.length < 10) return null;
+      if (!isRecordArray(row) || row.length < 11) return null;
       const [
         timestampMs,
         modelIndex,
@@ -180,6 +200,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
+        agentSlot,
       ] = row as SerializedRecord;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
@@ -210,6 +231,10 @@ export function decodeScanCache(document: unknown): ScanCache {
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
+        subagent:
+          typeof agentSlot !== "number"
+            ? null
+            : { name: agentSlot === UNNAMED_SUBAGENT_INDEX ? null : (agents[agentSlot] ?? null) },
       });
     }
     return records;

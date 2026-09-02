@@ -311,3 +311,59 @@ export async function readTranscriptRecords(
     await handle.close().catch(() => undefined);
   }
 }
+
+/**
+ * Every transcript belonging to a set of sessions: each session's own file plus
+ * the subagent files beneath it.
+ *
+ * Searches the project directories instead of deriving Claude's directory name
+ * from the workspace path, because that naming is Claude's own and has changed
+ * before. `orderedProjectDirs` puts the thread's own workspace first, so the
+ * usual case stops at the first directory rather than stat-ing hundreds.
+ */
+export async function listSessionTranscriptFiles(
+  projectsDir: string,
+  sessionIds: readonly string[],
+  orderProjectDirs: (dirs: readonly string[]) => readonly string[],
+): Promise<readonly string[]> {
+  let projectDirs: string[];
+  try {
+    const entries = await NodeFSP.readdir(projectsDir, { withFileTypes: true });
+    projectDirs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+  const ordered = orderProjectDirs(projectDirs);
+
+  const found: string[] = [];
+  for (const sessionId of sessionIds) {
+    for (const projectDir of ordered) {
+      const base = NodePath.join(projectsDir, projectDir);
+      const mainFile = NodePath.join(base, `${sessionId}.jsonl`);
+      try {
+        await NodeFSP.access(mainFile);
+      } catch {
+        continue;
+      }
+      found.push(mainFile);
+
+      // Subagent runs live in `<session>/subagents/*.jsonl` and stamp each
+      // record with the parent session id, so they belong to the same thread.
+      try {
+        const entries = await NodeFSP.readdir(NodePath.join(base, sessionId, "subagents"), {
+          withFileTypes: true,
+        });
+        for (const entry of entries) {
+          if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+            found.push(NodePath.join(base, sessionId, "subagents", entry.name));
+          }
+        }
+      } catch {
+        // A session that delegated nothing has no subagents directory.
+      }
+      // Session ids are unique across projects; stop at the first hit.
+      break;
+    }
+  }
+  return found;
+}

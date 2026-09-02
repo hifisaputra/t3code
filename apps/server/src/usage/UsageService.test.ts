@@ -12,9 +12,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Scheduler from "effect/Scheduler";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
+import { ProviderSessionRuntimeRepository } from "../persistence/ProviderSessionRuntime.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as UsageService from "./UsageService.ts";
@@ -84,6 +86,16 @@ const serviceLayers = (input: {
     ),
     Layer.provideMerge(
       Layer.succeed(HostProcessEnvironment, { GROK_HOME: NodePath.join(input.home, "grok") }),
+    ),
+    // Only `readThreadStats` reads provider sessions; the summary suites below
+    // never reach it, so an empty repository is enough to satisfy the layer.
+    Layer.provideMerge(
+      Layer.succeed(ProviderSessionRuntimeRepository, {
+        upsert: () => Effect.void,
+        getByThreadId: () => Effect.succeed(Option.none()),
+        list: () => Effect.succeed([]),
+        deleteByThreadId: () => Effect.void,
+      }),
     ),
   );
 

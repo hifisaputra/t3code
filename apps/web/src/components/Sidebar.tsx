@@ -194,6 +194,7 @@ import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./u
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import { openThreadUsageStats } from "./chat/threadUsageStatsStore";
 import {
   composerDraftHasUserContent,
   DraftId,
@@ -3147,6 +3148,13 @@ export default function Sidebar() {
           return;
         }
         switch (clicked.value) {
+          case "stats": {
+            openThreadUsageStats({
+              environmentId: threadRef.environmentId,
+              threadId: threadRef.threadId,
+            });
+            return;
+          }
           case "project-settings": {
             const projectGroup = projectGroupsRef.current.find((group) =>
               group.memberProjectRefs.some(
