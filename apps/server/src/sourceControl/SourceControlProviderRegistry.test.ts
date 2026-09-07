@@ -89,7 +89,7 @@ function makeRegistry(input: {
         registryLayer,
         processLayer,
         Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({}),
-        Layer.mock(BitbucketApi.BitbucketApi)({}),
+        Layer.mock(BitbucketApi.BitbucketApi)({ credentialsConfigured: true }),
         Layer.mock(GitHubCli.GitHubCli)({}),
         Layer.mock(GitLabCli.GitLabCli)({}),
         ServerConfig.layerTest(process.cwd(), {

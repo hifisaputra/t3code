@@ -27,7 +27,7 @@ const sourceControlProviderRegistryTestLayer = (input: {
           prefix: "t3-source-control-registry-test-",
         }).pipe(Layer.provide(NodeServices.layer)),
         Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({}),
-        Layer.mock(BitbucketApi.BitbucketApi)(input.bitbucket),
+        Layer.mock(BitbucketApi.BitbucketApi)({ credentialsConfigured: true, ...input.bitbucket }),
         Layer.mock(GitHubCli.GitHubCli)({}),
         Layer.mock(GitLabCli.GitLabCli)({}),
         Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({}),

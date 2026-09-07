@@ -62,7 +62,7 @@ import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
-export const SCRIPT_ICONS: Array<{ id: ProjectScriptIcon; label: string }> = [
+const SCRIPT_ICONS: Array<{ id: ProjectScriptIcon; label: string }> = [
   { id: "play", label: "Play" },
   { id: "test", label: "Test" },
   { id: "lint", label: "Lint" },

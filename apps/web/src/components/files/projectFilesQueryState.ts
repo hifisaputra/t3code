@@ -33,6 +33,7 @@ interface ProjectQueryState<A> {
   readonly refresh: () => void;
 }
 
+/** Also read outside React, to resolve workspace globs when suggesting project scripts. */
 export function getProjectEntriesQueryAtom(environmentId: EnvironmentId, cwd: string) {
   return projectEnvironment.listEntries({ environmentId, input: { cwd } });
 }

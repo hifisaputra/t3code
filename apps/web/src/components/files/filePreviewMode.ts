@@ -1,30 +1,16 @@
+import { isAbsolutePath } from "~/terminal-links";
+
 export const isMarkdownPreviewFile = (path: string): boolean => /\.(?:md|mdx)$/i.test(path);
 
-const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
-  apng: "image/apng",
-  avif: "image/avif",
-  bmp: "image/bmp",
-  gif: "image/gif",
-  ico: "image/x-icon",
-  jpeg: "image/jpeg",
-  jpg: "image/jpeg",
-  png: "image/png",
-  svg: "image/svg+xml",
-  webp: "image/webp",
-};
-
-function fileExtension(path: string): string {
-  const name = path.split(/[?#]/, 1)[0] ?? "";
-  const dotIndex = name.lastIndexOf(".");
-  return dotIndex === -1 ? "" : name.slice(dotIndex + 1).toLowerCase();
-}
-
-export const isImagePreviewFile = (path: string): boolean =>
-  fileExtension(path) in IMAGE_MIME_BY_EXTENSION;
-
-/** MIME type for a browser-renderable image path, or null when it isn't a known image. */
-export function imagePreviewMimeType(path: string): string | null {
-  return IMAGE_MIME_BY_EXTENSION[fileExtension(path)] ?? null;
+export function shouldShowFileExplorer(input: {
+  readonly relativePath: string | null;
+  readonly explorerOpen: boolean;
+  readonly attachmentOpen: boolean;
+}): boolean {
+  if (input.attachmentOpen || (input.relativePath && isAbsolutePath(input.relativePath))) {
+    return false;
+  }
+  return input.explorerOpen || input.relativePath === null;
 }
 
 export function setMarkdownTaskChecked(
