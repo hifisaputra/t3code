@@ -624,6 +624,13 @@ function preparePullRequestThread(
   return manager.preparePullRequestThread(input);
 }
 
+function prepareBranchThread(
+  manager: GitManager.GitManager["Service"],
+  input: GitManager.GitPrepareBranchThreadInput,
+) {
+  return manager.prepareBranchThread(input);
+}
+
 function makeManager(input?: {
   ghScenario?: FakeGhScenario;
   sourceControlProvider?: SourceControlProvider["Service"];
@@ -5743,7 +5750,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       );
 
       expect(errorMessage).toContain("Git command failed in GitVcsDriver.commit.commit");
-      expect(errorMessage).not.toContain("hook: fail");
+      // Git's own first line of complaint rides along, so the failure says why.
+      expect(errorMessage).toContain("hook: fail");
       expect(events).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -5838,6 +5846,265 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           phase: "pr",
           label: "Creating pull request...",
         }),
+      ]);
+    }),
+  );
+
+  it.effect("cuts a new branch from the remote default and points it at its own name", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(remoteDir, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+      yield* runGit(repoDir, ["remote", "set-head", "origin", "--auto"]);
+
+      const { manager } = yield* makeManager();
+
+      const result = yield* prepareBranchThread(manager, {
+        cwd: repoDir,
+        branch: "ada/del-123-wire-up-linear",
+        baseBranch: null,
+        mode: "worktree",
+      });
+
+      expect(result.reusedExistingBranch).toBe(false);
+      expect(result.branch).toBe("ada/del-123-wire-up-linear");
+      expect(result.baseBranch).toBe("main");
+      expect(result.worktreePath).not.toBeNull();
+
+      const worktreePath = result.worktreePath ?? "";
+      expect((yield* runGit(worktreePath, ["branch", "--show-current"])).stdout.trim()).toBe(
+        "ada/del-123-wire-up-linear",
+      );
+      // The branch is cut from the base but published under its own name, so the
+      // first push lands where Linear looks for it.
+      expect(
+        (yield* runGit(repoDir, ["rev-parse", "ada/del-123-wire-up-linear"])).stdout.trim(),
+      ).toBe((yield* runGit(repoDir, ["rev-parse", "origin/main"])).stdout.trim());
+      expect(
+        (yield* runGit(repoDir, [
+          "config",
+          "branch.ada/del-123-wire-up-linear.remote",
+        ])).stdout.trim(),
+      ).toBe("origin");
+      expect(
+        (yield* runGit(repoDir, [
+          "config",
+          "branch.ada/del-123-wire-up-linear.merge",
+        ])).stdout.trim(),
+      ).toBe("refs/heads/ada/del-123-wire-up-linear");
+      expect(
+        (yield* runGit(repoDir, [
+          "config",
+          "branch.ada/del-123-wire-up-linear.gh-merge-base",
+        ])).stdout.trim(),
+      ).toBe("main");
+    }),
+  );
+
+  it.effect("cuts a new branch from the base branch it was handed", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "develop"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "develop.txt"), "develop\n");
+      yield* runGit(repoDir, ["add", "develop.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Develop commit"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "develop"]);
+      yield* runGit(repoDir, ["checkout", "main"]);
+
+      const { manager } = yield* makeManager();
+
+      const result = yield* prepareBranchThread(manager, {
+        cwd: repoDir,
+        branch: "ada/del-200-from-develop",
+        baseBranch: "develop",
+        mode: "worktree",
+      });
+
+      expect(result.baseBranch).toBe("develop");
+      expect(result.reusedExistingBranch).toBe(false);
+      expect(
+        (yield* runGit(repoDir, ["rev-parse", "ada/del-200-from-develop"])).stdout.trim(),
+      ).toBe((yield* runGit(repoDir, ["rev-parse", "origin/develop"])).stdout.trim());
+    }),
+  );
+
+  it.effect("reuses a branch that already exists locally instead of recutting it", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "ada/del-300-existing"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "work.txt"), "work\n");
+      yield* runGit(repoDir, ["add", "work.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Existing work"]);
+      const existingHead = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "main"]);
+
+      const { manager } = yield* makeManager();
+
+      const result = yield* prepareBranchThread(manager, {
+        cwd: repoDir,
+        branch: "ada/del-300-existing",
+        baseBranch: "main",
+        mode: "worktree",
+      });
+
+      expect(result.reusedExistingBranch).toBe(true);
+      expect(result.worktreePath).not.toBeNull();
+      expect((yield* runGit(repoDir, ["rev-parse", "ada/del-300-existing"])).stdout.trim()).toBe(
+        existingHead,
+      );
+    }),
+  );
+
+  it.effect("adopts a branch that exists only on the remote", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "ada/del-400-remote-only"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "remote.txt"), "remote\n");
+      yield* runGit(repoDir, ["add", "remote.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Remote work"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "ada/del-400-remote-only"]);
+      const remoteHead = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* runGit(repoDir, ["checkout", "main"]);
+      yield* runGit(repoDir, ["branch", "-D", "ada/del-400-remote-only"]);
+
+      const { manager } = yield* makeManager();
+
+      const result = yield* prepareBranchThread(manager, {
+        cwd: repoDir,
+        branch: "ada/del-400-remote-only",
+        baseBranch: "main",
+        mode: "worktree",
+      });
+
+      expect(result.reusedExistingBranch).toBe(true);
+      expect((yield* runGit(repoDir, ["rev-parse", "ada/del-400-remote-only"])).stdout.trim()).toBe(
+        remoteHead,
+      );
+      expect(
+        (yield* runGit(repoDir, [
+          "rev-parse",
+          "--abbrev-ref",
+          "ada/del-400-remote-only@{upstream}",
+        ])).stdout.trim(),
+      ).toBe("origin/ada/del-400-remote-only");
+    }),
+  );
+
+  it.effect("switches the main checkout onto the branch in local mode", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+
+      const { manager } = yield* makeManager();
+
+      const result = yield* prepareBranchThread(manager, {
+        cwd: repoDir,
+        branch: "ada/del-500-local",
+        baseBranch: "main",
+        mode: "local",
+      });
+
+      expect(result.worktreePath).toBeNull();
+      expect(result.branch).toBe("ada/del-500-local");
+      expect((yield* runGit(repoDir, ["branch", "--show-current"])).stdout.trim()).toBe(
+        "ada/del-500-local",
+      );
+    }),
+  );
+
+  it.effect("refuses a worktree for a branch the main repo already has checked out", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "ada/del-600-checked-out"]);
+
+      const { manager } = yield* makeManager();
+
+      const error = yield* prepareBranchThread(manager, {
+        cwd: repoDir,
+        branch: "ada/del-600-checked-out",
+        baseBranch: "main",
+        mode: "worktree",
+      }).pipe(Effect.flip);
+
+      expect(error._tag).toBe("GitManagerError");
+      expect(error.message).toContain("already checked out in the main repo");
+    }),
+  );
+
+  it.effect("fails when no base branch is given and the remote records no default", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+
+      const { manager } = yield* makeManager();
+
+      const error = yield* prepareBranchThread(manager, {
+        cwd: repoDir,
+        branch: "ada/del-700-no-base",
+        baseBranch: null,
+        mode: "worktree",
+      }).pipe(Effect.flip);
+
+      expect(error._tag).toBe("GitManagerError");
+      expect(error.message).toContain("No base branch");
+    }),
+  );
+
+  it.effect("runs the project setup script in a newly created branch worktree", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+
+      const setupCalls: unknown[] = [];
+      const { manager } = yield* makeManager({
+        setupScriptRunner: {
+          runForThread: (setupInput) =>
+            Effect.sync(() => {
+              setupCalls.push(setupInput);
+              return { status: "no-script" as const };
+            }),
+        },
+      });
+
+      const result = yield* prepareBranchThread(manager, {
+        cwd: repoDir,
+        branch: "ada/del-800-setup",
+        baseBranch: "main",
+        mode: "worktree",
+        threadId: asThreadId("thread-branch-setup"),
+      });
+
+      expect(setupCalls).toEqual([
+        {
+          threadId: "thread-branch-setup",
+          projectCwd: repoDir,
+          worktreePath: result.worktreePath,
+        },
       ]);
     }),
   );

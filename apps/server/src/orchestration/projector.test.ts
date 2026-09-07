@@ -87,6 +87,7 @@ describe("orchestration projector", () => {
         branch: null,
         worktreePath: null,
         branchPullRequest: null,
+        linkedIssue: null,
         latestTurn: null,
         createdAt: now,
         updatedAt: now,
@@ -165,6 +166,68 @@ describe("orchestration projector", () => {
         expect(model.threads[0]?.branchPullRequest).toEqual(update.expected);
         expect(model.threads[0]?.linkedPullRequest).toEqual(linkedPullRequest);
       }
+    }),
+  );
+
+  effectIt.effect("carries a linked issue from thread.created and clears it on meta updates", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const eventFields = {
+        aggregateKind: "thread" as const,
+        aggregateId: "thread-1",
+        occurredAt: now,
+        commandId: null,
+      };
+      const linkedIssue = {
+        provider: "linear",
+        id: "issue-uuid",
+        identifier: "DEL-123",
+        url: "https://linear.app/t3/issue/DEL-123/do-the-thing",
+      };
+      let model = yield* projectEvent(
+        createEmptyReadModel(now),
+        makeEvent({
+          ...eventFields,
+          sequence: 1,
+          type: "thread.created",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "Issue thread",
+            modelSelection: { provider: "codex", model: "gpt-5-codex" },
+            runtimeMode: "full-access",
+            branch: "tomo/del-123",
+            worktreePath: null,
+            linkedIssue,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      );
+      expect(model.threads[0]?.linkedIssue).toEqual(linkedIssue);
+
+      // A meta update that says nothing about the issue leaves the link alone.
+      model = yield* projectEvent(
+        model,
+        makeEvent({
+          ...eventFields,
+          sequence: 2,
+          type: "thread.meta-updated",
+          payload: { threadId: "thread-1", updatedAt: now, title: "Renamed" },
+        }),
+      );
+      expect(model.threads[0]?.linkedIssue).toEqual(linkedIssue);
+
+      model = yield* projectEvent(
+        model,
+        makeEvent({
+          ...eventFields,
+          sequence: 3,
+          type: "thread.meta-updated",
+          payload: { threadId: "thread-1", updatedAt: now, linkedIssue: null },
+        }),
+      );
+      expect(model.threads[0]?.linkedIssue).toBeNull();
     }),
   );
 

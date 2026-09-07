@@ -27,6 +27,7 @@ import {
   type OrchestrationThreadShell,
   ModelSelection,
   ProjectId,
+  ThreadLinkedIssue,
   ThreadLinkedPullRequest,
   ThreadId,
 } from "@t3tools/contracts";
@@ -117,6 +118,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
     modelSelection: Schema.fromJsonString(ModelSelection),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     branchPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    linkedIssue: Schema.NullOr(Schema.fromJsonString(ThreadLinkedIssue)),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -502,6 +504,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
+          linked_issue_json AS "linkedIssue",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -542,6 +545,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
+          linked_issue_json AS "linkedIssue",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -584,6 +588,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
+          linked_issue_json AS "linkedIssue",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -1075,6 +1080,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
+          linked_issue_json AS "linkedIssue",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -2075,6 +2081,7 @@ pending_approval_requests AS (
                 ...(row.linkedPullRequest === null
                   ? {}
                   : { linkedPullRequest: row.linkedPullRequest }),
+                ...(row.linkedIssue === null ? {} : { linkedIssue: row.linkedIssue }),
                 latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
@@ -2290,6 +2297,7 @@ pending_approval_requests AS (
                   ...(row.linkedPullRequest === null
                     ? {}
                     : { linkedPullRequest: row.linkedPullRequest }),
+                  ...(row.linkedIssue === null ? {} : { linkedIssue: row.linkedIssue }),
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2432,6 +2440,7 @@ pending_approval_requests AS (
                       ...(row.linkedPullRequest === null
                         ? {}
                         : { linkedPullRequest: row.linkedPullRequest }),
+                      ...(row.linkedIssue === null ? {} : { linkedIssue: row.linkedIssue }),
                       latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                       createdAt: row.createdAt,
                       updatedAt: row.updatedAt,
@@ -2582,6 +2591,7 @@ pending_approval_requests AS (
                 ...(row.linkedPullRequest === null
                   ? {}
                   : { linkedPullRequest: row.linkedPullRequest }),
+                ...(row.linkedIssue === null ? {} : { linkedIssue: row.linkedIssue }),
                 latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
@@ -2905,6 +2915,9 @@ pending_approval_requests AS (
         ...(threadRow.value.linkedPullRequest === null
           ? {}
           : { linkedPullRequest: threadRow.value.linkedPullRequest }),
+        ...(threadRow.value.linkedIssue === null
+          ? {}
+          : { linkedIssue: threadRow.value.linkedIssue }),
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,
@@ -3188,6 +3201,9 @@ pending_approval_requests AS (
         ...(threadRow.value.linkedPullRequest === null
           ? {}
           : { linkedPullRequest: threadRow.value.linkedPullRequest }),
+        ...(threadRow.value.linkedIssue === null
+          ? {}
+          : { linkedIssue: threadRow.value.linkedIssue }),
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,

@@ -59,6 +59,30 @@ export const T3ProjectFileScript = Schema.Struct({
 });
 export type T3ProjectFileScript = typeof T3ProjectFileScript.Type;
 
+export const T3ProjectFileLinear = Schema.Struct({
+  teams: Schema.optionalKey(
+    Schema.Array(trimmedNonEmpty({ description: 'A Linear team key, such as "DEL".' })).annotate({
+      description:
+        "Linear teams whose issues belong in this repository. Used to pick the repository when an issue is delegated to T3 Code.",
+    }),
+  ),
+  projects: Schema.optionalKey(
+    Schema.Array(trimmedNonEmpty({ description: "A Linear project id." })).annotate({
+      description:
+        "Linear projects whose issues belong in this repository. Narrows `teams` when one team spans several repositories.",
+    }),
+  ),
+  baseBranch: Schema.optionalKey(
+    trimmedNonEmpty({
+      description:
+        "Branch that issue branches are cut from. Defaults to the remote's default branch.",
+    }),
+  ),
+}).annotate({
+  description: "How Linear issues map onto this repository.",
+});
+export type T3ProjectFileLinear = typeof T3ProjectFileLinear.Type;
+
 export const T3ProjectFile = Schema.Struct({
   $schema: Schema.optionalKey(
     Schema.String.annotate({
@@ -80,6 +104,7 @@ export const T3ProjectFile = Schema.Struct({
         'Where new threads start for this repository: "worktree" for a fresh git worktree, "local" for the current checkout. A per-project setting in T3 Code overrides this; when neither is set, the global default applies.',
     }),
   ),
+  linear: Schema.optionalKey(T3ProjectFileLinear),
   scripts: Schema.optionalKey(
     Schema.Array(T3ProjectFileScript)
       .annotate({

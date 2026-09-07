@@ -21,8 +21,10 @@ import { cn } from "../../lib/cn";
 import { relativeTime } from "../../lib/time";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
+import { useThreadIssue } from "../../state/use-thread-issue";
 import { useThreadPr } from "../../state/use-thread-pr";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
+import { ThreadIssueChip } from "./thread-issue-chip";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import {
   resolveThreadListV2SnoozeMenuSelection,
@@ -427,6 +429,14 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const pinnedRow = props.pinned === true;
 
   const pr = useThreadPr(thread);
+  const issue = useThreadIssue(thread);
+  const rowAccessibilityLabel = [
+    thread.title,
+    issue?.accessibilityLabel ?? null,
+    props.hasQueuedMessages ? "messages queued to send" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   const theme = useUniwindTheme();
   const screenColor = theme["--color-screen"];
@@ -817,6 +827,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         ) : (
           <View className="flex-1" />
         )}
+        {issue ? <ThreadIssueChip issue={issue} selected={selected} /> : null}
         {pr ? (
           <Text
             accessibilityLabel={pr.accessibilityLabel}
@@ -839,9 +850,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     variant === "card" ? (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={rowAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         onPress={() => {
@@ -881,9 +890,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     ) : (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={rowAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         className={sidebarPane ? undefined : "bg-screen"}

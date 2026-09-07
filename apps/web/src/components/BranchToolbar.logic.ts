@@ -281,8 +281,15 @@ export function shouldIncludeBranchPickerItem(input: {
   normalizedQuery: string;
   createBranchItemValue: string | null;
   checkoutPullRequestItemValue: string | null;
+  startIssueThreadItemValue?: string | null;
 }): boolean {
-  const { itemValue, normalizedQuery, createBranchItemValue, checkoutPullRequestItemValue } = input;
+  const {
+    itemValue,
+    normalizedQuery,
+    createBranchItemValue,
+    checkoutPullRequestItemValue,
+    startIssueThreadItemValue = null,
+  } = input;
 
   if (normalizedQuery.length === 0) {
     return true;
@@ -293,6 +300,10 @@ export function shouldIncludeBranchPickerItem(input: {
   }
 
   if (checkoutPullRequestItemValue && itemValue === checkoutPullRequestItemValue) {
+    return true;
+  }
+
+  if (startIssueThreadItemValue && itemValue === startIssueThreadItemValue) {
     return true;
   }
 

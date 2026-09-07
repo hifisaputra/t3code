@@ -9,6 +9,7 @@ import {
   usePullRequestResolution,
 } from "~/lib/sourceControlActions";
 import { cn } from "~/lib/utils";
+import { parseLinearIssueReference } from "~/linearIssueReference";
 import { parsePullRequestReference } from "~/pullRequestReference";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useEnvironmentQuery } from "~/state/query";
@@ -34,6 +35,8 @@ interface PullRequestThreadDialogProps {
   initialReference: string | null;
   onOpenChange: (open: boolean) => void;
   onPrepared: (input: { branch: string; worktreePath: string | null }) => Promise<void> | void;
+  /** Offered when the typed reference is a Linear issue; hands it to the issue dialog. */
+  onSwitchToIssue?: ((reference: string) => void) | undefined;
 }
 
 export function PullRequestThreadDialog({
@@ -44,6 +47,7 @@ export function PullRequestThreadDialog({
   initialReference,
   onOpenChange,
   onPrepared,
+  onSwitchToIssue,
 }: PullRequestThreadDialogProps) {
   const referenceInputRef = useRef<HTMLInputElement>(null);
   const [reference, setReference] = useState(initialReference ?? "");
@@ -82,6 +86,11 @@ export function PullRequestThreadDialog({
 
   const parsedReference = parsePullRequestReference(reference);
   const parsedDebouncedReference = parsePullRequestReference(debouncedReference);
+  // Both dialogs read the same typed text, and the two reference grammars do
+  // not overlap, so a Linear identifier pasted here is an unambiguous request
+  // for the other one rather than a typo to reject.
+  const linearIssueReference =
+    parsedReference === null ? parseLinearIssueReference(reference) : null;
   const sourceControlScope = useMemo(
     () => ({
       environmentId,
@@ -170,11 +179,15 @@ export function PullRequestThreadDialog({
 
   const validationMessage = !referenceDirty
     ? null
-    : reference.trim().length === 0
-      ? `Paste a ${terminology.singular} URL, checkout command, or enter 123 / #123.`
-      : parsedReference === null
-        ? `Use a ${terminology.singular} URL, checkout command, 123, or #123.`
-        : null;
+    : linearIssueReference !== null && onSwitchToIssue
+      ? // The offer below says what to do instead; "use a PR URL" on top of it
+        // would be a second, wrong answer to the same input.
+        null
+      : reference.trim().length === 0
+        ? `Paste a ${terminology.singular} URL, checkout command, or enter 123 / #123.`
+        : parsedReference === null
+          ? `Use a ${terminology.singular} URL, checkout command, 123, or #123.`
+          : null;
   const errorMessage =
     validationMessage ??
     (resolvedPullRequest === null && pullRequestResolution.error
@@ -252,6 +265,18 @@ export function PullRequestThreadDialog({
               <Spinner className="size-3.5" />
               Resolving {terminology.singular}...
             </div>
+          ) : null}
+
+          {linearIssueReference && onSwitchToIssue ? (
+            <button
+              type="button"
+              className="text-left text-muted-foreground text-xs underline underline-offset-2 hover:text-foreground"
+              onClick={() => {
+                onSwitchToIssue(linearIssueReference);
+              }}
+            >
+              This looks like a Linear issue — open the issue dialog
+            </button>
           ) : null}
 
           {errorMessage ? <p className="text-destructive text-xs">{errorMessage}</p> : null}

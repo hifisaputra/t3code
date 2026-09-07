@@ -2,15 +2,22 @@ import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environ
 import { pullRequestDetailToVcsStatus } from "@t3tools/client-runtime/state/pull-requests";
 import {
   type EnvironmentId,
+  type LinearIssueDetail,
   resolveEnvironmentMachineKind,
+  type ThreadLinkedIssue,
+  type ScopedThreadRef,
   type ThreadLinkedPullRequest,
   type VcsStatusResult,
 } from "@t3tools/contracts";
-import { FolderGit2Icon, TerminalIcon } from "lucide-react";
-import { useMemo } from "react";
+import { CircleDotIcon, FolderGit2Icon, TerminalIcon } from "lucide-react";
+import { useCallback, useMemo, type MouseEvent } from "react";
+
+import { useOpenLink } from "../browser/useOpenLink";
+import { stackedThreadToast, toastManager } from "./ui/toast";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useEnvironmentQuery } from "../state/query";
+import { linearEnvironment, useSharedLinearIssue } from "../state/linear";
 import { linkedPullRequestDetailAtom, useSharedPullRequestSummary } from "../state/pullRequests";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useUiStateStore } from "../uiStateStore";
@@ -27,6 +34,14 @@ export interface PrStatusIndicator {
   tooltip: string;
   tooltipLead: string;
   tooltipTitle: string;
+  url: string;
+}
+
+export interface IssueStatusIndicator {
+  label: string;
+  /** Linear owns the state colour and hands it over as hex, so it is inline rather than a class. */
+  color: string;
+  tooltip: string;
   url: string;
 }
 
@@ -76,6 +91,95 @@ export function useLinkedThreadPullRequest(
             },
           },
     [detail],
+  );
+}
+
+/**
+ * The live issue behind a thread's link. Title and state are never stored on
+ * the thread, so the chip is only as good as this query — and a row that
+ * scrolls offscreen stops querying, so the last good answer is kept for the
+ * identifier it belongs to rather than letting the chip blink out.
+ */
+export function useLinkedThreadIssue(
+  environmentId: EnvironmentId | null,
+  linkedIssue: ThreadLinkedIssue | null | undefined,
+  enabled = true,
+): LinearIssueDetail | null {
+  const queried = useEnvironmentQuery(
+    !enabled || environmentId === null || linkedIssue == null
+      ? null
+      : linearEnvironment.issue({
+          environmentId,
+          input: { reference: linkedIssue.identifier },
+        }),
+  ).data;
+  return useSharedLinearIssue(environmentId, linkedIssue?.identifier ?? null, queried);
+}
+
+export function issueStatusIndicator(
+  issue: LinearIssueDetail | null | undefined,
+): IssueStatusIndicator | null {
+  if (!issue) return null;
+  return {
+    label: issue.identifier,
+    color: issue.state.color,
+    tooltip: `${issue.identifier} · ${issue.title} · ${issue.state.name}`,
+    url: issue.url,
+  };
+}
+
+/**
+ * Opens an issue URL the way the pull-request chip opens a PR: through the
+ * "Open links in" setting, with the modifier still forcing the system browser.
+ * No project can ever host a Linear URL, so there is nothing to resolve first.
+ */
+export function useOpenIssueLink(threadRef?: ScopedThreadRef) {
+  const openLink = useOpenLink(threadRef);
+  return useCallback(
+    (event: MouseEvent<HTMLElement>, url: string, targetThreadRef?: ScopedThreadRef) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openLink(url, { event, threadRef: targetThreadRef }).catch((error: unknown) => {
+        console.error(error);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Unable to open issue link",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      });
+    },
+    [openLink],
+  );
+}
+
+/** The issue chip: identifier in its Linear state colour, opening the issue on click. */
+export function IssueStatusChip({
+  status,
+  onOpen,
+}: {
+  readonly status: IssueStatusIndicator;
+  readonly onOpen: (event: React.MouseEvent<HTMLElement>) => void;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            aria-label={status.tooltip}
+            onClick={onOpen}
+            className="inline-flex shrink-0 items-center gap-1 text-[10px]"
+            style={{ color: status.color }}
+          />
+        }
+      >
+        <CircleDotIcon className="size-3" />
+        <span className="hidden md:inline">{status.label}</span>
+      </TooltipTrigger>
+      <TooltipPopup side="top">{status.tooltip}</TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -340,13 +444,23 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
   const threadEnvironmentLabel = isRemoteThread ? (remoteEnvLabel ?? "Remote") : null;
   const remoteMachine = resolveEnvironmentMachineKind(environment?.serverConfig ?? null);
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
+  const linkedIssue = useLinkedThreadIssue(thread.environmentId, thread.linkedIssue);
+  const issueStatus = issueStatusIndicator(linkedIssue);
+  const openIssueLink = useOpenIssueLink();
+  const threadRef = scopeThreadRef(thread.environmentId, thread.id);
 
-  if (!terminalStatus && !isRemoteThread) {
+  if (!terminalStatus && !isRemoteThread && !issueStatus) {
     return null;
   }
 
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5">
+      {issueStatus ? (
+        <IssueStatusChip
+          status={issueStatus}
+          onOpen={(event) => openIssueLink(event, issueStatus.url, threadRef)}
+        />
+      ) : null}
       {terminalStatus ? (
         <Tooltip>
           <TooltipTrigger

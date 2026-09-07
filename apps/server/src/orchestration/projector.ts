@@ -337,6 +337,7 @@ export function projectEvent(
             branch: payload.branch,
             worktreePath: payload.worktreePath,
             branchPullRequest: null,
+            linkedIssue: payload.linkedIssue ?? null,
             latestTurn: null,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -519,6 +520,7 @@ export function projectEvent(
             ...(payload.branchPullRequest !== undefined
               ? { branchPullRequest: payload.branchPullRequest }
               : {}),
+            ...(payload.linkedIssue !== undefined ? { linkedIssue: payload.linkedIssue } : {}),
             updatedAt: payload.updatedAt,
           }),
         })),

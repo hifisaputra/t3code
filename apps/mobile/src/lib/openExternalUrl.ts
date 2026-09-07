@@ -5,6 +5,7 @@ const ExternalUrlTarget = Schema.Literals([
   "file-preview",
   "markdown-link",
   "pull-request",
+  "linear-issue",
   "provider-auth",
 ]);
 

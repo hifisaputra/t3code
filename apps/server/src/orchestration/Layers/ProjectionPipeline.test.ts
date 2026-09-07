@@ -8,6 +8,7 @@ import {
   MessageId,
   ProjectId,
   ThreadId,
+  ThreadLinkedIssue,
   ThreadLinkedPullRequest,
   TurnId,
   ProviderInstanceId,
@@ -64,6 +65,7 @@ const BaseTestLayer = makeProjectionPipelinePrefixedTestLayer("t3-projection-pip
 const encodeThreadLinkedPullRequest = Schema.encodeSync(
   Schema.fromJsonString(ThreadLinkedPullRequest),
 );
+const encodeThreadLinkedIssue = Schema.encodeSync(Schema.fromJsonString(ThreadLinkedIssue));
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-cursor-batch-")))(
   "OrchestrationProjectionPipeline cursor batches",
@@ -291,6 +293,86 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-branch-pr-proje
             },
           ]);
         }
+      }),
+    );
+  },
+);
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-linked-issue-projection-")))(
+  "linked issue projection",
+  (it) => {
+    it.effect("persists the issue from thread.created and clears it on meta updates", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-01-01T00:00:00.000Z";
+        const threadId = ThreadId.make("thread-linked-issue");
+        const projectId = ProjectId.make("project-linked-issue");
+        const eventFields = {
+          aggregateKind: "thread" as const,
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+        };
+        const linkedIssue = {
+          provider: "linear" as const,
+          id: "issue-uuid",
+          identifier: "DEL-123",
+          url: "https://linear.app/t3/issue/DEL-123/do-the-thing",
+        };
+        const readLinkedIssue = sql<{ readonly linkedIssue: string | null }>`
+          SELECT linked_issue_json AS "linkedIssue"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+
+        const created = yield* eventStore.append({
+          ...eventFields,
+          type: "thread.created",
+          eventId: EventId.make("evt-linked-issue-created"),
+          payload: {
+            threadId,
+            projectId,
+            title: "Issue thread",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: "tomo/del-123",
+            worktreePath: null,
+            linkedIssue,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* projectionPipeline.projectEvent(created);
+        assert.deepEqual(yield* readLinkedIssue, [
+          { linkedIssue: encodeThreadLinkedIssue(linkedIssue) },
+        ]);
+
+        // A meta update that says nothing about the issue leaves it alone.
+        const renamed = yield* eventStore.append({
+          ...eventFields,
+          type: "thread.meta-updated",
+          eventId: EventId.make("evt-linked-issue-renamed"),
+          payload: { threadId, updatedAt: now, title: "Renamed thread" },
+        });
+        yield* projectionPipeline.projectEvent(renamed);
+        assert.deepEqual(yield* readLinkedIssue, [
+          { linkedIssue: encodeThreadLinkedIssue(linkedIssue) },
+        ]);
+
+        const unlinked = yield* eventStore.append({
+          ...eventFields,
+          type: "thread.meta-updated",
+          eventId: EventId.make("evt-linked-issue-cleared"),
+          payload: { threadId, updatedAt: now, linkedIssue: null },
+        });
+        yield* projectionPipeline.projectEvent(unlinked);
+        assert.deepEqual(yield* readLinkedIssue, [{ linkedIssue: null }]);
       }),
     );
   },

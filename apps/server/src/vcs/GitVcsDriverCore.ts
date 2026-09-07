@@ -45,6 +45,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const WORKTREE_ADD_TIMEOUT_MS = 300_000;
 const WORKTREE_REMOVE_TIMEOUT_MS = Duration.toMillis(Duration.minutes(5));
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
+/** Details reach the UI verbatim, so git's reason is cut rather than wrapped forever. */
+const GIT_ERROR_REASON_MAX_LENGTH = 200;
 const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
 const PREPARED_COMMIT_PATCH_MAX_OUTPUT_BYTES = 49_000;
 const RANGE_COMMIT_SUMMARY_MAX_OUTPUT_BYTES = 19_000;
@@ -156,6 +158,25 @@ interface ExecuteGitOptions {
   maxOutputBytes?: number | undefined;
   appendTruncationMarker?: boolean | undefined;
   progress?: GitVcsDriver.ExecuteGitProgress | undefined;
+}
+
+/**
+ * Git's own first line of complaint, appended to the operation's fallback so a
+ * user reading "git checkout failed" also sees why it failed. Capped because
+ * the detail is printed verbatim in the UI.
+ */
+function withGitReason(detail: string, stderr: string): string {
+  const reason = stderr
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (reason === undefined) return detail;
+  const capped =
+    reason.length > GIT_ERROR_REASON_MAX_LENGTH
+      ? `${reason.slice(0, GIT_ERROR_REASON_MAX_LENGTH - 1)}\u2026`
+      : reason;
+  // Fallback details end in a full stop; the reason continues the sentence.
+  return `${detail.replace(/\.$/, "")}: ${capped}`;
 }
 
 function parseBranchAb(value: string): { ahead: number; behind: number } {
@@ -904,7 +925,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         return Effect.fail(
           new GitCommandError({
             ...gitCommandContext({ operation, cwd, args }),
-            detail: options.fallbackErrorDetail ?? "Git command exited with a non-zero status.",
+            detail: withGitReason(
+              options.fallbackErrorDetail ?? "Git command exited with a non-zero status.",
+              result.stderr,
+            ),
             ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
             stdoutLength: result.stdout.length,
             stderrLength: result.stderr.length,

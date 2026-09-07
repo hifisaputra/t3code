@@ -639,3 +639,95 @@ describe("ServerSettings environment icon", () => {
     expect(encodeServerSettings(linuxSettings).environmentIcon).toBe("linux");
   });
 });
+
+const defaultBranchNaming = {
+  style: "linear",
+  prefixes: ["feat", "fix", "bug", "chore"],
+  labelPrefixes: [{ label: "Bug", prefix: "fix" }],
+};
+
+describe("ServerSettings linear block", () => {
+  it("defaults to a disconnected Linear with agent access off", () => {
+    expect(decodeServerSettings({}).linear).toEqual({
+      apiKey: "",
+      repositories: [],
+      branchNaming: defaultBranchNaming,
+      agentAccess: false,
+      moveToStartedOnThreadStart: true,
+    });
+    expect(decodeServerSettings({ linear: { agentAccess: true } }).linear).toEqual({
+      apiKey: "",
+      repositories: [],
+      branchNaming: defaultBranchNaming,
+      agentAccess: true,
+      moveToStartedOnThreadStart: true,
+    });
+  });
+
+  it("trims the key on both the settings and the patch", () => {
+    expect(decodeServerSettings({ linear: { apiKey: "  lin_api_key  " } }).linear.apiKey).toBe(
+      "lin_api_key",
+    );
+    expect(
+      decodeServerSettingsPatch({ linear: { apiKey: "  lin_api_key  " } }).linear?.apiKey,
+    ).toBe("lin_api_key");
+  });
+
+  it("keeps a patch sparse so an untouched Linear field is never overwritten", () => {
+    const patch = decodeServerSettingsPatch({ linear: { moveToStartedOnThreadStart: false } });
+    expect(patch.linear).toEqual({ moveToStartedOnThreadStart: false });
+  });
+
+  it("rejects Linear fields of the wrong type", () => {
+    expect(() => decodeServerSettings({ linear: { apiKey: 1 } })).toThrow();
+    expect(() => decodeServerSettingsPatch({ linear: { agentAccess: "yes" } })).toThrow();
+  });
+});
+
+describe("ServerSettings linear branch naming", () => {
+  it("defaults to Linear's own branch format with the common prefixes ready", () => {
+    expect(decodeServerSettings({}).linear.branchNaming).toEqual({
+      style: "linear",
+      prefixes: ["feat", "fix", "bug", "chore"],
+      labelPrefixes: [{ label: "Bug", prefix: "fix" }],
+    });
+  });
+
+  it("decodes a prefixed convention and patches parts of it", () => {
+    const decoded = decodeServerSettings({
+      linear: { branchNaming: { style: "prefixed", prefixes: ["feature", "hotfix"] } },
+    });
+    expect(decoded.linear.branchNaming.style).toBe("prefixed");
+    expect(decoded.linear.branchNaming.prefixes).toEqual(["feature", "hotfix"]);
+    expect(decoded.linear.branchNaming.labelPrefixes).toEqual([{ label: "Bug", prefix: "fix" }]);
+    const patch = decodeServerSettingsPatch({ linear: { branchNaming: { style: "prefixed" } } });
+    expect(patch.linear).toEqual({ branchNaming: { style: "prefixed" } });
+    expect(() => decodeServerSettings({ linear: { branchNaming: { style: "custom" } } })).toThrow();
+  });
+});
+
+describe("ServerSettings linear repositories", () => {
+  it("defaults to no mappings and accepts a team row and a project row", () => {
+    expect(decodeServerSettings({}).linear.repositories).toEqual([]);
+    const decoded = decodeServerSettings({
+      linear: {
+        repositories: [
+          { teamKey: "DEL", linearProjectId: null, projectId: "project-1", baseBranch: null },
+          {
+            teamKey: null,
+            linearProjectId: "lp-1",
+            projectId: "project-2",
+            baseBranch: "develop",
+          },
+        ],
+      },
+    });
+    expect(decoded.linear.repositories).toHaveLength(2);
+    expect(decoded.linear.repositories[1]?.baseBranch).toBe("develop");
+  });
+
+  it("patches the whole list at once", () => {
+    const patch = decodeServerSettingsPatch({ linear: { repositories: [] } });
+    expect(patch.linear).toEqual({ repositories: [] });
+  });
+});

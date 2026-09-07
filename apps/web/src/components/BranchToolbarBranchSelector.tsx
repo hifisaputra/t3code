@@ -6,7 +6,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import type { ContextMenuItem, EnvironmentId, VcsRef, ThreadId } from "@t3tools/contracts";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { ChevronDownIcon, GitBranchIcon, SearchIcon } from "lucide-react";
+import { ChevronDownIcon, CircleDotIcon, GitBranchIcon, SearchIcon } from "lucide-react";
 import {
   useCallback,
   useDeferredValue,
@@ -33,6 +33,7 @@ import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { vcsEnvironment } from "../state/vcs";
 import { cn } from "../lib/utils";
+import { parseLinearIssueReference } from "../linearIssueReference";
 import { parsePullRequestReference } from "../pullRequestReference";
 import { getSourceControlPresentation } from "../sourceControlPresentation";
 import { composerFloatingLayerProps } from "./chat/composerEventScope";
@@ -76,6 +77,7 @@ interface BranchToolbarBranchSelectorProps {
   startFromOrigin: boolean;
   onStartFromOriginChange: (startFromOrigin: boolean) => void;
   onCheckoutPullRequestRequest?: (reference: string) => void;
+  onStartIssueThreadRequest?: (reference: string) => void;
   onComposerFocusRequest?: () => void;
 }
 
@@ -95,6 +97,7 @@ export function BranchToolbarBranchSelector({
   startFromOrigin,
   onStartFromOriginChange,
   onCheckoutPullRequestRequest,
+  onStartIssueThreadRequest,
   onComposerFocusRequest,
 }: BranchToolbarBranchSelectorProps) {
   const startFromOriginSwitchId = useId();
@@ -264,6 +267,11 @@ export function BranchToolbarBranchSelector({
     effectiveEnvMode === "worktree" && !envLocked && !activeWorktreePath;
   const checkoutPullRequestItemValue =
     prReference && onCheckoutPullRequestRequest ? `__checkout_pull_request__:${prReference}` : null;
+  // A Linear identifier is not a branch name and cannot be a PR reference, so
+  // the same typed text unambiguously offers this entry instead.
+  const issueReference = parseLinearIssueReference(trimmedBranchQuery);
+  const startIssueThreadItemValue =
+    issueReference && onStartIssueThreadRequest ? `__start_issue_thread__:${issueReference}` : null;
   const canCreateBranch = !isSelectingWorktreeBase && trimmedBranchQuery.length > 0;
   // The ref is created under its sanitized name, so the collision check has to
   // use that name too. Matching on the raw query would offer to create a ref
@@ -281,8 +289,17 @@ export function BranchToolbarBranchSelector({
     if (checkoutPullRequestItemValue) {
       items.unshift(checkoutPullRequestItemValue);
     }
+    if (startIssueThreadItemValue) {
+      items.unshift(startIssueThreadItemValue);
+    }
     return items;
-  }, [branchNames, checkoutPullRequestItemValue, createBranchItemValue, hasExactBranchMatch]);
+  }, [
+    branchNames,
+    checkoutPullRequestItemValue,
+    createBranchItemValue,
+    hasExactBranchMatch,
+    startIssueThreadItemValue,
+  ]);
   const filteredBranchPickerItems = useMemo(
     () =>
       normalizedDeferredBranchQuery.length === 0
@@ -293,6 +310,7 @@ export function BranchToolbarBranchSelector({
               normalizedQuery: normalizedDeferredBranchQuery,
               createBranchItemValue,
               checkoutPullRequestItemValue,
+              startIssueThreadItemValue,
             }),
           ),
     [
@@ -300,6 +318,7 @@ export function BranchToolbarBranchSelector({
       checkoutPullRequestItemValue,
       createBranchItemValue,
       normalizedDeferredBranchQuery,
+      startIssueThreadItemValue,
     ],
   );
   const [resolvedActiveBranch, setOptimisticBranch] = useOptimistic(
@@ -630,6 +649,34 @@ export function BranchToolbarBranchSelector({
   const openPrLink = useOpenPrLink(threadRef);
 
   function renderPickerItem(itemValue: string, index: number) {
+    if (startIssueThreadItemValue && itemValue === startIssueThreadItemValue) {
+      return (
+        <ComboboxItem
+          hideIndicator
+          key={itemValue}
+          index={index}
+          value={itemValue}
+          className="pe-2"
+          onClick={() => {
+            if (!issueReference || !onStartIssueThreadRequest) {
+              return;
+            }
+            setIsBranchMenuOpen(false);
+            setBranchQuery("");
+            onComposerFocusRequest?.();
+            onStartIssueThreadRequest(issueReference);
+          }}
+        >
+          <div className="flex min-w-0 items-center gap-2 py-1">
+            <CircleDotIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="flex min-w-0 flex-col items-start">
+              <span className="truncate font-medium">Start thread from issue</span>
+              <span className="truncate text-muted-foreground text-xs">{issueReference}</span>
+            </span>
+          </div>
+        </ComboboxItem>
+      );
+    }
     if (checkoutPullRequestItemValue && itemValue === checkoutPullRequestItemValue) {
       return (
         <ComboboxItem

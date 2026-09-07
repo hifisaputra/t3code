@@ -1,6 +1,7 @@
 import {
   ArrowLeftIcon,
   ChartNoAxesColumnIcon,
+  CircleDotIcon,
   GitPullRequestIcon,
   SettingsIcon,
 } from "lucide-react";
@@ -11,6 +12,7 @@ import { Link, useCanGoBack, useLocation, useNavigate } from "@tanstack/react-ro
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { useEnvironments } from "../../state/environments";
+import { useAnyEnvironmentHasLinearKey } from "../../state/linear";
 import { T3Wordmark } from "../T3Wordmark";
 import {
   resolveEnvironmentIdentificationPillLabel,
@@ -30,6 +32,7 @@ import {
   useSidebar,
 } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { readIssueListPreferences } from "../issues/issueListPreferences";
 import { readPullRequestListPreferences } from "../pullRequest/pullRequestListPreferences";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
@@ -145,7 +148,9 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             ? "usage"
             : location.pathname === "/pull-requests"
               ? "pull-requests"
-              : null,
+              : location.pathname === "/issues"
+                ? "issues"
+                : null,
   });
   const { environments } = useEnvironments();
   // The page reads every connected server, so one of them offering pull requests is enough for
@@ -153,6 +158,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const pullRequestsSupported = environments.some(
     (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
   );
+  const issuesSupported = useAnyEnvironmentHasLinearKey();
   const closeMobileSidebar = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -163,6 +169,13 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     void navigate({
       to: "/pull-requests",
       search: readPullRequestListPreferences(),
+    });
+  }, [closeMobileSidebar, navigate]);
+  const handleIssuesClick = useCallback(() => {
+    closeMobileSidebar();
+    void navigate({
+      to: "/issues",
+      search: readIssueListPreferences(),
     });
   }, [closeMobileSidebar, navigate]);
   const handleSettingsClick = useCallback(() => {
@@ -207,6 +220,13 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               icon={<GitPullRequestIcon />}
               label="Pull Requests"
               onClick={handlePullRequestsClick}
+            />
+          ) : null}
+          {issuesSupported ? (
+            <SidebarUtilityItem
+              icon={<CircleDotIcon />}
+              label="Issues"
+              onClick={handleIssuesClick}
             />
           ) : null}
           <SidebarUtilityItem

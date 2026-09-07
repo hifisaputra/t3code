@@ -31,6 +31,7 @@ import {
   ModelSelection,
   SourceControlProviderError,
   type SourceControlWritingStyleSettings,
+  type ThreadId,
 } from "@t3tools/contracts";
 import {
   detectSourceControlProviderFromGitRemoteUrl,
@@ -89,6 +90,30 @@ interface SourceControlTextGenerationSettings {
   readonly style: SourceControlWritingStyleSettings;
 }
 
+/**
+ * Check out a plain branch for a thread. The pull-request path resolves its
+ * branch from the host; this one is handed the exact name (Linear's
+ * `branchName`, for instance) and only has to make it exist and be checked out.
+ */
+export interface GitPrepareBranchThreadInput {
+  /** The project workspace root, always the root checkout rather than a worktree. */
+  readonly cwd: string;
+  readonly branch: string;
+  /** `null` asks for the remote's default branch. */
+  readonly baseBranch: string | null;
+  readonly mode: "local" | "worktree";
+  readonly threadId?: ThreadId;
+}
+
+export interface GitPrepareBranchThreadResult {
+  readonly branch: string;
+  readonly worktreePath: string | null;
+  /** The base the branch was cut from, or would have been cut from on reuse. */
+  readonly baseBranch: string;
+  /** True when the branch already existed locally or on the remote. */
+  readonly reusedExistingBranch: boolean;
+}
+
 export class GitManager extends Context.Service<
   GitManager,
   {
@@ -116,6 +141,9 @@ export class GitManager extends Context.Service<
     readonly preparePullRequestThread: (
       input: GitPreparePullRequestThreadInput,
     ) => Effect.Effect<GitPreparePullRequestThreadResult, GitManagerServiceError>;
+    readonly prepareBranchThread: (
+      input: GitPrepareBranchThreadInput,
+    ) => Effect.Effect<GitPrepareBranchThreadResult, GitManagerServiceError>;
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
       options?: GitRunStackedActionOptions,
@@ -139,6 +167,9 @@ const PR_LOOKUP_CACHE_TTL = Duration.seconds(60);
 const PR_LOOKUP_FAILURE_BASE_TTL = Duration.seconds(20);
 const PR_LOOKUP_FAILURE_MAX_TTL = Duration.minutes(15);
 const PR_LOOKUP_CACHE_CAPACITY = 2_048;
+const BRANCH_COMMAND_TIMEOUT_MS = 10_000;
+/** Enough headroom for a name that collides as a substring with sibling branches. */
+const BRANCH_LOOKUP_REF_LIMIT = 200;
 const isSourceControlProviderError = Schema.is(SourceControlProviderError);
 
 /**
@@ -2233,29 +2264,47 @@ export const make = Effect.gen(function* () {
     return { pullRequest };
   });
 
+  /**
+   * Runs the project's setup script inside a freshly prepared worktree. Both
+   * thread-preparation paths call it, and both treat a failing script as
+   * something to report rather than something that strands the thread.
+   */
+  const runThreadSetupScript = (input: {
+    readonly operation: string;
+    readonly threadId: ThreadId | undefined;
+    readonly projectCwd: string;
+    readonly worktreePath: string;
+  }) => {
+    if (!input.threadId) {
+      return Effect.void;
+    }
+    return projectSetupScriptRunner
+      .runForThread({
+        threadId: input.threadId,
+        projectCwd: input.projectCwd,
+        worktreePath: input.worktreePath,
+      })
+      .pipe(
+        Effect.catch((error) =>
+          Effect.logWarning(`GitManager.${input.operation} setup script failed`, {
+            threadId: input.threadId,
+            worktreePath: input.worktreePath,
+            cause: error,
+          }).pipe(Effect.asVoid),
+        ),
+      );
+  };
+
   const preparePullRequestThread: GitManager["Service"]["preparePullRequestThread"] = Effect.fn(
     "preparePullRequestThread",
   )(function* (input) {
-    const maybeRunSetupScript = (worktreePath: string) => {
-      if (!input.threadId) {
-        return Effect.void;
-      }
-      return projectSetupScriptRunner
-        .runForThread({
-          threadId: input.threadId,
-          projectCwd: input.cwd,
-          worktreePath,
-        })
-        .pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("GitManager.preparePullRequestThread setup script failed", {
-              threadId: input.threadId,
-              worktreePath,
-              cause: error,
-            }).pipe(Effect.asVoid),
-          ),
-        );
-    };
+    const maybeRunSetupScript = (worktreePath: string) =>
+      runThreadSetupScript({
+        operation: "preparePullRequestThread",
+        threadId: input.threadId,
+        projectCwd: input.cwd,
+        worktreePath,
+      });
     return yield* Effect.gen(function* () {
       const normalizedReference = normalizePullRequestReference(input.reference);
       const rootWorktreePath = yield* canonicalizeExistingPath(input.cwd);
@@ -2494,6 +2543,180 @@ export const make = Effect.gen(function* () {
         branch: worktree.worktree.refName,
         worktreePath: worktree.worktree.path,
         isOnPullRequestHead: true,
+      };
+    }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
+  });
+
+  const prepareBranchThread: GitManager["Service"]["prepareBranchThread"] = Effect.fn(
+    "prepareBranchThread",
+  )(function* (input) {
+    const branch = input.branch.trim();
+    const maybeRunSetupScript = (worktreePath: string) =>
+      runThreadSetupScript({
+        operation: "prepareBranchThread",
+        threadId: input.threadId,
+        projectCwd: input.cwd,
+        worktreePath,
+      });
+
+    return yield* Effect.gen(function* () {
+      const rootWorktreePath = yield* canonicalizeExistingPath(input.cwd);
+
+      // A repository with no remote is still a valid project, so both the remote
+      // lookup and the fetch are best effort. Everything below reads a null
+      // remote as "there is nothing to track and nothing to fetch from".
+      const remoteName = yield* gitCore
+        .resolvePrimaryRemoteName(input.cwd)
+        .pipe(Effect.orElseSucceed(() => null));
+      if (remoteName !== null) {
+        yield* gitCore.fetchRemote({ cwd: input.cwd, remoteName }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("GitManager.prepareBranchThread fetch failed", {
+              cwd: input.cwd,
+              remoteName,
+              cause,
+            }).pipe(Effect.asVoid),
+          ),
+        );
+      }
+
+      const requestedBaseBranch = input.baseBranch?.trim() ?? "";
+      const baseBranch =
+        requestedBaseBranch.length > 0
+          ? requestedBaseBranch
+          : remoteName === null
+            ? null
+            : yield* gitCore
+                .resolveDefaultBranchName(input.cwd, remoteName)
+                .pipe(Effect.orElseSucceed(() => null));
+      if (baseBranch === null || baseBranch.length === 0) {
+        return yield* new GitManagerError({
+          operation: "prepareBranchThread",
+          cwd: input.cwd,
+          detail:
+            "No base branch was given and this repository's remote records no default branch. Configure a base branch for the project, or run `git remote set-head <remote> --auto`.",
+        });
+      }
+
+      const remoteRefExists = (refName: string) =>
+        remoteName === null
+          ? Effect.succeed(false)
+          : gitCore
+              .remoteBranchExists({ cwd: input.cwd, remoteName, refName })
+              .pipe(Effect.orElseSucceed(() => false));
+
+      // Narrowed by name so a repository with hundreds of branches cannot push
+      // the one being asked for off the first page of results.
+      const localBranchRef = yield* gitCore
+        .listRefs({
+          cwd: input.cwd,
+          refresh: true,
+          query: branch,
+          refKind: "local",
+          limit: BRANCH_LOOKUP_REF_LIMIT,
+        })
+        .pipe(Effect.map((result) => result.refs.find((ref) => ref.name === branch) ?? null));
+
+      const remoteBranchExists = localBranchRef === null ? yield* remoteRefExists(branch) : false;
+      const reusedExistingBranch = localBranchRef !== null || remoteBranchExists;
+
+      if (localBranchRef === null) {
+        if (remoteBranchExists) {
+          yield* gitCore.execute({
+            operation: "GitManager.prepareBranchThread.trackRemoteBranch",
+            cwd: input.cwd,
+            args: ["branch", "--track", branch, `${remoteName}/${branch}`],
+            timeoutMs: BRANCH_COMMAND_TIMEOUT_MS,
+          });
+        } else {
+          const startPoint = (yield* remoteRefExists(baseBranch))
+            ? `${remoteName}/${baseBranch}`
+            : baseBranch;
+          yield* gitCore.execute({
+            operation: "GitManager.prepareBranchThread.createBranch",
+            cwd: input.cwd,
+            // `--no-track` because git would otherwise make the base the branch's
+            // upstream, and the upstream this branch wants is its own name on the
+            // remote: that is where the first push has to land for the issue
+            // tracker to recognise the work.
+            args: ["branch", "--no-track", branch, startPoint],
+            timeoutMs: BRANCH_COMMAND_TIMEOUT_MS,
+          });
+          if (remoteName !== null) {
+            // Written by hand rather than through `--set-upstream-to`, which
+            // needs `<remote>/<branch>` to already exist; this branch has never
+            // been pushed.
+            yield* gitCore.execute({
+              operation: "GitManager.prepareBranchThread.configureUpstreamRemote",
+              cwd: input.cwd,
+              args: ["config", `branch.${branch}.remote`, remoteName],
+              timeoutMs: BRANCH_COMMAND_TIMEOUT_MS,
+            });
+            yield* gitCore.execute({
+              operation: "GitManager.prepareBranchThread.configureUpstreamMerge",
+              cwd: input.cwd,
+              args: ["config", `branch.${branch}.merge`, `refs/heads/${branch}`],
+              timeoutMs: BRANCH_COMMAND_TIMEOUT_MS,
+            });
+          }
+          // The same key createWorktree writes for the branches it creates, and
+          // the first thing resolveBaseBranch reads when a PR is opened later.
+          yield* gitCore.execute({
+            operation: "GitManager.prepareBranchThread.configureMergeBase",
+            cwd: input.cwd,
+            args: ["config", `branch.${branch}.gh-merge-base`, baseBranch],
+            timeoutMs: BRANCH_COMMAND_TIMEOUT_MS,
+          });
+        }
+      }
+
+      if (input.mode === "local") {
+        // switchRef also invalidates the driver's ref caches, which the raw
+        // branch creation above deliberately leaves alone.
+        const switched = yield* Effect.scoped(
+          gitCore.switchRef({ cwd: input.cwd, refName: branch }),
+        );
+        return {
+          branch: switched.refName ?? branch,
+          worktreePath: null,
+          baseBranch,
+          reusedExistingBranch,
+        };
+      }
+
+      const checkedOutWorktreePath = localBranchRef?.worktreePath ?? null;
+      if (checkedOutWorktreePath !== null) {
+        if ((yield* canonicalizeExistingPath(checkedOutWorktreePath)) === rootWorktreePath) {
+          return yield* new GitManagerError({
+            operation: "prepareBranchThread",
+            cwd: input.cwd,
+            detail:
+              "This branch is already checked out in the main repo. Use Local, or switch the main repo off that branch before creating a worktree thread.",
+          });
+        }
+        // Handed back untouched: the branch is already what the caller asked for,
+        // and a thread may be running in there. Nothing moved, so the setup
+        // script has nothing new to set up.
+        return {
+          branch,
+          worktreePath: checkedOutWorktreePath,
+          baseBranch,
+          reusedExistingBranch,
+        };
+      }
+
+      const worktree = yield* gitCore.createWorktree({
+        cwd: input.cwd,
+        refName: branch,
+        path: null,
+      });
+      yield* maybeRunSetupScript(worktree.worktree.path);
+
+      return {
+        branch: worktree.worktree.refName,
+        worktreePath: worktree.worktree.path,
+        baseBranch,
+        reusedExistingBranch,
       };
     }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
   });
@@ -2752,6 +2975,7 @@ export const make = Effect.gen(function* () {
     invalidateStatus,
     resolvePullRequest,
     preparePullRequestThread,
+    prepareBranchThread,
     runStackedAction,
   });
 });

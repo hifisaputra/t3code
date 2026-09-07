@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   type EditorId,
+  type ThreadLinkedIssue,
   type ProjectScript,
   type ResolvedKeybindingsConfig,
   type ThreadId,
@@ -22,6 +23,12 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import GitActionsControl from "../GitActionsControl";
+import {
+  IssueStatusChip,
+  issueStatusIndicator,
+  useLinkedThreadIssue,
+  useOpenIssueLink,
+} from "../ThreadStatusIndicators";
 import { isTrailingDoubleClick } from "../Sidebar.logic";
 import { type DraftId } from "~/composerDraftStore";
 import { type PackageScriptSuggestion } from "~/projectScripts";
@@ -67,6 +74,7 @@ interface ChatHeaderProps {
   rightPanelOpen: boolean;
   gitCwd: string | null;
   readonly onOpenPullRequest?: ((number: number) => void) | undefined;
+  readonly linkedIssue?: ThreadLinkedIssue | null | undefined;
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
   onRunProjectScript: (script: ProjectScript) => void;
@@ -140,6 +148,7 @@ export const ChatHeader = memo(function ChatHeader({
   rightPanelOpen,
   gitCwd,
   onOpenPullRequest,
+  linkedIssue,
   onNewThreadInProject,
   onOpenProjectSettings,
   onRunProjectScript,
@@ -169,6 +178,9 @@ export const ChatHeader = memo(function ChatHeader({
     activeProjectScripts ? activeProjectCwd : null,
   );
   const remoteOpenState = useRemoteOpenState(activeThreadEnvironmentId);
+  const linkedIssueDetail = useLinkedThreadIssue(activeThreadEnvironmentId, linkedIssue);
+  const issueStatus = issueStatusIndicator(linkedIssueDetail);
+  const openIssueLink = useOpenIssueLink();
   const showOpenInPicker = shouldShowOpenInPicker({
     activeProjectName,
     activeThreadEnvironmentId,
@@ -422,6 +434,12 @@ export const ChatHeader = memo(function ChatHeader({
           "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:motion-safe:ease-out",
         )}
       >
+        {issueStatus ? (
+          <IssueStatusChip
+            status={issueStatus}
+            onOpen={(event) => openIssueLink(event, issueStatus.url, activeThreadRef)}
+          />
+        ) : null}
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}

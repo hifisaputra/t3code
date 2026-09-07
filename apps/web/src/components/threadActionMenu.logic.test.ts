@@ -9,6 +9,7 @@ const baseState: ThreadActionMenuState = {
   isSnoozed: false,
   canSnoozeNow: true,
   isRegeneratingTitle: false,
+  hasLinkedIssue: false,
   isRunning: false,
   supports: { settlement: true, snooze: true, pinning: true, titleRegeneration: true },
   snoozePresets: [
@@ -27,6 +28,11 @@ function allIds(state: ThreadActionMenuState): string[] {
 }
 
 describe("buildThreadActionMenuItems", () => {
+  it("offers the way out of a linked issue only when one is linked", () => {
+    expect(ids(baseState)).not.toContain("unlink-issue");
+    expect(ids({ ...baseState, hasLinkedIssue: true })).toContain("unlink-issue");
+  });
+
   it("hides lifecycle items when the environment lacks the capabilities", () => {
     expect(
       ids({

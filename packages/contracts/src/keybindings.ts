@@ -38,6 +38,7 @@ const THREAD_KEYBINDING_COMMANDS = [
   "thread.previous",
   "thread.next",
   "thread.copyReference",
+  "thread.startFromIssue",
   "thread.settle",
   "thread.pin",
   ...THREAD_JUMP_KEYBINDING_COMMANDS,

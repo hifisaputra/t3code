@@ -22,6 +22,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
+  SERVER_SECRET_REDACTED_MARKER,
   ServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
@@ -135,16 +136,16 @@ function providerEnvironmentSecretName(input: {
   return `provider-env-${Buffer.from(input.instanceId, "utf8").toString("base64url")}-${Buffer.from(input.name, "utf8").toString("base64url")}`;
 }
 
-/**
- * On disk the hub key is replaced by this marker and the real value lives in
- * the secret store, mirroring provider environment secrets. A client that
- * sends the marker back means "keep what you have".
- */
-const USAGE_LIMIT_SOURCE_KEY_REDACTED = "\u2022\u2022\u2022\u2022\u2022\u2022";
-
 export function usageLimitSourceSecretName(sourceId: string): string {
   return `usage-limit-source-${Buffer.from(sourceId, "utf8").toString("base64url")}`;
 }
+
+/**
+ * Secrets kept out of settings.json live under a fixed name in the secret
+ * store; on disk only `SERVER_SECRET_REDACTED_MARKER` remains, and a client
+ * sending the marker back means "keep what you have".
+ */
+const LINEAR_API_KEY_SECRET_NAME = "linear-api-key";
 
 function redactProviderEnvironmentVariable(
   variable: ProviderInstanceEnvironmentVariable,
@@ -178,11 +179,19 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
       id,
       {
         ...source,
-        managementKey: source.managementKey.length > 0 ? USAGE_LIMIT_SOURCE_KEY_REDACTED : "",
+        managementKey: source.managementKey.length > 0 ? SERVER_SECRET_REDACTED_MARKER : "",
       },
     ]),
   );
-  return { ...settings, providerInstances, usageLimitSources };
+  return {
+    ...settings,
+    providerInstances,
+    usageLimitSources,
+    linear: {
+      ...settings.linear,
+      apiKey: settings.linear.apiKey.length > 0 ? SERVER_SECRET_REDACTED_MARKER : "",
+    },
+  };
 }
 
 export class ServerSettingsService extends Context.Service<
@@ -543,7 +552,7 @@ const make = Effect.gen(function* () {
       }
       const usageLimitSources: Record<string, UsageLimitSourceConfig> = {};
       for (const [sourceId, source] of Object.entries(settings.usageLimitSources)) {
-        if (source.managementKey !== USAGE_LIMIT_SOURCE_KEY_REDACTED) {
+        if (source.managementKey !== SERVER_SECRET_REDACTED_MARKER) {
           usageLimitSources[sourceId] = source;
           continue;
         }
@@ -559,10 +568,24 @@ const make = Effect.gen(function* () {
           managementKey: Option.isSome(secret) ? textDecoder.decode(secret.value) : "",
         };
       }
+      const linearApiKey =
+        settings.linear.apiKey === SERVER_SECRET_REDACTED_MARKER
+          ? yield* secretStore.get(LINEAR_API_KEY_SECRET_NAME).pipe(
+              Effect.map((secret) =>
+                Option.isSome(secret) ? textDecoder.decode(secret.value) : "",
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new ServerSettingsError({ settingsPath, operation: "read-secret", cause }),
+              ),
+            )
+          : settings.linear.apiKey;
+
       return {
         ...settings,
         providerInstances: providerInstances as ServerSettings["providerInstances"],
         usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
+        linear: { ...settings.linear, apiKey: linearApiKey },
       };
     });
 
@@ -692,7 +715,7 @@ const make = Effect.gen(function* () {
       const usageLimitSources: Record<string, UsageLimitSourceConfig> = {};
       for (const [sourceId, source] of Object.entries(next.usageLimitSources)) {
         const secretName = usageLimitSourceSecretName(sourceId);
-        if (source.managementKey === USAGE_LIMIT_SOURCE_KEY_REDACTED) {
+        if (source.managementKey === SERVER_SECRET_REDACTED_MARKER) {
           // Unchanged from the client's point of view; the store already has it.
           usageLimitSources[sourceId] = source;
           continue;
@@ -717,7 +740,7 @@ const make = Effect.gen(function* () {
                 new ServerSettingsError({ settingsPath, operation: "write-secret", cause }),
             ),
           );
-        usageLimitSources[sourceId] = { ...source, managementKey: USAGE_LIMIT_SOURCE_KEY_REDACTED };
+        usageLimitSources[sourceId] = { ...source, managementKey: SERVER_SECRET_REDACTED_MARKER };
       }
       for (const sourceId of Object.keys(current.usageLimitSources)) {
         if (sourceId in next.usageLimitSources) continue;
@@ -731,10 +754,36 @@ const make = Effect.gen(function* () {
           );
       }
 
+      // The marker means the client never saw the key, so the store keeps what it has.
+      const linearApiKey = next.linear.apiKey;
+      if (linearApiKey !== SERVER_SECRET_REDACTED_MARKER) {
+        yield* linearApiKey.length === 0
+          ? secretStore
+              .remove(LINEAR_API_KEY_SECRET_NAME)
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ServerSettingsError({ settingsPath, operation: "remove-secret", cause }),
+                ),
+              )
+          : secretStore
+              .set(LINEAR_API_KEY_SECRET_NAME, textEncoder.encode(linearApiKey))
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ServerSettingsError({ settingsPath, operation: "write-secret", cause }),
+                ),
+              );
+      }
+
       return {
         ...next,
         providerInstances: providerInstances as ServerSettings["providerInstances"],
         usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
+        linear: {
+          ...next.linear,
+          apiKey: linearApiKey.length === 0 ? "" : SERVER_SECRET_REDACTED_MARKER,
+        },
       };
     });
 

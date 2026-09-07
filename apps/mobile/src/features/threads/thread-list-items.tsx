@@ -23,9 +23,11 @@ import { relativeTime } from "../../lib/time";
 import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
+import { useThreadIssue } from "../../state/use-thread-issue";
 import { useThreadPr, type ThreadPrPresentation } from "../../state/use-thread-pr";
 import type { HomeGroupDisplayAction } from "../home/homeListItems";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
+import { ThreadIssueChip } from "./thread-issue-chip";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import { QueuedMessageIcon } from "./queued-message-icon";
 import { resolveThreadStatus } from "./threadPresentation";
@@ -487,11 +489,13 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   } = props;
   const status = resolveThreadStatus(thread);
   const pr = useThreadPr(thread);
+  const issue = useThreadIssue(thread);
   const timestamp = relativeTime(
     thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
   );
   const threadAccessibilityLabel = [
     thread.title,
+    issue?.accessibilityLabel,
     pr?.accessibilityLabel,
     props.hasQueuedMessages ? "messages queued to send" : null,
   ]
@@ -569,7 +573,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   ) : null;
 
   const subtitleRow =
-    subtitleParts.length > 0 || pr !== null ? (
+    subtitleParts.length > 0 || pr !== null || issue !== null ? (
       <View className="mt-px flex-row items-center gap-1.5">
         {subtitleParts.length > 0 ? (
           <>
@@ -598,6 +602,9 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
               {subtitleParts.join(" · ")}
             </Text>
           </>
+        ) : null}
+        {issue !== null ? (
+          <ThreadIssueChip compact={compact} issue={issue} selected={selected} />
         ) : null}
         {pr !== null ? (
           <View className="flex-row items-center gap-0.5">

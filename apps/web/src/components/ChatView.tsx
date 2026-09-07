@@ -26,6 +26,8 @@ import {
   type ScopedThreadRef,
   type ThreadId,
   type ThreadLinkedPullRequest,
+  type ThreadLinkedIssue,
+  type LinearIssueDetail,
   type TurnId,
   type KeybindingCommand,
   OrchestrationThreadActivity,
@@ -310,6 +312,7 @@ import {
   threadHasOlderTurns,
 } from "@t3tools/client-runtime/state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
+import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { vcsEnvironment } from "../state/vcs";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
@@ -324,6 +327,9 @@ import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
+import { LinearIssueThreadDialog } from "./LinearIssueThreadDialog";
+import { formatLinearIssueForComposer } from "../linearIssueComposerSeed";
+import { subscribeLinearIssueDialogRequest } from "../linearIssueDialogBus";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
@@ -472,6 +478,7 @@ import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "./chat/composerPromptHistory";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
+const EMPTY_PROJECTS: ReadonlyArray<EnvironmentProject> = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
@@ -1646,6 +1653,10 @@ export default function ChatView(props: ChatViewProps) {
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
   const [pullRequestDialogState, setPullRequestDialogState] =
     useState<PullRequestDialogState | null>(null);
+  // Same shape as the pull-request dialog: a key so reopening with a new
+  // reference remounts the input instead of keeping the old typed value.
+  const [linearIssueDialogState, setLinearIssueDialogState] =
+    useState<PullRequestDialogState | null>(null);
   const [terminalUiLaunchContext, setTerminalUiLaunchContext] =
     useState<TerminalLaunchContext | null>(null);
   const [attachmentPreviewHandoffByMessageId, setAttachmentPreviewHandoffByMessageId] = useState<
@@ -2213,8 +2224,34 @@ export default function ChatView(props: ChatViewProps) {
     setPullRequestDialogState(null);
   }, []);
 
+  // Unlike checking out a pull request, this works from a server thread too:
+  // the issue's branch always lands in a draft, either the project's existing
+  // one or a fresh one, so there is no thread to reuse and nothing to gate on.
+  const openLinearIssueDialog = useCallback(
+    (reference?: string) => {
+      if (!activeProject) {
+        return;
+      }
+      setPullRequestDialogState(null);
+      setLinearIssueDialogState({
+        initialReference: reference ?? null,
+        key: Date.now(),
+      });
+    },
+    [activeProject],
+  );
+
+  const closeLinearIssueDialog = useCallback(() => {
+    setLinearIssueDialogState(null);
+  }, []);
+
   const openOrReuseProjectDraftThread = useCallback(
-    async (input: { branch: string; worktreePath: string | null; envMode: DraftThreadEnvMode }) => {
+    async (input: {
+      branch: string;
+      worktreePath: string | null;
+      envMode: DraftThreadEnvMode;
+      linkedIssue?: ThreadLinkedIssue;
+    }) => {
       if (!activeProject) {
         throw new Error("No active project is available for this pull request.");
       }
@@ -2299,6 +2336,80 @@ export default function ChatView(props: ChatViewProps) {
       });
     },
     [openOrReuseProjectDraftThread],
+  );
+
+  const handlePreparedIssueThread = useCallback(
+    async (input: {
+      branch: string;
+      worktreePath: string | null;
+      issue: LinearIssueDetail;
+      linkedIssue: ThreadLinkedIssue;
+      project: EnvironmentProject;
+    }) => {
+      const envMode = input.worktreePath ? "worktree" : "local";
+      // Prepending keeps anything already typed: the ticket is context, and
+      // the person's own instruction belongs after it.
+      const seedComposer = (targetDraftId: DraftId) => {
+        const seed = formatLinearIssueForComposer(input.issue);
+        const existing =
+          useComposerDraftStore.getState().getComposerDraft(targetDraftId)?.prompt ?? "";
+        setComposerDraftPrompt(targetDraftId, existing.length > 0 ? seed + existing : seed);
+      };
+
+      // The issue's repository mapping can send the work to a checkout other
+      // than the one this view is bound to, and the reuse path above only
+      // knows the active project's draft.
+      if (
+        !activeProject ||
+        input.project.id !== activeProject.id ||
+        input.project.environmentId !== activeProject.environmentId
+      ) {
+        const session = await handleNewThread(
+          scopeProjectRef(input.project.environmentId, input.project.id),
+          {
+            branch: input.branch,
+            worktreePath: input.worktreePath,
+            envMode,
+            linkedIssue: input.linkedIssue,
+          },
+        );
+        if (!session) return;
+        seedComposer(session.draftId);
+        return;
+      }
+
+      await openOrReuseProjectDraftThread({
+        branch: input.branch,
+        worktreePath: input.worktreePath,
+        envMode,
+        linkedIssue: input.linkedIssue,
+      });
+      // The draft the call above created or reused, looked up the same way it
+      // resolved it, so the ticket lands in that composer and not a stale one.
+      const draftSession = getDraftSessionByLogicalProjectKey(
+        deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings),
+      );
+      if (!draftSession) return;
+      seedComposer(draftSession.draftId);
+    },
+    [
+      activeProject,
+      getDraftSessionByLogicalProjectKey,
+      handleNewThread,
+      openOrReuseProjectDraftThread,
+      projectGroupingSettings,
+      setComposerDraftPrompt,
+    ],
+  );
+
+  // The dialog resolves the issue's own checkout, so it needs every project on
+  // this thread's server, not just the one being viewed.
+  const linearDialogProjects = useMemo(
+    () =>
+      activeThreadEnvironmentId === null
+        ? EMPTY_PROJECTS
+        : allProjects.filter((project) => project.environmentId === activeThreadEnvironmentId),
+    [activeThreadEnvironmentId, allProjects],
   );
 
   // Once a thread selects an environment, never substitute the primary
@@ -5075,6 +5186,7 @@ export default function ChatView(props: ChatViewProps) {
 
   useEffect(() => {
     setPullRequestDialogState(null);
+    setLinearIssueDialogState(null);
     isAtEndRef.current = true;
     timelineScrollIntentRef.current = null;
     timelineScrollModeRef.current = "following-end";
@@ -6017,6 +6129,13 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
 
+      if (command === "thread.startFromIssue") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) openLinearIssueDialog();
+        return;
+      }
+
       if (command === "thread.settle") {
         event.preventDefault();
         event.stopPropagation();
@@ -6199,11 +6318,22 @@ export default function ChatView(props: ChatViewProps) {
     supportsSettlement,
     confirmAndUnpinThread,
     copyActiveThreadReference,
+    openLinearIssueDialog,
     toggleRightPanel,
     toggleRightPanelMaximized,
     toggleTerminalVisibility,
     composerRef,
   ]);
+
+  // The command palette (and anything else without ChatView's project and
+  // draft context) asks for the issue dialog through the window bus.
+  useEffect(
+    () =>
+      subscribeLinearIssueDialogRequest((reference) => {
+        openLinearIssueDialog(reference ?? undefined);
+      }),
+    [openLinearIssueDialog],
+  );
 
   // Paste-to-focus: the resting composer blurs on a click into the timeline,
   // so a paste that follows has no editable target and would be dropped.
@@ -6887,6 +7017,10 @@ export default function ChatView(props: ChatViewProps) {
                       interactionMode: sendInteractionMode,
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
+                      // The link is set on the create so the thread has it
+                      // from its first event, rather than in a second command
+                      // that could lose the race with the turn.
+                      ...(draftThread?.linkedIssue ? { linkedIssue: draftThread.linkedIssue } : {}),
                       createdAt: activeThread.createdAt,
                     },
                   }
@@ -7988,6 +8122,7 @@ export default function ChatView(props: ChatViewProps) {
             availableEditors={availableEditors}
             rightPanelOpen={rightPanelOpen}
             gitCwd={gitCwd}
+            linkedIssue={activeThreadMetadata?.linkedIssue ?? draftThread?.linkedIssue ?? null}
             onNewThreadInProject={handleNewThreadInActiveProject}
             {...(activeDraftLogicalProjectKey
               ? { onOpenProjectSettings: handleOpenDraftProjectSettings }
@@ -8306,7 +8441,10 @@ export default function ChatView(props: ChatViewProps) {
                                 envLocked={envLocked}
                                 onComposerFocusRequest={scheduleComposerFocus}
                                 {...(canCheckoutPullRequestIntoThread
-                                  ? { onCheckoutPullRequestRequest: openPullRequestDialog }
+                                  ? {
+                                      onCheckoutPullRequestRequest: openPullRequestDialog,
+                                      onStartIssueThreadRequest: openLinearIssueDialog,
+                                    }
                                   : {})}
                                 {...(hasMultipleEnvironments ? { onEnvironmentChange } : {})}
                                 autoEnvironmentLabel={autoEnvironmentLabel}
@@ -8389,6 +8527,25 @@ export default function ChatView(props: ChatViewProps) {
                   }
                 }}
                 onPrepared={handlePreparedPullRequestThread}
+                onSwitchToIssue={openLinearIssueDialog}
+              />
+            ) : null}
+
+            {linearIssueDialogState ? (
+              <LinearIssueThreadDialog
+                key={linearIssueDialogState.key}
+                open
+                environmentId={activeThread.environmentId}
+                {...(isLocalDraftThread ? { threadId: activeThread.id } : {})}
+                projects={linearDialogProjects}
+                defaultProjectId={activeProject?.id ?? null}
+                initialReference={linearIssueDialogState.initialReference}
+                onOpenChange={(open) => {
+                  if (!open) {
+                    closeLinearIssueDialog();
+                  }
+                }}
+                onPrepared={handlePreparedIssueThread}
               />
             ) : null}
           </div>

@@ -403,6 +403,52 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["agent opens browser pop into view hide"],
   },
   {
+    id: "linear-api-key",
+    title: "Linear API key",
+    to: "/settings/integrations",
+    searchTerms: ["linear issues integration personal token connect workspace"],
+  },
+  {
+    id: "linear-connection-status",
+    title: "Linear connection",
+    to: "/settings/integrations",
+    searchTerms: ["linear issues integration api key workspace connected who signed in"],
+  },
+  {
+    id: "linear-repositories",
+    title: "Repositories",
+    to: "/settings/integrations",
+    searchTerms: [
+      "linear issues integration map team project checkout repository folder base branch",
+    ],
+  },
+  {
+    id: "linear-branch-naming",
+    title: "Branch names",
+    to: "/settings/integrations",
+    searchTerms: [
+      "linear issues integration branch name format convention prefix feat fix repository",
+    ],
+  },
+  {
+    id: "linear-branch-prefixes",
+    title: "Prefixes",
+    to: "/settings/integrations",
+    searchTerms: ["linear issues integration branch prefix feat fix bug chore namespace default"],
+  },
+  {
+    id: "linear-branch-label-prefixes",
+    title: "Label prefixes",
+    to: "/settings/integrations",
+    searchTerms: ["linear issues integration branch prefix label rule bug fix per issue"],
+  },
+  {
+    id: "linear-move-to-started",
+    title: "Move issue to In Progress when a thread starts",
+    to: "/settings/integrations",
+    searchTerms: ["linear issues integration workflow state started status"],
+  },
+  {
     id: "source-control",
     title: "Source control",
     to: "/settings/source-control",

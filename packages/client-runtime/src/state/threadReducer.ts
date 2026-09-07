@@ -246,6 +246,9 @@ export function applyThreadDetailEvent(
           ...(event.payload.branchPullRequest !== undefined
             ? { branchPullRequest: event.payload.branchPullRequest }
             : {}),
+          ...(event.payload.linkedIssue !== undefined
+            ? { linkedIssue: event.payload.linkedIssue }
+            : {}),
           ...(event.payload.activeOrderKey !== undefined
             ? { activeOrderKey: event.payload.activeOrderKey }
             : {}),

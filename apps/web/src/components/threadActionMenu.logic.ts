@@ -23,6 +23,7 @@ export type ThreadActionMenuId =
   | "copy-path"
   | "copy-branch"
   | "copy-thread-id"
+  | "unlink-issue"
   | "stats"
   | "archive"
   | "delete";
@@ -34,6 +35,8 @@ export interface ThreadActionMenuState {
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
   readonly isRegeneratingTitle: boolean;
+  /** The way out of the link the issue dialog made; absent when nothing is linked. */
+  readonly hasLinkedIssue: boolean;
   /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
   readonly supports: {
@@ -121,6 +124,9 @@ export function buildThreadActionMenuItems(
         { id: "copy-thread-id", label: "Thread ID", icon: "hash" },
       ],
     },
+    ...(state.hasLinkedIssue
+      ? [{ id: "unlink-issue" as const, label: "Unlink issue", icon: "link-2-off" }]
+      : []),
     { id: "stats", label: "Usage stats", icon: "chart-column" },
     { id: "project-settings", label: "Project settings", icon: "settings" },
     // Archive removes the thread from the sidebar while keeping its

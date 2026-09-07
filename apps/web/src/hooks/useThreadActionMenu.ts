@@ -145,6 +145,7 @@ export function useThreadActionMenu(input: {
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
+          hasLinkedIssue: thread.linkedIssue != null,
           isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
           supports,
           snoozePresets,
@@ -255,6 +256,14 @@ export function useThreadActionMenu(input: {
               updateThreadMetadata({
                 environmentId: threadRef.environmentId,
                 input: { threadId: threadRef.threadId, regenerateTitle: true },
+              }),
+            );
+            return;
+          case "unlink-issue":
+            await reportFailure("Failed to unlink issue", () =>
+              updateThreadMetadata({
+                environmentId: threadRef.environmentId,
+                input: { threadId: threadRef.threadId, linkedIssue: null },
               }),
             );
             return;

@@ -180,12 +180,16 @@ import {
 import { SidebarDragLifecycle, SidebarPointerSensor } from "./Sidebar.pointer";
 import { createSidebarListMotion } from "./Sidebar.motion";
 import {
+  IssueStatusChip,
+  issueStatusIndicator,
   ThreadWorktreeIndicator,
   prStatusIndicator,
   settledPrHoverColorClass,
   terminalStatusFromRunningIds,
   type TerminalStatusIndicator,
+  useLinkedThreadIssue,
   useLinkedThreadPullRequest,
+  useOpenIssueLink,
 } from "./ThreadStatusIndicators";
 import {
   resolveSnoozePresets,
@@ -1069,6 +1073,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     thread.linkedPullRequest ?? thread.branchPullRequest,
     leaseLiveStatus,
   );
+  const linkedIssue = useLinkedThreadIssue(
+    thread.environmentId,
+    thread.linkedIssue,
+    leaseLiveStatus,
+  );
+  const openIssueLink = useOpenIssueLink();
   const gitStatus = useEnvironmentQuery(
     leaseLiveStatus && (thread.branch != null || thread.worktreePath !== null) && gitCwd !== null
       ? vcsEnvironment.status({
@@ -1175,6 +1185,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     currentGitBranch: visibleGitStatus?.refName ?? null,
   });
   const prStatus = prStatusIndicator(pr, linkedPullRequestStatus?.sourceControlProvider);
+  const issueStatus = issueStatusIndicator(linkedIssue);
   const settledPrHoverClass = pr ? settledPrHoverColorClass(pr.state, pr.isDraft) : undefined;
 
   const modelInstanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
@@ -1479,6 +1490,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         #{pr.number}
       </a>
     ) : null;
+  const issueBadge = issueStatus ? (
+    <IssueStatusChip
+      status={issueStatus}
+      onOpen={(event) => openIssueLink(event, issueStatus.url, threadRef)}
+    />
+  ) : null;
   const terminalStatusIcon = terminalStatus ? (
     <span
       role="img"
@@ -1593,6 +1610,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {/* The PR badge stays outside the hover-fading slot: it must
               remain visible AND clickable while the row is hovered. Only
               the time/jump label yields to the settle affordance. */}
+            {issueBadge}
             {prBadge}
             {sortable?.isDragging ? (
               dragDestination
@@ -1896,6 +1914,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 <span className="flex-1" />
               )}
               {terminalStatusIcon}
+              {issueBadge}
               {prBadge}
               {diff ? (
                 <span className="shrink-0 font-mono">
@@ -3927,6 +3946,7 @@ export default function Sidebar() {
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
+              hasLinkedIssue: thread.linkedIssue != null,
               isRunning:
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
               supports: {
@@ -4020,6 +4040,23 @@ export default function Sidebar() {
                 stackedThreadToast({
                   type: "error",
                   title: "Failed to regenerate thread title",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
+          case "unlink-issue": {
+            const result = await updateThreadMetadata({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, linkedIssue: null },
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to unlink issue",
                   description: error instanceof Error ? error.message : "An error occurred.",
                 }),
               );

@@ -876,6 +876,107 @@ it.effect("accepts a linked pull request in thread.meta.update", () =>
   }),
 );
 
+it.effect("decodes threads, shells, and payloads written before linked issues existed", () =>
+  Effect.gen(function* () {
+    const common = {
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Pre-issue thread",
+      modelSelection: { provider: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      archivedAt: null,
+      session: null,
+    };
+    const thread = yield* decodeOrchestrationThread({
+      ...common,
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    });
+    const shell = yield* decodeOrchestrationThreadShell({
+      ...common,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    });
+    const created = yield* decodeThreadCreatedPayload({
+      threadId: "thread-1",
+      projectId: "project-1",
+      title: "Pre-issue thread",
+      modelSelection: { provider: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const metaUpdated = yield* decodeThreadMetaUpdatedPayload({
+      threadId: "thread-1",
+      title: "Renamed",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.isUndefined(thread.linkedIssue);
+    assert.isUndefined(shell.linkedIssue);
+    assert.isUndefined(created.linkedIssue);
+    assert.isUndefined(metaUpdated.linkedIssue);
+  }),
+);
+
+it.effect("carries a linked issue through thread creation, metadata, and the read model", () =>
+  Effect.gen(function* () {
+    const linkedIssue = {
+      provider: "linear",
+      id: "issue-uuid",
+      identifier: "DEL-123",
+      url: "https://linear.app/t3/issue/DEL-123/do-the-thing",
+    };
+    const created = yield* decodeThreadCreatedPayload({
+      threadId: "thread-1",
+      projectId: "project-1",
+      title: "DEL-123",
+      modelSelection: { provider: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: "tomo/del-123",
+      worktreePath: null,
+      linkedIssue,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.deepStrictEqual(created.linkedIssue, linkedIssue);
+
+    const linked = yield* decodeOrchestrationCommand({
+      type: "thread.meta.update",
+      commandId: "cmd-link-issue",
+      threadId: "thread-1",
+      linkedIssue,
+    });
+    assert.strictEqual(linked.type, "thread.meta.update");
+    if (linked.type === "thread.meta.update") {
+      assert.deepStrictEqual(linked.linkedIssue, linkedIssue);
+    }
+
+    // Unlinking is the reverse state, and travels as an explicit null.
+    const unlinked = yield* decodeThreadMetaUpdatedPayload({
+      threadId: "thread-1",
+      linkedIssue: null,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(unlinked.linkedIssue, null);
+  }),
+);
+
 it.effect("accepts an internal title regeneration completion", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeOrchestrationCommand({

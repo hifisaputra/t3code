@@ -315,7 +315,10 @@ function ThreadRouteContent(
 
   /* ─── Native header theming ──────────────────────────────────────── */
   const usesNativeHeaderGlass = NATIVE_LIQUID_GLASS_SUPPORTED;
+  // The linked issue leads the subtitle: on a native header there is no room
+  // for a chip, and the identifier is the fact a linked thread is about.
   const headerSubtitle = [
+    selectedThread?.linkedIssue?.identifier ?? null,
     selectedThreadProject?.title ?? null,
     selectedEnvironmentConnection?.environmentLabel ?? null,
   ]

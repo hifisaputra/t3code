@@ -493,7 +493,8 @@ it.effect("fails a ref snapshot when for-each-ref exits unsuccessfully", () =>
       assert.deepInclude(error, {
         _tag: "GitCommandError",
         operation: "GitVcsDriver.listRefs.snapshotRefs",
-        detail: "Git ref snapshot enumeration failed.",
+        // The fallback detail carries git's own first line of complaint.
+        detail: "Git ref snapshot enumeration failed: fatal: not a git repository",
         exitCode: 128,
       });
       assert.equal(yield* Ref.get(snapshotAttempts), 1);

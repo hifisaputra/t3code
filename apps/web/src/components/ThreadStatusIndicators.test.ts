@@ -1,4 +1,9 @@
-import { ProjectId, type PullRequestSummary, type VcsStatusResult } from "@t3tools/contracts";
+import {
+  ProjectId,
+  type LinearIssueDetail,
+  type PullRequestSummary,
+  type VcsStatusResult,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import {
   GitMergeIcon,
@@ -9,6 +14,7 @@ import {
 
 import {
   ChangeRequestStatusIcon,
+  issueStatusIndicator,
   prStatusIndicator,
   settledPrHoverColorClass,
 } from "./ThreadStatusIndicators";
@@ -130,5 +136,44 @@ describe("settledPrHoverColorClass", () => {
 
   it("keeps draft pull requests gray on row hover", () => {
     expect(settledPrHoverColorClass("open", true)).toContain("group-hover/v2-row:text-zinc-500");
+  });
+});
+
+function linearIssue(overrides: Partial<LinearIssueDetail> = {}): LinearIssueDetail {
+  return {
+    id: "issue-uuid",
+    identifier: "DEL-123",
+    title: "Fix the login page",
+    url: "https://linear.app/tomo/issue/DEL-123/fix-the-login-page",
+    branchName: "tomo/del-123-fix-the-login-page",
+    priority: 2,
+    state: { id: "s1", name: "In Progress", type: "started", color: "#f2c94c", position: 1 },
+    team: { id: "t1", key: "DEL", name: "Delivery" },
+    assignee: null,
+    updatedAt: "2026-09-07T10:00:00.000Z",
+    description: null,
+    comments: [],
+    parent: null,
+    children: [],
+    labels: [],
+    project: null,
+    cycle: null,
+    ...overrides,
+  };
+}
+
+describe("issueStatusIndicator", () => {
+  it("labels the chip with the identifier and carries Linear's own state color", () => {
+    expect(issueStatusIndicator(linearIssue())).toEqual({
+      label: "DEL-123",
+      color: "#f2c94c",
+      tooltip: "DEL-123 · Fix the login page · In Progress",
+      url: "https://linear.app/tomo/issue/DEL-123/fix-the-login-page",
+    });
+  });
+
+  it("has nothing to show without an issue", () => {
+    expect(issueStatusIndicator(null)).toBeNull();
+    expect(issueStatusIndicator(undefined)).toBeNull();
   });
 });

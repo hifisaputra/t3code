@@ -142,6 +142,9 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
+import * as LinearApi from "./linear/LinearApi.ts";
+import * as LinearThreadService from "./linear/LinearThreadService.ts";
+import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as AzureDevOpsCli from "./sourceControl/AzureDevOpsCli.ts";
@@ -591,6 +594,8 @@ const makeWsRpcLayer = (
       );
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
+      const linear = yield* LinearApi.LinearApi;
+      const linearThreads = yield* LinearThreadService.LinearThreadService;
       const automaticGitFetchInterval = serverSettings.getSettings.pipe(
         Effect.map(
           (settings) => resolveServerBackgroundActivitySettings(settings).automaticGitFetchInterval,
@@ -1188,6 +1193,9 @@ const makeWsRpcLayer = (
                 branch: bootstrap.createThread.branch,
                 worktreePath: bootstrap.createThread.worktreePath,
                 createdAt: bootstrap.createThread.createdAt,
+                ...(bootstrap.createThread.linkedIssue
+                  ? { linkedIssue: bootstrap.createThread.linkedIssue }
+                  : {}),
               });
               // The successful create is a fence in the engine command queue:
               // every delete for the prior incarnation committed before it.
@@ -2089,6 +2097,30 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [WS_METHODS.linearStatus]: (_input) =>
+          observeRpcEffect(WS_METHODS.linearStatus, linear.status, {
+            "rpc.aggregate": "linear",
+          }),
+        [WS_METHODS.linearWorkspace]: (_input) =>
+          observeRpcEffect(WS_METHODS.linearWorkspace, linear.workspace, {
+            "rpc.aggregate": "linear",
+          }),
+        [WS_METHODS.linearListIssues]: (input) =>
+          observeRpcEffect(WS_METHODS.linearListIssues, linear.listIssues(input), {
+            "rpc.aggregate": "linear",
+          }),
+        [WS_METHODS.linearGetIssue]: (input) =>
+          observeRpcEffect(WS_METHODS.linearGetIssue, linear.getIssue(input), {
+            "rpc.aggregate": "linear",
+          }),
+        [WS_METHODS.linearPrepareIssueThread]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.linearPrepareIssueThread,
+            linearThreads
+              .prepareIssueThread(input)
+              .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            { "rpc.aggregate": "linear" },
           ),
         [WS_METHODS.serverGetTraceDiagnostics]: (_input) =>
           observeRpcEffect(
@@ -3020,6 +3052,15 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               // One server-lifetime service means clients share the same PR caches, and a WS
               // mutation invalidates the HTTP diff cache that every client reads from.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
+              // Stateless and cheap to build, like the discovery service below: it
+              // holds no key of its own, reading settings on every call.
+              Layer.provide(
+                LinearThreadService.layer.pipe(
+                  Layer.provide(LinearApi.layer),
+                  Layer.provide(T3ProjectFileLoader.layer),
+                ),
+              ),
+              Layer.provide(LinearApi.layer),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

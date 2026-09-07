@@ -529,4 +529,71 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       assert.deepStrictEqual(Option.getOrNull(branchCleared)?.linkedPullRequest, linkedPullRequest);
     }),
   );
+
+  it.effect("round-trips a linked issue and leaves unlinked threads without one", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const projectId = ProjectId.make("project-linked-issue");
+      const linkedIssue = {
+        provider: "linear" as const,
+        id: "issue-uuid",
+        identifier: "DEL-123",
+        url: "https://linear.app/t3/issue/DEL-123/do-the-thing",
+      };
+      const baseRow = {
+        projectId,
+        title: "Linked issue",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        latestTurnId: null,
+        createdAt: "2026-03-24T00:00:00.000Z",
+        updatedAt: "2026-03-24T00:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        unsettledAt: null,
+        snoozedUntil: null,
+        snoozedAt: null,
+        pinnedAt: null,
+        latestUserMessageAt: null,
+        pendingApprovalCount: 0,
+        pendingUserInputCount: 0,
+        hasActionableProposedPlan: 0,
+        deletedAt: null,
+      };
+
+      yield* threads.upsert({
+        ...baseRow,
+        threadId: ThreadId.make("thread-linked-issue"),
+        linkedIssue,
+      });
+      yield* threads.upsert({
+        ...baseRow,
+        threadId: ThreadId.make("thread-unlinked-issue"),
+        createdAt: "2026-03-25T00:00:00.000Z",
+      });
+
+      const persisted = yield* threads.getById({ threadId: ThreadId.make("thread-linked-issue") });
+      assert.deepStrictEqual(Option.getOrNull(persisted)?.linkedIssue, linkedIssue);
+
+      const unlinked = yield* threads.getById({ threadId: ThreadId.make("thread-unlinked-issue") });
+      assert.strictEqual(Option.getOrNull(unlinked)?.linkedIssue, null);
+
+      const listed = yield* threads.listByProjectId({ projectId });
+      assert.deepStrictEqual(listed[0]?.linkedIssue, linkedIssue);
+      assert.strictEqual(listed[1]?.linkedIssue, null);
+
+      const row = Option.getOrNull(persisted);
+      if (row === null) return yield* Effect.die("Expected linked issue row to exist.");
+      yield* threads.upsert({ ...row, linkedIssue: null });
+      const cleared = yield* threads.getById({ threadId: row.threadId });
+      assert.strictEqual(Option.getOrNull(cleared)?.linkedIssue, null);
+    }),
+  );
 });

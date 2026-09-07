@@ -2,7 +2,7 @@
  * Integrations settings - preferences for surfaces T3 Code embeds rather than
  * owns. Browser is the first section: the defaults a preview tab opens at,
  * applied to both hand-opened tabs and agent `preview_open` calls that don't
- * state their own size.
+ * state their own size. Linear follows it, and lives in its own module.
  *
  * @module IntegrationsSettings
  */
@@ -97,6 +97,7 @@ import {
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { BrowserImportWizard, type WizardTarget } from "./BrowserImportWizard";
+import { LinearSettingsSection } from "./LinearSettings";
 import type { ImportOutcome } from "./browserImportWizard.logic";
 
 const FILL_VALUE = "fill";
@@ -1193,6 +1194,7 @@ export function IntegrationsSettingsPanel() {
           previewDefaults
         )}
       </SettingsSection>
+      <LinearSettingsSection />
     </SettingsPageContainer>
   );
 }

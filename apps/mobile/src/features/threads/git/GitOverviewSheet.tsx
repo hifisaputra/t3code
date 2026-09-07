@@ -4,6 +4,7 @@ import {
   getGitActionDisabledReason,
   requiresDefaultBranchConfirmation,
 } from "@t3tools/client-runtime/state/vcs";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import {
   CommonActions,
@@ -24,6 +25,7 @@ import { AppText as Text } from "../../../components/AppText";
 import { nativeHeaderScrollEdgeEffects } from "../../../native/StackHeader";
 import { tryOpenExternalUrl } from "../../../lib/openExternalUrl";
 import { useEnvironmentQuery } from "../../../state/query";
+import { useThreadIssue } from "../../../state/use-thread-issue";
 import { useThreadSelection } from "../../../state/use-thread-selection";
 import { useSelectedThreadGitActions } from "../../../state/use-selected-thread-git-actions";
 import { useSelectedThreadGitState } from "../../../state/use-selected-thread-git-state";
@@ -41,6 +43,33 @@ type GitOverviewSheetProps = StaticScreenProps<{
   readonly headerInset?: number;
   readonly presentation?: "sheet" | "inspector";
 };
+
+/**
+ * The thread's linked Linear issue, shown next to the pull request actions.
+ * Tapping it opens the issue; starting a thread from an issue stays on the
+ * desktop and web clients.
+ */
+function LinkedIssueSheetRow(props: { readonly thread: EnvironmentThreadShell }) {
+  const issue = useThreadIssue(props.thread);
+  if (issue === null) return null;
+  return (
+    <>
+      <View className="ml-12 h-px bg-border" />
+      <SheetListRow
+        icon="ticket"
+        title={`Linear issue ${issue.identifier}`}
+        subtitle={issue.title.length > 0 ? issue.title : "Open in Linear"}
+        onPress={() => {
+          void tryOpenExternalUrl(issue.url, "linear-issue").then((opened) => {
+            if (!opened) {
+              Alert.alert("Unable to open issue", "The Linear issue could not be opened.");
+            }
+          });
+        }}
+      />
+    </>
+  );
+}
 
 export function GitOverviewSheet(props: GitOverviewSheetProps) {
   const navigation = useNavigation();
@@ -270,6 +299,7 @@ export function GitOverviewSheet(props: GitOverviewSheetProps) {
             );
           }}
         />
+        {selectedThread !== null ? <LinkedIssueSheetRow thread={selectedThread} /> : null}
         <View className="ml-12 h-px bg-border" />
         <SheetListRow
           icon="point.topleft.down.curvedto.point.bottomright.up"

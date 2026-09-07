@@ -9,6 +9,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   type ScopedProjectRef,
   type ThreadId,
+  type ThreadLinkedIssue,
 } from "@t3tools/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
@@ -45,6 +46,8 @@ interface NewThreadWorkspaceOptions {
   worktreePath?: string | null;
   envMode?: DraftThreadEnvMode;
   startFromOrigin?: boolean;
+  /** The Linear issue this thread is being started from, when one is. */
+  linkedIssue?: ThreadLinkedIssue | null;
 }
 
 // The workspace options the caller passed explicitly, shaped for the draft
@@ -56,6 +59,7 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
     ...(options?.worktreePath !== undefined ? { worktreePath: options.worktreePath } : {}),
     ...(options?.envMode !== undefined ? { envMode: options.envMode } : {}),
     ...(options?.startFromOrigin !== undefined ? { startFromOrigin: options.startFromOrigin } : {}),
+    ...(options?.linkedIssue !== undefined ? { linkedIssue: options.linkedIssue } : {}),
   };
 }
 
@@ -77,6 +81,7 @@ export function useNewThreadHandler() {
         worktreePath?: string | null;
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
+        linkedIssue?: ThreadLinkedIssue;
         replace?: boolean;
       },
       // Which draft the thread ended up in, so a caller that has something to put in it — a
@@ -171,6 +176,7 @@ export function useNewThreadHandler() {
       const hasWorktreePathOption = options?.worktreePath !== undefined;
       const hasEnvModeOption = options?.envMode !== undefined;
       const hasStartFromOriginOption = options?.startFromOrigin !== undefined;
+      const hasLinkedIssueOption = options?.linkedIssue !== undefined;
       const storedDraftThread = getDraftSessionByLogicalProjectKey(logicalProjectKey);
       const storedDraftThreadRef = storedDraftThread
         ? scopeThreadRef(storedDraftThread.environmentId, storedDraftThread.threadId)
@@ -210,7 +216,8 @@ export function useNewThreadHandler() {
             hasBranchOption ||
             hasWorktreePathOption ||
             hasEnvModeOption ||
-            hasStartFromOriginOption;
+            hasStartFromOriginOption ||
+            hasLinkedIssueOption;
           // Resurrecting an empty stored draft must not resurrect its stale
           // context: explicit workspace options win outright; otherwise the
           // env context resets to the configured defaults so drafts seeded
@@ -255,6 +262,8 @@ export function useNewThreadHandler() {
             workspaceContext = {
               branch: null,
               worktreePath: null,
+              // A link left by an issue-started draft is as stale as its branch.
+              linkedIssue: null,
               envMode: defaultEnvMode,
               startFromOrigin: resolveNewDraftStartFromOrigin({
                 envMode: defaultEnvMode,
@@ -342,7 +351,8 @@ export function useNewThreadHandler() {
           hasBranchOption ||
           hasWorktreePathOption ||
           hasEnvModeOption ||
-          hasStartFromOriginOption
+          hasStartFromOriginOption ||
+          hasLinkedIssueOption
         ) {
           setDraftThreadContext(currentRouteTarget.draftId, pickExplicitWorkspaceOptions(options));
         }
@@ -408,6 +418,7 @@ export function useNewThreadHandler() {
           createdAt,
           branch: options?.branch ?? null,
           worktreePath: options?.worktreePath ?? null,
+          ...(options?.linkedIssue !== undefined ? { linkedIssue: options.linkedIssue } : {}),
           envMode: initialEnvMode,
           startFromOrigin:
             options?.startFromOrigin ??

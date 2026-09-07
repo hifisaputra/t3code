@@ -16,6 +16,7 @@ import {
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
+  type ThreadLinkedIssue,
   ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -438,6 +439,8 @@ export interface DraftSessionState {
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
   startFromOrigin: boolean;
+  /** Set when the draft was started from a tracker issue; carried onto the thread on first send. */
+  linkedIssue?: ThreadLinkedIssue | null;
   promotedTo?: ScopedThreadRef | null;
 }
 
@@ -509,6 +512,7 @@ interface ComposerDraftStoreState {
       interactionMode?: ProviderInteractionMode;
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
+      linkedIssue?: ThreadLinkedIssue | null;
     },
   ) => void;
   /** Creates or updates the draft session tracked for a concrete project ref. */
@@ -526,6 +530,7 @@ interface ComposerDraftStoreState {
       interactionMode?: ProviderInteractionMode;
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
+      linkedIssue?: ThreadLinkedIssue | null;
     },
   ) => void;
   /** Updates mutable draft-session metadata without touching composer content. */
@@ -542,6 +547,7 @@ interface ComposerDraftStoreState {
       interactionMode?: ProviderInteractionMode;
       environmentSelection?: "auto" | "manual";
       loadBalancedEnvironmentId?: EnvironmentId | null;
+      linkedIssue?: ThreadLinkedIssue | null;
     },
   ) => void;
   clearProjectDraftThreadId: (projectRef: ScopedProjectRef) => void;
@@ -1546,6 +1552,7 @@ function createDraftThreadState(
     interactionMode?: ProviderInteractionMode;
     environmentSelection?: "auto" | "manual";
     loadBalancedEnvironmentId?: EnvironmentId | null;
+    linkedIssue?: ThreadLinkedIssue | null;
   },
 ): DraftThreadState {
   // A project change (including switching environments within a logical
@@ -1574,6 +1581,14 @@ function createDraftThreadState(
       : options.startFromOrigin;
   const environmentSelection =
     options?.environmentSelection ?? existingThread?.environmentSelection;
+  // The issue is tied to the repository the branch lives in, so it drops with
+  // the branch when the draft is retargeted at a different project.
+  const nextLinkedIssue =
+    options?.linkedIssue === undefined
+      ? projectChanged
+        ? null
+        : (existingThread?.linkedIssue ?? null)
+      : options.linkedIssue;
   return {
     threadId,
     environmentId: projectRef.environmentId,
@@ -1598,6 +1613,7 @@ function createDraftThreadState(
     envMode:
       options?.envMode ?? (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
     startFromOrigin: nextStartFromOrigin,
+    linkedIssue: nextLinkedIssue,
     promotedTo: null,
   };
 }
@@ -1610,6 +1626,16 @@ function scopedThreadRefsEqual(
     return left === right;
   }
   return left.environmentId === right.environmentId && left.threadId === right.threadId;
+}
+
+function linkedIssuesEqual(
+  left: ThreadLinkedIssue | null | undefined,
+  right: ThreadLinkedIssue | null | undefined,
+): boolean {
+  if (!left || !right) {
+    return (left ?? null) === (right ?? null);
+  }
+  return left.provider === right.provider && left.id === right.id;
 }
 
 function isDraftThreadPromoting(draftThread: DraftThreadState | null | undefined): boolean {
@@ -1632,6 +1658,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
     left.startFromOrigin === right.startFromOrigin &&
+    linkedIssuesEqual(left.linkedIssue, right.linkedIssue) &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
 }
@@ -2757,6 +2784,12 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               (options.branch != null || options.worktreePath != null
                 ? "manual"
                 : existing.environmentSelection);
+            const nextLinkedIssue =
+              options.linkedIssue === undefined
+                ? projectChanged
+                  ? null
+                  : (existing.linkedIssue ?? null)
+                : options.linkedIssue;
             const nextDraftThread: DraftThreadState = {
               threadId: existing.threadId,
               environmentId: nextProjectRef.environmentId,
@@ -2780,6 +2813,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               envMode:
                 options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
               startFromOrigin: nextStartFromOrigin,
+              linkedIssue: nextLinkedIssue,
               promotedTo: existing.promotedTo ?? null,
             };
             const isUnchanged =
@@ -2795,6 +2829,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftThread.worktreePath === existing.worktreePath &&
               nextDraftThread.envMode === existing.envMode &&
               nextDraftThread.startFromOrigin === existing.startFromOrigin &&
+              linkedIssuesEqual(nextDraftThread.linkedIssue, existing.linkedIssue) &&
               scopedThreadRefsEqual(nextDraftThread.promotedTo, existing.promotedTo);
             if (isUnchanged) {
               return state;

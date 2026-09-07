@@ -39,6 +39,7 @@ import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
   ArrowLeftIcon,
+  CircleDotIcon,
   CornerLeftUpIcon,
   FileSearchIcon,
   FolderIcon,
@@ -80,6 +81,7 @@ import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+import { useAnyEnvironmentHasLinearKey } from "../state/linear";
 import { useProjects, useThreadShells } from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
@@ -146,6 +148,8 @@ import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectFilePicker } from "./files/ProjectFilePicker";
 import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog";
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
+import { openLinearIssueDialogRequest } from "../linearIssueDialogBus";
+import { readIssueListPreferences } from "./issues/issueListPreferences";
 import { searchSettings, SETTINGS_SECTION_LABELS } from "./settings/settingsSearch";
 import {
   COMMAND_PALETTE_META_ICON_CLASS,
@@ -593,6 +597,7 @@ function OpenCommandPaletteDialog(props: {
     reportFailure: false,
   });
   const { environments } = useEnvironments();
+  const hasLinearKey = useAnyEnvironmentHasLinearKey();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
@@ -1602,6 +1607,33 @@ function OpenCommandPaletteDialog(props: {
       icon: <LinkIcon className={ITEM_ICON_CLASS} />,
       shortcutCommand: "thread.copyReference",
       run: copyActiveThreadReference,
+    });
+  }
+
+  if (activeThreadId !== null) {
+    actionItems.push({
+      kind: "action",
+      value: "action:start-thread-from-issue",
+      searchTerms: ["linear", "issue", "ticket", "start thread", "branch"],
+      title: "Start thread from Linear issue…",
+      icon: <CircleDotIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "thread.startFromIssue",
+      run: async () => {
+        openLinearIssueDialogRequest();
+      },
+    });
+  }
+
+  if (hasLinearKey) {
+    actionItems.push({
+      kind: "action",
+      value: "action:issues",
+      searchTerms: ["issues", "linear", "tickets", "my issues"],
+      title: "Open issues",
+      icon: <CircleDotIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({ to: "/issues", search: readIssueListPreferences() });
+      },
     });
   }
 

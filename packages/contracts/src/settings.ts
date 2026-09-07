@@ -777,6 +777,91 @@ export const UsageLimitSourceConfig = Schema.Struct({
 });
 export type UsageLimitSourceConfig = typeof UsageLimitSourceConfig.Type;
 
+/**
+ * What a server-held secret looks like once it has been redacted for a client.
+ * Sending the marker back in a patch means "keep the stored value".
+ */
+export const SERVER_SECRET_REDACTED_MARKER = "\u2022\u2022\u2022\u2022\u2022\u2022";
+
+/**
+ * The Linear connection. A personal API key made by the connected user; it is
+ * stored in the secret store and redacted to a marker before reaching a client,
+ * like `UsageLimitSourceConfig.managementKey`. An empty key means "not
+ * connected".
+ */
+/**
+ * Which checkout an issue's work lands in. A row keyed by Linear project wins
+ * over a row keyed by team, so one repository can own a team while another
+ * owns a single project inside it. `baseBranch` overrides the repository's
+ * default branch for new issue branches.
+ */
+export const LinearRepositoryMapping = Schema.Struct({
+  /** Linear team key such as `DEL`. Null when the row is keyed by project. */
+  teamKey: Schema.NullOr(TrimmedNonEmptyString),
+  /** Linear project id. Null when the row is keyed by team. */
+  linearProjectId: Schema.NullOr(TrimmedNonEmptyString),
+  /** The T3 Code project on this server. */
+  projectId: ProjectId,
+  baseBranch: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type LinearRepositoryMapping = typeof LinearRepositoryMapping.Type;
+
+/** An issue carrying a label with this name gets this branch prefix. */
+export const LinearLabelBranchPrefix = Schema.Struct({
+  /** Matched case-insensitively against the issue's label names. */
+  label: TrimmedNonEmptyString,
+  /** A branch namespace such as `fix`; no slash. */
+  prefix: TrimmedNonEmptyString,
+});
+export type LinearLabelBranchPrefix = typeof LinearLabelBranchPrefix.Type;
+
+export const LINEAR_DEFAULT_BRANCH_PREFIXES: ReadonlyArray<string> = [
+  "feat",
+  "fix",
+  "bug",
+  "chore",
+];
+export const LINEAR_DEFAULT_LABEL_BRANCH_PREFIXES: ReadonlyArray<LinearLabelBranchPrefix> = [
+  { label: "Bug", prefix: "fix" },
+];
+
+/**
+ * How a thread started from an issue names its branch.
+ *
+ * `linear` checks out the issue's own `branchName`, built from the workspace's
+ * git branch format (`tomo/del-177-fix-login`). `prefixed` follows the
+ * repository's own convention instead: `<prefix>/del-177-fix-login`, where the
+ * prefix is picked per issue from `labelPrefixes`, falling back to the first
+ * of `prefixes`. Linear links a pull request to an issue whenever the branch
+ * contains the identifier, so both styles keep its automations working.
+ */
+export const LinearBranchNaming = Schema.Struct({
+  style: Schema.Literals(["linear", "prefixed"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("linear" as const)),
+  ),
+  /** The prefixes offered when starting a thread; the first is the default. */
+  prefixes: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(LINEAR_DEFAULT_BRANCH_PREFIXES)),
+  ),
+  labelPrefixes: Schema.Array(LinearLabelBranchPrefix).pipe(
+    Schema.withDecodingDefault(Effect.succeed(LINEAR_DEFAULT_LABEL_BRANCH_PREFIXES)),
+  ),
+});
+export type LinearBranchNaming = typeof LinearBranchNaming.Type;
+
+export const LinearSettings = Schema.Struct({
+  apiKey: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  repositories: Schema.Array(LinearRepositoryMapping).pipe(
+    Schema.withDecodingDefault(Effect.succeed([] as ReadonlyArray<LinearRepositoryMapping>)),
+  ),
+  branchNaming: LinearBranchNaming.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  /** Lets agents in a linked thread read and update their issue through server-side tools. */
+  agentAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Starting a thread from an issue moves it to the team's first "started" state. */
+  moveToStartedOnThreadStart: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+});
+export type LinearSettings = typeof LinearSettings.Type;
+
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -975,6 +1060,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  linear: LinearSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // Keyed by a user-chosen id so a source keeps its rows across edits. Entries
   // this build cannot decode round-trip untouched, as provider instances do.
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
@@ -1185,6 +1271,21 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),
       otlpMetricsUrl: Schema.optionalKey(TrimmedString),
+    }),
+  ),
+  linear: Schema.optionalKey(
+    Schema.Struct({
+      apiKey: Schema.optionalKey(TrimmedString),
+      repositories: Schema.optionalKey(Schema.Array(LinearRepositoryMapping)),
+      branchNaming: Schema.optionalKey(
+        Schema.Struct({
+          style: Schema.optionalKey(Schema.Literals(["linear", "prefixed"])),
+          prefixes: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+          labelPrefixes: Schema.optionalKey(Schema.Array(LinearLabelBranchPrefix)),
+        }),
+      ),
+      agentAccess: Schema.optionalKey(Schema.Boolean),
+      moveToStartedOnThreadStart: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   providers: Schema.optionalKey(

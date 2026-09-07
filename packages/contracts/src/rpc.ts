@@ -131,6 +131,19 @@ import {
   PullRequestUpdateInput,
 } from "./pullRequest.ts";
 import {
+  LinearConnectionStatus,
+  LinearGetIssueInput,
+  LinearIssueDetail,
+  LinearIssueNotFoundError,
+  LinearListIssuesInput,
+  LinearListIssuesResult,
+  LinearOperationError,
+  LinearPrepareIssueThreadInput,
+  LinearPrepareIssueThreadResult,
+  LinearUnavailableError,
+  LinearWorkspaceStructure,
+} from "./linear.ts";
+import {
   RelayClientInstallFailedError,
   RelayClientInstallProgressEventSchema,
   RelayClientStatusSchema,
@@ -378,6 +391,13 @@ export const WS_METHODS = {
   sourceControlLookupRepository: "sourceControl.lookupRepository",
   sourceControlCloneRepository: "sourceControl.cloneRepository",
   sourceControlPublishRepository: "sourceControl.publishRepository",
+
+  // Linear methods
+  linearStatus: "linear.status",
+  linearWorkspace: "linear.workspace",
+  linearListIssues: "linear.listIssues",
+  linearGetIssue: "linear.getIssue",
+  linearPrepareIssueThread: "linear.prepareIssueThread",
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
@@ -1214,6 +1234,48 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   stream: true,
 });
 
+const LinearRpcError = Schema.Union([
+  LinearUnavailableError,
+  LinearOperationError,
+  EnvironmentAuthorizationError,
+]);
+
+/** Never fails on Linear's account: a bad or missing key is a status, not an error. */
+const WsLinearStatusRpc = Rpc.make(WS_METHODS.linearStatus, {
+  payload: Schema.Struct({}),
+  success: LinearConnectionStatus,
+  error: EnvironmentAuthorizationError,
+});
+
+/** Teams and their projects, for the repository mapping picker in Settings. */
+const WsLinearWorkspaceRpc = Rpc.make(WS_METHODS.linearWorkspace, {
+  payload: Schema.Struct({}),
+  success: LinearWorkspaceStructure,
+  error: LinearRpcError,
+});
+
+const WsLinearListIssuesRpc = Rpc.make(WS_METHODS.linearListIssues, {
+  payload: LinearListIssuesInput,
+  success: LinearListIssuesResult,
+  error: LinearRpcError,
+});
+
+const WsLinearGetIssueRpc = Rpc.make(WS_METHODS.linearGetIssue, {
+  payload: LinearGetIssueInput,
+  success: LinearIssueDetail,
+  error: Schema.Union([LinearIssueNotFoundError, ...LinearRpcError.members]),
+});
+
+const WsLinearPrepareIssueThreadRpc = Rpc.make(WS_METHODS.linearPrepareIssueThread, {
+  payload: LinearPrepareIssueThreadInput,
+  success: LinearPrepareIssueThreadResult,
+  error: Schema.Union([
+    LinearIssueNotFoundError,
+    GitManagerServiceError,
+    ...LinearRpcError.members,
+  ]),
+});
+
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
@@ -1276,6 +1338,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlLookupRepositoryRpc,
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,
+  WsLinearStatusRpc,
+  WsLinearWorkspaceRpc,
+  WsLinearListIssuesRpc,
+  WsLinearGetIssueRpc,
+  WsLinearPrepareIssueThreadRpc,
   WsProjectsListEntriesRpc,
   WsProjectsReadFileRpc,
   WsProjectsSearchContentsRpc,

@@ -485,6 +485,19 @@ export const ThreadLinkedPullRequest = Schema.Struct({
 });
 export type ThreadLinkedPullRequest = typeof ThreadLinkedPullRequest.Type;
 
+/**
+ * The issue a thread is working. Only the link is stored; title and state are
+ * fetched live so the projection never goes stale. `provider` is a
+ * discriminator so other trackers can follow Linear without a new field.
+ */
+export const ThreadLinkedIssue = Schema.Struct({
+  provider: Schema.Literal("linear"),
+  id: TrimmedNonEmptyString,
+  identifier: TrimmedNonEmptyString,
+  url: TrimmedNonEmptyString,
+});
+export type ThreadLinkedIssue = typeof ThreadLinkedIssue.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -498,6 +511,7 @@ export const OrchestrationThread = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  linkedIssue: Schema.optional(Schema.NullOr(ThreadLinkedIssue)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -580,6 +594,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  linkedIssue: Schema.optional(Schema.NullOr(ThreadLinkedIssue)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -808,6 +823,8 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  /** Set when the thread is started from an issue, so the link exists from the first event. */
+  linkedIssue: Schema.optional(ThreadLinkedIssue),
   createdAt: IsoDateTime,
   historyImport: Schema.optional(Schema.Literal(true)),
 });
@@ -920,6 +937,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  linkedIssue: Schema.optional(Schema.NullOr(ThreadLinkedIssue)),
 }).check(
   Schema.makeFilter(
     (input) =>
@@ -952,6 +970,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  linkedIssue: Schema.optional(ThreadLinkedIssue),
   createdAt: IsoDateTime,
 });
 
@@ -1333,6 +1352,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  linkedIssue: Schema.optional(Schema.NullOr(ThreadLinkedIssue)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1420,6 +1440,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  linkedIssue: Schema.optional(Schema.NullOr(ThreadLinkedIssue)),
   updatedAt: IsoDateTime,
 });
 

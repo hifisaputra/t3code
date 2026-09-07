@@ -6,6 +6,7 @@ import {
   MessageId,
   ProjectId,
   ThreadId,
+  ThreadLinkedIssue,
   ThreadLinkedPullRequest,
   TurnId,
   ProviderInstanceId,
@@ -40,6 +41,7 @@ const encodeChatAttachments = Schema.encodeEffect(
 const encodeThreadLinkedPullRequest = Schema.encodeSync(
   Schema.fromJsonString(ThreadLinkedPullRequest),
 );
+const encodeThreadLinkedIssue = Schema.encodeSync(Schema.fromJsonString(ThreadLinkedIssue));
 
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -914,6 +916,164 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         (yield* snapshotQuery.getThreadRuntimeContext(ThreadId.make("thread-active")))._tag,
         "None",
       );
+    }),
+  );
+
+  it.effect("carries the linked issue through every thread snapshot query", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const linkedIssue = {
+        provider: "linear" as const,
+        id: "issue-uuid",
+        identifier: "DEL-123",
+        url: "https://linear.app/t3/issue/DEL-123/do-the-thing",
+      };
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_state`;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_thread_proposed_plans`;
+      yield* sql`DELETE FROM projection_turns`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-linked-issue',
+          'Linked Issue',
+          '/tmp/linked-issue',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          '[]',
+          '2026-04-07T00:00:00.000Z',
+          '2026-04-07T00:00:01.000Z',
+          NULL
+        )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          linked_issue_json,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES
+          (
+            'thread-with-issue',
+            'project-linked-issue',
+            'Linked',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            'tomo/del-123',
+            NULL,
+            ${encodeThreadLinkedIssue(linkedIssue)},
+            NULL,
+            NULL,
+            0,
+            0,
+            0,
+            '2026-04-07T00:00:02.000Z',
+            '2026-04-07T00:00:03.000Z',
+            NULL
+          ),
+          (
+            'thread-without-issue',
+            'project-linked-issue',
+            'Unlinked',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            0,
+            0,
+            0,
+            '2026-04-07T00:00:04.000Z',
+            '2026-04-07T00:00:05.000Z',
+            NULL
+          )
+      `;
+
+      yield* sql`
+        INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
+        VALUES
+          (${ORCHESTRATION_PROJECTOR_NAMES.projects}, 2, '2026-04-07T00:00:06.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threads}, 2, '2026-04-07T00:00:06.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threadMessages}, 2, '2026-04-07T00:00:06.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threadProposedPlans}, 2, '2026-04-07T00:00:06.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threadActivities}, 2, '2026-04-07T00:00:06.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.threadSessions}, 2, '2026-04-07T00:00:06.000Z'),
+          (${ORCHESTRATION_PROJECTOR_NAMES.checkpoints}, 2, '2026-04-07T00:00:06.000Z')
+      `;
+
+      const findLinked = <A extends { readonly id: ThreadId }>(threads: ReadonlyArray<A>) =>
+        threads.find((thread) => thread.id === ThreadId.make("thread-with-issue"));
+      const findUnlinked = <A extends { readonly id: ThreadId }>(threads: ReadonlyArray<A>) =>
+        threads.find((thread) => thread.id === ThreadId.make("thread-without-issue"));
+
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      assert.deepEqual(findLinked(snapshot.threads)?.linkedIssue, linkedIssue);
+      assert.equal(findUnlinked(snapshot.threads)?.linkedIssue, undefined);
+
+      const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
+      assert.deepEqual(findLinked(shellSnapshot.threads)?.linkedIssue, linkedIssue);
+      assert.equal(findUnlinked(shellSnapshot.threads)?.linkedIssue, undefined);
+
+      const commandReadModel = yield* snapshotQuery.getCommandReadModel();
+      assert.deepEqual(findLinked(commandReadModel.threads)?.linkedIssue, linkedIssue);
+
+      const threadShell = yield* snapshotQuery.getThreadShellById(
+        ThreadId.make("thread-with-issue"),
+      );
+      assert.equal(threadShell._tag, "Some");
+      if (threadShell._tag === "Some") {
+        assert.deepEqual(threadShell.value.linkedIssue, linkedIssue);
+      }
+
+      // Clearing the link (thread.meta-updated with linkedIssue: null) drops it
+      // from every read.
+      yield* sql`
+        UPDATE projection_threads
+        SET linked_issue_json = NULL
+        WHERE thread_id = 'thread-with-issue'
+      `;
+      const cleared = yield* snapshotQuery.getSnapshot();
+      assert.equal(findLinked(cleared.threads)?.linkedIssue, undefined);
+      const clearedShell = yield* snapshotQuery.getThreadShellById(
+        ThreadId.make("thread-with-issue"),
+      );
+      assert.equal(clearedShell._tag, "Some");
+      if (clearedShell._tag === "Some") {
+        assert.equal(clearedShell.value.linkedIssue, undefined);
+      }
     }),
   );
 

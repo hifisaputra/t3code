@@ -70,4 +70,51 @@ describe("canonicalizeClientCommandTimestamps", () => {
     expect(result.createdAt).toBe(serverReceivedAt);
     expect(result.bootstrap?.createThread?.createdAt).toBe(serverReceivedAt);
   });
+
+  it("keeps the bootstrap linked issue while rewriting timestamps", () => {
+    const linkedIssue = {
+      provider: "linear",
+      id: "issue-uuid",
+      identifier: "DEL-123",
+      url: "https://linear.app/t3/issue/DEL-123/do-the-thing",
+    } as const;
+    const command: ClientOrchestrationCommand = {
+      type: "thread.turn.start",
+      commandId: CommandId.make("command-3"),
+      threadId: ThreadId.make("thread-2"),
+      message: {
+        messageId: MessageId.make("message-2"),
+        role: "user",
+        text: "Start from an issue",
+        attachments: [],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      bootstrap: {
+        createThread: {
+          projectId: ProjectId.make("project-1"),
+          title: "DEL-123",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.4",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "tomo/del-123",
+          worktreePath: null,
+          linkedIssue,
+          createdAt: clientCreatedAt,
+        },
+      },
+      createdAt: clientCreatedAt,
+    };
+
+    const result = canonicalizeClientCommandTimestamps(command, serverReceivedAt);
+
+    if (result.type !== "thread.turn.start") {
+      throw new Error("Expected a thread.turn.start command");
+    }
+    expect(result.bootstrap?.createThread?.createdAt).toBe(serverReceivedAt);
+    expect(result.bootstrap?.createThread?.linkedIssue).toEqual(linkedIssue);
+  });
 });

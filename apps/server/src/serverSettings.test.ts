@@ -4,6 +4,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
+  SERVER_SECRET_REDACTED_MARKER,
   ServerSettings,
   ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -1277,6 +1278,53 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.match(environment.CODEX_HOME ?? "", /[\\/][.]codex-terminal$/);
       assert.notInclude(persisted, "sk-terminal-secret");
       assert.include(persisted, '"valueRedacted": true');
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("keeps the Linear API key in the secret store and the marker on disk", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+
+      const stored = yield* serverSettings.updateSettings({ linear: { apiKey: "lin_api_secret" } });
+      assert.strictEqual(stored.linear.apiKey, "lin_api_secret");
+
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      assert.notInclude(raw, "lin_api_secret");
+      assert.include(raw, SERVER_SECRET_REDACTED_MARKER);
+      assert.strictEqual((yield* serverSettings.getSettings).linear.apiKey, "lin_api_secret");
+
+      // The marker is what a client sends back, and it must not clear the key
+      // or the sibling fields patched alongside it.
+      const kept = yield* serverSettings.updateSettings({
+        linear: { apiKey: SERVER_SECRET_REDACTED_MARKER, agentAccess: true },
+      });
+      assert.strictEqual(kept.linear.apiKey, "lin_api_secret");
+      assert.isTrue(kept.linear.agentAccess);
+      assert.isTrue(kept.linear.moveToStartedOnThreadStart);
+
+      const cleared = yield* serverSettings.updateSettings({ linear: { apiKey: "" } });
+      assert.strictEqual(cleared.linear.apiKey, "");
+      assert.isTrue(cleared.linear.agentAccess);
+      assert.strictEqual((yield* serverSettings.getSettings).linear.apiKey, "");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("redacts the Linear API key before settings reach a client", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+      const settings = yield* serverSettings.updateSettings({
+        linear: { apiKey: "lin_api_secret" },
+      });
+      const redacted = ServerSettingsModule.redactServerSettingsForClient(settings);
+
+      assert.strictEqual(redacted.linear.apiKey, SERVER_SECRET_REDACTED_MARKER);
+      assert.strictEqual(
+        ServerSettingsModule.redactServerSettingsForClient(DEFAULT_SERVER_SETTINGS).linear.apiKey,
+        "",
+      );
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 });

@@ -12,12 +12,16 @@ import {
 } from "lucide-react";
 import {
   ChangeRequestStatusIcon,
+  IssueStatusChip,
+  issueStatusIndicator,
   prStatusIndicator,
   PrStatusTooltipContent,
   terminalStatusFromRunningIds,
   ThreadStatusLabel,
   ThreadWorktreeIndicator,
+  useLinkedThreadIssue,
   useLinkedThreadPullRequest,
+  useOpenIssueLink,
 } from "./ThreadStatusIndicators";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectFavicon } from "./ProjectFavicon";
@@ -482,6 +486,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const pr = linkedPullRequestStatus?.pr ?? null;
   const prStatus = prStatusIndicator(pr, linkedPullRequestStatus?.sourceControlProvider);
+  const linkedIssue = useLinkedThreadIssue(
+    thread.environmentId,
+    thread.linkedIssue,
+    leaseLiveStatus,
+  );
+  const issueStatus = issueStatusIndicator(linkedIssue);
+  const openIssueLink = useOpenIssueLink();
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
   const threadMetaClassName = isConfirmingArchive
@@ -714,6 +725,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         onContextMenu={handleRowContextMenu}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+          {issueStatus && (
+            <IssueStatusChip
+              status={issueStatus}
+              onOpen={(event) => openIssueLink(event, issueStatus.url, threadRef)}
+            />
+          )}
           {prStatus && pr && (
             <Tooltip>
               <TooltipTrigger
