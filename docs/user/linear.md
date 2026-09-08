@@ -183,13 +183,18 @@ the other.
 
 The `linear-work` skill is the runbook for working a ticket: read everything before deciding
 anything, restate what done looks like, ask and stop when a product decision is missing, post one
-plan comment and then stay quiet until the pull request, file follow-ups as sub-issues, and never
+plan comment and then report the pull request or completed research, file follow-ups as sub-issues, and never
 set an issue to Done. When it is installed for a provider, the kickoff message mentions it as
 `$linear-work` so the agent follows it from the first turn.
 
-Install it by copying the skill directory to `~/.claude/skills/linear-work` for Claude Code, or to
-`~/.codex/skills/linear-work` for Codex. Without it the kickoff spells out the same first steps
-inline, so threads still start the same way.
+The repository includes `linear-work`, `linear-task`, `linear-comment`, and `unslop` under
+[`.agents/skills`](../../.agents/skills). `linear-task` formats issue descriptions;
+`linear-comment` handles conversational replies and findings. `unslop` supplies writing guidance.
+Claude Code can also access these through the repository's `.claude/skills` symlink.
+
+To use them in other projects, copy all four skill directories into `~/.claude/skills/` for
+Claude Code or `~/.codex/skills/` for Codex on the machine running the agent. Without the runbook,
+the kickoff spells out the first steps inline.
 
 ## Replace or remove the key
 
