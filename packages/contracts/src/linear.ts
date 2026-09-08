@@ -15,6 +15,10 @@ import { PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 export const LinearIssueReference = TrimmedNonEmptyString;
 export type LinearIssueReference = typeof LinearIssueReference.Type;
 
+/**
+ * Linear's workflow state types. `duplicate` is the closed-as-duplicate state
+ * every team carries; it counts as finished, like `completed` and `canceled`.
+ */
 export const LinearWorkflowStateType = Schema.Literals([
   "triage",
   "backlog",
@@ -22,6 +26,7 @@ export const LinearWorkflowStateType = Schema.Literals([
   "started",
   "completed",
   "canceled",
+  "duplicate",
 ]);
 export type LinearWorkflowStateType = typeof LinearWorkflowStateType.Type;
 

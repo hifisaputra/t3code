@@ -2,7 +2,10 @@ import { ApprovalRequestId } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
+import {
+  ComposerPendingApprovalPanel,
+  splitIntegrationDetail,
+} from "./ComposerPendingApprovalPanel";
 
 describe("ComposerPendingApprovalPanel", () => {
   it("keeps the complete command readable in the compact row", () => {
@@ -89,8 +92,42 @@ describe("ComposerPendingApprovalPanel", () => {
     expect(markup).toContain('aria-label="Integration approval"');
     expect(markup).toContain('aria-label="Requested change"');
     expect(markup).toContain(">Linear<");
-    expect(markup).toContain(detail);
-    expect(markup).toContain("whitespace-pre");
+    expect(markup).toContain(">Comment on DEL-177<");
+    expect(markup).toContain("Shipped the fix, deploying now.");
+    expect(markup).toContain("whitespace-pre-wrap");
+    expect(markup).toContain("break-words");
+    expect(markup).not.toContain("font-mono");
+  });
+
+  it("shows only the headline when an integration write has no body", () => {
+    const markup = renderToStaticMarkup(
+      <ComposerPendingApprovalPanel
+        approval={{
+          requestId: ApprovalRequestId.make("approval-linear-update"),
+          requestKind: "integration",
+          createdAt: "2026-09-08T00:00:00.000Z",
+          appName: "Linear",
+          detail: "Update DEL-177",
+        }}
+        pendingCount={2}
+      />,
+    );
+
+    expect(markup).toContain(">Update DEL-177<");
+    expect(markup).not.toContain('data-approval-detail="complete"');
+    expect(markup).toContain("1/2");
+  });
+
+  it("splits an integration detail into headline and body", () => {
+    expect(splitIntegrationDetail("Comment on DEL-1\r\n\r\n## Plan\n\nline two")).toEqual({
+      headline: "Comment on DEL-1",
+      body: "## Plan\n\nline two",
+    });
+    expect(splitIntegrationDetail("  Update DEL-2  ")).toEqual({
+      headline: "Update DEL-2",
+      body: "",
+    });
+    expect(splitIntegrationDetail("")).toEqual({ headline: "", body: "" });
   });
 
   it("limits long app names so the complete approval message stays readable", () => {

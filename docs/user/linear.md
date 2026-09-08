@@ -18,27 +18,31 @@ see Troubleshooting below.
 Open the Linear issue dialog from the new-thread menu, from the command palette, or with the
 `thread.startFromIssue` keybinding you set in **Settings → Keybindings**. Paste an issue
 identifier such as `DEL-123`, or the issue URL from your browser. If you would rather browse,
-**My issues** under the input lists the issues assigned to you. The issue opens beside the picker
-with its state, labels, and full description, so you can read the brief before starting.
+the box lists the issues assigned to you as you type, narrowed by identifier or title. The issue
+opens below with its state, labels, and full description, so you can read the brief before
+starting.
 
-Choose **Worktree** to work in a fresh git worktree, or **Local** to work in the checkout you
-already have open. Worktree keeps the checkout you are using free.
+Under the issue, check what the thread will get: the project it runs in, whether it gets a fresh
+git worktree or uses the checkout you already have open, the branch, and the model. A worktree
+keeps the checkout you are using free. The model starts as the project's default and can be
+changed for this thread alone. Add a note if the ticket leaves something out; it is sent with the
+first message.
 
-The dialog also shows the branch the thread will start on. By default that is the branch Linear
-suggests for the issue, such as `tomo/del-123-fix-login`; see Branch names below to follow your
-repository's own convention instead. Either way the branch carries the issue identifier, so Linear
-links the pull request to the issue by itself and moves the issue through In Review and Done as
-the pull request progresses. You do not have to paste the identifier anywhere.
+**Start thread** does the rest in one step: the branch is checked out, the thread is created, and
+the agent begins. There is no draft to press Enter in. The agent reads the ticket and its comments
+through its Linear tools, restates what done looks like, and then either starts or asks you the
+question the brief left open. When agent access is off, the ticket text itself is sent in the
+first message instead, since the agent has no way to read it.
 
-The composer opens with a short instruction naming the issue, not the ticket text. Press Enter
-and the agent reads the ticket and its comments through its Linear tools, restates what done looks
-like, and then either starts or asks you the question the brief left open. Add your own note under
-the instruction first if you have one. When agent access is off, the ticket text itself is quoted
-in the message instead, since the agent has no way to read it.
+By default the branch is the one Linear suggests for the issue, such as `tomo/del-123-fix-login`;
+see Branch names below to follow your repository's own convention instead. Either way the branch
+carries the issue identifier, so Linear links the pull request to the issue by itself and moves the
+issue through In Review and Done as the pull request progresses. You do not have to paste the
+identifier anywhere.
 
 The issue also moves to the first started state on its team, usually **In Progress**. Turn that
 off with **Move issue to In Progress when a thread starts** in **Settings → Integrations →
-Linear**. An issue that is already started, completed, or canceled is left alone.
+Linear**. An issue that is already started, completed, canceled, or marked duplicate is left alone.
 
 A linked thread shows the issue identifier next to its pull request: in the sidebar, in the chat
 header, and in the thread list and thread actions on mobile. Select it to open the issue in Linear.
@@ -116,8 +120,8 @@ Narrow the list by state, team, project, or cycle. The page remembers the filter
 with, so the button brings you back to the same view. Select an issue to read it in full,
 description and comments included.
 
-**Start thread** on an issue runs the flow described above, with the same worktree and branch
-choices. An issue that already has a thread offers **Open thread** instead.
+**Start thread** on an issue opens the same dialog, with the issue already picked. An issue that
+already has a thread offers **Open thread** instead.
 
 ## Let agents work on issues
 

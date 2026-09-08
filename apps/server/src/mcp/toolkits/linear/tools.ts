@@ -128,7 +128,7 @@ export const ListMyIssuesTool = readonlyLinearTool(
       stateTypes: Schema.optional(
         Schema.Array(LinearWorkflowStateType).annotate({
           description:
-            "Workflow state types to include: triage, backlog, unstarted, started, completed, or canceled. Defaults to unstarted and started.",
+            "Workflow state types to include: triage, backlog, unstarted, started, completed, canceled, or duplicate. Defaults to unstarted and started.",
         }),
       ),
       projectId: Schema.optional(

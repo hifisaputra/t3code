@@ -171,11 +171,23 @@ const WorkspaceResult = Schema.Struct({
   }),
 });
 
+/**
+ * A team's state list is read leniently: a state type this build does not know
+ * is dropped from the list rather than failing the whole read, so a new Linear
+ * state type never blocks moving an issue to In Progress.
+ */
+const RawTeamWorkflowState = Schema.Struct({
+  ...RawWorkflowState.fields,
+  type: Schema.String,
+});
+
 const TeamStatesResult = Schema.Struct({
   team: Schema.NullOr(
-    Schema.Struct({ states: Schema.Struct({ nodes: Schema.Array(RawWorkflowState) }) }),
+    Schema.Struct({ states: Schema.Struct({ nodes: Schema.Array(RawTeamWorkflowState) }) }),
   ),
 });
+
+const isKnownWorkflowStateType = Schema.is(LinearWorkflowStateType);
 
 const IssueUpdateResult = Schema.Struct({
   issueUpdate: Schema.Struct({ success: Schema.Boolean }),
@@ -724,7 +736,9 @@ export const make = Effect.gen(function* () {
         detail: "Linear has no team with that id, or it is not visible to the connected user.",
       });
     }
-    return result.team.states.nodes;
+    return result.team.states.nodes.flatMap((state): LinearWorkflowState[] =>
+      isKnownWorkflowStateType(state.type) ? [{ ...state, type: state.type }] : [],
+    );
   });
 
   const updateIssueState = Effect.fn("LinearApi.updateIssueState")(function* (input: {

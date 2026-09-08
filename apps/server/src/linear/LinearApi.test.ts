@@ -428,6 +428,24 @@ it.effect("reads a team's workflow states", () => {
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("drops team states of a type this build does not know instead of failing", () => {
+  const known: ReadonlyArray<LinearWorkflowState> = [
+    { id: "state-1", name: "Todo", type: "unstarted", color: "#bec2c8", position: 0 },
+    { id: "state-2", name: "In Progress", type: "started", color: "#f2c94c", position: 1 },
+    { id: "state-3", name: "Duplicate", type: "duplicate", color: "#95a2b3", position: 5 },
+  ];
+  const unknown = { id: "state-4", name: "Parked", type: "parked", color: "#000000", position: 9 };
+  const { layer } = makeLayer({
+    response: () => Response.json({ data: { team: { states: { nodes: [...known, unknown] } } } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    assert.deepStrictEqual(yield* linear.workflowStates("team-1"), known);
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("fails the state move when Linear reports no success", () => {
   const { layer } = makeLayer({
     response: () => Response.json({ data: { issueUpdate: { success: false } } }),

@@ -101,6 +101,7 @@ const STATE_TYPE_RANK: Record<LinearWorkflowStateType, number> = {
   backlog: 3,
   completed: 4,
   canceled: 5,
+  duplicate: 6,
 };
 
 /** Linear's `0` means "no priority", which belongs last rather than ahead of urgent. */
