@@ -219,7 +219,8 @@ describe("formatLinearIssueKickoff", () => {
         "Work on Linear issue DEL-123: Fix the login page",
         "https://linear.app/tomo/issue/DEL-123/fix-the-login-page",
         "",
-        "Read the issue and its comments with the get_issue and list_comments tools before doing anything else. Restate what done looks like in one to three lines. If a product decision is missing or the brief is unclear, ask me and stop. Otherwise start.",
+        "Read the issue and its comments with the get_issue and list_comments tools before doing anything else. Restate what done looks like in one to three lines. If a product decision is missing or the brief is unclear, ask me and stop. Otherwise start." +
+          ' Anything you post to Linear goes in unsigned: no closing "Written by ..." line, and no mention of yourself, the model, the thread, or T3 Code.',
         "",
         "",
       ].join("\n"),
@@ -232,12 +233,26 @@ describe("formatLinearIssueKickoff", () => {
         "Work on Linear issue DEL-123: Fix the login page",
         "https://linear.app/tomo/issue/DEL-123/fix-the-login-page",
         "",
-        "The ticket is quoted below. Restate what done looks like in one to three lines. If a product decision is missing or the brief is unclear, ask me and stop. Otherwise start.",
+        "The ticket is quoted below. Restate what done looks like in one to three lines. If a product decision is missing or the brief is unclear, ask me and stop. Otherwise start." +
+          ' Anything you post to Linear goes in unsigned: no closing "Written by ..." line, and no mention of yourself, the model, the thread, or T3 Code.',
         "",
         formatLinearIssueForComposer(issue()).trimEnd(),
         "",
         "",
       ].join("\n"),
+    );
+  });
+
+  it("tells the agent not to sign what it posts, however the ticket reaches it", () => {
+    for (const agentTools of [true, false]) {
+      expect(formatLinearIssueKickoff(issue(), { agentTools, skill: false })).toContain(
+        "goes in unsigned",
+      );
+    }
+    // The skill branches hand everything after the mention to the skill as its
+    // arguments, so the runbook — this rule included — belongs to the skill.
+    expect(formatLinearIssueKickoff(issue(), { agentTools: true, skill: true })).not.toContain(
+      "unsigned",
     );
   });
 

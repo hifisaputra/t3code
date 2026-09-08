@@ -169,8 +169,10 @@ waiting before that. Turn the setting off if you would rather agents write to Li
 asking.
 
 Every read and write goes through the key you saved, so changes land in Linear as the connected
-user. Comments and edits an agent makes look like yours in Linear's history. Say in the issue or
-the comment when an agent wrote it, if the rest of your team needs to know.
+user. Comments and edits an agent makes look like yours in Linear's history, and a thread started
+from an issue is told to post unsigned — no footer naming the agent or T3 Code, since an agent
+that has just read a ticket's comments otherwise picks up the habit of signing. Whether the rest
+of your team is told an agent wrote it is your call: say so in the issue or the comment.
 
 The key itself never leaves the server. Agents call the tools, the server calls Linear.
 

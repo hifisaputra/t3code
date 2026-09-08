@@ -152,7 +152,7 @@ export const SaveCommentTool = linearTool(
       "Post a comment on a Linear issue as the connected user. The body is Linear-flavoured markdown. Pass issueId as an identifier such as DEL-123 or a Linear UUID; omit it and the issue this thread is linked to is commented on.",
     parameters: Schema.Struct({
       body: describedText(
-        "The comment body, in markdown, written for whoever reads the issue next.",
+        'The comment body, in markdown, written for whoever reads the issue next. Post it unsigned: no closing "Written by ..." line, and no mention of the agent, the model, or T3 Code.',
       ),
       issueId: IssueIdParameter,
     }),

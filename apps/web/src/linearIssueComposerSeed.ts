@@ -82,6 +82,18 @@ const INSTRUCTION =
   "Restate what done looks like in one to three lines. If a product decision is missing or the brief is unclear, ask me and stop. Otherwise start.";
 
 /**
+ * Comments and issue edits go in unsigned.
+ *
+ * An agent that just read a ticket's comments writes in their style, and a
+ * closing "written by" line is the one part of that style nobody asked for.
+ * The write already lands as the connected user, so the footer tells the team
+ * nothing except that a robot typed it — and it is the person's call, not the
+ * agent's, whether the team is told that.
+ */
+const NO_ATTRIBUTION =
+  'Anything you post to Linear goes in unsigned: no closing "Written by ..." line, and no mention of yourself, the model, the thread, or T3 Code.';
+
+/**
  * Whether any provider on this server can run the `linear-work` skill, so the
  * kickoff may mention it.
  *
@@ -110,7 +122,9 @@ export function hasLinearWorkSkill(
  * The skill mention leads the prompt because Claude Code turns the last known
  * `$name` into `/name <everything after it>`, and that trailing text becomes
  * the skill's ARGUMENTS. Putting the identifier and URL on the mention's own
- * line and the line below hands the skill the issue it is about.
+ * line and the line below hands the skill the issue it is about — and keeps
+ * the runbook, {@link NO_ATTRIBUTION} included, out of those arguments. A
+ * skill that owns the runbook owns that rule too.
  *
  * The fenced ticket (see {@link formatLinearIssueForComposer}) only comes back
  * when the agent has no Linear tools: with `get_issue` and `list_comments` the
@@ -132,14 +146,14 @@ export function formatLinearIssueKickoff(
     if (!options.skill) {
       lines.push(
         "",
-        `Read the issue and its comments with the get_issue and list_comments tools before doing anything else. ${INSTRUCTION}`,
+        `Read the issue and its comments with the get_issue and list_comments tools before doing anything else. ${INSTRUCTION} ${NO_ATTRIBUTION}`,
       );
     }
     return `${lines.join("\n")}\n\n`;
   }
 
   if (!options.skill) {
-    lines.push("", `The ticket is quoted below. ${INSTRUCTION}`);
+    lines.push("", `The ticket is quoted below. ${INSTRUCTION} ${NO_ATTRIBUTION}`);
   }
   return `${lines.join("\n")}\n\n${formatLinearIssueForComposer(issue)}`;
 }
