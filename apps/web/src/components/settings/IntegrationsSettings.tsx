@@ -1,9 +1,9 @@
+import { useSettingsSearchTargetId } from "./settingsLayout";
 import { GoogleCalendarSettingsSection } from "./GoogleCalendarSettings";
 /**
  * Integrations settings - preferences for surfaces T3 Code embeds rather than
- * owns. Browser is the first section: the defaults a preview tab opens at,
- * applied to both hand-opened tabs and agent `preview_open` calls that don't
- * state their own size. Linear follows it, and lives in its own module.
+ * owns. Each integration has its own view. Browser defaults apply to both
+ * hand-opened tabs and agent preview calls that do not specify their own size.
  *
  * @module IntegrationsSettings
  */
@@ -1168,6 +1168,16 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
 }
 
 export function IntegrationsSettingsPanel() {
+  const target = useSettingsSearchTargetId();
+  const [active, setActive] = useState("linear");
+  const [previousTarget, setPreviousTarget] = useState<string | null>(null);
+  if (target !== previousTarget) {
+    setPreviousTarget(target);
+    if (target?.startsWith("linear")) setActive("linear");
+    else if (target?.startsWith("google-calendar")) setActive("google-calendar");
+    else if (target?.startsWith("browser") || target === "agent-browser-access")
+      setActive("browser");
+  }
   // Client-local preview defaults are editable only where the preview exists.
   const previewDefaultsDisabled = !isElectron;
   const previewDefaults = (
@@ -1184,19 +1194,48 @@ export function IntegrationsSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      <SettingsSection id="browser" title="Browser">
-        {/* Server-authoritative, so it stays editable on any client anchored to
+      <div className="space-y-3 px-3 sm:px-4">
+        <p className="text-sm text-muted-foreground">
+          Manage connections and choose how agents use them.
+        </p>
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Choose an integration">
+          {[
+            { id: "linear", title: "Linear" },
+            { id: "google-calendar", title: "Google Calendar" },
+            { id: "browser", title: "Browser" },
+          ].map((integration) => (
+            <Button
+              key={integration.id}
+              size="sm"
+              variant={active === integration.id ? "secondary" : "ghost"}
+              aria-pressed={active === integration.id}
+              aria-controls={`integration-${integration.id}`}
+              onClick={() => setActive(integration.id)}
+            >
+              {integration.title}
+            </Button>
+          ))}
+        </div>
+      </div>
+      <div id="integration-browser" hidden={active !== "browser"}>
+        <SettingsSection id="browser" title="Browser">
+          {/* Server-authoritative, so it stays editable on any client anchored to
             a server; `serverScoped` covers the hosted app, which has none. It
             sits outside the block covering the desktop-only defaults. */}
-        <AgentBrowserAccessSetting />
-        {previewDefaultsDisabled ? (
-          <DesktopOnlyBrowserDefaults>{previewDefaults}</DesktopOnlyBrowserDefaults>
-        ) : (
-          previewDefaults
-        )}
-      </SettingsSection>
-      <LinearSettingsSection />
-      <GoogleCalendarSettingsSection />
+          <AgentBrowserAccessSetting />
+          {previewDefaultsDisabled ? (
+            <DesktopOnlyBrowserDefaults>{previewDefaults}</DesktopOnlyBrowserDefaults>
+          ) : (
+            previewDefaults
+          )}
+        </SettingsSection>
+      </div>
+      <div id="integration-linear" hidden={active !== "linear"}>
+        <LinearSettingsSection />
+      </div>
+      <div id="integration-google-calendar" hidden={active !== "google-calendar"}>
+        <GoogleCalendarSettingsSection />
+      </div>
     </SettingsPageContainer>
   );
 }

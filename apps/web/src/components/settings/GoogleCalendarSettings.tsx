@@ -1,3 +1,4 @@
+import { IntegrationSetup } from "./IntegrationSetup";
 import { usePrimarySettings } from "~/hooks/useSettings";
 import { serverEnvironment } from "~/state/server";
 import { Input } from "../ui/input";
@@ -12,6 +13,7 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 export function GoogleCalendarSettingsSection() {
   const environmentId = usePrimaryEnvironment()?.environmentId ?? null;
+  const oauth = usePrimarySettings((s) => s.googleCalendar);
   const status = useEnvironmentQuery(
     environmentId ? calendar.status({ environmentId, input: {} }) : null,
   );
@@ -23,13 +25,6 @@ export function GoogleCalendarSettingsSection() {
 
   return (
     <SettingsSection id="google-calendar" title="Google Calendar">
-      <GoogleOAuthSettings
-        key={environmentId}
-        onSaved={() => {
-          setAuthorizationUrl(null);
-          status.refresh();
-        }}
-      />
       <SettingsRow
         serverScoped
         title="Connection"
@@ -95,7 +90,7 @@ export function GoogleCalendarSettingsSection() {
               : !environmentId
                 ? "Connect to an environment first."
                 : !status.data?.configured
-                  ? "Save the Google OAuth client ID, secret, and callback URL above to enable Connect."
+                  ? "Open OAuth application setup below to configure your Google client."
                   : status.data.connected
                     ? "Connected. Open Issues → Agenda to plan your work."
                     : "Not connected.")}
@@ -122,6 +117,18 @@ export function GoogleCalendarSettingsSection() {
           </div>
         ) : null}
       </SettingsRow>
+      <IntegrationSetup
+        title="OAuth application setup"
+        configured={Boolean(oauth.clientId && oauth.clientSecret && oauth.redirectUri)}
+      >
+        <GoogleOAuthSettings
+          key={environmentId}
+          onSaved={() => {
+            setAuthorizationUrl(null);
+            status.refresh();
+          }}
+        />
+      </IntegrationSetup>
     </SettingsSection>
   );
 }

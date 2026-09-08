@@ -1,3 +1,4 @@
+import { IntegrationSetup } from "./IntegrationSetup";
 import { searchableSetting } from "./settingsSearch";
 import { DEFAULT_CLIENT_SETTINGS, type LinearDelegationSettings } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -62,28 +63,6 @@ export function LinearDelegationSettingsSection() {
           />
         }
       />
-      <DelegationField
-        title="Public environment URL"
-        value={saved.publicUrl}
-        onSave={(publicUrl) => patch({ publicUrl })}
-      />
-      <DelegationField
-        title="Linear app client ID"
-        value={saved.clientId}
-        onSave={(clientId) => patch({ clientId })}
-      />
-      <DelegationField
-        title="Linear app client secret"
-        secret
-        value={saved.clientSecret}
-        onSave={(clientSecret) => patch({ clientSecret })}
-      />
-      <DelegationField
-        title="Linear webhook secret"
-        secret
-        value={saved.webhookSecret}
-        onSave={(webhookSecret) => patch({ webhookSecret })}
-      />
       <SettingsRow
         serverScoped
         title="Linear agent connection"
@@ -141,12 +120,6 @@ export function LinearDelegationSettingsSection() {
             status.error ??
             (status.data?.connected ? "Connected to Linear as an app." : "Not connected.")}
         </p>
-        {saved.publicUrl && (
-          <div className="mt-2 break-all text-xs text-muted-foreground">
-            <p>OAuth callback: {saved.publicUrl.replace(/\/$/, "")}/api/linear/oauth/callback</p>
-            <p>Webhook: {saved.publicUrl.replace(/\/$/, "")}/api/webhooks/linear</p>
-          </div>
-        )}
         {url && (
           <Button
             size="sm"
@@ -161,6 +134,44 @@ export function LinearDelegationSettingsSection() {
           </Button>
         )}
       </SettingsRow>
+      <IntegrationSetup
+        title="App credentials and endpoints"
+        configured={Boolean(
+          saved.clientId && saved.clientSecret && saved.webhookSecret && saved.publicUrl,
+        )}
+      >
+        <DelegationField
+          title="Public environment URL"
+          value={saved.publicUrl}
+          onSave={(publicUrl) => patch({ publicUrl })}
+        />
+        <DelegationField
+          title="Linear app client ID"
+          value={saved.clientId}
+          onSave={(clientId) => patch({ clientId })}
+        />
+        <DelegationField
+          title="Linear app client secret"
+          secret
+          value={saved.clientSecret}
+          onSave={(clientSecret) => patch({ clientSecret })}
+        />
+        <DelegationField
+          title="Linear webhook secret"
+          secret
+          value={saved.webhookSecret}
+          onSave={(webhookSecret) => patch({ webhookSecret })}
+        />
+        <div className="px-3 py-3 sm:px-4">
+          {" "}
+          {saved.publicUrl && (
+            <div className="mt-2 break-all text-xs text-muted-foreground">
+              <p>OAuth callback: {saved.publicUrl.replace(/\/$/, "")}/api/linear/oauth/callback</p>
+              <p>Webhook: {saved.publicUrl.replace(/\/$/, "")}/api/webhooks/linear</p>
+            </div>
+          )}
+        </div>
+      </IntegrationSetup>
       <SettingsRow
         serverScoped
         title="Delegation model"

@@ -70,24 +70,32 @@ export function LinearSettingsSection() {
   }, [refreshStatus, storedKey]);
 
   return (
-    <SettingsSection id="linear" title="Linear">
-      <LinearApiKeySetting storedKey={storedKey} />
-      <LinearConnectionSetting
-        hasEnvironment={environmentId !== null}
-        data={status.data}
-        error={status.error}
-        isPending={status.isPending}
-        onCheckAgain={refreshStatus}
-      />
-      {environmentId !== null && status.data?.status === "connected" ? (
-        <LinearRepositoriesSetting environmentId={environmentId} />
-      ) : null}
-      <LinearBranchNamingSetting />
-      <LinearMoveToStartedSetting />
-      <LinearAgentAccessSetting />
-      <LinearConfirmWritesSetting />
-      <LinearDelegationSettingsSection />
-    </SettingsSection>
+    <div className="space-y-6">
+      <SettingsSection id="linear" title="Personal connection">
+        <LinearApiKeySetting storedKey={storedKey} />
+        <LinearConnectionSetting
+          hasEnvironment={environmentId !== null}
+          data={status.data}
+          error={status.error}
+          isPending={status.isPending}
+          onCheckAgain={refreshStatus}
+        />
+      </SettingsSection>
+      <SettingsSection title="Repositories and branches">
+        {environmentId !== null && status.data?.status === "connected" ? (
+          <LinearRepositoriesSetting environmentId={environmentId} />
+        ) : null}
+        <LinearBranchNamingSetting />
+        <LinearMoveToStartedSetting />
+      </SettingsSection>
+      <SettingsSection title="Agent permissions">
+        <LinearAgentAccessSetting />
+        <LinearConfirmWritesSetting />
+      </SettingsSection>
+      <SettingsSection title="Inbound delegation">
+        <LinearDelegationSettingsSection />
+      </SettingsSection>
+    </div>
   );
 }
 
