@@ -30,8 +30,11 @@ repository's own convention instead. Either way the branch carries the issue ide
 links the pull request to the issue by itself and moves the issue through In Review and Done as
 the pull request progresses. You do not have to paste the identifier anywhere.
 
-The composer opens with the ticket already in it: identifier, title, URL, description, and
-comments, with a blank line for your own instruction.
+The composer opens with a short instruction naming the issue, not the ticket text. Press Enter
+and the agent reads the ticket and its comments through its Linear tools, restates what done looks
+like, and then either starts or asks you the question the brief left open. Add your own note under
+the instruction first if you have one. When agent access is off, the ticket text itself is quoted
+in the message instead, since the agent has no way to read it.
 
 The issue also moves to the first started state on its team, usually **In Progress**. Turn that
 off with **Move issue to In Progress when a thread starts** in **Settings → Integrations →
@@ -159,6 +162,18 @@ The key itself never leaves the server. Agents call the tools, the server calls 
 
 Agent browser access is a separate setting, with its own toggle. Turning one on does not turn on
 the other.
+
+### Give agents a runbook
+
+The `linear-work` skill is the runbook for working a ticket: read everything before deciding
+anything, restate what done looks like, ask and stop when a product decision is missing, post one
+plan comment and then stay quiet until the pull request, file follow-ups as sub-issues, and never
+set an issue to Done. When it is installed for a provider, the kickoff message mentions it as
+`$linear-work` so the agent follows it from the first turn.
+
+Install it by copying the skill directory to `~/.claude/skills/linear-work` for Claude Code, or to
+`~/.codex/skills/linear-work` for Codex. Without it the kickoff spells out the same first steps
+inline, so threads still start the same way.
 
 ## Replace or remove the key
 

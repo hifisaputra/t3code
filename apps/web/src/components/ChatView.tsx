@@ -328,7 +328,7 @@ import { createPageScrollController, type PageScrollKey } from "./chat/pageScrol
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { LinearIssueThreadDialog } from "./LinearIssueThreadDialog";
-import { formatLinearIssueForComposer } from "../linearIssueComposerSeed";
+import { formatLinearIssueKickoff, hasLinearWorkSkill } from "../linearIssueComposerSeed";
 import { subscribeLinearIssueDialogRequest } from "../linearIssueDialogBus";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
@@ -2347,10 +2347,21 @@ export default function ChatView(props: ChatViewProps) {
       project: EnvironmentProject;
     }) => {
       const envMode = input.worktreePath ? "worktree" : "local";
-      // Prepending keeps anything already typed: the ticket is context, and
-      // the person's own instruction belongs after it.
+      // The issue's own server decides the kickoff: it owns the Linear key and
+      // the toggle that gives the agent tools, and it discovered the skills.
+      // The mapping can send the work to another server than the one on screen.
+      const config = environmentById.get(input.project.environmentId)?.serverConfig ?? null;
+      const linear = config?.settings.linear;
+      // Prepending keeps anything already typed: the kickoff is the
+      // instruction, and the person's own note belongs after it.
       const seedComposer = (targetDraftId: DraftId) => {
-        const seed = formatLinearIssueForComposer(input.issue);
+        const seed = formatLinearIssueKickoff(input.issue, {
+          agentTools: (linear?.agentAccess ?? false) && (linear?.apiKey ?? "").length > 0,
+          skill: hasLinearWorkSkill(
+            config?.providers ?? [],
+            input.worktreePath ?? input.project.workspaceRoot,
+          ),
+        });
         const existing =
           useComposerDraftStore.getState().getComposerDraft(targetDraftId)?.prompt ?? "";
         setComposerDraftPrompt(targetDraftId, existing.length > 0 ? seed + existing : seed);
@@ -2394,6 +2405,7 @@ export default function ChatView(props: ChatViewProps) {
     },
     [
       activeProject,
+      environmentById,
       getDraftSessionByLogicalProjectKey,
       handleNewThread,
       openOrReuseProjectDraftThread,

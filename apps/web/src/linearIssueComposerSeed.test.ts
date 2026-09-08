@@ -1,7 +1,12 @@
-import type { LinearIssueDetail } from "@t3tools/contracts";
+import type { LinearIssueDetail, ServerProvider } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { formatLinearIssueForComposer } from "./linearIssueComposerSeed";
+import {
+  formatLinearIssueForComposer,
+  formatLinearIssueKickoff,
+  hasLinearWorkSkill,
+} from "./linearIssueComposerSeed";
 
 function issue(overrides: Partial<LinearIssueDetail> = {}): LinearIssueDetail {
   return {
@@ -129,5 +134,131 @@ describe("formatLinearIssueForComposer", () => {
     const seed = formatLinearIssueForComposer(issue({ description: "```ts\nconst a = 1;\n```" }));
     expect(seed.startsWith("````linear-issue\n")).toBe(true);
     expect(seed.endsWith("````\n\n")).toBe(true);
+  });
+});
+
+function provider(overrides: Partial<ServerProvider> = {}): ServerProvider {
+  return {
+    instanceId: ProviderInstanceId.make("claude"),
+    driver: ProviderDriverKind.make("claude"),
+    enabled: true,
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-09-07T10:00:00.000Z",
+    models: [],
+    slashCommands: [],
+    skills: [],
+    ...overrides,
+  };
+}
+
+function skill(overrides: Partial<ServerProvider["skills"][number]> = {}) {
+  return {
+    name: "linear-work",
+    path: "/home/dev/.claude/skills/linear-work/SKILL.md",
+    enabled: true,
+    ...overrides,
+  };
+}
+
+describe("hasLinearWorkSkill", () => {
+  it("finds the skill on any provider", () => {
+    expect(hasLinearWorkSkill([provider(), provider({ skills: [skill()] })])).toBe(true);
+  });
+
+  it("is false when no provider knows it", () => {
+    expect(hasLinearWorkSkill([])).toBe(false);
+    expect(hasLinearWorkSkill([provider({ skills: [skill({ name: "linear-task" })] })])).toBe(
+      false,
+    );
+  });
+
+  it("ignores a skill the mention could not start", () => {
+    expect(hasLinearWorkSkill([provider({ skills: [skill({ enabled: false })] })])).toBe(false);
+    expect(hasLinearWorkSkill([provider({ skills: [skill({ userInvocable: false })] })])).toBe(
+      false,
+    );
+  });
+
+  it("prefers the workspace snapshot for the checkout the thread runs in", () => {
+    const providers = [
+      provider({
+        skills: [],
+        workspaceSnapshots: [
+          {
+            cwd: "/repos/app",
+            checkedAt: "2026-09-07T10:00:00.000Z",
+            slashCommands: [],
+            skills: [skill()],
+          },
+        ],
+      }),
+    ];
+    expect(hasLinearWorkSkill(providers, "/repos/app")).toBe(true);
+    expect(hasLinearWorkSkill(providers, "/repos/other")).toBe(false);
+  });
+});
+
+describe("formatLinearIssueKickoff", () => {
+  it("leads with the skill mention so the issue becomes its arguments", () => {
+    expect(formatLinearIssueKickoff(issue(), { agentTools: true, skill: true })).toBe(
+      [
+        "$linear-work DEL-123: Fix the login page",
+        "https://linear.app/tomo/issue/DEL-123/fix-the-login-page",
+        "",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("spells out the runbook when the skill is not installed", () => {
+    expect(formatLinearIssueKickoff(issue(), { agentTools: true, skill: false })).toBe(
+      [
+        "Work on Linear issue DEL-123: Fix the login page",
+        "https://linear.app/tomo/issue/DEL-123/fix-the-login-page",
+        "",
+        "Read the issue and its comments with the get_issue and list_comments tools before doing anything else. Restate what done looks like in one to three lines. If a product decision is missing or the brief is unclear, ask me and stop. Otherwise start.",
+        "",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("quotes the ticket when the agent has no Linear tools", () => {
+    expect(formatLinearIssueKickoff(issue(), { agentTools: false, skill: false })).toBe(
+      [
+        "Work on Linear issue DEL-123: Fix the login page",
+        "https://linear.app/tomo/issue/DEL-123/fix-the-login-page",
+        "",
+        "The ticket is quoted below. Restate what done looks like in one to three lines. If a product decision is missing or the brief is unclear, ask me and stop. Otherwise start.",
+        "",
+        formatLinearIssueForComposer(issue()).trimEnd(),
+        "",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps the mention above the quoted ticket when both apply", () => {
+    expect(formatLinearIssueKickoff(issue(), { agentTools: false, skill: true })).toBe(
+      [
+        "$linear-work DEL-123: Fix the login page",
+        "https://linear.app/tomo/issue/DEL-123/fix-the-login-page",
+        "",
+        formatLinearIssueForComposer(issue()).trimEnd(),
+        "",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("never quotes the ticket when the agent can read it itself", () => {
+    for (const withSkill of [true, false]) {
+      const seed = formatLinearIssueKickoff(issue(), { agentTools: true, skill: withSkill });
+      expect(seed).not.toContain("linear-issue");
+      expect(seed).not.toContain("The login button does nothing on Safari.");
+    }
   });
 });

@@ -1,4 +1,8 @@
-import type { LinearIssueDetail } from "@t3tools/contracts";
+import {
+  isProviderSkillUserInvocable,
+  resolveProviderSkillsForCwd,
+} from "@t3tools/client-runtime/providerSkills";
+import type { LinearIssueDetail, ServerProvider } from "@t3tools/contracts";
 
 /**
  * The ticket, as the composer seeds it when a thread starts from a Linear
@@ -10,8 +14,8 @@ import type { LinearIssueDetail } from "@t3tools/contracts";
  * instruction.
  *
  * Descriptions and comment threads on a long-running ticket can dwarf the rest
- * of a turn, so both are capped: the agent has `get_issue` (phase 4) or the URL
- * for the rest.
+ * of a turn, so both are capped: the agent has the URL for the rest. Only the
+ * no-tools kickoff quotes this; see {@link formatLinearIssueKickoff}.
  */
 
 const DESCRIPTION_LIMIT = 6000;
@@ -69,4 +73,72 @@ export function formatLinearIssueForComposer(issue: LinearIssueDetail): string {
   const body = lines.join("\n");
   const fence = fenceFor(body);
   return `${fence}linear-issue\n${body}\n${fence}\n\n`;
+}
+
+/** The runbook a thread started from an issue should follow when it is installed. */
+export const LINEAR_WORK_SKILL_NAME = "linear-work";
+
+const INSTRUCTION =
+  "Restate what done looks like in one to three lines. If a product decision is missing or the brief is unclear, ask me and stop. Otherwise start.";
+
+/**
+ * Whether any provider on this server can run the `linear-work` skill, so the
+ * kickoff may mention it.
+ *
+ * A mention only dispatches for a skill the provider actually discovered and
+ * left invocable (see `planClaudeSkillDispatch` on the server); an unknown
+ * `$name` stays literal text in the prompt, which reads as noise.
+ */
+export function hasLinearWorkSkill(
+  providers: ReadonlyArray<ServerProvider>,
+  cwd?: string | null,
+): boolean {
+  return providers.some((provider) =>
+    resolveProviderSkillsForCwd(provider, cwd).some(
+      (skill) =>
+        skill.name.trim().toLowerCase() === LINEAR_WORK_SKILL_NAME &&
+        isProviderSkillUserInvocable(skill),
+    ),
+  );
+}
+
+/**
+ * What the composer seeds when a thread starts from a Linear issue: an
+ * instruction to work the ticket, not the ticket itself.
+ *
+ * The skill mention leads the prompt because Claude Code turns the last known
+ * `$name` into `/name <everything after it>`, and that trailing text becomes
+ * the skill's ARGUMENTS. Putting the identifier and URL on the mention's own
+ * line and the line below hands the skill the issue it is about.
+ *
+ * The fenced ticket (see {@link formatLinearIssueForComposer}) only comes back
+ * when the agent has no Linear tools: with `get_issue` and `list_comments` the
+ * agent reads a fresher, complete ticket itself, and quoting a capped copy in
+ * the prompt would only spend the turn's context on a worse one.
+ *
+ * Two trailing newlines leave the caret below for the person's own note.
+ */
+export function formatLinearIssueKickoff(
+  issue: LinearIssueDetail,
+  options: { agentTools: boolean; skill: boolean },
+): string {
+  const heading = options.skill
+    ? `$${LINEAR_WORK_SKILL_NAME} ${issue.identifier}: ${issue.title}`
+    : `Work on Linear issue ${issue.identifier}: ${issue.title}`;
+  const lines = [heading, issue.url];
+
+  if (options.agentTools) {
+    if (!options.skill) {
+      lines.push(
+        "",
+        `Read the issue and its comments with the get_issue and list_comments tools before doing anything else. ${INSTRUCTION}`,
+      );
+    }
+    return `${lines.join("\n")}\n\n`;
+  }
+
+  if (!options.skill) {
+    lines.push("", `The ticket is quoted below. ${INSTRUCTION}`);
+  }
+  return `${lines.join("\n")}\n\n${formatLinearIssueForComposer(issue)}`;
 }

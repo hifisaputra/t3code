@@ -60,7 +60,7 @@ import { useComposerDraftStore } from "../composerDraftStore";
 import { isElectron } from "../env";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { cn } from "../lib/utils";
-import { formatLinearIssueForComposer } from "../linearIssueComposerSeed";
+import { formatLinearIssueKickoff, hasLinearWorkSkill } from "../linearIssueComposerSeed";
 import { useProjects, useThreadShells } from "../state/entities";
 import { useEnvironments } from "../state/environments";
 import { linearEnvironment } from "../state/linear";
@@ -275,19 +275,32 @@ function IssuesRouteView() {
         toastManager.add({ type: "error", title: "Could not open a thread" });
         return;
       }
-      // Prepending keeps anything already typed: the ticket is context, and the
-      // person's own instruction belongs after it.
-      const seed = formatLinearIssueForComposer(input.issue);
+      // The issue's own server decides the kickoff: it owns the Linear key and
+      // the toggle that gives the agent tools, and it discovered the skills.
+      const config =
+        environments.find(
+          (environment) => environment.environmentId === input.project.environmentId,
+        )?.serverConfig ?? null;
+      const linear = config?.settings.linear;
+      // Prepending keeps anything already typed: the kickoff is the
+      // instruction, and the person's own note belongs after it.
+      const seed = formatLinearIssueKickoff(input.issue, {
+        agentTools: (linear?.agentAccess ?? false) && (linear?.apiKey ?? "").length > 0,
+        skill: hasLinearWorkSkill(
+          config?.providers ?? [],
+          input.worktreePath ?? input.project.workspaceRoot,
+        ),
+      });
       const existing =
         useComposerDraftStore.getState().getComposerDraft(session.draftId)?.prompt ?? "";
       setComposerDraftPrompt(session.draftId, existing.length > 0 ? seed + existing : seed);
       toastManager.add({
         type: "success",
         title: "Thread ready",
-        description: "The ticket is in the composer — read it over, then send.",
+        description: `Press Enter to start the agent on ${input.issue.identifier}.`,
       });
     },
-    [newThread, setComposerDraftPrompt],
+    [environments, newThread, setComposerDraftPrompt],
   );
 
   const filtered = Boolean(search.team || search.project || search.cycle || queryInput.trim());
