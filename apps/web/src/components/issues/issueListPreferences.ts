@@ -3,7 +3,7 @@ import * as Schema from "effect/Schema";
 import { EnvironmentId, type LinearWorkflowStateType } from "@t3tools/contracts";
 
 /**
- * Which of my issues the page lists. "open" is everything that is not done:
+ * Which issues the page lists. "open" is everything that is not done:
  * backlog, todo and in progress. The other three narrow to one workflow type.
  */
 export const IssueListStateFilter = Schema.Literals(["open", "active", "todo", "backlog"]);
@@ -33,6 +33,7 @@ export function issueListStateTypes(
  */
 export interface IssueListPreferences {
   readonly state: IssueListStateFilter;
+  readonly scope?: "all";
   readonly environmentId?: EnvironmentId;
   /** Team key, e.g. `DEL`. */
   readonly team?: string;
@@ -54,6 +55,7 @@ export const DEFAULT_ISSUE_LIST_PREFERENCES = {
 const BoundedPreference = Schema.String.check(Schema.isMaxLength(200));
 const IssueListPreferencesSchema = Schema.Struct({
   state: IssueListStateFilter,
+  scope: Schema.optional(Schema.Literal("all")),
   environmentId: Schema.optional(EnvironmentId),
   team: Schema.optional(BoundedPreference),
   project: Schema.optional(BoundedPreference),
@@ -77,6 +79,7 @@ export function issueListPreferences(
 ): IssueListPreferences {
   return {
     state: search.state,
+    ...(search.scope === "all" ? { scope: "all" as const } : {}),
     ...(search.environmentId ? { environmentId: search.environmentId } : {}),
     ...(search.team ? { team: search.team } : {}),
     ...(search.project ? { project: search.project } : {}),

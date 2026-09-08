@@ -325,6 +325,33 @@ it.effect("asks for the connected user's unstarted and started issues by default
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("lists all assignees when requested while preserving other filters", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { issues: { nodes: [issueSummary] } } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const result = yield* linear.listIssues({
+      assignedToMe: false,
+      teamKey: "DEL",
+      projectId: "project-1",
+      stateTypes: ["backlog", "unstarted", "started"],
+      limit: 100,
+    });
+
+    assert.strictEqual(result.issues[0]?.assignee, null);
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      filter: {
+        state: { type: { in: ["backlog", "unstarted", "started"] } },
+        team: { key: { eq: "DEL" } },
+        project: { id: { eq: "project-1" } },
+      },
+      first: 100,
+    });
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("filters by team and clamps the requested page size", () => {
   const { execute, layer } = makeLayer({
     response: () => Response.json({ data: { issues: { nodes: [] } } }),

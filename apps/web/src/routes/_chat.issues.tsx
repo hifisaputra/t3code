@@ -50,6 +50,7 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import { SidebarInset } from "../components/ui/sidebar";
+import { Switch } from "../components/ui/switch";
 import { Spinner } from "../components/ui/spinner";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { isElectron } from "../env";
@@ -96,6 +97,7 @@ export const Route = createFileRoute("/_chat/issues")({
       ...(typeof raw.environmentId === "string" && raw.environmentId
         ? { environmentId: raw.environmentId as EnvironmentId }
         : {}),
+      ...(raw.scope === "all" ? { scope: "all" } : {}),
       ...(team ? { team } : {}),
       ...(project ? { project } : {}),
       ...(cycle ? { cycle } : {}),
@@ -142,7 +144,11 @@ function IssuesRouteView() {
     environmentId
       ? linearEnvironment.issues({
           environmentId,
-          input: { stateTypes: issueListStateTypes(search.state), limit: ISSUE_LIST_LIMIT },
+          input: {
+            stateTypes: issueListStateTypes(search.state),
+            limit: ISSUE_LIST_LIMIT,
+            assignedToMe: search.scope !== "all",
+          },
         })
       : null,
   );
@@ -185,6 +191,7 @@ function IssuesRouteView() {
           const next = { ...previous, ...patch };
           return {
             state: next.state ?? previous.state,
+            ...(next.scope === "all" ? { scope: "all" } : {}),
             ...(next.environmentId ? { environmentId: next.environmentId } : {}),
             ...(next.team ? { team: next.team } : {}),
             ...(next.project ? { project: next.project } : {}),
@@ -316,7 +323,9 @@ function IssuesRouteView() {
               <EmptyDescription>
                 {filtered
                   ? "Widen the team, project or cycle filter, or clear the search."
-                  : "No open issues assigned to you."}
+                  : search.scope === "all"
+                    ? "No issues in this state."
+                    : "No issues assigned to you in this state."}
               </EmptyDescription>
             </EmptyHeader>
             {filtered ? (
@@ -400,6 +409,14 @@ function IssuesRouteView() {
           they can wrap instead of overflowing a narrow window. */}
       {linearConfigured ? (
         <div className="flex flex-wrap items-center gap-2 border-border/60 border-b px-3 py-2 sm:px-5">
+          <label className="flex items-center gap-2 text-sm">
+            <Switch
+              checked={search.scope !== "all"}
+              onCheckedChange={(checked) => updateListScope({ scope: checked ? undefined : "all" })}
+              aria-label="Assigned to me only"
+            />
+            Assigned to me only
+          </label>
           <FilterSelect
             label="State"
             value={search.state}

@@ -207,8 +207,10 @@ export const LinearConnectionStatus = Schema.Union([
 ]);
 export type LinearConnectionStatus = typeof LinearConnectionStatus.Type;
 
-/** Issues assigned to the connected user, newest activity first. */
+/** Issues ordered by newest activity, assigned to the connected user by default. */
 export const LinearListIssuesInput = Schema.Struct({
+  /** Defaults to true; false includes other assignees and unassigned issues. */
+  assignedToMe: Schema.optional(Schema.Boolean),
   teamKey: Schema.optional(TrimmedNonEmptyString),
   /** Defaults to `unstarted` and `started` when absent. */
   stateTypes: Schema.optional(Schema.Array(LinearWorkflowStateType)),

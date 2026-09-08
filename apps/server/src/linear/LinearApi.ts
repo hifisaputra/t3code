@@ -686,7 +686,7 @@ export const make = Effect.gen(function* () {
       query: LIST_ISSUES_QUERY,
       variables: {
         filter: {
-          assignee: { isMe: { eq: true } },
+          ...(input.assignedToMe !== false ? { assignee: { isMe: { eq: true } } } : {}),
           state: { type: { in: stateTypes } },
           ...(input.teamKey !== undefined ? { team: { key: { eq: input.teamKey } } } : {}),
           ...(input.projectId !== undefined ? { project: { id: { eq: input.projectId } } } : {}),
