@@ -50,15 +50,12 @@ The server operator must configure a Google OAuth **Web application** client bef
 
 1. Enable the Google Calendar API in a Google Cloud project and configure its OAuth consent screen. For a testing app, add your Google account as a test user.
 2. Create an OAuth client of type **Web application**. Register the exact callback URL of your T3 server, for example `https://t3.example.com/oauth/google-calendar/callback`.
-3. Set these environment variables on the T3 server process:
+3. Open **Settings → Integrations → Google Calendar**. Under **Google OAuth application**, enter the client ID, client secret, and callback URL, then select **Save**.
+4. Select **Connect**, continue to Google, and allow access. Return to Settings and select **Refresh**.
 
-   ```dotenv
-   T3CODE_GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-   T3CODE_GOOGLE_CLIENT_SECRET=your-client-secret
-   T3CODE_GOOGLE_REDIRECT_URI=https://t3.example.com/oauth/google-calendar/callback
-   ```
+The client secret stays in the server secret store. Leave its field blank to keep the saved secret, or use **Remove secret** to disable the configuration. Changes apply without restarting the server. Changing the client ID requires reconnecting Google.
 
-4. Restart the server, then connect from T3 settings.
+If you previously configured `T3CODE_GOOGLE_CLIENT_ID`, `T3CODE_GOOGLE_CLIENT_SECRET`, and `T3CODE_GOOGLE_REDIRECT_URI`, copy their values into these settings and reconnect once. Those environment variables are no longer used.
 
 Use an HTTPS callback reachable from the browser where you sign in. A localhost callback is suitable only when that browser can reach the server on localhost. For a remote or relay client, the callback must still route to the owning server's `/oauth/google-calendar/callback` endpoint; it must not point to the hosted client. Forward this path through your reverse proxy.
 

@@ -406,7 +406,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "google-calendar",
     title: "Google Calendar",
     to: "/settings/integrations",
-    searchTerms: ["calendar agenda scheduling google oauth time blocks"],
+    searchTerms: [
+      "calendar agenda scheduling google oauth time blocks client id secret callback redirect credentials",
+    ],
   },
   {
     id: "linear-api-key",

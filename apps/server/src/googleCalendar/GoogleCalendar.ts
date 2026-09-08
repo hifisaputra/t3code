@@ -1,6 +1,5 @@
 import * as NodeCrypto from "node:crypto";
 import * as Clock from "effect/Clock";
-import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -15,6 +14,7 @@ import {
   type GoogleCalendarUpdateInput,
 } from "@t3tools/contracts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import { LinearApi } from "../linear/LinearApi.ts";
 
 const SECRET = "google-calendar-oauth";
@@ -25,6 +25,7 @@ const SCOPES = [
 ];
 const fail = (message: string) => new GoogleCalendarError({ message });
 const Tokens = Schema.Struct({
+  clientId: Schema.optional(Schema.String),
   refreshToken: Schema.String,
   accessToken: Schema.String,
   expiresAt: Schema.Number,
@@ -123,16 +124,37 @@ export const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore;
   const linear = yield* LinearApi;
   const http = yield* HttpClient.HttpClient;
-  const clientId = yield* Config.string("T3CODE_GOOGLE_CLIENT_ID").pipe(Config.withDefault(""));
-  const clientSecret = yield* Config.string("T3CODE_GOOGLE_CLIENT_SECRET").pipe(
-    Config.withDefault(""),
+  const settings = yield* ServerSettingsService;
+  const configuration = settings.getSettings.pipe(
+    Effect.map((value) => value.googleCalendar),
+    Effect.mapError(() => fail("Could not read Google Calendar settings.")),
   );
-  const redirectUri = yield* Config.string("T3CODE_GOOGLE_REDIRECT_URI").pipe(
-    Config.withDefault(""),
-  );
-  const configured = Boolean(clientId && clientSecret && redirectUri);
+  const configured = (config: { clientId: string; clientSecret: string; redirectUri: string }) => {
+    if (!config.clientId || !config.clientSecret || !config.redirectUri) return false;
+    try {
+      const url = new URL(config.redirectUri);
+      return (
+        !url.username &&
+        !url.password &&
+        !url.hash &&
+        (url.protocol === "https:" ||
+          (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))
+      );
+    } catch {
+      return false;
+    }
+  };
+  const fingerprint = (config: { clientId: string; clientSecret: string; redirectUri: string }) =>
+    NodeCrypto.createHash("sha256")
+      .update(config.clientId)
+      .update("\0")
+      .update(config.clientSecret)
+      .update("\0")
+      .update(config.redirectUri)
+      .digest("hex");
   const lock = yield* Semaphore.make(1);
-  let pending: { state: string; verifier: string; expiresAt: number } | null = null;
+  let pending: { state: string; verifier: string; expiresAt: number; fingerprint: string } | null =
+    null;
 
   const readTokens = Effect.fn("GoogleCalendar.readTokens")(function* () {
     const value = yield* secrets
@@ -149,14 +171,15 @@ export const make = Effect.gen(function* () {
       .pipe(Effect.mapError(() => fail("Could not save the Google Calendar connection.")));
 
   const exchange = Effect.fn("GoogleCalendar.exchange")(function* (
+    config: { clientId: string; clientSecret: string },
     parameters: Record<string, string>,
   ) {
     const response = yield* http
       .execute(
         HttpClientRequest.post("https://oauth2.googleapis.com/token").pipe(
           HttpClientRequest.bodyUrlParams({
-            client_id: clientId,
-            client_secret: clientSecret,
+            client_id: config.clientId,
+            client_secret: config.clientSecret,
             ...parameters,
           }),
         ),
@@ -176,17 +199,20 @@ export const make = Effect.gen(function* () {
 
   const accessToken = lock.withPermits(1)(
     Effect.gen(function* () {
-      if (!configured)
+      const config = yield* configuration;
+      if (!configured(config))
         return yield* fail("Google Calendar OAuth is not configured on this server.");
       const tokens = yield* readTokens();
-      if (!tokens) return yield* fail("Connect Google Calendar in Settings → Integrations.");
+      if (!tokens || tokens.clientId !== config.clientId)
+        return yield* fail("Connect Google Calendar in Settings → Integrations.");
       const now = yield* Clock.currentTimeMillis;
       if (tokens.expiresAt > now + 60_000) return tokens.accessToken;
-      const result = yield* exchange({
+      const result = yield* exchange(config, {
         grant_type: "refresh_token",
         refresh_token: tokens.refreshToken,
       });
       yield* saveTokens({
+        clientId: config.clientId,
         refreshToken: result.refresh_token ?? tokens.refreshToken,
         accessToken: result.access_token,
         expiresAt: now + result.expires_in * 1000,
@@ -265,19 +291,30 @@ export const make = Effect.gen(function* () {
 
   return {
     status: Effect.gen(function* () {
-      return { configured, connected: (yield* readTokens()) !== null };
+      const config = yield* configuration;
+      const tokens = yield* readTokens();
+      return {
+        configured: configured(config),
+        connected: configured(config) && tokens !== null && tokens.clientId === config.clientId,
+      };
     }),
     authorize: lock.withPermits(1)(
       Effect.gen(function* () {
-        if (!configured)
+        const config = yield* configuration;
+        if (!configured(config))
           return yield* fail("Google Calendar OAuth is not configured on this server.");
         const verifier = NodeCrypto.randomBytes(32).toString("base64url");
         const state = NodeCrypto.randomBytes(32).toString("base64url");
-        pending = { state, verifier, expiresAt: (yield* Clock.currentTimeMillis) + 10 * 60_000 };
+        pending = {
+          state,
+          verifier,
+          fingerprint: fingerprint(config),
+          expiresAt: (yield* Clock.currentTimeMillis) + 10 * 60_000,
+        };
         const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
         url.search = new URLSearchParams({
-          client_id: clientId,
-          redirect_uri: redirectUri,
+          client_id: config.clientId,
+          redirect_uri: config.redirectUri,
           response_type: "code",
           scope: SCOPES.join(" "),
           access_type: "offline",
@@ -298,16 +335,22 @@ export const make = Effect.gen(function* () {
             pending.expiresAt <= (yield* Clock.currentTimeMillis)
           )
             return yield* fail("This connection request expired. Start again from T3 settings.");
-          const verifier = pending.verifier;
+          const request = pending;
+          const verifier = request.verifier;
           pending = null;
+          const config = yield* configuration;
+          if (!configured(config) || request.fingerprint !== fingerprint(config))
+            return yield* fail(
+              "Google Calendar settings changed. Start connecting again from Settings.",
+            );
           if (!code)
             return yield* fail(
               "Google Calendar connection was cancelled. You can try again from T3 settings.",
             );
-          const result = yield* exchange({
+          const result = yield* exchange(config, {
             grant_type: "authorization_code",
             code,
-            redirect_uri: redirectUri,
+            redirect_uri: config.redirectUri,
             code_verifier: verifier,
           });
           if (!result.refresh_token)
@@ -315,6 +358,7 @@ export const make = Effect.gen(function* () {
               "Google did not grant offline access. Reconnect and allow calendar access.",
             );
           yield* saveTokens({
+            clientId: config.clientId,
             refreshToken: result.refresh_token,
             accessToken: result.access_token,
             expiresAt: (yield* Clock.currentTimeMillis) + result.expires_in * 1000,

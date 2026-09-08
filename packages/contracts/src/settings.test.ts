@@ -753,3 +753,16 @@ describe("ServerSettings linear repositories", () => {
     expect(patch.linear).toEqual({ repositories: [] });
   });
 });
+
+describe("Google Calendar OAuth settings", () => {
+  it("defaults to unconfigured and allows partial patches", () => {
+    expect(decodeServerSettings({}).googleCalendar).toEqual({
+      clientId: "",
+      clientSecret: "",
+      redirectUri: "",
+    });
+    expect(
+      decodeServerSettingsPatch({ googleCalendar: { clientSecret: "" } }).googleCalendar,
+    ).toEqual({ clientSecret: "" });
+  });
+});

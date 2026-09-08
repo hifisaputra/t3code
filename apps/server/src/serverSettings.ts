@@ -187,6 +187,10 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
     ...settings,
     providerInstances,
     usageLimitSources,
+    googleCalendar: {
+      ...settings.googleCalendar,
+      clientSecret: settings.googleCalendar.clientSecret ? SERVER_SECRET_REDACTED_MARKER : "",
+    },
     linear: {
       ...settings.linear,
       delegation: {
@@ -588,6 +592,17 @@ const make = Effect.gen(function* () {
             )
           : settings.linear.apiKey;
 
+      const googleCalendar = { ...settings.googleCalendar };
+      if (googleCalendar.clientSecret === SERVER_SECRET_REDACTED_MARKER) {
+        const secret = yield* secretStore
+          .get("google-calendar-client-secret")
+          .pipe(
+            Effect.mapError(
+              (cause) => new ServerSettingsError({ settingsPath, operation: "read-secret", cause }),
+            ),
+          );
+        googleCalendar.clientSecret = Option.isSome(secret) ? textDecoder.decode(secret.value) : "";
+      }
       const delegation = { ...settings.linear.delegation };
       for (const field of ["clientSecret", "webhookSecret"] as const) {
         if (delegation[field] === SERVER_SECRET_REDACTED_MARKER) {
@@ -606,6 +621,7 @@ const make = Effect.gen(function* () {
         ...settings,
         providerInstances: providerInstances as ServerSettings["providerInstances"],
         usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
+        googleCalendar,
         linear: { ...settings.linear, apiKey: linearApiKey, delegation },
       };
     });
@@ -797,6 +813,20 @@ const make = Effect.gen(function* () {
               );
       }
 
+      const googleCalendar = { ...next.googleCalendar };
+      const googleSecret = googleCalendar.clientSecret;
+      if (googleSecret !== SERVER_SECRET_REDACTED_MARKER) {
+        yield* (
+          googleSecret
+            ? secretStore.set("google-calendar-client-secret", textEncoder.encode(googleSecret))
+            : secretStore.remove("google-calendar-client-secret")
+        ).pipe(
+          Effect.mapError(
+            (cause) => new ServerSettingsError({ settingsPath, operation: "write-secret", cause }),
+          ),
+        );
+      }
+      googleCalendar.clientSecret = googleSecret ? SERVER_SECRET_REDACTED_MARKER : "";
       const delegation = { ...next.linear.delegation };
       for (const field of ["clientSecret", "webhookSecret"] as const) {
         const value = delegation[field];
@@ -818,6 +848,7 @@ const make = Effect.gen(function* () {
         ...next,
         providerInstances: providerInstances as ServerSettings["providerInstances"],
         usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
+        googleCalendar,
         linear: {
           ...next.linear,
           delegation,

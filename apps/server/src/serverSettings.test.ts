@@ -1281,6 +1281,37 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("stores Google OAuth secrets securely and preserves them across partial updates", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const saved = yield* service.updateSettings({
+        googleCalendar: {
+          clientId: "google-client",
+          clientSecret: "google-secret-value",
+          redirectUri: "https://t3.example.com/oauth/google-calendar/callback",
+        },
+      });
+      assert.notInclude(yield* fs.readFileString(config.settingsPath), "google-secret-value");
+      assert.equal(
+        ServerSettingsModule.redactServerSettingsForClient(saved).googleCalendar.clientSecret,
+        SERVER_SECRET_REDACTED_MARKER,
+      );
+      const retained = yield* service.updateSettings({
+        googleCalendar: { clientSecret: SERVER_SECRET_REDACTED_MARKER, clientId: "changed-client" },
+      });
+      assert.equal(retained.googleCalendar.clientSecret, "google-secret-value");
+      const partial = yield* service.updateSettings({
+        googleCalendar: { redirectUri: "https://other.example.com/oauth/google-calendar/callback" },
+      });
+      assert.equal(partial.googleCalendar.clientSecret, "google-secret-value");
+      const cleared = yield* service.updateSettings({ googleCalendar: { clientSecret: "" } });
+      assert.equal(cleared.googleCalendar.clientSecret, "");
+      assert.equal((yield* service.getSettings).googleCalendar.clientSecret, "");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("keeps delegation secrets off disk and out of client settings", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;

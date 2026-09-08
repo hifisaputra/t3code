@@ -1,3 +1,6 @@
+import { usePrimarySettings } from "~/hooks/useSettings";
+import { serverEnvironment } from "~/state/server";
+import { Input } from "../ui/input";
 import { useState } from "react";
 import { ensureLocalApi } from "~/localApi";
 import { usePrimaryEnvironment } from "~/state/environments";
@@ -20,6 +23,13 @@ export function GoogleCalendarSettingsSection() {
 
   return (
     <SettingsSection id="google-calendar" title="Google Calendar">
+      <GoogleOAuthSettings
+        key={environmentId}
+        onSaved={() => {
+          setAuthorizationUrl(null);
+          status.refresh();
+        }}
+      />
       <SettingsRow
         serverScoped
         title="Connection"
@@ -85,7 +95,7 @@ export function GoogleCalendarSettingsSection() {
               : !environmentId
                 ? "Connect to an environment first."
                 : !status.data?.configured
-                  ? "Google Calendar has not been enabled on this server yet. Ask the server operator to enable it, then refresh."
+                  ? "Save the Google OAuth client ID, secret, and callback URL above to enable Connect."
                   : status.data.connected
                     ? "Connected. Open Issues → Agenda to plan your work."
                     : "Not connected.")}
@@ -113,5 +123,120 @@ export function GoogleCalendarSettingsSection() {
         ) : null}
       </SettingsRow>
     </SettingsSection>
+  );
+}
+
+function GoogleOAuthSettings({ onSaved }: { onSaved: () => void }) {
+  const environmentId = usePrimaryEnvironment()?.environmentId;
+  const saved = usePrimarySettings((s) => s.googleCalendar);
+  const update = useAtomCommand(serverEnvironment.updateSettings);
+  const [clientId, setClientId] = useState(saved.clientId);
+  const [redirectUri, setRedirectUri] = useState(saved.redirectUri);
+  const [clientSecret, setClientSecret] = useState("");
+  const [previous, setPrevious] = useState(saved);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (
+    previous.clientId !== saved.clientId ||
+    previous.redirectUri !== saved.redirectUri ||
+    previous.clientSecret !== saved.clientSecret
+  ) {
+    setPrevious(saved);
+    setClientId(saved.clientId);
+    setRedirectUri(saved.redirectUri);
+    setClientSecret("");
+  }
+  const persist = async (removeSecret = false) => {
+    if (!environmentId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await update({
+        environmentId,
+        input: {
+          patch: {
+            googleCalendar: removeSecret
+              ? { clientSecret: "" }
+              : {
+                  clientId: clientId.trim(),
+                  redirectUri: redirectUri.trim(),
+                  ...(clientSecret.trim() ? { clientSecret: clientSecret.trim() } : {}),
+                },
+          },
+        },
+      });
+      if (result._tag === "Success") {
+        setClientSecret("");
+        onSaved();
+      } else setError("Could not save Google OAuth settings. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <SettingsRow
+      serverScoped
+      title="Google OAuth application"
+      description="Create a Web application client in Google Cloud with the Calendar API enabled. Register the exact callback URL below. Changes apply immediately; changing the client ID requires reconnecting."
+      control={
+        <div className="flex gap-2">
+          <Button size="sm" disabled={!environmentId || busy} onClick={() => void persist()}>
+            Save
+          </Button>
+          {saved.clientSecret ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!environmentId || busy}
+              onClick={() => void persist(true)}
+            >
+              Remove secret
+            </Button>
+          ) : null}
+        </div>
+      }
+    >
+      <div className="mt-2 grid gap-3">
+        <label className="grid gap-1 text-sm">
+          Google client ID
+          <Input
+            autoComplete="off"
+            value={clientId}
+            disabled={busy}
+            onChange={(e) => setClientId(e.target.value)}
+          />
+        </label>
+        <label className="grid gap-1 text-sm">
+          Google client secret
+          <Input
+            type="password"
+            autoComplete="off"
+            value={clientSecret}
+            disabled={busy}
+            placeholder={saved.clientSecret ? "Saved; enter to replace" : "Client secret"}
+            onChange={(e) => setClientSecret(e.target.value)}
+          />
+        </label>
+        <label className="grid gap-1 text-sm">
+          Google callback URL
+          <Input
+            type="url"
+            value={redirectUri}
+            disabled={busy}
+            placeholder="https://your-server/oauth/google-calendar/callback"
+            onChange={(e) => setRedirectUri(e.target.value)}
+          />
+        </label>
+        <p className="text-sm text-muted-foreground">
+          Use your server’s public URL followed by /oauth/google-calendar/callback. The secret stays
+          on the server. Leave it blank to keep the saved secret.
+        </p>
+        {error ? (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    </SettingsRow>
   );
 }

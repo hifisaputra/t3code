@@ -849,6 +849,13 @@ export const LinearBranchNaming = Schema.Struct({
 });
 export type LinearBranchNaming = typeof LinearBranchNaming.Type;
 
+export const GoogleCalendarSettings = Schema.Struct({
+  clientId: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  clientSecret: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  redirectUri: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+});
+export type GoogleCalendarSettings = typeof GoogleCalendarSettings.Type;
+
 export const LinearDelegationSettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   clientId: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -1084,6 +1091,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  googleCalendar: GoogleCalendarSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   linear: LinearSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // Keyed by a user-chosen id so a source keeps its rows across edits. Entries
   // this build cannot decode round-trip untouched, as provider instances do.
@@ -1295,6 +1303,13 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),
       otlpMetricsUrl: Schema.optionalKey(TrimmedString),
+    }),
+  ),
+  googleCalendar: Schema.optionalKey(
+    Schema.Struct({
+      clientId: Schema.optionalKey(TrimmedString),
+      clientSecret: Schema.optionalKey(TrimmedString),
+      redirectUri: Schema.optionalKey(TrimmedString),
     }),
   ),
   linear: Schema.optionalKey(

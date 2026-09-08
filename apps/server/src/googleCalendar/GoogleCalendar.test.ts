@@ -1,5 +1,4 @@
 import { assert, it } from "@effect/vitest";
-import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -54,6 +53,7 @@ function fixture(
     stored.set(
       "google-calendar-oauth",
       encode({
+        clientId: "client-id",
         accessToken: "access-secret",
         refreshToken: "refresh-secret",
         expiresAt: options.expiresAt ?? 9e15,
@@ -87,29 +87,22 @@ function fixture(
       getOrCreateRandom: () => Effect.die("unused"),
     }),
   );
+  const settings = ServerSettings.layerTest({
+    linear: { apiKey: "linear-key" },
+    googleCalendar:
+      options.configured === false
+        ? {}
+        : {
+            clientId: "client-id",
+            clientSecret: "client-secret",
+            redirectUri: "https://t3.example.com/oauth/google-calendar/callback",
+          },
+  });
   const testLayer = layer.pipe(
-    Layer.provide(
-      LinearApi.layer.pipe(
-        Layer.provide(ServerSettings.layerTest({ linear: { apiKey: "linear-key" } })),
-      ),
-    ),
+    Layer.provide(LinearApi.layer),
+    Layer.provideMerge(settings),
     Layer.provide(secrets),
     Layer.provide(http),
-    Layer.provide(
-      ConfigProvider.layer(
-        ConfigProvider.fromEnv({
-          env:
-            options.configured === false
-              ? {}
-              : {
-                  T3CODE_GOOGLE_CLIENT_ID: "client-id",
-                  T3CODE_GOOGLE_CLIENT_SECRET: "client-secret",
-                  T3CODE_GOOGLE_REDIRECT_URI:
-                    "https://t3.example.com/oauth/google-calendar/callback",
-                },
-        }),
-      ),
-    ),
   );
   return { stored, requests, layer: testLayer };
 }
@@ -412,5 +405,70 @@ it.effect("does not leak Google response bodies when authorization fails", () =>
     const error = yield* Effect.flip(service.calendars);
     assert.include(error.message, "Reconnect");
     assert.notInclude(error.message, "access-secret");
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("uses saved OAuth settings immediately and rejects a callback after they change", () => {
+  const f = fixture({ configured: false, connected: false });
+  return Effect.gen(function* () {
+    const service = yield* GoogleCalendar;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    yield* settings.updateSettings({
+      googleCalendar: {
+        clientId: "new-client",
+        clientSecret: "new-secret",
+        redirectUri: "https://t3.example.com/oauth/google-calendar/callback",
+      },
+    });
+    assert.deepEqual(yield* service.status, { configured: true, connected: false });
+    const url = new URL((yield* service.authorize).url);
+    assert.equal(url.searchParams.get("client_id"), "new-client");
+    yield* settings.updateSettings({ googleCalendar: { clientSecret: "rotated-secret" } });
+    assert.match(
+      (yield* Effect.flip(service.complete(url.searchParams.get("state")!, "code"))).message,
+      /settings changed/,
+    );
+    assert.equal(f.requests.length, 0);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect(
+  "requires reconnection after switching clients and disables access when the secret is removed",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const service = yield* GoogleCalendar;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      assert.isTrue((yield* service.status).connected);
+      yield* settings.updateSettings({ googleCalendar: { clientId: "different-client" } });
+      assert.isFalse((yield* service.status).connected);
+      assert.match((yield* Effect.flip(service.calendars)).message, /Connect Google Calendar/);
+      yield* settings.updateSettings({ googleCalendar: { clientSecret: "" } });
+      assert.isFalse((yield* service.status).configured);
+      assert.match((yield* Effect.flip(service.authorize)).message, /not configured/);
+      assert.equal(f.requests.length, 0);
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect("rejects unsafe callback URLs before redirecting to Google", () => {
+  const f = fixture({ connected: false });
+  return Effect.gen(function* () {
+    const service = yield* GoogleCalendar;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    for (const redirectUri of [
+      "https://user:password@example.com/callback",
+      "http://example.com/callback",
+      "javascript:alert(1)",
+    ]) {
+      yield* settings.updateSettings({ googleCalendar: { redirectUri } });
+      assert.isFalse((yield* service.status).configured);
+      yield* Effect.flip(service.authorize);
+    }
+    yield* settings.updateSettings({
+      googleCalendar: { redirectUri: "http://localhost:3773/oauth/google-calendar/callback" },
+    });
+    assert.isTrue((yield* service.status).configured);
+    assert.equal(f.requests.length, 0);
   }).pipe(Effect.provide(f.layer));
 });
