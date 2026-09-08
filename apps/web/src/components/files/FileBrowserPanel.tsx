@@ -6,10 +6,10 @@ import type {
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelector } from "@pierre/trees/react";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
-import { ChevronsDownUpIcon, ChevronsUpDownIcon, Download, Upload } from "lucide-react";
+import { ChevronsDownUpIcon, ChevronsUpDownIcon, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { base64ToBytes, bytesToBase64 } from "~/lib/base64";
+import { bytesToBase64 } from "~/lib/base64";
 import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupInput } from "~/components/ui/input-group";
@@ -25,6 +25,7 @@ import { PIERRE_TREE_UNSAFE_CSS, pierreTreeStyle } from "~/pierre-tree-theme";
 import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
 
+import { FileDownloadButton } from "./FileDownloadButton";
 import { createFileTreeDragMentionController } from "./fileTreeDragMention";
 import { areAllDirectoriesExpanded, setAllDirectoriesExpanded } from "./fileTreeExpansion";
 import { buildFileTreePathUpdates } from "./fileTreePathReconciliation";
@@ -37,24 +38,6 @@ const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 function parentDirectory(relativePath: string): string {
   const separatorIndex = relativePath.lastIndexOf("/");
   return separatorIndex === -1 ? "" : relativePath.slice(0, separatorIndex);
-}
-
-/** Final path segment (file name) of a workspace-relative path. */
-function baseName(relativePath: string): string {
-  const separatorIndex = relativePath.lastIndexOf("/");
-  return separatorIndex === -1 ? relativePath : relativePath.slice(separatorIndex + 1);
-}
-
-/** Save raw bytes to the client's machine via a temporary object URL. */
-function saveBytesAsFile(bytes: Uint8Array<ArrayBuffer>, fileName: string): void {
-  const url = URL.createObjectURL(new Blob([bytes]));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
 }
 
 interface FileBrowserPanelProps {
@@ -137,7 +120,6 @@ export default function FileBrowserPanel({
   const composerRef = useComposerHandleContext();
   const entriesQuery = useProjectEntriesQuery(environmentId, cwd);
   const writeFile = useAtomCommand(projectEnvironment.writeFile);
-  const downloadFile = useAtomCommand(projectEnvironment.readFileForDownload);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -145,32 +127,6 @@ export default function FileBrowserPanel({
   const [uploadDirectory, setUploadDirectory] = useState("");
   // Currently-selected file path (null when a directory or nothing is selected).
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
-
-  const handleDownload = useCallback(async () => {
-    if (!selectedFile) return;
-    setIsDownloading(true);
-    setDownloadError(null);
-    try {
-      const result = await downloadFile({
-        environmentId,
-        input: { cwd, relativePath: selectedFile, encoding: "base64" },
-      });
-      if (result._tag !== "Success") {
-        setDownloadError(`Could not download ${baseName(selectedFile)}.`);
-        return;
-      }
-      if (result.value.truncated) {
-        setDownloadError(`${baseName(selectedFile)} is too large to download (over 50MB).`);
-        return;
-      }
-      saveBytesAsFile(base64ToBytes(result.value.contents), baseName(selectedFile));
-    } finally {
-      setIsDownloading(false);
-    }
-  }, [cwd, downloadFile, environmentId, selectedFile]);
-
   const handleUpload = useCallback(
     async (fileList: FileList | null) => {
       const files = fileList ? Array.from(fileList) : [];
@@ -459,6 +415,8 @@ export default function FileBrowserPanel({
       if (item && "expand" in item) item.expand();
     }
 
+    setSelectedFile(selectedPath);
+    setUploadDirectory(parentDirectory(selectedPath));
     selectedItem.select();
     model.scrollToPath(selectedPath, { focus: true, offset: "center" });
     queueMicrotask(() => {
@@ -531,27 +489,7 @@ export default function FileBrowserPanel({
             Upload to {uploadDirectory ? `${uploadDirectory}/` : "project root"}
           </TooltipPopup>
         </Tooltip>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label={
-                  selectedFile ? `Download ${baseName(selectedFile)}` : "Select a file to download"
-                }
-                disabled={!selectedFile || isDownloading}
-                onClick={() => void handleDownload()}
-              />
-            }
-          >
-            <Download className={cn("size-3.5", isDownloading && "animate-pulse")} />
-          </TooltipTrigger>
-          <TooltipPopup side="bottom">
-            {selectedFile ? `Download ${baseName(selectedFile)}` : "Select a file to download"}
-          </TooltipPopup>
-        </Tooltip>
+        <FileDownloadButton environmentId={environmentId} cwd={cwd} relativePath={selectedFile} />
         <FileSearchField
           name="project-files-search"
           ariaLabel={`Search ${projectName} files`}
@@ -586,9 +524,9 @@ export default function FileBrowserPanel({
           </Tooltip>
         ) : null}
       </div>
-      {(uploadError || downloadError) && (
+      {uploadError && (
         <div className="shrink-0 border-b border-border/60 px-3 py-1.5 text-[10px] leading-relaxed text-destructive">
-          {uploadError ?? downloadError}
+          {uploadError}
         </div>
       )}
       {entriesQuery.error && entriesQuery.data === null ? (

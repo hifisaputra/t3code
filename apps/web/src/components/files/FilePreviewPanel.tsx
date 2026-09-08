@@ -52,6 +52,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
 import FileBrowserPanel from "./FileBrowserPanel";
+import { FileDownloadButton } from "./FileDownloadButton";
 import { FileBreadcrumbs } from "./FileBreadcrumbs";
 import { FileMarkdownPreview } from "./FileMarkdownPreview";
 import {
@@ -1159,6 +1160,14 @@ export default function FilePreviewPanel({
               </div>
             </ScrollArea>
           )}
+          {!attachment && !isHostFile ? (
+            <FileDownloadButton
+              environmentId={environmentId}
+              cwd={cwd}
+              relativePath={relativePath}
+              showLabel
+            />
+          ) : null}
           {absolutePath &&
           (environmentId === primaryEnvironmentId || remoteOpenState.mode !== "local-exec") ? (
             <OpenInPicker
