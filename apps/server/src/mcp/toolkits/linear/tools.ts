@@ -149,8 +149,11 @@ export const ListMyIssuesTool = readonlyLinearTool(
 export const SaveCommentTool = linearTool(
   Tool.make("save_comment", {
     description:
-      "Post a comment on a Linear issue as the connected user. The body is Linear-flavoured markdown. Pass issueId as an identifier such as DEL-123 or a Linear UUID; omit it and the issue this thread is linked to is commented on.",
+      "Create or edit a Linear comment as the connected identity. Pass id from list_comments to replace an existing comment body; omit id to create a comment. For creation, issueId defaults to the issue this thread is linked to. For editing, the comment identifies its issue; an optional issueId must match. Linear enforces permission to edit the comment.",
     parameters: Schema.Struct({
+      id: Schema.optional(
+        describedText("Existing comment UUID to edit. Omit to create a new comment."),
+      ),
       body: describedText(
         'The comment body, in markdown, written for whoever reads the issue next. Post it unsigned: no closing "Written by ..." line, and no mention of the agent, the model, or T3 Code.',
       ),

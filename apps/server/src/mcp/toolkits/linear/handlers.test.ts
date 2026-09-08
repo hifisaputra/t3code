@@ -137,6 +137,8 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       createIssue: () => Effect.die("unused"),
       labels: () => Effect.die("unused"),
       createComment: () => Effect.die("unused"),
+      getComment: () => Effect.die("unused"),
+      updateComment: () => Effect.die("unused"),
       ...overrides,
     }),
   );
@@ -703,6 +705,85 @@ it.effect("refuses to write when the thread has no session to ask through", () =
         },
         confirmAgentWrites: true,
         session: false,
+      }),
+    ),
+  ),
+);
+
+for (const decision of ["accept", "decline"] as const) {
+  it.effect(`edits a comment only after approval: ${decision}`, () => {
+    const updated: Array<unknown> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          Effect.result(
+            callTool("save_comment", { id: "old-comment", body: "Corrected finding." }),
+          ),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* Schema.decodeUnknownEffect(Schema.Struct({ detail: Schema.String }))(
+          opened.payload,
+        );
+        assert.include(review.detail, "Edit comment on DEL-123");
+        assert.include(review.detail, "Corrected finding.");
+        assert.deepStrictEqual(updated, []);
+        yield* answer(opened, decision);
+        yield* Fiber.join(pending);
+        assert.deepStrictEqual(
+          updated,
+          decision === "accept" ? [{ id: "old-comment", body: "Corrected finding." }] : [],
+        );
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getComment: () =>
+              Effect.succeed({
+                id: "old-comment",
+                body: "Original.",
+                url: issue.url + "#old-comment",
+                issue: { id: issue.id },
+              }),
+            getIssue: (id) => {
+              assert.deepStrictEqual(id, { reference: issue.id });
+              return Effect.succeed(issue);
+            },
+            updateComment: (input) =>
+              Effect.sync(() => {
+                updated.push(input);
+                return { id: input.id, url: issue.url + "#old-comment" };
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
+
+it.effect("rejects a comment from a different issue before approval or mutation", () =>
+  Effect.gen(function* () {
+    const error = operationError(
+      yield* Effect.flip(
+        callTool("save_comment", { id: "other-comment", issueId: issue.id, body: "Changed." }),
+      ),
+    );
+    assert.include(error.detail, "does not belong");
+  }).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getComment: () =>
+            Effect.succeed({
+              id: "other-comment",
+              body: "Original.",
+              url: issue.url,
+              issue: { id: "other-issue" },
+            }),
+          getIssue: () => Effect.succeed(issue),
+        },
+        confirmAgentWrites: true,
       }),
     ),
   ),

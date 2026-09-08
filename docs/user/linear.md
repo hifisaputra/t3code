@@ -147,7 +147,7 @@ The tools are:
 - `list_comments` reads the comment thread on an issue.
 - `list_issue_statuses` lists the workflow states a team can move an issue to.
 - `list_my_issues` lists the open issues assigned to you.
-- `save_comment` posts a comment on an issue.
+- `save_comment` posts a comment on an issue, or edits an existing comment when given its `id` from `list_comments`. Editing replaces the body and requires permission from Linear.
 - `save_issue` edits an issue's title, description, state, or labels.
 - `create_issue` files a new issue. It files a sub-issue of the linked issue unless the agent is
   told to file it somewhere else.

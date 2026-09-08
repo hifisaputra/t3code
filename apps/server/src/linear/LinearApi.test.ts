@@ -643,3 +643,53 @@ it.effect("reports labels as unavailable when Linear rejects the key", () => {
     assert.strictEqual(error.reason, "unauthenticated");
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("fetches a comment directly with its owning issue", () => {
+  const comment = {
+    id: "old-comment",
+    body: "Original.",
+    url: "https://linear.app/comment",
+    issue: { id: "issue-uuid" },
+  };
+  const { execute, layer } = makeLayer({ response: () => Response.json({ data: { comment } }) });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(yield* linear.getComment("old-comment"), comment);
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, { id: "old-comment" });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("updates the specified comment body", () => {
+  const comment = { id: "comment-3", url: "https://linear.app/comment-3" };
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { commentUpdate: { success: true, comment } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(
+      yield* linear.updateComment({ id: comment.id, body: "Corrected." }),
+      comment,
+    );
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "commentUpdate");
+    assert.deepStrictEqual(request.variables, { id: comment.id, body: "Corrected." });
+  }).pipe(Effect.provide(layer));
+});
+
+for (const payload of [
+  { data: { commentUpdate: { success: false, comment: null } } },
+  { data: { commentUpdate: { success: true, comment: null } } },
+  { errors: [{ message: "Not authorized to edit this comment" }] },
+]) {
+  it.effect("surfaces rejected comment edits", () => {
+    const { layer } = makeLayer({ response: () => Response.json(payload) });
+    return Effect.gen(function* () {
+      const linear = yield* LinearApi.LinearApi;
+      const error = yield* Effect.flip(
+        linear.updateComment({ id: "comment-3", body: "Corrected." }),
+      );
+      assert.instanceOf(error, LinearOperationError);
+      assert.strictEqual(error.operation, "updateComment");
+    }).pipe(Effect.provide(layer));
+  });
+}

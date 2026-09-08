@@ -312,20 +312,46 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
-      const issue = yield* resolveIssue("save_comment", scope, named(input.issueId));
+      const id = named(input.id);
+      const comment = id === undefined ? undefined : yield* linear.getComment(id);
+      if (comment !== undefined && comment.issue === null) {
+        return yield* new LinearOperationError({
+          operation: "save_comment",
+          detail: "This comment does not belong to an issue.",
+        });
+      }
+      const issue = yield* resolveIssue(
+        "save_comment",
+        scope,
+        named(input.issueId) ?? comment?.issue?.id,
+      );
+      if (comment !== undefined && comment.issue?.id !== issue.id) {
+        return yield* new LinearOperationError({
+          operation: "save_comment",
+          detail: "The comment does not belong to the specified issue.",
+        });
+      }
       const body = input.body.trim();
+      if (body.length === 0 || (input.id !== undefined && id === undefined)) {
+        return yield* new LinearOperationError({
+          operation: "save_comment",
+          detail: "Comment body and supplied comment id must not be blank.",
+        });
+      }
       yield* confirmWrite("save_comment", scope, {
         appName: "Linear",
         change: {
-          summary: `Comment on ${issue.identifier}`,
-          record: { label: issue.identifier, url: issue.url },
+          summary: `${comment === undefined ? "Comment on" : "Edit comment on"} ${issue.identifier}`,
+          record: { label: issue.identifier, url: comment?.url ?? issue.url },
           // The comment lands as the agent wrote it, so it is reviewed the
           // same way: as the markdown Linear will render.
           fields: [{ label: "Comment", value: body, format: "markdown" }],
         },
         args: { ...input, issueId: issue.id },
       });
-      return yield* linear.createComment({ issueId: issue.id, body });
+      return yield* comment === undefined
+        ? linear.createComment({ issueId: issue.id, body })
+        : linear.updateComment({ id: comment.id, body });
     }),
 
   save_issue: (input) =>

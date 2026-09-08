@@ -200,6 +200,20 @@ const CommentCreateResult = Schema.Struct({
   }),
 });
 
+const CommentUpdateResult = Schema.Struct({
+  commentUpdate: CommentCreateResult.fields.commentCreate,
+});
+const CommentResult = Schema.Struct({
+  comment: Schema.NullOr(
+    Schema.Struct({
+      id: TrimmedNonEmptyString,
+      body: Schema.String,
+      url: Schema.String,
+      issue: Schema.NullOr(Schema.Struct({ id: TrimmedNonEmptyString })),
+    }),
+  ),
+});
+
 const IssueCreateResult = Schema.Struct({
   issueCreate: Schema.Struct({
     success: Schema.Boolean,
@@ -329,6 +343,20 @@ const LABELS_QUERY = `
       filter: { or: [{ team: { id: { eq: $teamId } } }, { team: { null: true } }] }
     ) {
       nodes { id name color }
+    }
+  }
+`;
+
+const GET_COMMENT_QUERY = `
+  query T3CodeGetComment($id: String!) {
+    comment(id: $id) { id body url issue { id } }
+  }
+`;
+const UPDATE_COMMENT_MUTATION = `
+  mutation T3CodeUpdateComment($id: String!, $body: String!) {
+    commentUpdate(id: $id, input: { body: $body }) {
+      success
+      comment { id url }
     }
   }
 `;
@@ -466,6 +494,19 @@ export class LinearApi extends Context.Service<
       teamId: string,
     ) => Effect.Effect<
       ReadonlyArray<LinearIssueLabel>,
+      LinearUnavailableError | LinearOperationError
+    >;
+    readonly getComment: (
+      id: string,
+    ) => Effect.Effect<
+      NonNullable<typeof CommentResult.Type.comment>,
+      LinearUnavailableError | LinearOperationError
+    >;
+    readonly updateComment: (input: {
+      readonly id: string;
+      readonly body: string;
+    }) => Effect.Effect<
+      { readonly id: string; readonly url: string },
       LinearUnavailableError | LinearOperationError
     >;
     readonly createComment: (input: {
@@ -861,7 +902,44 @@ export const make = Effect.gen(function* () {
     return result.commentCreate.comment;
   });
 
+  const getComment = Effect.fn("LinearApi.getComment")(function* (id: string) {
+    const result = yield* request({
+      operation: "getComment",
+      query: GET_COMMENT_QUERY,
+      variables: { id },
+      decode: Schema.decodeUnknownEffect(CommentResult),
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (result.comment === null) {
+      return yield* new LinearOperationError({
+        operation: "getComment",
+        detail: "Comment not found or inaccessible.",
+      });
+    }
+    return result.comment;
+  });
+
+  const updateComment = Effect.fn("LinearApi.updateComment")(function* (input: {
+    readonly id: string;
+    readonly body: string;
+  }) {
+    const result = yield* request({
+      operation: "updateComment",
+      query: UPDATE_COMMENT_MUTATION,
+      variables: { id: input.id, body: input.body },
+      decode: Schema.decodeUnknownEffect(CommentUpdateResult),
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.commentUpdate.success || result.commentUpdate.comment === null) {
+      return yield* new LinearOperationError({
+        operation: "updateComment",
+        detail: "Linear refused to edit the comment.",
+      });
+    }
+    return result.commentUpdate.comment;
+  });
+
   return LinearApi.of({
+    getComment,
+    updateComment,
     status,
     getIssue,
     listIssues,
