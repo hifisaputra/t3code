@@ -393,6 +393,9 @@ export function runtimeEventToActivities(
             ...(event.payload.detail ? { detail: event.payload.detail } : {}),
             ...(event.payload.appName ? { appName: event.payload.appName } : {}),
             ...(event.payload.options ? { options: event.payload.options } : {}),
+            // Persisted with the row: the review dialog reads the change back
+            // from the activity, so it survives a reload with the approval.
+            ...(event.payload.change ? { change: event.payload.change } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

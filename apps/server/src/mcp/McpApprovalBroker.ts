@@ -5,6 +5,7 @@ import {
   EventId,
   IsoDateTime,
   RuntimeRequestId,
+  type IntegrationApprovalChange,
   type ProviderApprovalDecision,
   type ProviderApprovalOption,
   type ProviderDriverKind,
@@ -35,6 +36,8 @@ export interface McpApprovalRequest {
   readonly sessionKey: string;
   readonly appName: string;
   readonly detail: string;
+  /** The whole change, for the review dialog; `detail` stays the one-line version. */
+  readonly change?: IntegrationApprovalChange;
   readonly args?: unknown;
   readonly options?: ReadonlyArray<ProviderApprovalOption>;
   readonly timeout?: Duration.Duration;
@@ -124,6 +127,7 @@ export const make = Effect.gen(function* McpApprovalBrokerMake() {
         appName: input.appName,
         detail: input.detail,
         options: input.options ?? DEFAULT_OPTIONS,
+        ...(input.change === undefined ? {} : { change: input.change }),
         ...(input.args === undefined ? {} : { args: input.args }),
       },
     } satisfies ProviderRuntimeEvent);

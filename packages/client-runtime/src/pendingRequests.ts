@@ -1,5 +1,6 @@
 import {
   ApprovalRequestId,
+  IntegrationApprovalChange,
   type OrchestrationThreadActivity,
   ProviderApprovalOption,
   ProviderRequestKind,
@@ -16,6 +17,11 @@ export interface PendingApproval {
   readonly detail?: string;
   readonly appName?: string;
   readonly options?: ReadonlyArray<ProviderApprovalOption>;
+  /**
+   * The whole write, for our own integration approvals. `detail` summarises it
+   * for the row; this is what a review surface shows before the user decides.
+   */
+  readonly change?: IntegrationApprovalChange;
 }
 
 export interface PendingUserInput {
@@ -29,6 +35,9 @@ export interface PendingUserInput {
 const isRequestId = Schema.is(ApprovalRequestId);
 const isProviderRequestKind = Schema.is(ProviderRequestKind);
 const isProviderApprovalOption = Schema.is(ProviderApprovalOption);
+// Rows persisted before integration changes carried one, and any provider's
+// own approval, simply have no change to decode.
+const decodeChange = Schema.decodeUnknownOption(IntegrationApprovalChange);
 const QuestionOption = Schema.Struct({
   ...UserInputQuestion.fields.options.value.fields,
   label: Schema.String,
@@ -159,6 +168,10 @@ export function derivePendingRequests(activities: ReadonlyArray<OrchestrationThr
           ? { appName: payload.appName }
           : {}),
         ...(options.length > 0 ? { options } : {}),
+        ...Option.match(decodeChange(payload.change), {
+          onNone: () => ({}),
+          onSome: (change) => ({ change }),
+        }),
       });
     } else if (activity.kind === "user-input.requested") {
       if (closedUserInputs.has(requestId)) continue;

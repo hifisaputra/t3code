@@ -1,4 +1,9 @@
-import { isProviderDriverKind, LinearOperationError, type LinearTeamRef } from "@t3tools/contracts";
+import {
+  isProviderDriverKind,
+  LinearOperationError,
+  type IntegrationApprovalChange,
+  type LinearTeamRef,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
@@ -151,9 +156,9 @@ const resolveLabels = Effect.fn("LinearToolkit.resolveLabels")(function* (
 });
 
 /**
- * The approval card shows the detail in a short monospace box, so a long
- * comment or description is clipped rather than turned into a wall of text the
- * user has to scroll before deciding.
+ * The approval row is one line above the composer, so its `detail` is a
+ * summary. The change travels beside it in full — see `describeChange` — and
+ * the review dialog is what the person actually reads before approving.
  */
 const MAX_DETAIL_CHARS = 400;
 
@@ -162,6 +167,23 @@ const clampDetail = (text: string): string => {
   return trimmed.length > MAX_DETAIL_CHARS
     ? `${trimmed.slice(0, MAX_DETAIL_CHARS)}\u2026`
     : trimmed;
+};
+
+/**
+ * The short `detail` for a change, derived rather than written twice so the row
+ * and the review dialog can never describe different writes.
+ *
+ * A change that is one piece of prose — a comment — reads as a headline with
+ * the prose under it. A set of edited fields reads as a list of what each one
+ * becomes.
+ */
+const describeChange = (change: IntegrationApprovalChange): string => {
+  const [first] = change.fields;
+  const body =
+    change.fields.length === 1 && first?.format === "markdown"
+      ? `\n\n${first.value}`
+      : change.fields.map((field) => `\n${field.label}: ${field.value}`).join("");
+  return clampDetail(`${change.summary}${body}`);
 };
 
 /**
@@ -177,7 +199,11 @@ const clampDetail = (text: string): string => {
 const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
   operation: string,
   scope: Scope,
-  input: { readonly appName: string; readonly detail: string; readonly args: unknown },
+  input: {
+    readonly appName: string;
+    readonly change: IntegrationApprovalChange;
+    readonly args: unknown;
+  },
 ) {
   const serverSettings = yield* ServerSettingsService;
   // Read per call: the toggle can change in Settings while a session runs.
@@ -221,7 +247,8 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
     ...(session.activeTurnId === null ? {} : { turnId: session.activeTurnId }),
     sessionKey: `${scope.threadId}:${scope.providerSessionId}`,
     appName: input.appName,
-    detail: input.detail,
+    detail: describeChange(input.change),
+    change: input.change,
     args: input.args,
   });
 
@@ -289,7 +316,13 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const body = input.body.trim();
       yield* confirmWrite("save_comment", scope, {
         appName: "Linear",
-        detail: clampDetail(`Comment on ${issue.identifier}\n\n${body}`),
+        change: {
+          summary: `Comment on ${issue.identifier}`,
+          record: { label: issue.identifier, url: issue.url },
+          // The comment lands as the agent wrote it, so it is reviewed the
+          // same way: as the markdown Linear will render.
+          fields: [{ label: "Comment", value: body, format: "markdown" }],
+        },
         args: { ...input, issueId: issue.id },
       });
       return yield* linear.createComment({ issueId: issue.id, body });
@@ -323,19 +356,33 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const labelIds = resolvedLabels?.map((label) => label.id);
       yield* confirmWrite("save_issue", scope, {
         appName: "Linear",
-        detail: clampDetail(
-          [
-            `Update ${issue.identifier}`,
-            ...(title === undefined ? [] : [`title: ${title}`]),
-            ...(resolvedState === undefined ? [] : [`state: ${resolvedState.name}`]),
+        change: {
+          summary: `Update ${issue.identifier}`,
+          record: { label: issue.identifier, url: issue.url },
+          fields: [
+            ...(title === undefined ? [] : [{ label: "Title", value: title }]),
+            ...(resolvedState === undefined ? [] : [{ label: "State", value: resolvedState.name }]),
             ...(resolvedLabels === undefined
               ? []
-              : [`labels: ${resolvedLabels.map((label) => label.name).join(", ")}`]),
+              : [
+                  {
+                    label: "Labels",
+                    value: resolvedLabels.map((label) => label.name).join(", "),
+                  },
+                ]),
+            // The description replaces what the issue says now, so it is shown
+            // whole. A character count is not something anyone can approve.
             ...(input.description === undefined
               ? []
-              : [`description: ${input.description.length} chars`]),
-          ].join("\n"),
-        ),
+              : [
+                  {
+                    label: "Description",
+                    value: input.description,
+                    format: "markdown" as const,
+                  },
+                ]),
+          ],
+        },
         args: {
           ...input,
           issueId: issue.id,
@@ -387,17 +434,34 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const title = input.title.trim();
       yield* confirmWrite("create_issue", scope, {
         appName: "Linear",
-        detail: clampDetail(
-          [
-            `Create issue in ${team.key}`,
-            ...(parent === undefined ? [] : [`parent: ${parent.identifier}`]),
-            `title: ${title}`,
-            ...(resolvedState === undefined ? [] : [`state: ${resolvedState.name}`]),
+        change: {
+          summary: `Create issue in ${team.key}`,
+          ...(parent === undefined
+            ? {}
+            : { record: { label: parent.identifier, url: parent.url } }),
+          fields: [
+            { label: "Title", value: title },
+            ...(parent === undefined ? [] : [{ label: "Parent", value: parent.identifier }]),
+            ...(resolvedState === undefined ? [] : [{ label: "State", value: resolvedState.name }]),
             ...(resolvedLabels === undefined
               ? []
-              : [`labels: ${resolvedLabels.map((label) => label.name).join(", ")}`]),
-          ].join("\n"),
-        ),
+              : [
+                  {
+                    label: "Labels",
+                    value: resolvedLabels.map((label) => label.name).join(", "),
+                  },
+                ]),
+            ...(input.description === undefined
+              ? []
+              : [
+                  {
+                    label: "Description",
+                    value: input.description,
+                    format: "markdown" as const,
+                  },
+                ]),
+          ],
+        },
         args: {
           ...input,
           teamId: team.id,

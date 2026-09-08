@@ -157,9 +157,11 @@ projects. Those stay with you.
 
 Writes wait for you. **Ask before agents write to Linear** sits in the same settings group and is
 on by default. Every comment, edit, or new issue an agent wants to make shows up as an approval in
-the thread's composer, with what will change. **Approve** applies it, **Decline** tells the agent
-you refused, and **Allow for this session** stops asking for the rest of that agent session. Reads
-never ask.
+the thread's composer, summarised in one line. **Review** opens the whole change — the comment or
+description as Linear will render it, and every field the write would set — and you can approve or
+decline from there without going back to the row. **Approve** applies it, **Decline** tells the
+agent you refused, and **Allow for this session** stops asking for the rest of that agent session.
+Reads never ask.
 
 If nobody answers within about ten minutes the change is not made and the agent is told to ask
 again. Agents also have their own tool timeouts, often about a minute, so an agent can give up

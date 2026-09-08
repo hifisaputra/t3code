@@ -58,6 +58,42 @@ describe("pending approvals", () => {
     },
   );
 
+  it("keeps the whole change an integration write is asking for", () => {
+    const change = {
+      summary: "Comment on DEL-123",
+      record: { label: "DEL-123", url: "https://linear.app/acme/issue/DEL-123" },
+      fields: [{ label: "Comment", value: "Shipped it.", format: "markdown" }],
+    };
+    const requested = makeActivity({
+      kind: "approval.requested",
+      payload: {
+        requestId: "per-integration",
+        requestKind: "integration",
+        appName: "Linear",
+        detail: "Comment on DEL-123\n\nShipped it.",
+        change,
+      },
+    });
+
+    expect(derivePendingRequests([requested]).approvals[0]?.change).toEqual(change);
+  });
+
+  it("drops a change it cannot read rather than the approval itself", () => {
+    const requested = makeActivity({
+      kind: "approval.requested",
+      payload: {
+        requestId: "per-broken-change",
+        requestKind: "integration",
+        detail: "Comment on DEL-123",
+        change: { summary: "", fields: "not a list" },
+      },
+    });
+
+    const [approval] = derivePendingRequests([requested]).approvals;
+    expect(approval?.change).toBeUndefined();
+    expect(approval?.detail).toBe("Comment on DEL-123");
+  });
+
   it("tracks open approvals and removes resolved ones", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

@@ -510,12 +510,47 @@ const ContentDeltaPayload = Schema.Struct({
 });
 export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
 
+/**
+ * One line of what an integration write will do. `markdown` marks prose the
+ * agent wrote — a comment body, an issue description — which the review dialog
+ * renders the way the record will, rather than as a quoted blob.
+ */
+export const IntegrationApprovalChangeField = Schema.Struct({
+  label: TrimmedNonEmptyStringSchema,
+  value: Schema.String,
+  format: Schema.optional(Schema.Literals(["text", "markdown"])),
+});
+export type IntegrationApprovalChangeField = typeof IntegrationApprovalChangeField.Type;
+
+/**
+ * Everything an integration write will change, whole.
+ *
+ * `detail` is the sentence the approval row shows and stays short enough for
+ * one line; this is what the person reads before approving, so it carries the
+ * comment or description in full rather than clipped to a preview.
+ */
+export const IntegrationApprovalChange = Schema.Struct({
+  /** The headline: "Comment on DEL-123", "Update DEL-123", "Create issue in DEL". */
+  summary: TrimmedNonEmptyStringSchema,
+  /** The record being written to, when it already exists and can be opened. */
+  record: Schema.optional(
+    Schema.Struct({
+      label: TrimmedNonEmptyStringSchema,
+      url: Schema.optional(TrimmedNonEmptyStringSchema),
+    }),
+  ),
+  fields: Schema.Array(IntegrationApprovalChangeField),
+});
+export type IntegrationApprovalChange = typeof IntegrationApprovalChange.Type;
+
 const RequestOpenedPayload = Schema.Struct({
   requestType: CanonicalRequestType,
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
   appName: Schema.optional(TrimmedNonEmptyStringSchema),
   options: Schema.optional(Schema.Array(ProviderApprovalOption)),
   args: Schema.optional(Schema.Unknown),
+  /** Set by our own integration writes; providers' own approvals carry only `detail`. */
+  change: Schema.optional(IntegrationApprovalChange),
 });
 export type RequestOpenedPayload = typeof RequestOpenedPayload.Type;
 

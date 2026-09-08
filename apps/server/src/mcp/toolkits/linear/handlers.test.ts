@@ -502,6 +502,13 @@ it.effect("asks before it comments, and writes only once the user approves", () 
           { decision: "acceptForSession", label: "Allow for this session" },
           { decision: "accept", label: "Approve" },
         ],
+        // The row shows the detail; the review dialog reads this, so the
+        // comment travels whole and marked as the markdown Linear renders.
+        change: {
+          summary: "Comment on DEL-123",
+          record: { label: "DEL-123", url: issue.url },
+          fields: [{ label: "Comment", value: "Shipped it.", format: "markdown" }],
+        },
         args: { body: "Shipped it.", issueId: issue.id },
       });
       // Nothing is written while the card is open.
@@ -593,7 +600,15 @@ it.effect("summarizes the fields a confirmed issue update would change", () =>
       const opened = yield* nextApprovalEvent;
       assert.strictEqual(
         (opened.payload as { readonly detail: string }).detail,
-        "Update DEL-123\ntitle: Renamed\nstate: In Progress\nlabels: urgent",
+        "Update DEL-123\nTitle: Renamed\nState: In Progress\nLabels: urgent",
+      );
+      assert.deepStrictEqual(
+        (opened.payload as { readonly change: { readonly fields: unknown } }).change.fields,
+        [
+          { label: "Title", value: "Renamed" },
+          { label: "State", value: "In Progress" },
+          { label: "Labels", value: "urgent" },
+        ],
       );
       yield* answer(opened, "accept");
       yield* Fiber.join(pending);
@@ -605,6 +620,40 @@ it.effect("summarizes the fields a confirmed issue update would change", () =>
           getIssue: () => Effect.succeed(issue),
           workflowStates: () => Effect.succeed(states),
           labels: () => Effect.succeed(labels),
+          updateIssue: () => Effect.void,
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  ),
+);
+
+it.effect("sends the description it would overwrite, whole, for review", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const description = `## Plan\n\n${"long line ".repeat(60)}`;
+      const pending = yield* Effect.forkScoped(callTool("save_issue", { description }));
+      const opened = yield* nextApprovalEvent;
+
+      const { change, detail } = opened.payload as {
+        readonly change: { readonly fields: ReadonlyArray<Record<string, unknown>> };
+        readonly detail: string;
+      };
+      // A description replaces what the issue says now, so approving it means
+      // reading it. The row's detail is still clipped to one line's worth.
+      assert.deepStrictEqual(change.fields, [
+        { label: "Description", value: description, format: "markdown" },
+      ]);
+      assert.isBelow(detail.length, description.length);
+
+      yield* answer(opened, "accept");
+      yield* Fiber.join(pending);
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
           updateIssue: () => Effect.void,
         },
         confirmAgentWrites: true,

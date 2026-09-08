@@ -19,7 +19,8 @@ interface ComposerPendingApprovalActionsProps {
 }
 
 const APPROVAL_ACTION_CLASS_NAME = "font-normal";
-const DEFAULT_APPROVAL_OPTIONS = [
+/** What a provider that sent no options of its own gets asked. */
+export const DEFAULT_APPROVAL_OPTIONS = [
   { decision: "cancel", label: "Cancel" },
   { decision: "decline", label: "Decline" },
   { decision: "acceptForSession", label: "Always allow this session" },
