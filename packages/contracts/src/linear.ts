@@ -229,6 +229,18 @@ export const LinearGetIssueInput = Schema.Struct({
 export type LinearGetIssueInput = typeof LinearGetIssueInput.Type;
 
 /**
+ * How the thread gets its branch.
+ *
+ * `issue` checks Linear's branch out — the identifier in the name is what
+ * links the pull request back to the issue later. `current` leaves the
+ * checkout alone: nothing is created or switched, and the thread runs on
+ * whatever branch is already there, which is what a small fix on a branch
+ * that already exists wants.
+ */
+export const LinearIssueThreadBranchMode = Schema.Literals(["issue", "current"]);
+export type LinearIssueThreadBranchMode = typeof LinearIssueThreadBranchMode.Type;
+
+/**
  * Check out Linear's branch for an issue and hand back everything a thread
  * needs. `threadId` lets the setup script run for a thread that already
  * exists; the dialog usually calls without one, then creates the thread.
@@ -243,17 +255,29 @@ export const LinearPrepareIssueThreadInput = Schema.Struct({
    * Must contain the issue identifier, so Linear still links the pull request.
    */
   branch: Schema.optional(TrimmedNonEmptyString),
+  /** Defaults to `issue`. Under `current`, `branch` is ignored and git is left alone. */
+  branchMode: Schema.optional(LinearIssueThreadBranchMode),
   threadId: Schema.optional(ThreadId),
 });
 export type LinearPrepareIssueThreadInput = typeof LinearPrepareIssueThreadInput.Type;
 
 export const LinearPrepareIssueThreadResult = Schema.Struct({
   issue: LinearIssueDetail,
-  /** The branch that was checked out; see `LinearPrepareIssueThreadInput.branch`. */
-  branch: TrimmedNonEmptyString,
+  /**
+   * The branch the thread runs on: the one that was checked out under the
+   * `issue` branch mode, the checkout's own under `current`. Null only under
+   * `current`, when the checkout has no branch to report — a detached HEAD, or
+   * a directory git does not track.
+   */
+  branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
-  baseBranch: TrimmedNonEmptyString,
-  /** True when the branch already existed locally or on the remote and was checked out as-is. */
+  /** What the branch was cut from. Null under the `current` mode, which cuts nothing. */
+  baseBranch: Schema.NullOr(TrimmedNonEmptyString),
+  /**
+   * True when the branch already existed locally or on the remote and was
+   * checked out as-is. Always false under the `current` mode, where no branch
+   * was looked for in the first place.
+   */
   reusedExistingBranch: Schema.Boolean,
   /** The state the issue was moved to, or null when it was left alone. */
   movedToState: Schema.NullOr(LinearWorkflowState),

@@ -94,6 +94,10 @@ function isValidGitBranchName(branch: string): boolean {
  * `linear.branchNaming` setting supplies the name, git supplies the checkout,
  * and the state transition is a courtesy that never costs the caller its
  * worktree.
+ *
+ * Under the `current` branch mode there is no branch to turn it into: the
+ * checkout is left exactly as it is and this only resolves the issue, reports
+ * the branch already checked out, and moves the issue along.
  */
 export class LinearThreadService extends Context.Service<
   LinearThreadService,
@@ -143,10 +147,46 @@ export const make = Effect.gen(function* () {
     return target;
   });
 
+  /** The transition, with the failure it is allowed to have already swallowed. */
+  const moveIssueToStartedIfPossible = (issue: Parameters<typeof moveIssueToStarted>[0]) =>
+    moveIssueToStarted(issue).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("LinearThreadService could not move the issue to In Progress", {
+          identifier: issue.identifier,
+          cause,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+
   const prepareIssueThread: LinearThreadService["Service"]["prepareIssueThread"] = Effect.fn(
     "LinearThreadService.prepareIssueThread",
   )(function* (input) {
     const issue = yield* linear.getIssue({ reference: input.reference });
+
+    // Nothing to check out, so nothing here needs the branch settings or the
+    // mapping: report the branch the checkout is already on, so the thread
+    // still records where it ran, and leave git alone. A checkout that cannot
+    // be read (a detached HEAD, or a directory git does not track) costs the
+    // thread that record, never the thread itself.
+    if (input.branchMode === "current") {
+      const currentBranch = yield* gitWorkflow.localStatus({ cwd: input.cwd }).pipe(
+        Effect.map((status) => status.refName),
+        Effect.catch((cause) =>
+          Effect.logWarning("LinearThreadService could not read the checkout's branch", {
+            cwd: input.cwd,
+            cause,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      return {
+        issue,
+        branch: currentBranch,
+        worktreePath: null,
+        baseBranch: null,
+        reusedExistingBranch: false,
+        movedToState: yield* moveIssueToStartedIfPossible(issue),
+      } satisfies LinearPrepareIssueThreadResult;
+    }
 
     // The mapping row the user set in Settings wins over the repository's own
     // t3.json, which in turn wins over the remote's default branch (picked
@@ -202,14 +242,7 @@ export const make = Effect.gen(function* () {
       ...(input.threadId ? { threadId: input.threadId } : {}),
     });
 
-    const movedToState = yield* moveIssueToStarted(issue).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("LinearThreadService could not move the issue to In Progress", {
-          identifier: issue.identifier,
-          cause,
-        }).pipe(Effect.as(null)),
-      ),
-    );
+    const movedToState = yield* moveIssueToStartedIfPossible(issue);
 
     return {
       issue,

@@ -23,7 +23,8 @@ opens below with its state, labels, and full description, so you can read the br
 starting.
 
 Under the issue, check what the thread will get: the project it runs in, whether it gets a fresh
-git worktree or uses the checkout you already have open, the branch, and the model. A worktree
+git worktree or uses the checkout you already have open, the branch — the issue's own, or the one
+the checkout is already on — and the model. A worktree
 keeps the checkout you are using free. The model starts as the project's default and can be
 changed for this thread alone. Add a note if the ticket leaves something out; it is sent with the
 first message.
@@ -39,6 +40,12 @@ see Branch names below to follow your repository's own convention instead. Eithe
 carries the issue identifier, so Linear links the pull request to the issue by itself and moves the
 issue through In Review and Done as the pull request progresses. You do not have to paste the
 identifier anywhere.
+
+If the work belongs on the branch you are already on — a fix to a branch in review, or a second
+issue on the same feature — switch the branch row to **Current branch**. The thread then starts
+where the checkout already is: nothing is created and nothing is checked out. A worktree is not
+offered for it, since a worktree needs a branch of its own. The pull request will not carry the
+issue identifier either, so link it from the issue in Linear if you want the two connected.
 
 The issue also moves to the first started state on its team, usually **In Progress**. Turn that
 off with **Move issue to In Progress when a thread starts** in **Settings → Integrations →
@@ -109,7 +116,8 @@ repository convention you can change the prefix or type the whole branch name yo
 
 The branch has to keep the issue identifier, such as `del-123`, and the dialog will not start a
 thread without it. Finding the identifier in the branch name is how Linear links the pull request
-to the issue and moves the issue through In Review and Done as the pull request progresses.
+to the issue and moves the issue through In Review and Done as the pull request progresses. The
+exception is **Current branch**, which asks for no branch at all and gives up that automatic link.
 
 ## See your issues
 

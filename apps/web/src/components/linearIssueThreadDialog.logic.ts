@@ -65,6 +65,27 @@ export function filterLinearIssues<T extends { identifier: string; title: string
   );
 }
 
+/**
+ * The dialog footer's one-line account of what "Start thread" will do.
+ *
+ * Under `current` the thread is not going anywhere new, so the sentence names
+ * the branch it stays on rather than one that is about to be cut — and says so
+ * even before the checkout's status has arrived.
+ */
+export function linearIssueThreadLaunchSummary(input: {
+  readonly mode: "local" | "worktree";
+  readonly branchMode: "issue" | "current";
+  readonly issueBranch: string;
+  readonly currentBranch: string | null;
+}): string {
+  if (input.branchMode === "current") {
+    return input.currentBranch === null
+      ? "This checkout, on the branch it is already on"
+      : `This checkout, staying on ${input.currentBranch}`;
+  }
+  return `${input.mode === "worktree" ? "New worktree" : "Local checkout"} on ${input.issueBranch}`;
+}
+
 const THREAD_TITLE_LIMIT = 80;
 
 /** `DEL-123 Fix login`, cut so the sidebar row stays one line. */

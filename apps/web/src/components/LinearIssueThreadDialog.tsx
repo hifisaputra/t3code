@@ -3,6 +3,7 @@ import type {
   LinearBranchNaming,
   LinearIssueDetail,
   LinearIssueSummary,
+  LinearIssueThreadBranchMode,
   ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -54,6 +55,7 @@ import { useEnvironmentQuery } from "~/state/query";
 import { EMPTY_SERVER_PROVIDERS } from "~/state/server";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { vcsEnvironment } from "~/state/vcs";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE } from "~/types";
 import { ProviderModelPicker } from "./chat/ProviderModelPicker";
 import ChatMarkdown from "./ChatMarkdown";
@@ -62,6 +64,7 @@ import {
   filterLinearIssues,
   linearBranchPrefixOptions,
   linearBranchProblem,
+  linearIssueThreadLaunchSummary,
   linearIssueThreadMessage,
   linearIssueThreadTitle,
 } from "./linearIssueThreadDialog.logic";
@@ -136,9 +139,17 @@ const DEFAULT_BRANCH_NAMING: LinearBranchNaming = {
  * format there is nothing to decide and the issue's `branchName` is shown as a
  * fact, while the repository convention offers the prefix and lets the whole
  * name be typed over. Either way it has to carry the issue identifier, which
- * is what makes Linear recognise the pull request later. The checkout is not
- * the caller's either: the issue's team or Linear project decides it through
- * the repository mapping, and the caller's project is only the fallback.
+ * is what makes Linear recognise the pull request later.
+ *
+ * That row can also decline the branch entirely: "Current branch" starts the
+ * thread on whatever the checkout is already on, for the fix that belongs on
+ * the branch in progress rather than on one of its own. Nothing is created or
+ * switched, so it rules out a worktree, and the pull request has to be linked
+ * from Linear by hand.
+ *
+ * The checkout is not the caller's either: the issue's team or Linear project
+ * decides it through the repository mapping, and the caller's project is only
+ * the fallback.
  */
 export function LinearIssueThreadDialog({
   open,
@@ -176,6 +187,9 @@ export function LinearIssueThreadDialog({
     prefix: string;
     branch: string;
   } | null>(null);
+  // Not tied to an issue: declining the branch is a statement about the work
+  // in the checkout, and it survives resolving a different issue.
+  const [branchMode, setBranchMode] = useState<LinearIssueThreadBranchMode>("issue");
   // The dialog stays mounted between openings, so a branch left in the box
   // would greet the next issue that happens to resolve to the same id.
   // Dropped while rendering the closed dialog, since an effect would have to
@@ -185,6 +199,7 @@ export function LinearIssueThreadDialog({
     setBranchDraftOpen(open);
     if (!open) {
       setBranchDraft(null);
+      setBranchMode("issue");
       setNote("");
       setStartError(null);
     }
@@ -269,9 +284,22 @@ export function LinearIssueThreadDialog({
   const prepareIssueThreadAction = usePrepareIssueThreadAction(scope);
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
 
-  // Worktree unless the project, or the server, says threads start locally.
+  // Worktree unless the project, or the server, says threads start locally —
+  // or unless no branch is being cut, since git will not put a second worktree
+  // on the branch the root checkout already holds.
   const mode: ThreadMode =
-    modeOverride ?? targetProject?.defaultThreadEnvMode ?? serverSettings.defaultThreadEnvMode;
+    branchMode === "current"
+      ? "local"
+      : (modeOverride ??
+        targetProject?.defaultThreadEnvMode ??
+        serverSettings.defaultThreadEnvMode);
+
+  // What "Current branch" will run on. The same subscription the chat view
+  // reads, so the dialog costs no extra status call on the way in.
+  const checkoutStatus = useEnvironmentQuery(
+    !open || cwd === null ? null : vcsEnvironment.status({ environmentId, input: { cwd } }),
+  );
+  const currentBranch = checkoutStatus.data?.refName ?? null;
 
   // The model row is the composer's picker fed the same way the project
   // defaults page feeds it, defaulting like a new draft would: the project's
@@ -341,7 +369,7 @@ export function LinearIssueThreadDialog({
     activeBranchDraft?.branch ??
     (resolvedIssue === null ? "" : linearIssueBranchName(resolvedIssue, branchNaming));
   const branchProblem =
-    branchIsEditable && resolvedIssue !== null
+    branchMode === "issue" && branchIsEditable && resolvedIssue !== null
       ? linearBranchProblem(branchName, resolvedIssue.identifier)
       : null;
 
@@ -383,9 +411,11 @@ export function LinearIssueThreadDialog({
     const prepared = await prepareIssueThreadAction.run({
       reference: parsedReference,
       mode,
+      branchMode,
       // Under Linear's own format there is nothing the dialog knows that the
-      // server does not, so it names the branch itself.
-      ...(branchIsEditable ? { branch: branchName.trim() } : {}),
+      // server does not, so it names the branch itself. Under "Current branch"
+      // there is no branch to name at all.
+      ...(branchIsEditable && branchMode === "issue" ? { branch: branchName.trim() } : {}),
       ...(mode === "worktree" ? { threadId } : {}),
     });
     if (prepared._tag === "Failure") {
@@ -452,12 +482,13 @@ export function LinearIssueThreadDialog({
     if (started._tag === "Failure") {
       if (!isAtomCommandInterrupted(started)) {
         const error = squashAtomCommandFailure(started);
-        // The branch is checked out by now; saying so keeps a retry from
-        // reading as a second checkout.
+        const detail = error instanceof Error ? error.message : "unknown error";
+        // A checked-out branch is worth saying, so a retry does not read as a
+        // second checkout. Under "Current branch" nothing was checked out.
         setStartError(
-          `${branch} is ready, but the thread could not start: ${
-            error instanceof Error ? error.message : "unknown error"
-          }`,
+          branchMode === "issue" && branch !== null
+            ? `${branch} is ready, but the thread could not start: ${detail}`
+            : `The thread could not start: ${detail}`,
         );
       }
       return;
@@ -473,6 +504,7 @@ export function LinearIssueThreadDialog({
     onOpenChange(false);
   }, [
     branchIsEditable,
+    branchMode,
     branchName,
     branchProblem,
     environmentId,
@@ -629,8 +661,14 @@ export function LinearIssueThreadDialog({
               onProjectChange={(projectId) => setOverride({ issueId: resolvedIssue.id, projectId })}
               mode={mode}
               onModeChange={setModeOverride}
-              branch={
-                branchIsEditable
+              // A worktree needs a branch of its own, so it is not on offer
+              // while the thread is staying on the checkout's branch.
+              worktreeAvailable={branchMode === "issue"}
+              branch={{
+                mode: branchMode,
+                onModeChange: setBranchMode,
+                currentBranch,
+                issue: branchIsEditable
                   ? {
                       editable: true,
                       prefix: branchPrefix ?? "",
@@ -639,8 +677,8 @@ export function LinearIssueThreadDialog({
                       problem: branchProblem,
                       onEdit: editBranch,
                     }
-                  : { editable: false, name: resolvedIssue.branchName }
-              }
+                  : { editable: false, name: resolvedIssue.branchName },
+              }}
               model={
                 modelSelection
                   ? {
@@ -680,7 +718,12 @@ export function LinearIssueThreadDialog({
           >
             {footerError ??
               (resolvedIssue && targetProject
-                ? `${mode === "worktree" ? "New worktree" : "Local checkout"} on ${branchName || resolvedIssue.branchName}`
+                ? linearIssueThreadLaunchSummary({
+                    mode,
+                    branchMode,
+                    issueBranch: branchName || resolvedIssue.branchName,
+                    currentBranch,
+                  })
                 : "")}
           </p>
           <Button
@@ -703,7 +746,7 @@ export function LinearIssueThreadDialog({
             {phase === "preparing" ? (
               <>
                 <Spinner className="size-3.5" />
-                Checking out branch...
+                {branchMode === "current" ? "Reading issue..." : "Checking out branch..."}
               </>
             ) : phase === "starting" ? (
               <>
@@ -730,16 +773,24 @@ interface LaunchPanelProps {
   readonly onProjectChange: (projectId: ProjectId) => void;
   readonly mode: ThreadMode;
   readonly onModeChange: (mode: ThreadMode) => void;
-  readonly branch:
-    | {
-        readonly editable: true;
-        readonly prefix: string;
-        readonly prefixOptions: ReadonlyArray<string>;
-        readonly name: string;
-        readonly problem: string | null;
-        readonly onEdit: (patch: { prefix?: string; branch?: string }) => void;
-      }
-    | { readonly editable: false; readonly name: string };
+  /** False while the thread stays on the checkout's branch, which no worktree can share. */
+  readonly worktreeAvailable: boolean;
+  readonly branch: {
+    readonly mode: LinearIssueThreadBranchMode;
+    readonly onModeChange: (mode: LinearIssueThreadBranchMode) => void;
+    /** What the checkout is on, or null while the status is still coming in. */
+    readonly currentBranch: string | null;
+    readonly issue:
+      | {
+          readonly editable: true;
+          readonly prefix: string;
+          readonly prefixOptions: ReadonlyArray<string>;
+          readonly name: string;
+          readonly problem: string | null;
+          readonly onEdit: (patch: { prefix?: string; branch?: string }) => void;
+        }
+      | { readonly editable: false; readonly name: string };
+  };
   readonly model: {
     readonly selection: ModelSelection;
     readonly entries: Parameters<typeof ProviderModelPicker>[0]["instanceEntries"];
@@ -765,6 +816,7 @@ function LaunchPanel({
   onProjectChange,
   mode,
   onModeChange,
+  worktreeAvailable,
   branch,
   model,
   note,
@@ -772,6 +824,7 @@ function LaunchPanel({
   onNoteKeyDown,
   disabled,
 }: LaunchPanelProps) {
+  const issueBranch = branch.issue;
   return (
     <div className="grid gap-2.5 border-border/60 border-t bg-muted/24 px-6 py-3.5 text-xs">
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
@@ -817,7 +870,9 @@ function LaunchPanel({
               if (next === "worktree" || next === "local") onModeChange(next);
             }}
           >
-            <Toggle value="worktree">New worktree</Toggle>
+            <Toggle value="worktree" disabled={!worktreeAvailable}>
+              New worktree
+            </Toggle>
             <Toggle value="local">This checkout</Toggle>
           </ToggleGroup>
         </LaunchField>
@@ -843,46 +898,74 @@ function LaunchPanel({
       </div>
 
       <LaunchField label="Branch" className="items-start">
-        {branch.editable ? (
-          <div className="grid min-w-0 flex-1 gap-1">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <Select
-                value={branch.prefix}
-                onValueChange={(next) => branch.onEdit({ prefix: String(next) })}
-                disabled={disabled}
-              >
-                <SelectTrigger size="xs" className="w-auto min-w-20" aria-label="Branch prefix">
-                  <SelectValue>
-                    <span className="truncate font-mono">{branch.prefix}</span>
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="start" alignItemWithTrigger={false}>
-                  {branch.prefixOptions.map((prefix) => (
-                    <SelectItem hideIndicator key={prefix} value={prefix}>
-                      <span className="truncate font-mono">{prefix}</span>
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-              <Input
-                size="sm"
-                spellCheck={false}
-                aria-label="Branch name"
-                aria-invalid={branch.problem !== null}
-                className="min-w-0 flex-1 font-mono text-xs"
-                value={branch.name}
-                disabled={disabled}
-                onChange={(event) => branch.onEdit({ branch: event.target.value })}
-              />
-            </div>
-            {branch.problem ? <p className="text-destructive">{branch.problem}</p> : null}
+        <div className="grid min-w-0 flex-1 gap-1.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <ToggleGroup
+              aria-label="Which branch the thread runs on"
+              variant="segmented"
+              value={[branch.mode]}
+              disabled={disabled}
+              onValueChange={(value) => {
+                const next = value[0];
+                if (next === "issue" || next === "current") branch.onModeChange(next);
+              }}
+            >
+              <Toggle value="issue">Issue branch</Toggle>
+              <Toggle value="current">Current branch</Toggle>
+            </ToggleGroup>
+            {branch.mode === "current" ? (
+              <span className="flex min-w-0 items-center gap-1.5 font-mono text-foreground">
+                <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="truncate">{branch.currentBranch ?? "the current branch"}</span>
+              </span>
+            ) : issueBranch.editable ? (
+              <div className="flex min-w-52 flex-1 items-center gap-1.5">
+                <Select
+                  value={issueBranch.prefix}
+                  onValueChange={(next) => issueBranch.onEdit({ prefix: String(next) })}
+                  disabled={disabled}
+                >
+                  <SelectTrigger size="xs" className="w-auto min-w-20" aria-label="Branch prefix">
+                    <SelectValue>
+                      <span className="truncate font-mono">{issueBranch.prefix}</span>
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup align="start" alignItemWithTrigger={false}>
+                    {issueBranch.prefixOptions.map((prefix) => (
+                      <SelectItem hideIndicator key={prefix} value={prefix}>
+                        <span className="truncate font-mono">{prefix}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+                <Input
+                  size="sm"
+                  spellCheck={false}
+                  aria-label="Branch name"
+                  aria-invalid={issueBranch.problem !== null}
+                  className="min-w-0 flex-1 font-mono text-xs"
+                  value={issueBranch.name}
+                  disabled={disabled}
+                  onChange={(event) => issueBranch.onEdit({ branch: event.target.value })}
+                />
+              </div>
+            ) : (
+              <span className="flex min-w-0 items-center gap-1.5 font-mono text-foreground">
+                <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="truncate">{issueBranch.name}</span>
+              </span>
+            )}
           </div>
-        ) : (
-          <span className="flex min-w-0 items-center gap-1.5 font-mono text-foreground">
-            <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
-            <span className="truncate">{branch.name}</span>
-          </span>
-        )}
+          {branch.mode === "current" ? (
+            <p className="text-muted-foreground">
+              Nothing is created or checked out, so the thread runs in this checkout. Linear links a
+              pull request through the identifier in its branch name, so this one has to be linked
+              from the issue.
+            </p>
+          ) : issueBranch.editable && issueBranch.problem ? (
+            <p className="text-destructive">{issueBranch.problem}</p>
+          ) : null}
+        </div>
       </LaunchField>
 
       <LaunchField label="Note" className="items-start">

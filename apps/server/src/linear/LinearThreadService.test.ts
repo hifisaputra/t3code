@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import {
+  GitCommandError,
   LinearIssueNotFoundError,
   LinearOperationError,
   ProjectId,
@@ -92,8 +93,12 @@ function makeHarness(input?: {
   readonly projectFile?: T3ProjectFile;
   readonly linearRepositories?: ReadonlyArray<LinearRepositoryMapping>;
   readonly linearBranchNaming?: Partial<LinearBranchNaming>;
+  /** What the checkout is on, for the branch mode that stays on it. */
+  readonly checkoutBranch?: string | null;
+  readonly localStatusFails?: boolean;
 }) {
   const gitCalls: PreparedBranchCall[] = [];
+  const statusCwds: string[] = [];
   const movedStateIds: string[] = [];
 
   const linearLayer = Layer.mock(LinearApi.LinearApi)({
@@ -117,6 +122,28 @@ function makeHarness(input?: {
   });
 
   const gitLayer = Layer.mock(GitWorkflowService.GitWorkflowService)({
+    localStatus: (statusInput) => {
+      statusCwds.push(statusInput.cwd);
+      if (input?.localStatusFails) {
+        return Effect.fail(
+          new GitCommandError({
+            operation: "localStatus",
+            command: "git status",
+            cwd: statusInput.cwd,
+            exitCode: 128,
+            detail: "fatal: not a git repository",
+          }),
+        );
+      }
+      return Effect.succeed({
+        isRepo: true,
+        hasPrimaryRemote: true,
+        isDefaultRef: false,
+        refName: input?.checkoutBranch === undefined ? "release/24.3" : input.checkoutBranch,
+        hasWorkingTreeChanges: false,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
+      });
+    },
     prepareBranchThread: (branchInput) =>
       Effect.sync(() => {
         gitCalls.push({
@@ -159,7 +186,7 @@ function makeHarness(input?: {
     ),
   );
 
-  return { layer, gitCalls, movedStateIds };
+  return { layer, gitCalls, statusCwds, movedStateIds };
 }
 
 const input = {
@@ -386,5 +413,57 @@ it.effect("refuses a branch git would reject as a ref", () => {
     assert.instanceOf(error, LinearOperationError);
     assert.include(error.message, "not a valid git branch name");
     assert.deepStrictEqual(gitCalls, []);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("stays on the checkout's branch and never touches git under the current mode", () => {
+  const { layer, gitCalls, statusCwds, movedStateIds } = makeHarness();
+
+  return Effect.gen(function* () {
+    const service = yield* LinearThreadService.LinearThreadService;
+
+    const result = yield* service.prepareIssueThread({
+      ...input,
+      branchMode: "current",
+      // Named anyway, the way the dialog leaves a branch in its box: the mode
+      // decides, so this is ignored rather than checked out.
+      branch: "ada/del-123-wire-up-linear",
+    });
+
+    assert.deepStrictEqual(gitCalls, []);
+    assert.deepStrictEqual(statusCwds, ["/repos/t3code"]);
+    assert.strictEqual(result.branch, "release/24.3");
+    assert.strictEqual(result.worktreePath, null);
+    assert.strictEqual(result.baseBranch, null);
+    assert.strictEqual(result.reusedExistingBranch, false);
+    // The issue still moves: that is about the work starting, not the branch.
+    assert.deepStrictEqual(result.movedToState, IN_PROGRESS_STATE);
+    assert.deepStrictEqual(movedStateIds, ["state-in-progress"]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("starts the thread even when the checkout has no branch to report", () => {
+  const { layer, gitCalls } = makeHarness({ localStatusFails: true });
+
+  return Effect.gen(function* () {
+    const service = yield* LinearThreadService.LinearThreadService;
+
+    const result = yield* service.prepareIssueThread({ ...input, branchMode: "current" });
+
+    assert.strictEqual(result.branch, null);
+    assert.deepStrictEqual(gitCalls, []);
+    assert.deepStrictEqual(result.movedToState, IN_PROGRESS_STATE);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reports a detached checkout as no branch rather than failing", () => {
+  const { layer } = makeHarness({ checkoutBranch: null });
+
+  return Effect.gen(function* () {
+    const service = yield* LinearThreadService.LinearThreadService;
+
+    const result = yield* service.prepareIssueThread({ ...input, branchMode: "current" });
+
+    assert.strictEqual(result.branch, null);
   }).pipe(Effect.provide(layer));
 });

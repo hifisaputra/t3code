@@ -1,4 +1,9 @@
-import type { EnvironmentId, LinearIssueDetail, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  LinearIssueDetail,
+  LinearIssueThreadBranchMode,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -20,7 +25,8 @@ export interface LinearIssueThreadScope {
 
 /**
  * Checking out an issue's branch, with the pending and error state the dialog
- * renders.
+ * renders. Under the `current` branch mode there is no checkout to do and the
+ * call only resolves the issue and moves it along.
  *
  * Unlike the pull-request equivalent this does not register with the shared
  * VCS action manager: the manager's operation list is a wire contract, and the
@@ -43,6 +49,8 @@ export function usePrepareIssueThreadAction(scope: LinearIssueThreadScope) {
       mode: "local" | "worktree";
       /** Omitted when the dialog left the branch to the server's naming setting. */
       branch?: string;
+      /** `current` starts on the branch the checkout is already on; the server touches git only under `issue`. */
+      branchMode?: LinearIssueThreadBranchMode;
       threadId?: ThreadId;
     }) => {
       if (scope.environmentId === null || scope.cwd === null) {
@@ -59,6 +67,7 @@ export function usePrepareIssueThreadAction(scope: LinearIssueThreadScope) {
           reference: input.reference,
           mode: input.mode,
           ...(input.branch ? { branch: input.branch } : {}),
+          ...(input.branchMode ? { branchMode: input.branchMode } : {}),
           ...(input.threadId ? { threadId: input.threadId } : {}),
         },
       });

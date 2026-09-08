@@ -4,6 +4,7 @@ import {
   filterLinearIssues,
   linearBranchPrefixOptions,
   linearBranchProblem,
+  linearIssueThreadLaunchSummary,
   linearIssueThreadMessage,
   linearIssueThreadTitle,
 } from "./linearIssueThreadDialog.logic";
@@ -113,5 +114,40 @@ describe("linearIssueThreadMessage", () => {
     expect(linearIssueThreadMessage("Work on DEL-12\n\n", " Keep the old route. ")).toBe(
       "Work on DEL-12\n\nKeep the old route.",
     );
+  });
+});
+
+describe("linearIssueThreadLaunchSummary", () => {
+  it("names the branch about to be cut", () => {
+    expect(
+      linearIssueThreadLaunchSummary({
+        mode: "worktree",
+        branchMode: "issue",
+        issueBranch: "ada/del-123-fix-login",
+        currentBranch: "main",
+      }),
+    ).toBe("New worktree on ada/del-123-fix-login");
+  });
+
+  it("names the branch it stays on instead", () => {
+    expect(
+      linearIssueThreadLaunchSummary({
+        mode: "local",
+        branchMode: "current",
+        issueBranch: "ada/del-123-fix-login",
+        currentBranch: "release/24.3",
+      }),
+    ).toBe("This checkout, staying on release/24.3");
+  });
+
+  it("says as much before the checkout's status arrives", () => {
+    expect(
+      linearIssueThreadLaunchSummary({
+        mode: "local",
+        branchMode: "current",
+        issueBranch: "ada/del-123-fix-login",
+        currentBranch: null,
+      }),
+    ).toBe("This checkout, on the branch it is already on");
   });
 });
