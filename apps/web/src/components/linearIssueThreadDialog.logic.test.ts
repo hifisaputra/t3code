@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { linearBranchPrefixOptions, linearBranchProblem } from "./linearIssueThreadDialog.logic";
+import {
+  filterLinearIssues,
+  linearBranchPrefixOptions,
+  linearBranchProblem,
+  linearIssueThreadMessage,
+  linearIssueThreadTitle,
+} from "./linearIssueThreadDialog.logic";
 
 describe("linearBranchPrefixOptions", () => {
   it("keeps the configured order", () => {
@@ -52,6 +58,60 @@ describe("linearBranchProblem", () => {
     );
     expect(linearBranchProblem("   ", "DEL-177")).toBe(
       "Must include DEL-177 so Linear links the pull request.",
+    );
+  });
+});
+
+describe("filterLinearIssues", () => {
+  const issues = [
+    { identifier: "DEL-12", title: "Fix login redirect" },
+    { identifier: "DEL-120", title: "Rename the settings page" },
+    { identifier: "OPS-3", title: "Rotate the login secret" },
+  ];
+
+  it("shows everything for an empty box", () => {
+    expect(filterLinearIssues(issues, "  ")).toBe(issues);
+  });
+
+  it("narrows by a word in the title, ignoring case", () => {
+    expect(filterLinearIssues(issues, "LOGIN").map((issue) => issue.identifier)).toEqual([
+      "DEL-12",
+      "OPS-3",
+    ]);
+  });
+
+  it("narrows by a partial identifier", () => {
+    expect(filterLinearIssues(issues, "del-12").map((issue) => issue.identifier)).toEqual([
+      "DEL-12",
+      "DEL-120",
+    ]);
+  });
+});
+
+describe("linearIssueThreadTitle", () => {
+  it("leads with the identifier", () => {
+    expect(linearIssueThreadTitle({ identifier: "DEL-12", title: "  Fix login  " })).toBe(
+      "DEL-12 Fix login",
+    );
+  });
+
+  it("cuts a long title to one line", () => {
+    const title = linearIssueThreadTitle({ identifier: "DEL-12", title: "x".repeat(200) });
+    expect(title.length).toBeLessThanOrEqual(81);
+    expect(title.endsWith("…")).toBe(true);
+  });
+});
+
+describe("linearIssueThreadMessage", () => {
+  it("sends the kickoff alone without the caret room", () => {
+    expect(linearIssueThreadMessage("Work on DEL-12\nhttps://x\n\n", "  ")).toBe(
+      "Work on DEL-12\nhttps://x",
+    );
+  });
+
+  it("puts the note under the kickoff", () => {
+    expect(linearIssueThreadMessage("Work on DEL-12\n\n", " Keep the old route. ")).toBe(
+      "Work on DEL-12\n\nKeep the old route.",
     );
   });
 });

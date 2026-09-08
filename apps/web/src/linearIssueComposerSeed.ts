@@ -103,8 +103,9 @@ export function hasLinearWorkSkill(
 }
 
 /**
- * What the composer seeds when a thread starts from a Linear issue: an
- * instruction to work the ticket, not the ticket itself.
+ * The first message of a thread started from a Linear issue: an instruction
+ * to work the ticket, not the ticket itself. The issue dialog sends it as the
+ * kickoff, with the person's note under it when they wrote one.
  *
  * The skill mention leads the prompt because Claude Code turns the last known
  * `$name` into `/name <everything after it>`, and that trailing text becomes
@@ -116,7 +117,7 @@ export function hasLinearWorkSkill(
  * agent reads a fresher, complete ticket itself, and quoting a capped copy in
  * the prompt would only spend the turn's context on a worse one.
  *
- * Two trailing newlines leave the caret below for the person's own note.
+ * Two trailing newlines leave room below for the person's own note.
  */
 export function formatLinearIssueKickoff(
   issue: LinearIssueDetail,

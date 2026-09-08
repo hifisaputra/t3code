@@ -45,3 +45,48 @@ export function linearBranchProblem(branch: string, identifier: string): string 
   }
   return null;
 }
+
+/**
+ * The rows the "My issues" list shows for what is in the box.
+ *
+ * The box doubles as a filter: a word narrows the list by title, and a
+ * partial identifier such as `DEL-1` narrows it by identifier, so a list of
+ * twenty is scanned by typing rather than by reading. Empty shows all.
+ */
+export function filterLinearIssues<T extends { identifier: string; title: string }>(
+  issues: ReadonlyArray<T>,
+  query: string,
+): ReadonlyArray<T> {
+  const needle = query.trim().toLowerCase();
+  if (needle.length === 0) return issues;
+  return issues.filter(
+    (issue) =>
+      issue.identifier.toLowerCase().includes(needle) || issue.title.toLowerCase().includes(needle),
+  );
+}
+
+const THREAD_TITLE_LIMIT = 80;
+
+/** `DEL-123 Fix login`, cut so the sidebar row stays one line. */
+export function linearIssueThreadTitle(issue: {
+  readonly identifier: string;
+  readonly title: string;
+}): string {
+  const title = `${issue.identifier} ${issue.title.trim()}`.trim();
+  return title.length <= THREAD_TITLE_LIMIT
+    ? title
+    : `${title.slice(0, THREAD_TITLE_LIMIT).trimEnd()}…`;
+}
+
+/**
+ * The first message of a thread started from an issue: the kickoff, then the
+ * person's own note under it when there is one.
+ *
+ * The kickoff ends in a blank line that used to leave room for the caret in
+ * the composer; the note takes that room now, and without a note the blank
+ * line goes.
+ */
+export function linearIssueThreadMessage(kickoff: string, note: string): string {
+  const trimmedNote = note.trim();
+  return trimmedNote.length === 0 ? kickoff.trimEnd() : `${kickoff.trimEnd()}\n\n${trimmedNote}`;
+}

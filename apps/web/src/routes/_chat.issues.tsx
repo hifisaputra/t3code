@@ -1,13 +1,10 @@
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type {
   EnvironmentId,
-  LinearIssueDetail,
   LinearIssueSummary,
   ProjectId,
-  ThreadLinkedIssue,
+  ScopedThreadRef,
 } from "@t3tools/contracts";
 import { resolveLinearRepositoryMapping } from "@t3tools/contracts";
-import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useDebouncedCallback } from "@tanstack/react-pacer";
 import { SearchIcon } from "lucide-react";
@@ -54,13 +51,9 @@ import {
 } from "../components/ui/select";
 import { SidebarInset } from "../components/ui/sidebar";
 import { Spinner } from "../components/ui/spinner";
-import { toastManager } from "../components/ui/toast";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
-import { useComposerDraftStore } from "../composerDraftStore";
 import { isElectron } from "../env";
-import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { cn } from "../lib/utils";
-import { formatLinearIssueKickoff, hasLinearWorkSkill } from "../linearIssueComposerSeed";
 import { useProjects, useThreadShells } from "../state/entities";
 import { useEnvironments } from "../state/environments";
 import { linearEnvironment } from "../state/linear";
@@ -119,8 +112,6 @@ function IssuesRouteView() {
   const { environments } = useEnvironments();
   const allProjects = useProjects();
   const threadShells = useThreadShells();
-  const newThread = useNewThreadHandler();
-  const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
 
   const linearEnvironments = useMemo(() => linearCapableEnvironments(environments), [environments]);
   const environmentId = useMemo(
@@ -252,55 +243,14 @@ function IssuesRouteView() {
     [startThread],
   );
 
-  const handlePrepared = useCallback(
-    async (input: {
-      branch: string;
-      worktreePath: string | null;
-      issue: LinearIssueDetail;
-      linkedIssue: ThreadLinkedIssue;
-      project: EnvironmentProject;
-    }) => {
-      // The dialog resolved the checkout from the issue's mapping; the page's
-      // own select was only the default it started from.
-      const session = await newThread(
-        scopeProjectRef(input.project.environmentId, input.project.id),
-        {
-          branch: input.branch,
-          worktreePath: input.worktreePath,
-          envMode: input.worktreePath ? "worktree" : "local",
-          linkedIssue: input.linkedIssue,
-        },
-      );
-      if (!session) {
-        toastManager.add({ type: "error", title: "Could not open a thread" });
-        return;
-      }
-      // The issue's own server decides the kickoff: it owns the Linear key and
-      // the toggle that gives the agent tools, and it discovered the skills.
-      const config =
-        environments.find(
-          (environment) => environment.environmentId === input.project.environmentId,
-        )?.serverConfig ?? null;
-      const linear = config?.settings.linear;
-      // Prepending keeps anything already typed: the kickoff is the
-      // instruction, and the person's own note belongs after it.
-      const seed = formatLinearIssueKickoff(input.issue, {
-        agentTools: (linear?.agentAccess ?? false) && (linear?.apiKey ?? "").length > 0,
-        skill: hasLinearWorkSkill(
-          config?.providers ?? [],
-          input.worktreePath ?? input.project.workspaceRoot,
-        ),
-      });
-      const existing =
-        useComposerDraftStore.getState().getComposerDraft(session.draftId)?.prompt ?? "";
-      setComposerDraftPrompt(session.draftId, existing.length > 0 ? seed + existing : seed);
-      toastManager.add({
-        type: "success",
-        title: "Thread ready",
-        description: `Press Enter to start the agent on ${input.issue.identifier}.`,
+  const handleStarted = useCallback(
+    (threadRef: ScopedThreadRef) => {
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(threadRef),
       });
     },
-    [environments, newThread, setComposerDraftPrompt],
+    [navigate],
   );
 
   const filtered = Boolean(search.team || search.project || search.cycle || queryInput.trim());
@@ -534,7 +484,7 @@ function IssuesRouteView() {
           onOpenChange={(open) => {
             if (!open) setDialog(null);
           }}
-          onPrepared={handlePrepared}
+          onStarted={handleStarted}
         />
       ) : null}
     </SidebarInset>

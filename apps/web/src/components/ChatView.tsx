@@ -27,7 +27,6 @@ import {
   type ThreadId,
   type ThreadLinkedPullRequest,
   type ThreadLinkedIssue,
-  type LinearIssueDetail,
   type TurnId,
   type KeybindingCommand,
   OrchestrationThreadActivity,
@@ -328,7 +327,6 @@ import { createPageScrollController, type PageScrollKey } from "./chat/pageScrol
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { LinearIssueThreadDialog } from "./LinearIssueThreadDialog";
-import { formatLinearIssueKickoff, hasLinearWorkSkill } from "../linearIssueComposerSeed";
 import { subscribeLinearIssueDialogRequest } from "../linearIssueDialogBus";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
@@ -2338,80 +2336,14 @@ export default function ChatView(props: ChatViewProps) {
     [openOrReuseProjectDraftThread],
   );
 
-  const handlePreparedIssueThread = useCallback(
-    async (input: {
-      branch: string;
-      worktreePath: string | null;
-      issue: LinearIssueDetail;
-      linkedIssue: ThreadLinkedIssue;
-      project: EnvironmentProject;
-    }) => {
-      const envMode = input.worktreePath ? "worktree" : "local";
-      // The issue's own server decides the kickoff: it owns the Linear key and
-      // the toggle that gives the agent tools, and it discovered the skills.
-      // The mapping can send the work to another server than the one on screen.
-      const config = environmentById.get(input.project.environmentId)?.serverConfig ?? null;
-      const linear = config?.settings.linear;
-      // Prepending keeps anything already typed: the kickoff is the
-      // instruction, and the person's own note belongs after it.
-      const seedComposer = (targetDraftId: DraftId) => {
-        const seed = formatLinearIssueKickoff(input.issue, {
-          agentTools: (linear?.agentAccess ?? false) && (linear?.apiKey ?? "").length > 0,
-          skill: hasLinearWorkSkill(
-            config?.providers ?? [],
-            input.worktreePath ?? input.project.workspaceRoot,
-          ),
-        });
-        const existing =
-          useComposerDraftStore.getState().getComposerDraft(targetDraftId)?.prompt ?? "";
-        setComposerDraftPrompt(targetDraftId, existing.length > 0 ? seed + existing : seed);
-      };
-
-      // The issue's repository mapping can send the work to a checkout other
-      // than the one this view is bound to, and the reuse path above only
-      // knows the active project's draft.
-      if (
-        !activeProject ||
-        input.project.id !== activeProject.id ||
-        input.project.environmentId !== activeProject.environmentId
-      ) {
-        const session = await handleNewThread(
-          scopeProjectRef(input.project.environmentId, input.project.id),
-          {
-            branch: input.branch,
-            worktreePath: input.worktreePath,
-            envMode,
-            linkedIssue: input.linkedIssue,
-          },
-        );
-        if (!session) return;
-        seedComposer(session.draftId);
-        return;
-      }
-
-      await openOrReuseProjectDraftThread({
-        branch: input.branch,
-        worktreePath: input.worktreePath,
-        envMode,
-        linkedIssue: input.linkedIssue,
+  const handleStartedIssueThread = useCallback(
+    (threadRef: ScopedThreadRef) => {
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(threadRef),
       });
-      // The draft the call above created or reused, looked up the same way it
-      // resolved it, so the ticket lands in that composer and not a stale one.
-      const draftSession = getDraftSessionByLogicalProjectKey(
-        deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings),
-      );
-      if (!draftSession) return;
-      seedComposer(draftSession.draftId);
     },
-    [
-      activeProject,
-      environmentById,
-      getDraftSessionByLogicalProjectKey,
-      handleNewThread,
-      openOrReuseProjectDraftThread,
-      projectGroupingSettings,
-      setComposerDraftPrompt,
-    ],
+    [navigate],
   );
 
   // The dialog resolves the issue's own checkout, so it needs every project on
@@ -8548,7 +8480,6 @@ export default function ChatView(props: ChatViewProps) {
                 key={linearIssueDialogState.key}
                 open
                 environmentId={activeThread.environmentId}
-                {...(isLocalDraftThread ? { threadId: activeThread.id } : {})}
                 projects={linearDialogProjects}
                 defaultProjectId={activeProject?.id ?? null}
                 initialReference={linearIssueDialogState.initialReference}
@@ -8557,7 +8488,7 @@ export default function ChatView(props: ChatViewProps) {
                     closeLinearIssueDialog();
                   }
                 }}
-                onPrepared={handlePreparedIssueThread}
+                onStarted={handleStartedIssueThread}
               />
             ) : null}
           </div>

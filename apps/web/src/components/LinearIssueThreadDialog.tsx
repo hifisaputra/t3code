@@ -3,11 +3,13 @@ import type {
   LinearBranchNaming,
   LinearIssueDetail,
   LinearIssueSummary,
+  ModelSelection,
   ProjectId,
-  ThreadId,
-  ThreadLinkedIssue,
+  ProviderInstanceId,
+  ScopedThreadRef,
 } from "@t3tools/contracts";
 import {
+  DEFAULT_SERVER_SETTINGS,
   defaultLinearBranchPrefix,
   linearIssueBranchName,
   LINEAR_DEFAULT_BRANCH_PREFIXES,
@@ -15,21 +17,63 @@ import {
   resolveLinearRepositoryMapping,
 } from "@t3tools/contracts";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import { createModelSelection } from "@t3tools/shared/model";
 import { useDebouncedValue } from "@tanstack/react-pacer";
-import { Link } from "@tanstack/react-router";
-import { CircleDotIcon, ExternalLinkIcon } from "lucide-react";
+import { Link, useNavigate } from "@tanstack/react-router";
+import {
+  CircleDotIcon,
+  ExternalLinkIcon,
+  FolderGit2Icon,
+  GitBranchIcon,
+  PlayIcon,
+  SearchIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { useComposerDraftStore } from "~/composerDraftStore";
+import { useClientSettings } from "~/hooks/useSettings";
+import { newMessageId, newThreadId } from "~/lib/utils";
+import { formatLinearIssueKickoff, hasLinearWorkSkill } from "~/linearIssueComposerSeed";
 import { parseLinearIssueReference } from "~/linearIssueReference";
+import { getCustomModelOptionsByInstance } from "~/modelSelection";
+import {
+  applyProviderInstanceSettings,
+  deriveProviderInstanceEntries,
+  resolveDefaultProviderModelSelection,
+  sortProviderInstanceEntries,
+} from "~/providerInstances";
 import { useEnvironments } from "~/state/environments";
 import { linearEnvironment } from "~/state/linear";
 import { usePrepareIssueThreadAction, useLinearIssueResolution } from "~/state/linearActions";
 import { useEnvironmentQuery } from "~/state/query";
+import { EMPTY_SERVER_PROVIDERS } from "~/state/server";
+import { threadEnvironment } from "~/state/threads";
+import { useAtomCommand } from "~/state/use-atom-command";
+import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE } from "~/types";
+import { ProviderModelPicker } from "./chat/ProviderModelPicker";
 import ChatMarkdown from "./ChatMarkdown";
 import { IssueStateDot } from "./issues/IssueRow";
-import { linearBranchPrefixOptions, linearBranchProblem } from "./linearIssueThreadDialog.logic";
+import {
+  filterLinearIssues,
+  linearBranchPrefixOptions,
+  linearBranchProblem,
+  linearIssueThreadMessage,
+  linearIssueThreadTitle,
+} from "./linearIssueThreadDialog.logic";
 import { useOpenIssueLink } from "./ThreadStatusIndicators";
+import {
+  Autocomplete,
+  AutocompleteEmpty,
+  AutocompleteInput,
+  AutocompleteItem,
+  AutocompleteList,
+  AutocompletePopup,
+} from "./ui/autocomplete";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -40,32 +84,30 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { Input } from "./ui/input";
+import { Kbd } from "./ui/kbd";
 import { ScrollArea } from "./ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import { Spinner } from "./ui/spinner";
+import { Textarea } from "./ui/textarea";
 import { toastManager } from "./ui/toast";
+import { Toggle, ToggleGroup } from "./ui/toggle-group";
 
 /** How many of my issues the picker lists. Enough to recognise one, short enough to scan. */
 const MY_ISSUES_LIMIT = 20;
 
+type ThreadMode = "local" | "worktree";
+
 interface LinearIssueThreadDialogProps {
   open: boolean;
   environmentId: EnvironmentId;
-  /** Present only for a draft thread, whose id the worktree setup script can run for. */
-  threadId?: ThreadId | undefined;
   /** Every project on this environment; the dialog picks the one the issue belongs to. */
   projects: ReadonlyArray<EnvironmentProject>;
   /** Where the caller was, used when no mapping claims the issue. */
   defaultProjectId: ProjectId | null;
   initialReference: string | null;
   onOpenChange: (open: boolean) => void;
-  onPrepared: (input: {
-    branch: string;
-    worktreePath: string | null;
-    issue: LinearIssueDetail;
-    linkedIssue: ThreadLinkedIssue;
-    project: EnvironmentProject;
-  }) => Promise<void> | void;
+  /** The thread is created and its first turn is running; the caller shows it. */
+  onStarted: (threadRef: ScopedThreadRef) => void;
 }
 
 /** What the branch row falls back to before the environment's settings arrive. */
@@ -80,9 +122,15 @@ const DEFAULT_BRANCH_NAMING: LinearBranchNaming = {
  *
  * Two panes: the left one picks an issue, by reference or from the list of
  * mine, and the right one reads it, description included, so what the thread
- * is for is on screen before it is started. Under the reader sit the two
- * things the thread needs decided: which checkout it starts in and what the
- * branch is called.
+ * is for is on screen before it is started. Under the reader sits the launch
+ * panel: which checkout the thread starts in, whether it gets its own
+ * worktree, what the branch is called, which model runs it, and an optional
+ * note for the agent.
+ *
+ * Starting is one step. The dialog checks the branch out, then creates the
+ * thread and its first turn in a single command, so there is no draft to
+ * press Enter in: the kickoff prompt that used to be seeded into the composer
+ * is sent as the first message. The caller only has to show the thread.
  *
  * The branch row follows the `linear.branchNaming` setting: under Linear's own
  * format there is nothing to decide and the issue's `branchName` is shown as a
@@ -95,20 +143,32 @@ const DEFAULT_BRANCH_NAMING: LinearBranchNaming = {
 export function LinearIssueThreadDialog({
   open,
   environmentId,
-  threadId,
   projects,
   defaultProjectId,
   initialReference,
   onOpenChange,
-  onPrepared,
+  onStarted,
 }: LinearIssueThreadDialogProps) {
+  const navigate = useNavigate();
   const referenceInputRef = useRef<HTMLInputElement>(null);
   const [reference, setReference] = useState(initialReference ?? "");
   const [referenceDirty, setReferenceDirty] = useState(false);
-  const [preparingMode, setPreparingMode] = useState<"local" | "worktree" | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [note, setNote] = useState("");
+  const [modeOverride, setModeOverride] = useState<ThreadMode | null>(null);
+  // "preparing" while the branch is being checked out, "starting" while the
+  // thread and its first turn are being created. The footer names each.
+  const [phase, setPhase] = useState<"preparing" | "starting" | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
   // Tied to the issue it was chosen for, so resolving a different issue falls
   // back to that issue's own mapping instead of keeping a stale override.
   const [override, setOverride] = useState<{ issueId: string; projectId: ProjectId } | null>(null);
+  // Tied to the project, whose default it replaces: the mapping can move the
+  // thread to another checkout, and that one has a default of its own.
+  const [modelPick, setModelPick] = useState<{
+    projectId: ProjectId;
+    selection: ModelSelection;
+  } | null>(null);
   // Tied to its issue the same way, so resolving another issue starts from
   // that issue's own default rather than the branch typed for the last one.
   const [branchDraft, setBranchDraft] = useState<{
@@ -123,9 +183,12 @@ export function LinearIssueThreadDialog({
   const [branchDraftOpen, setBranchDraftOpen] = useState(open);
   if (branchDraftOpen !== open) {
     setBranchDraftOpen(open);
-    if (!open) setBranchDraft(null);
+    if (!open) {
+      setBranchDraft(null);
+      setNote("");
+      setStartError(null);
+    }
   }
-  const [movedToStateName, setMovedToStateName] = useState<string | null>(null);
   const [debouncedReference, referenceDebouncer] = useDebouncedValue(
     reference,
     { wait: 450 },
@@ -165,6 +228,10 @@ export function LinearIssueThreadDialog({
       ? linearEnvironment.issues({ environmentId, input: { limit: MY_ISSUES_LIMIT } })
       : null,
   );
+  const listedIssues = useMemo(
+    () => (myIssues.data ? filterLinearIssues(myIssues.data.issues, reference) : null),
+    [myIssues.data, reference],
+  );
 
   const resolvedIssue =
     parsedReference !== null && parsedReference === parsedDebouncedReference
@@ -172,12 +239,14 @@ export function LinearIssueThreadDialog({
       : null;
 
   const { environments } = useEnvironments();
-  const linearSettings = useMemo(
+  const serverConfig = useMemo(
     () =>
-      environments.find((environment) => environment.environmentId === environmentId)?.serverConfig
-        ?.settings.linear ?? null,
+      environments.find((environment) => environment.environmentId === environmentId)
+        ?.serverConfig ?? null,
     [environmentId, environments],
   );
+  const serverSettings = serverConfig?.settings ?? DEFAULT_SERVER_SETTINGS;
+  const linearSettings = serverConfig?.settings.linear ?? null;
   const repositories = linearSettings?.repositories ?? [];
   const branchNaming = linearSettings?.branchNaming ?? DEFAULT_BRANCH_NAMING;
   const mappedProjectId = resolvedIssue
@@ -198,6 +267,53 @@ export function LinearIssueThreadDialog({
   const cwd = targetProject?.workspaceRoot ?? null;
   const scope = useMemo(() => ({ environmentId, cwd }), [cwd, environmentId]);
   const prepareIssueThreadAction = usePrepareIssueThreadAction(scope);
+  const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+
+  // Worktree unless the project, or the server, says threads start locally.
+  const mode: ThreadMode =
+    modeOverride ?? targetProject?.defaultThreadEnvMode ?? serverSettings.defaultThreadEnvMode;
+
+  // The model row is the composer's picker fed the same way the project
+  // defaults page feeds it, defaulting like a new draft would: the project's
+  // pinned model, then the server's, then whatever was picked last.
+  const providers = serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS;
+  const clientSettings = useClientSettings();
+  const unifiedSettings = useMemo(
+    () => ({ ...serverSettings, ...clientSettings }),
+    [clientSettings, serverSettings],
+  );
+  const providerEntries = useMemo(
+    () =>
+      sortProviderInstanceEntries(
+        applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), unifiedSettings),
+      ),
+    [providers, unifiedSettings],
+  );
+  const stickyProvider = useComposerDraftStore((store) => store.stickyActiveProvider);
+  const stickySelection = useComposerDraftStore((store) =>
+    stickyProvider ? (store.stickyModelSelectionByProvider[stickyProvider] ?? null) : null,
+  );
+  const pickedSelection =
+    modelPick !== null && targetProject !== null && modelPick.projectId === targetProject.id
+      ? modelPick.selection
+      : null;
+  const modelSelection = resolveDefaultProviderModelSelection(
+    providers,
+    pickedSelection ??
+      targetProject?.defaultModelSelection ??
+      serverSettings.defaultModelSelection ??
+      stickySelection,
+  );
+  const modelOptionsByInstance = useMemo(
+    () =>
+      getCustomModelOptionsByInstance(
+        unifiedSettings,
+        providers,
+        modelSelection?.instanceId,
+        modelSelection?.model,
+      ),
+    [modelSelection?.instanceId, modelSelection?.model, providers, unifiedSettings],
+  );
 
   const isResolving =
     open &&
@@ -221,8 +337,6 @@ export function LinearIssueThreadDialog({
   const branchPrefixOptions = branchIsEditable
     ? linearBranchPrefixOptions(branchNaming.prefixes, branchPrefix)
     : [];
-  // Not `branch`: `handleConfirm` destructures the server's answer under that
-  // name, and a shadowed const there would be a temporal-dead-zone read.
   const branchName =
     activeBranchDraft?.branch ??
     (resolvedIssue === null ? "" : linearIssueBranchName(resolvedIssue, branchNaming));
@@ -244,83 +358,142 @@ export function LinearIssueThreadDialog({
     });
   };
 
-  const handleConfirm = useCallback(
-    async (mode: "local" | "worktree") => {
-      if (!parsedReference) {
-        setReferenceDirty(true);
-        return;
-      }
-      if (!resolvedIssue || !targetProject || branchProblem !== null) {
-        return;
-      }
-      setPreparingMode(mode);
-      const result = await prepareIssueThreadAction.run({
-        reference: parsedReference,
-        mode,
-        // Under Linear's own format there is nothing the dialog knows that the
-        // server does not, so it names the branch itself.
-        ...(branchIsEditable ? { branch: branchName.trim() } : {}),
-        ...(mode === "worktree" && threadId ? { threadId } : {}),
-      });
-      setPreparingMode(null);
-      if (result._tag === "Failure") {
-        if (isAtomCommandInterrupted(result)) {
-          prepareIssueThreadAction.resetError();
-        }
-        return;
-      }
-      const { branch, worktreePath, issue, movedToState } = result.value;
-      // The note below only survives if `onPrepared` fails; on the happy path
-      // the dialog closes and the thread takes over the screen, so the state
-      // change is reported where the person will still be looking.
-      setMovedToStateName(movedToState?.name ?? null);
-      if (movedToState) {
-        toastManager.add({
-          type: "success",
-          title: `Moved to ${movedToState.name}`,
-          description: issue.identifier,
-        });
-      }
-      await onPrepared({
-        branch,
-        worktreePath,
-        issue,
-        linkedIssue: {
-          provider: "linear",
-          id: issue.id,
-          identifier: issue.identifier,
-          url: issue.url,
-        },
-        project: targetProject,
-      });
-      onOpenChange(false);
-    },
-    [
-      branchIsEditable,
-      branchName,
-      branchProblem,
-      onOpenChange,
-      onPrepared,
-      parsedReference,
-      prepareIssueThreadAction,
-      resolvedIssue,
-      targetProject,
-      threadId,
-    ],
-  );
+  const busy = phase !== null;
+  const canStart =
+    targetProject !== null &&
+    resolvedIssue !== null &&
+    modelSelection !== null &&
+    !isResolving &&
+    !busy &&
+    branchProblem === null;
 
-  const fillReference = useCallback((identifier: string) => {
-    setReferenceDirty(true);
-    setReference(identifier);
-    // Enter in the box starts the thread, so a picked row leaves it focused.
-    referenceInputRef.current?.focus();
-  }, []);
+  const handleStart = useCallback(async () => {
+    if (!parsedReference) {
+      setReferenceDirty(true);
+      return;
+    }
+    if (!resolvedIssue || !targetProject || !modelSelection || branchProblem !== null) {
+      return;
+    }
+    // Minted here so the worktree setup script can already run for the
+    // thread that is about to exist.
+    const threadId = newThreadId();
+    setStartError(null);
+    setPhase("preparing");
+    const prepared = await prepareIssueThreadAction.run({
+      reference: parsedReference,
+      mode,
+      // Under Linear's own format there is nothing the dialog knows that the
+      // server does not, so it names the branch itself.
+      ...(branchIsEditable ? { branch: branchName.trim() } : {}),
+      ...(mode === "worktree" ? { threadId } : {}),
+    });
+    if (prepared._tag === "Failure") {
+      if (isAtomCommandInterrupted(prepared)) {
+        prepareIssueThreadAction.resetError();
+      }
+      setPhase(null);
+      return;
+    }
+    const { branch, worktreePath, issue, movedToState } = prepared.value;
+
+    setPhase("starting");
+    // The issue's own server decides the kickoff: it owns the Linear key and
+    // the toggle that gives the agent tools, and it discovered the skills.
+    const linear = serverConfig?.settings.linear;
+    const kickoff = formatLinearIssueKickoff(issue, {
+      agentTools: (linear?.agentAccess ?? false) && (linear?.apiKey ?? "").length > 0,
+      skill: hasLinearWorkSkill(
+        serverConfig?.providers ?? [],
+        worktreePath ?? targetProject.workspaceRoot,
+      ),
+    });
+    const title = linearIssueThreadTitle(issue);
+    const createdAt = new Date().toISOString();
+    const started = await startThreadTurn({
+      environmentId,
+      input: {
+        threadId,
+        message: {
+          messageId: newMessageId(),
+          role: "user",
+          text: linearIssueThreadMessage(kickoff, note),
+          attachments: [],
+        },
+        modelSelection,
+        titleSeed: title,
+        runtimeMode: DEFAULT_RUNTIME_MODE,
+        interactionMode: DEFAULT_INTERACTION_MODE,
+        bootstrap: {
+          createThread: {
+            projectId: targetProject.id,
+            title,
+            modelSelection,
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            interactionMode: DEFAULT_INTERACTION_MODE,
+            branch,
+            worktreePath,
+            // On the create, so the thread has the link from its first event
+            // rather than in a second command that could lose the race with
+            // the turn.
+            linkedIssue: {
+              provider: "linear",
+              id: issue.id,
+              identifier: issue.identifier,
+              url: issue.url,
+            },
+            createdAt,
+          },
+        },
+        createdAt,
+      },
+    });
+    setPhase(null);
+    if (started._tag === "Failure") {
+      if (!isAtomCommandInterrupted(started)) {
+        const error = squashAtomCommandFailure(started);
+        // The branch is checked out by now; saying so keeps a retry from
+        // reading as a second checkout.
+        setStartError(
+          `${branch} is ready, but the thread could not start: ${
+            error instanceof Error ? error.message : "unknown error"
+          }`,
+        );
+      }
+      return;
+    }
+    if (movedToState) {
+      toastManager.add({
+        type: "success",
+        title: `Moved to ${movedToState.name}`,
+        description: issue.identifier,
+      });
+    }
+    onStarted(scopeThreadRef(environmentId, threadId));
+    onOpenChange(false);
+  }, [
+    branchIsEditable,
+    branchName,
+    branchProblem,
+    environmentId,
+    mode,
+    modelSelection,
+    note,
+    onOpenChange,
+    onStarted,
+    parsedReference,
+    prepareIssueThreadAction,
+    resolvedIssue,
+    serverConfig,
+    startThreadTurn,
+    targetProject,
+  ]);
 
   const validationMessage = !referenceDirty
     ? null
     : reference.trim().length === 0
       ? "Paste a Linear issue URL, or enter DEL-123."
-      : parsedReference === null
+      : parsedReference === null && (listedIssues?.length ?? 0) === 0
         ? "Use a Linear issue URL or an identifier such as DEL-123."
         : null;
   const resolutionError =
@@ -331,16 +504,19 @@ export function LinearIssueThreadDialog({
     prepareIssueThreadAction.error instanceof Error
       ? prepareIssueThreadAction.error.message
       : prepareIssueThreadAction.error
-        ? "Failed to start a thread from this issue."
+        ? "Could not check out the issue's branch."
         : null;
+  const footerError = startError ?? prepareError;
 
-  const busy = prepareIssueThreadAction.isPending;
-  const canStart =
-    targetProject !== null &&
-    resolvedIssue !== null &&
-    !isResolving &&
-    !busy &&
-    branchProblem === null;
+  const submitOnEnter = (event: React.KeyboardEvent) => {
+    if (event.key !== "Enter" || event.shiftKey || event.altKey) return;
+    if (event.currentTarget.tagName === "TEXTAREA" && !(event.metaKey || event.ctrlKey)) return;
+    event.preventDefault();
+    if (canStart) void handleStart();
+  };
+  // Enter in the box picks the highlighted suggestion while the list is up,
+  // and starts the thread once it is down; the two never share a keypress.
+  const pickerHasSuggestions = pickerOpen && (listedIssues?.length ?? 0) > 0;
 
   return (
     <Dialog
@@ -351,188 +527,162 @@ export function LinearIssueThreadDialog({
         }
       }}
     >
-      <DialogPopup className="max-w-4xl sm:h-[42rem]">
+      <DialogPopup className="max-w-5xl sm:h-[48rem]">
         <DialogHeader className="pb-3">
           <DialogTitle className="flex items-center gap-2">
             <CircleDotIcon className="size-4" />
             Start thread from issue
           </DialogTitle>
           <DialogDescription>
-            Pick an issue and read it, then create the draft thread on its branch in the main repo
-            or in a dedicated worktree.
+            Pick an issue and check where it runs. The agent starts on it as soon as you do.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] sm:grid-cols-[minmax(0,18rem)_minmax(0,1fr)] sm:grid-rows-none">
-          <div className="flex min-h-0 flex-col gap-3 border-border/60 border-b px-6 pb-4 sm:border-r sm:border-b-0 sm:pr-4 sm:pb-6">
-            <label className="grid gap-1.5">
-              <span className="font-medium text-foreground text-xs">Issue</span>
-              <Input
-                ref={referenceInputRef}
-                placeholder="DEL-123 or a linear.app issue URL"
-                value={reference}
-                onChange={(event) => {
-                  setReferenceDirty(true);
-                  setReference(event.target.value);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter") {
-                    return;
-                  }
-                  event.preventDefault();
-                  if (canStart) {
-                    void handleConfirm("worktree");
-                  }
-                }}
-              />
-              {validationMessage ? (
-                <span className="text-destructive text-xs">{validationMessage}</span>
-              ) : null}
-            </label>
-
-            {!linearConnected && !linearNeedsSetup ? (
-              <p className="text-muted-foreground text-xs">{linearUnavailableSentence}</p>
-            ) : linearNeedsSetup ? (
-              <p className="text-muted-foreground text-xs">
-                Linear is not connected.{" "}
-                <Link
-                  to="/settings/integrations"
-                  className="underline underline-offset-2"
-                  onClick={() => onOpenChange(false)}
-                >
-                  Connect it in Settings → Integrations
-                </Link>
-                .
-              </p>
-            ) : (
-              <MyIssuesList
-                issues={myIssues.data?.issues ?? null}
-                isPending={myIssues.isPending}
-                error={myIssues.error}
-                selectedIdentifier={parsedReference}
-                onSelect={fillReference}
-              />
-            )}
-          </div>
-
-          <div className="flex min-h-0 flex-col">
-            <ScrollArea scrollFade className="min-h-0 flex-1">
-              <div className="px-6 py-4 sm:pt-0 sm:pl-4">
-                {resolvedIssue ? (
-                  <IssueReader
-                    issue={resolvedIssue}
-                    environmentId={environmentId}
-                    cwd={cwd}
-                    // The reader may already show an older answer while a fresh
-                    // one is on its way; that one refresh does not deserve a
-                    // spinner over a description the person is reading.
-                    refreshing={issueResolution.isFetching}
-                  />
-                ) : isResolving ? (
-                  <ReaderNotice>
-                    <Spinner className="size-3.5" />
-                    Resolving {parsedReference}...
-                  </ReaderNotice>
-                ) : resolutionError ? (
-                  <ReaderNotice tone="error">{resolutionError}</ReaderNotice>
-                ) : (
-                  <ReaderNotice>
-                    Pick an issue from the list, or paste its link, to read it here before starting.
-                  </ReaderNotice>
-                )}
-              </div>
-            </ScrollArea>
-
-            {resolvedIssue && targetProject ? (
-              <div className="grid gap-2 border-border/60 border-t px-6 py-3 text-xs sm:pl-4">
-                <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
-                  <span className="w-14 shrink-0">Starts in</span>
-                  {projects.length > 1 ? (
-                    <Select
-                      value={targetProject.id}
-                      onValueChange={(next) =>
-                        setOverride({
-                          issueId: resolvedIssue.id,
-                          projectId: String(next) as ProjectId,
-                        })
-                      }
-                    >
-                      <SelectTrigger size="xs" className="w-auto min-w-36" aria-label="Project">
-                        <SelectValue>
-                          <span className="truncate">{targetProject.title}</span>
-                        </SelectValue>
-                      </SelectTrigger>
-                      <SelectPopup align="start" alignItemWithTrigger={false}>
-                        {projects.map((project) => (
-                          <SelectItem hideIndicator key={project.id} value={project.id}>
-                            <span className="truncate">{project.title}</span>
-                          </SelectItem>
-                        ))}
-                      </SelectPopup>
-                    </Select>
-                  ) : (
-                    <span className="font-medium text-foreground">{targetProject.title}</span>
-                  )}
-                </div>
-
-                {branchIsEditable ? (
-                  <div className="grid gap-1">
-                    <div className="flex items-center gap-2 text-muted-foreground">
-                      <span className="w-14 shrink-0">Branch</span>
-                      <Select
-                        value={branchPrefix ?? ""}
-                        onValueChange={(next) => editBranch({ prefix: String(next) })}
-                      >
-                        <SelectTrigger
-                          size="xs"
-                          className="w-auto min-w-20"
-                          aria-label="Branch prefix"
-                        >
-                          <SelectValue>
-                            <span className="truncate">{branchPrefix}</span>
-                          </SelectValue>
-                        </SelectTrigger>
-                        <SelectPopup align="start" alignItemWithTrigger={false}>
-                          {branchPrefixOptions.map((prefix) => (
-                            <SelectItem hideIndicator key={prefix} value={prefix}>
-                              <span className="truncate">{prefix}</span>
-                            </SelectItem>
-                          ))}
-                        </SelectPopup>
-                      </Select>
-                      <Input
-                        size="sm"
-                        spellCheck={false}
-                        aria-label="Branch name"
-                        aria-invalid={branchProblem !== null}
-                        className="min-w-0 flex-1 font-mono text-xs"
-                        value={branchName}
-                        onChange={(event) => editBranch({ branch: event.target.value })}
-                      />
-                    </div>
-                    {branchProblem ? (
-                      <p className="pl-16 text-destructive">{branchProblem}</p>
-                    ) : null}
-                  </div>
-                ) : (
-                  <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
-                    <span className="w-14 shrink-0">Branch</span>
-                    <span className="min-w-0 truncate font-mono text-foreground">
-                      {resolvedIssue.branchName}
-                    </span>
-                  </div>
-                )}
-
-                {movedToStateName ? (
-                  <p className="text-muted-foreground">Moved to {movedToStateName}</p>
-                ) : null}
-                {prepareError ? <p className="text-destructive">{prepareError}</p> : null}
-              </div>
+        <div className="grid gap-1.5 px-6 pb-3">
+          <Autocomplete
+            items={listedIssues ?? []}
+            itemToStringValue={(issue) => issue.identifier}
+            filter={null}
+            mode="none"
+            autoHighlight
+            openOnInputClick
+            open={pickerOpen && linearConnected}
+            onOpenChange={setPickerOpen}
+            value={reference}
+            onValueChange={(value) => {
+              setReferenceDirty(true);
+              setReference(value);
+            }}
+          >
+            <AutocompleteInput
+              ref={referenceInputRef}
+              aria-label="Issue"
+              startAddon={<SearchIcon />}
+              placeholder="Search your issues, or paste DEL-123 or a Linear link"
+              spellCheck={false}
+              disabled={busy}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && pickerHasSuggestions) return;
+                submitOnEnter(event);
+              }}
+            />
+            {linearConnected ? (
+              <AutocompletePopup>
+                <IssueSuggestions
+                  issues={listedIssues}
+                  filtered={reference.trim().length > 0}
+                  isPending={myIssues.isPending}
+                  error={myIssues.error}
+                />
+              </AutocompletePopup>
             ) : null}
-          </div>
+          </Autocomplete>
+          {validationMessage ? (
+            <span className="text-destructive text-xs">{validationMessage}</span>
+          ) : !linearConnected && !linearNeedsSetup ? (
+            <span className="text-muted-foreground text-xs">{linearUnavailableSentence}</span>
+          ) : linearNeedsSetup ? (
+            <span className="text-muted-foreground text-xs">
+              Linear is not connected.{" "}
+              <Link
+                to="/settings/integrations"
+                className="underline underline-offset-2"
+                onClick={() => onOpenChange(false)}
+              >
+                Connect it in Settings → Integrations
+              </Link>
+              .
+            </span>
+          ) : null}
         </div>
 
-        <DialogFooter>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ScrollArea scrollFade className="min-h-0 flex-1 border-border/60 border-t">
+            <div className="px-6 py-4">
+              {resolvedIssue ? (
+                <IssueReader
+                  issue={resolvedIssue}
+                  environmentId={environmentId}
+                  cwd={cwd}
+                  // The reader may already show an older answer while a fresh
+                  // one is on its way; that one refresh does not deserve a
+                  // spinner over a description the person is reading.
+                  refreshing={issueResolution.isFetching}
+                />
+              ) : isResolving ? (
+                <ReaderNotice>
+                  <Spinner className="size-3.5" />
+                  Resolving {parsedReference}...
+                </ReaderNotice>
+              ) : resolutionError ? (
+                <ReaderNotice tone="error">{resolutionError}</ReaderNotice>
+              ) : (
+                <EmptyReader />
+              )}
+            </div>
+          </ScrollArea>
+
+          {resolvedIssue && targetProject ? (
+            <LaunchPanel
+              projects={projects}
+              targetProject={targetProject}
+              onProjectChange={(projectId) => setOverride({ issueId: resolvedIssue.id, projectId })}
+              mode={mode}
+              onModeChange={setModeOverride}
+              branch={
+                branchIsEditable
+                  ? {
+                      editable: true,
+                      prefix: branchPrefix ?? "",
+                      prefixOptions: branchPrefixOptions,
+                      name: branchName,
+                      problem: branchProblem,
+                      onEdit: editBranch,
+                    }
+                  : { editable: false, name: resolvedIssue.branchName }
+              }
+              model={
+                modelSelection
+                  ? {
+                      selection: modelSelection,
+                      entries: providerEntries,
+                      optionsByInstance: modelOptionsByInstance,
+                      onChange: (instanceId, model) =>
+                        setModelPick({
+                          projectId: targetProject.id,
+                          selection: createModelSelection(instanceId, model),
+                        }),
+                      onOpenProviderSetup: (instanceId) => {
+                        onOpenChange(false);
+                        void navigate({
+                          to: "/settings/providers",
+                          search: { environmentId, instanceId },
+                        });
+                      },
+                    }
+                  : null
+              }
+              note={note}
+              onNoteChange={setNote}
+              onNoteKeyDown={submitOnEnter}
+              disabled={busy}
+            />
+          ) : null}
+        </div>
+
+        <DialogFooter className="items-center">
+          <p
+            className={
+              footerError
+                ? "min-w-0 flex-1 text-destructive text-xs"
+                : "min-w-0 flex-1 truncate text-muted-foreground text-xs"
+            }
+          >
+            {footerError ??
+              (resolvedIssue && targetProject
+                ? `${mode === "worktree" ? "New worktree" : "Local checkout"} on ${branchName || resolvedIssue.branchName}`
+                : "")}
+          </p>
           <Button
             type="button"
             variant="outline"
@@ -545,27 +695,227 @@ export function LinearIssueThreadDialog({
           <Button
             type="button"
             size="sm"
-            variant="outline"
             onClick={() => {
-              void handleConfirm("local");
+              void handleStart();
             }}
             disabled={!canStart}
           >
-            {preparingMode === "local" ? "Preparing local..." : "Local"}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            onClick={() => {
-              void handleConfirm("worktree");
-            }}
-            disabled={!canStart}
-          >
-            {preparingMode === "worktree" ? "Preparing worktree..." : "Worktree"}
+            {phase === "preparing" ? (
+              <>
+                <Spinner className="size-3.5" />
+                Checking out branch...
+              </>
+            ) : phase === "starting" ? (
+              <>
+                <Spinner className="size-3.5" />
+                Starting agent...
+              </>
+            ) : (
+              <>
+                <PlayIcon className="size-3.5" />
+                Start thread
+                <Kbd className="ml-1">↵</Kbd>
+              </>
+            )}
           </Button>
         </DialogFooter>
       </DialogPopup>
     </Dialog>
+  );
+}
+
+interface LaunchPanelProps {
+  readonly projects: ReadonlyArray<EnvironmentProject>;
+  readonly targetProject: EnvironmentProject;
+  readonly onProjectChange: (projectId: ProjectId) => void;
+  readonly mode: ThreadMode;
+  readonly onModeChange: (mode: ThreadMode) => void;
+  readonly branch:
+    | {
+        readonly editable: true;
+        readonly prefix: string;
+        readonly prefixOptions: ReadonlyArray<string>;
+        readonly name: string;
+        readonly problem: string | null;
+        readonly onEdit: (patch: { prefix?: string; branch?: string }) => void;
+      }
+    | { readonly editable: false; readonly name: string };
+  readonly model: {
+    readonly selection: ModelSelection;
+    readonly entries: Parameters<typeof ProviderModelPicker>[0]["instanceEntries"];
+    readonly optionsByInstance: Parameters<typeof ProviderModelPicker>[0]["modelOptionsByInstance"];
+    readonly onChange: (instanceId: ProviderInstanceId, model: string) => void;
+    readonly onOpenProviderSetup: (instanceId: ProviderInstanceId) => void;
+  } | null;
+  readonly note: string;
+  readonly onNoteChange: (note: string) => void;
+  readonly onNoteKeyDown: (event: React.KeyboardEvent) => void;
+  readonly disabled: boolean;
+}
+
+/**
+ * Everything the thread needs decided, in one strip under the issue: the
+ * checkout, the worktree choice, the branch, the model, and a note. Each row
+ * is a fact with a control next to it, so the panel reads as a summary of
+ * what "Start thread" will do rather than as a form.
+ */
+function LaunchPanel({
+  projects,
+  targetProject,
+  onProjectChange,
+  mode,
+  onModeChange,
+  branch,
+  model,
+  note,
+  onNoteChange,
+  onNoteKeyDown,
+  disabled,
+}: LaunchPanelProps) {
+  return (
+    <div className="grid gap-2.5 border-border/60 border-t bg-muted/24 px-6 py-3.5 text-xs">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <LaunchField label="Project">
+          {projects.length > 1 ? (
+            <Select
+              value={targetProject.id}
+              onValueChange={(next) => onProjectChange(String(next) as ProjectId)}
+              disabled={disabled}
+            >
+              <SelectTrigger size="xs" className="w-auto min-w-36" aria-label="Project">
+                <SelectValue>
+                  <span className="flex items-center gap-1.5 truncate">
+                    <FolderGit2Icon className="size-3.5 text-muted-foreground" />
+                    {targetProject.title}
+                  </span>
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="start" alignItemWithTrigger={false}>
+                {projects.map((project) => (
+                  <SelectItem hideIndicator key={project.id} value={project.id}>
+                    <span className="truncate">{project.title}</span>
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          ) : (
+            <span className="flex items-center gap-1.5 font-medium text-foreground">
+              <FolderGit2Icon className="size-3.5 text-muted-foreground" />
+              {targetProject.title}
+            </span>
+          )}
+        </LaunchField>
+
+        <LaunchField label="Run in">
+          <ToggleGroup
+            aria-label="Where the thread runs"
+            variant="segmented"
+            value={[mode]}
+            disabled={disabled}
+            onValueChange={(value) => {
+              const next = value[0];
+              if (next === "worktree" || next === "local") onModeChange(next);
+            }}
+          >
+            <Toggle value="worktree">New worktree</Toggle>
+            <Toggle value="local">This checkout</Toggle>
+          </ToggleGroup>
+        </LaunchField>
+
+        <LaunchField label="Model">
+          {model ? (
+            <ProviderModelPicker
+              activeInstanceId={model.selection.instanceId}
+              model={model.selection.model}
+              lockedProvider={null}
+              instanceEntries={model.entries}
+              modelOptionsByInstance={model.optionsByInstance}
+              size="xs"
+              triggerVariant="outline"
+              disabled={disabled}
+              onOpenProviderSetup={model.onOpenProviderSetup}
+              onInstanceModelChange={model.onChange}
+            />
+          ) : (
+            <span className="text-muted-foreground">No provider is set up on this server.</span>
+          )}
+        </LaunchField>
+      </div>
+
+      <LaunchField label="Branch" className="items-start">
+        {branch.editable ? (
+          <div className="grid min-w-0 flex-1 gap-1">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Select
+                value={branch.prefix}
+                onValueChange={(next) => branch.onEdit({ prefix: String(next) })}
+                disabled={disabled}
+              >
+                <SelectTrigger size="xs" className="w-auto min-w-20" aria-label="Branch prefix">
+                  <SelectValue>
+                    <span className="truncate font-mono">{branch.prefix}</span>
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="start" alignItemWithTrigger={false}>
+                  {branch.prefixOptions.map((prefix) => (
+                    <SelectItem hideIndicator key={prefix} value={prefix}>
+                      <span className="truncate font-mono">{prefix}</span>
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+              <Input
+                size="sm"
+                spellCheck={false}
+                aria-label="Branch name"
+                aria-invalid={branch.problem !== null}
+                className="min-w-0 flex-1 font-mono text-xs"
+                value={branch.name}
+                disabled={disabled}
+                onChange={(event) => branch.onEdit({ branch: event.target.value })}
+              />
+            </div>
+            {branch.problem ? <p className="text-destructive">{branch.problem}</p> : null}
+          </div>
+        ) : (
+          <span className="flex min-w-0 items-center gap-1.5 font-mono text-foreground">
+            <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="truncate">{branch.name}</span>
+          </span>
+        )}
+      </LaunchField>
+
+      <LaunchField label="Note" className="items-start">
+        <Textarea
+          size="sm"
+          className="flex-1"
+          rows={1}
+          placeholder="Anything the ticket does not say. Optional."
+          aria-label="Note for the agent"
+          value={note}
+          disabled={disabled}
+          onChange={(event) => onNoteChange(event.target.value)}
+          onKeyDown={onNoteKeyDown}
+        />
+      </LaunchField>
+    </div>
+  );
+}
+
+function LaunchField({
+  label,
+  className,
+  children,
+}: {
+  readonly label: string;
+  readonly className?: string;
+  readonly children: React.ReactNode;
+}) {
+  return (
+    <div className={`flex min-w-0 items-center gap-2 ${className ?? ""}`}>
+      <span className="w-14 shrink-0 pt-px text-muted-foreground">{label}</span>
+      {children}
+    </div>
   );
 }
 
@@ -585,6 +935,21 @@ function ReaderNotice({
       }
     >
       {children}
+    </div>
+  );
+}
+
+function EmptyReader() {
+  return (
+    <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 py-10 text-center">
+      <span className="flex size-10 items-center justify-center rounded-full bg-muted/60 text-muted-foreground">
+        <CircleDotIcon className="size-4.5" />
+      </span>
+      <p className="font-medium text-foreground text-sm">No issue picked yet</p>
+      <p className="max-w-64 text-muted-foreground text-xs">
+        Choose one of your issues, or paste an identifier or link, to read it here before the agent
+        starts on it.
+      </p>
     </div>
   );
 }
@@ -678,57 +1043,65 @@ function IssueReader({
  */
 function IssueStateLabel({ name, color }: { readonly name: string; readonly color: string }) {
   return (
-    <span className="shrink-0 text-xs" style={{ color }}>
+    <span
+      className="inline-flex items-center gap-1.5 rounded-full border border-border/70 px-2 py-0.5 text-xs"
+      style={{ color }}
+    >
+      <IssueStateDot color={color} className="size-1.5" />
       {name}
     </span>
   );
 }
 
-function MyIssuesList({
+/**
+ * The rows under the search box: my issues, narrowed by what is typed. Each
+ * row is a suggestion whose value is the identifier, so picking one fills
+ * the box and the reader below takes over.
+ */
+function IssueSuggestions({
   issues,
+  filtered,
   isPending,
   error,
-  selectedIdentifier,
-  onSelect,
 }: {
   readonly issues: ReadonlyArray<LinearIssueSummary> | null;
+  /** Whether the box holds text, so an empty list can say it is the filter's doing. */
+  readonly filtered: boolean;
   readonly isPending: boolean;
   readonly error: string | null;
-  readonly selectedIdentifier: string | null;
-  readonly onSelect: (identifier: string) => void;
 }) {
+  if (issues === null && isPending) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 text-muted-foreground text-xs">
+        <Spinner className="size-3.5" />
+        Loading your issues...
+      </div>
+    );
+  }
+  if (error !== null && issues === null) {
+    return <p className="px-3 py-2 text-muted-foreground text-xs">{error}</p>;
+  }
+  if (issues === null || issues.length === 0) {
+    return (
+      <AutocompleteEmpty className="px-3 py-2 text-left text-xs">
+        {filtered
+          ? "None of your issues match. Paste an identifier or link to start from any issue."
+          : "No issues are assigned to you right now."}
+      </AutocompleteEmpty>
+    );
+  }
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-      <span className="font-medium text-foreground text-xs">My issues</span>
-      {issues === null && isPending ? (
-        <div className="flex items-center gap-2 text-muted-foreground text-xs">
-          <Spinner className="size-3.5" />
-          Loading issues...
-        </div>
-      ) : error !== null && issues === null ? (
-        <p className="text-muted-foreground text-xs">{error}</p>
-      ) : issues !== null && issues.length === 0 ? (
-        <p className="text-muted-foreground text-xs">No issues are assigned to you right now.</p>
-      ) : (
-        <ul className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-border/70 max-sm:max-h-44">
-          {(issues ?? []).map((issue) => (
-            <li key={issue.id}>
-              <button
-                type="button"
-                onClick={() => onSelect(issue.identifier)}
-                data-selected={issue.identifier === selectedIdentifier ? "true" : undefined}
-                className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/40 data-[selected=true]:bg-muted/60"
-              >
-                <IssueStateDot color={issue.state.color} className="size-2 shrink-0" />
-                <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-                  {issue.identifier}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-sm">{issue.title}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+    <AutocompleteList className="max-h-80">
+      {issues.map((issue) => (
+        <AutocompleteItem key={issue.id} value={issue} className="gap-2">
+          <IssueStateDot color={issue.state.color} className="size-2 shrink-0" />
+          <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+            {issue.identifier}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-sm">{issue.title}</span>
+          <span className="shrink-0 text-[11px] text-muted-foreground">{issue.state.name}</span>
+        </AutocompleteItem>
+      ))}
+    </AutocompleteList>
   );
 }
