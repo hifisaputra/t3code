@@ -211,6 +211,16 @@ describe("searchSettings", () => {
     });
   });
 
+  it("finds the Linear write confirmation next to agent access", () => {
+    expect(searchSettings("ask before agents write")[0]).toMatchObject({
+      id: "linear-confirm-agent-writes",
+      to: "/settings/integrations",
+    });
+    expect(searchSettings("linear write approval").map((item) => item.id)).toContain(
+      "linear-confirm-agent-writes",
+    );
+  });
+
   it("routes browser recording quality to integrations", () => {
     const result = searchSettings("recording frame rate")[0];
     expect(result).toMatchObject({

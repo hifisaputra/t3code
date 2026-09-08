@@ -14,6 +14,8 @@ import * as McpProviderSession from "./McpProviderSession.ts";
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  /** Decided by the caller from settings; the registry only records it. */
+  readonly capabilities: ReadonlySet<McpInvocationContext.McpCapability>;
 }
 
 export interface McpIssuedCredential {
@@ -21,6 +23,12 @@ export interface McpIssuedCredential {
 }
 
 export interface McpSessionRegistryShape {
+  /**
+   * What this server's `/mcp` can actually serve. A deployment without a
+   * preview host leaves `preview` out, and `issueActiveMcpCredential` drops
+   * it from every request so no session is told about tools that cannot work.
+   */
+  readonly offeredCapabilities: ReadonlySet<McpInvocationContext.McpCapability>;
   readonly issue: (request: McpCredentialRequest) => Effect.Effect<McpIssuedCredential>;
   readonly resolve: (
     rawToken: string,
@@ -54,7 +62,14 @@ interface RegistryState {
 export interface McpSessionRegistryOptions {
   readonly livenessWindowMs?: number;
   readonly now?: () => number;
+  /** Defaults to every capability. */
+  readonly offeredCapabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
 }
+
+const ALL_CAPABILITIES: ReadonlySet<McpInvocationContext.McpCapability> = new Set([
+  "preview",
+  "linear",
+]);
 
 /**
  * How long a credential outlives the last sign of life from its provider
@@ -98,6 +113,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const state = yield* SynchronizedRef.make<RegistryState>({ records: new Map() });
   const currentTimeMillis = options.now ? Effect.sync(options.now) : Clock.currentTimeMillis;
   const livenessWindowMs = options.livenessWindowMs ?? DEFAULT_LIVENESS_WINDOW_MS;
+  const offeredCapabilities = options.offeredCapabilities ?? ALL_CAPABILITIES;
   const endpoint =
     httpServer.address._tag === "TcpAddress"
       ? `http://${getHttpMcpEndpointHost(httpServer.address.hostname)}:${httpServer.address.port}/mcp`
@@ -128,7 +144,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
-        capabilities: new Set(["preview"]),
+        capabilities: new Set(request.capabilities),
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {
@@ -144,6 +160,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerInstanceId: scope.providerInstanceId,
           endpoint,
           authorizationHeader: `Bearer ${rawToken}`,
+          capabilities: scope.capabilities,
         },
       };
     },
@@ -187,6 +204,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     }));
 
   return McpSessionRegistry.of({
+    offeredCapabilities,
     issue,
     resolve,
     touch,
@@ -204,32 +222,53 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
 
 let activeMcpSessionRegistry: McpSessionRegistryShape | undefined;
 
-const make = Effect.acquireRelease(
-  makeWithOptions().pipe(
-    Effect.tap((registry) =>
-      Effect.sync(() => {
-        activeMcpSessionRegistry = registry;
-      }),
+const make = (options: McpSessionRegistryOptions = {}) =>
+  Effect.acquireRelease(
+    makeWithOptions(options).pipe(
+      Effect.tap((registry) =>
+        Effect.sync(() => {
+          activeMcpSessionRegistry = registry;
+        }),
+      ),
     ),
-  ),
-  (registry) =>
-    Effect.sync(() => {
-      if (activeMcpSessionRegistry === registry) {
-        activeMcpSessionRegistry = undefined;
-      }
-    }),
-);
+    (registry) =>
+      Effect.sync(() => {
+        if (activeMcpSessionRegistry === registry) {
+          activeMcpSessionRegistry = undefined;
+        }
+      }),
+  );
 
-export const layer = Layer.effect(McpSessionRegistry, make);
+export const layerWithOptions = (options: McpSessionRegistryOptions) =>
+  Layer.effect(McpSessionRegistry, make(options));
 
+export const layer = layerWithOptions({});
+
+/**
+ * Issues a credential for the capabilities the caller wants and this server
+ * offers. The old credential for the thread is revoked either way, so a
+ * request that ends up granting nothing still leaves no token behind.
+ */
 export const issueActiveMcpCredential = (
   request: McpCredentialRequest,
-): Effect.Effect<McpIssuedCredential | undefined> =>
-  activeMcpSessionRegistry
-    ? activeMcpSessionRegistry
-        .revokeThread(request.threadId)
-        .pipe(Effect.andThen(activeMcpSessionRegistry.issue(request)))
-    : Effect.sync((): McpIssuedCredential | undefined => undefined);
+): Effect.Effect<McpIssuedCredential | undefined> => {
+  const registry = activeMcpSessionRegistry;
+  if (!registry) return Effect.sync((): McpIssuedCredential | undefined => undefined);
+  const capabilities = new Set(
+    Array.from(request.capabilities).filter((capability) =>
+      registry.offeredCapabilities.has(capability),
+    ),
+  );
+  return registry
+    .revokeThread(request.threadId)
+    .pipe(
+      Effect.andThen(
+        capabilities.size === 0
+          ? Effect.sync((): McpIssuedCredential | undefined => undefined)
+          : registry.issue({ ...request, capabilities }),
+      ),
+    );
+};
 
 /**
  * Refreshes the liveness of a thread's MCP credential. Called on every provider

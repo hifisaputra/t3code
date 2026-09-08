@@ -49,6 +49,7 @@ import {
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
+import { McpApprovalBroker } from "../../mcp/McpApprovalBroker.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { canReplaceThreadTitle } from "../threadTitles.ts";
@@ -286,7 +287,7 @@ function sessionStatusAllowsActiveTurn(
 
 function requestKindFromCanonicalRequestType(
   requestType: string | undefined,
-): "command" | "file-read" | "file-change" | "mcp-elicitation" | undefined {
+): "command" | "file-read" | "file-change" | "mcp-elicitation" | "integration" | undefined {
   switch (requestType) {
     case "command_execution_approval":
     case "exec_command_approval":
@@ -298,6 +299,8 @@ function requestKindFromCanonicalRequestType(
       return "file-change";
     case "mcp_elicitation_approval":
       return "mcp-elicitation";
+    case "integration_write_approval":
+      return "integration";
     default:
       return undefined;
   }
@@ -380,7 +383,9 @@ export function runtimeEventToActivities(
                   ? "File-change approval requested"
                   : requestKind === "mcp-elicitation"
                     ? "App access approval requested"
-                    : "Approval requested",
+                    : requestKind === "integration"
+                      ? "Integration approval requested"
+                      : "Approval requested",
           payload: {
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
@@ -904,6 +909,7 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const approvalBroker = yield* McpApprovalBroker;
   const projectionThreadMessages = yield* ProjectionThreadMessageRepository;
   const projectionThreadProposedPlans = yield* ProjectionThreadProposedPlanRepository;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
@@ -2168,6 +2174,14 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       yield* forkParked(
         Stream.runForEach(providerService.streamEvents, (event) =>
+          worker.enqueue({ source: "runtime", event }),
+        ),
+      );
+      // The server's own tools raise approvals through the broker, so its
+      // events join the same worker as the providers': one ordering, one
+      // projection path, no second approval code path in orchestration.
+      yield* forkParked(
+        Stream.runForEach(approvalBroker.streamEvents, (event) =>
           worker.enqueue({ source: "runtime", event }),
         ),
       );

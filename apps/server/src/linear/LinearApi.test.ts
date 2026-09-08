@@ -473,3 +473,128 @@ it.effect("returns the created comment", () => {
     });
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("sends only the fields the caller set, and never an assignment field", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { issueUpdate: { success: true } } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    yield* linear.updateIssue({
+      issueId: "issue-uuid",
+      title: "Wire up Linear tools",
+      labelIds: ["label-1"],
+    });
+
+    const sent = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.deepStrictEqual(sent.variables, {
+      id: "issue-uuid",
+      input: { title: "Wire up Linear tools", labelIds: ["label-1"] },
+    });
+    // `deepStrictEqual` above already pins the exact patch; the query must not
+    // offer an assignment field either.
+    for (const forbidden of ["assigneeId", "delegateId", "subscriberIds"]) {
+      assert.isFalse(sent.query.includes(forbidden), `${forbidden} must not be sent`);
+    }
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("fails the issue patch when Linear reports no success", () => {
+  const { layer } = makeLayer({
+    response: () => Response.json({ data: { issueUpdate: { success: false } } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const error = yield* Effect.flip(
+      linear.updateIssue({ issueId: "issue-uuid", description: "New body." }),
+    );
+
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "updateIssue");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("returns the created issue summary", () => {
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({ data: { issueCreate: { success: true, issue: issueSummary } } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const created = yield* linear.createIssue({
+      teamId: "team-1",
+      title: "Wire up Linear",
+      parentId: "issue-parent",
+    });
+
+    assert.strictEqual(created.identifier, "DEL-123");
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      input: { teamId: "team-1", title: "Wire up Linear", parentId: "issue-parent" },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("fails issue creation when Linear answers without an issue", () => {
+  const { layer } = makeLayer({
+    response: () => Response.json({ data: { issueCreate: { success: true, issue: null } } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const error = yield* Effect.flip(linear.createIssue({ teamId: "team-1", title: "Orphan" }));
+
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "createIssue");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads team and workspace labels, sorted by name regardless of case", () => {
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({
+        data: {
+          issueLabels: {
+            nodes: [
+              { id: "label-2", name: "urgent", color: "#eb5757" },
+              { id: "label-1", name: "Integration", color: "#5e6ad2" },
+            ],
+          },
+        },
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    assert.deepStrictEqual(yield* linear.labels("team-1"), [
+      { id: "label-1", name: "Integration", color: "#5e6ad2" },
+      { id: "label-2", name: "urgent", color: "#eb5757" },
+    ]);
+
+    const sent = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.deepStrictEqual(sent.variables, { teamId: "team-1" });
+    // Workspace-level labels have no team, so the filter has to admit a null one.
+    assert.isTrue(sent.query.includes("team: { null: true }"));
+    assert.isTrue(sent.query.includes("$teamId: ID!"));
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reports labels as unavailable when Linear rejects the key", () => {
+  const { layer } = makeLayer({ response: () => new Response("unauthorized", { status: 401 }) });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const error = yield* Effect.flip(linear.labels("team-1"));
+
+    assert.instanceOf(error, LinearUnavailableError);
+    assert.strictEqual(error.reason, "unauthenticated");
+  }).pipe(Effect.provide(layer));
+});

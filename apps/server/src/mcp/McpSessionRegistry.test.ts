@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -37,6 +38,7 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
     const registry = yield* makeRegistry(() => timestamp);
     const threadId = ThreadId.make("thread-1");
     const issued = yield* registry.issue({
+      capabilities: new Set(["preview"]),
       threadId,
       providerInstanceId: ProviderInstanceId.make("codex"),
     });
@@ -66,6 +68,7 @@ it.effect("builds MCP endpoints from the bound server host", () =>
     for (const [hostname, expectedEndpoint] of cases) {
       const registry = yield* makeRegistry(() => 1_000, makeFakeHttpServer(hostname));
       const issued = yield* registry.issue({
+        capabilities: new Set(["preview"]),
         threadId: ThreadId.make(`thread-${hostname}`),
         providerInstanceId: ProviderInstanceId.make("codex"),
       });
@@ -79,6 +82,7 @@ it.effect("expires credentials once their session stops showing signs of life", 
     let timestamp = 1_000;
     const registry = yield* makeRegistry(() => timestamp);
     const issued = yield* registry.issue({
+      capabilities: new Set(["preview"]),
       threadId: ThreadId.make("thread-2"),
       providerInstanceId: ProviderInstanceId.make("claude"),
     });
@@ -94,6 +98,7 @@ it.effect("keeps a credential alive across turns that never touch an MCP tool", 
     const registry = yield* makeRegistry(() => timestamp);
     const threadId = ThreadId.make("thread-3");
     const issued = yield* registry.issue({
+      capabilities: new Set(["preview"]),
       threadId,
       providerInstanceId: ProviderInstanceId.make("claude"),
     });
@@ -115,6 +120,7 @@ it.effect("does not keep credentials of other threads alive", () =>
     let timestamp = 1_000;
     const registry = yield* makeRegistry(() => timestamp);
     const issued = yield* registry.issue({
+      capabilities: new Set(["preview"]),
       threadId: ThreadId.make("thread-4"),
       providerInstanceId: ProviderInstanceId.make("codex"),
     });
@@ -126,4 +132,32 @@ it.effect("does not keep credentials of other threads alive", () =>
 
     expect(yield* registry.resolve(token)).toBeUndefined();
   }),
+);
+
+it.effect("drops capabilities the server does not offer and issues nothing when none remain", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread-offered");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const both = yield* McpSessionRegistry.issueActiveMcpCredential({
+      threadId,
+      providerInstanceId,
+      capabilities: new Set(["preview", "linear"]),
+    });
+    expect(Array.from(both?.config.capabilities ?? [])).toEqual(["linear"]);
+
+    const none = yield* McpSessionRegistry.issueActiveMcpCredential({
+      threadId,
+      providerInstanceId,
+      capabilities: new Set(["preview"]),
+    });
+    expect(none).toBeUndefined();
+  }).pipe(
+    Effect.provide(
+      McpSessionRegistry.layerWithOptions({ offeredCapabilities: new Set(["linear"]) }).pipe(
+        Layer.provide(Layer.succeed(HttpServer.HttpServer, fakeHttpServer)),
+        Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment)),
+        Layer.provide(NodeServices.layer),
+      ),
+    ),
+  ),
 );

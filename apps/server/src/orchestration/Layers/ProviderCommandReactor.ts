@@ -41,6 +41,7 @@ import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { McpApprovalBroker } from "../../mcp/McpApprovalBroker.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -323,6 +324,7 @@ const make = Effect.gen(function* () {
   const providerAuthService = yield* ProviderAuthService;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
+  const approvalBroker = yield* McpApprovalBroker;
   const gitWorkflow = yield* GitWorkflowService;
   const fileSystem = yield* FileSystem.FileSystem;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -1545,6 +1547,18 @@ const make = Effect.gen(function* () {
   ) {
     const thread = yield* resolveThreadShell(event.payload.threadId);
     if (!thread) {
+      return;
+    }
+    // Approvals the server raised for its own tools are answered here, not by
+    // the provider: the adapter never saw them and would reject the id. This
+    // also means an integration approval survives a session that has stopped.
+    if (
+      yield* approvalBroker.respond({
+        threadId: event.payload.threadId,
+        requestId: event.payload.requestId,
+        decision: event.payload.decision,
+      })
+    ) {
       return;
     }
     const hasSession = thread.session && thread.session.status !== "stopped";

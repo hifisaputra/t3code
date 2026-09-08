@@ -449,6 +449,22 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["linear issues integration workflow state started status"],
   },
   {
+    id: "linear-agent-access",
+    title: "Let agents read and update Linear issues",
+    to: "/settings/integrations",
+    searchTerms: [
+      "linear issues integration agent tools mcp read update comment status label sub issue",
+    ],
+  },
+  {
+    id: "linear-confirm-agent-writes",
+    title: "Ask before agents write to Linear",
+    to: "/settings/integrations",
+    searchTerms: [
+      "linear issues integration agent write approval confirm comment edit create issue permission",
+    ],
+  },
+  {
     id: "source-control",
     title: "Source control",
     to: "/settings/source-control",

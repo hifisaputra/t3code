@@ -543,6 +543,25 @@ describe("T3 browser developer instructions", () => {
       /preview_open/,
     );
   });
+
+  // A credential that grants only `linear` still configures the `t3-code` MCP
+  // server, so the turn has to be told what the credential actually carries
+  // rather than inferring browser tools from the server being attached.
+  it.effect("omits the browser block when the turn says the preview tools are withheld", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "Go",
+        interactionMode: "default",
+        browserToolsAvailable: false,
+      });
+
+      const instructions = params.collaborationMode?.settings?.developer_instructions ?? "";
+      NodeAssert.doesNotMatch(instructions, /preview_open/);
+      NodeAssert.match(instructions, /<collaboration_mode>/);
+    }),
+  );
 });
 
 describe("hasConfiguredMcpServer", () => {

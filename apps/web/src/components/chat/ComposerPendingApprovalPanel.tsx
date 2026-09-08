@@ -16,19 +16,23 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
   const fallbackLabel =
     approval.requestKind === "mcp-elicitation"
       ? "App access approval"
-      : approval.requestKind === "command"
-        ? "Command approval"
-        : approval.requestKind === "file-read"
-          ? "File read approval"
-          : "File change approval";
+      : approval.requestKind === "integration"
+        ? "Integration approval"
+        : approval.requestKind === "command"
+          ? "Command approval"
+          : approval.requestKind === "file-read"
+            ? "File read approval"
+            : "File change approval";
   const detailAriaLabel =
     approval.requestKind === "mcp-elicitation"
       ? "App access request"
-      : approval.requestKind === "command"
-        ? "Command"
-        : approval.requestKind === "file-read"
-          ? "File to read"
-          : "File change";
+      : approval.requestKind === "integration"
+        ? "Requested change"
+        : approval.requestKind === "command"
+          ? "Command"
+          : approval.requestKind === "file-read"
+            ? "File to read"
+            : "File change";
 
   return (
     <span

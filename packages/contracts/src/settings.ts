@@ -857,6 +857,11 @@ export const LinearSettings = Schema.Struct({
   branchNaming: LinearBranchNaming.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   /** Lets agents in a linked thread read and update their issue through server-side tools. */
   agentAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Each agent write to Linear (a comment, an edit, a new issue) first raises an
+   * approval in the thread and waits for the user's answer. Reads never ask.
+   */
+  confirmAgentWrites: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   /** Starting a thread from an issue moves it to the team's first "started" state. */
   moveToStartedOnThreadStart: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
@@ -1285,6 +1290,7 @@ export const ServerSettingsPatch = Schema.Struct({
         }),
       ),
       agentAccess: Schema.optionalKey(Schema.Boolean),
+      confirmAgentWrites: Schema.optionalKey(Schema.Boolean),
       moveToStartedOnThreadStart: Schema.optionalKey(Schema.Boolean),
     }),
   ),

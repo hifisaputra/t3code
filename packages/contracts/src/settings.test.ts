@@ -653,6 +653,7 @@ describe("ServerSettings linear block", () => {
       repositories: [],
       branchNaming: defaultBranchNaming,
       agentAccess: false,
+      confirmAgentWrites: true,
       moveToStartedOnThreadStart: true,
     });
     expect(decodeServerSettings({ linear: { agentAccess: true } }).linear).toEqual({
@@ -660,6 +661,7 @@ describe("ServerSettings linear block", () => {
       repositories: [],
       branchNaming: defaultBranchNaming,
       agentAccess: true,
+      confirmAgentWrites: true,
       moveToStartedOnThreadStart: true,
     });
   });

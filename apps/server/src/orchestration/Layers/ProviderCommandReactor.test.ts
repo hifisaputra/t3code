@@ -70,6 +70,7 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import * as McpApprovalBroker from "../../mcp/McpApprovalBroker.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
@@ -116,6 +117,7 @@ async function waitFor(
 
 describe("ProviderCommandReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
+    | McpApprovalBroker.McpApprovalBroker
     | OrchestrationEngineService
     | ProviderCommandReactor
     | ProjectionSnapshotQuery
@@ -476,6 +478,7 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(McpApprovalBroker.layer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
@@ -485,6 +488,9 @@ describe("ProviderCommandReactor", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
+    const approvalBroker = await runtime.runPromise(
+      Effect.service(McpApprovalBroker.McpApprovalBroker),
+    );
     const runEffect = <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect);
 
     await Effect.runPromise(
@@ -607,6 +613,7 @@ describe("ProviderCommandReactor", () => {
       generateBranchName,
       generateThreadTitle,
       runtimeSessions,
+      approvalBroker,
       stateDir,
       drain,
       runEffect,
@@ -3685,6 +3692,58 @@ describe("ProviderCommandReactor", () => {
       requestId: "approval-request-1",
       decision: "accept",
     });
+  });
+
+  it("answers approvals the server raised for its own tools, not the provider", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-for-broker-approval"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    const decision = harness.runEffect(
+      harness.approvalBroker.request({
+        threadId: ThreadId.make("thread-1"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        provider: ProviderDriverKind.make("codex"),
+        sessionKey: "thread-1:provider-session-1",
+        appName: "Linear",
+        detail: "Comment on DEL-123",
+      }),
+    );
+    const [opened] = await harness.runEffect(
+      Stream.runCollect(Stream.take(harness.approvalBroker.streamEvents, 1)),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.approval.respond",
+        commandId: CommandId.make("cmd-broker-approval-respond"),
+        threadId: ThreadId.make("thread-1"),
+        requestId: asApprovalRequestId(String(opened?.requestId)),
+        decision: "accept",
+        createdAt: now,
+      }),
+    );
+
+    await harness.drain();
+    expect(await decision).toBe("accept");
+    expect(harness.respondToRequest.mock.calls.length).toBe(0);
   });
 
   it("forwards user input answers without reading unrelated message bodies", async () => {

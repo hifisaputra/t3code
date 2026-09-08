@@ -18,7 +18,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { Link } from "@tanstack/react-router";
-import { CircleDotIcon } from "lucide-react";
+import { CircleDotIcon, ExternalLinkIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { parseLinearIssueReference } from "~/linearIssueReference";
@@ -26,18 +26,21 @@ import { useEnvironments } from "~/state/environments";
 import { linearEnvironment } from "~/state/linear";
 import { usePrepareIssueThreadAction, useLinearIssueResolution } from "~/state/linearActions";
 import { useEnvironmentQuery } from "~/state/query";
+import ChatMarkdown from "./ChatMarkdown";
+import { IssueStateDot } from "./issues/IssueRow";
 import { linearBranchPrefixOptions, linearBranchProblem } from "./linearIssueThreadDialog.logic";
+import { useOpenIssueLink } from "./ThreadStatusIndicators";
 import { Button } from "./ui/button";
 import {
   Dialog,
   DialogDescription,
   DialogFooter,
   DialogHeader,
-  DialogPanel,
   DialogPopup,
   DialogTitle,
 } from "./ui/dialog";
 import { Input } from "./ui/input";
+import { ScrollArea } from "./ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import { Spinner } from "./ui/spinner";
 import { toastManager } from "./ui/toast";
@@ -74,6 +77,12 @@ const DEFAULT_BRANCH_NAMING: LinearBranchNaming = {
 
 /**
  * Start a thread from a Linear issue.
+ *
+ * Two panes: the left one picks an issue, by reference or from the list of
+ * mine, and the right one reads it, description included, so what the thread
+ * is for is on screen before it is started. Under the reader sit the two
+ * things the thread needs decided: which checkout it starts in and what the
+ * branch is called.
  *
  * The branch row follows the `linear.branchNaming` setting: under Linear's own
  * format there is nothing to decide and the issue's `branchName` is shown as a
@@ -303,6 +312,7 @@ export function LinearIssueThreadDialog({
   const fillReference = useCallback((identifier: string) => {
     setReferenceDirty(true);
     setReference(identifier);
+    // Enter in the box starts the thread, so a picked row leaves it focused.
     referenceInputRef.current?.focus();
   }, []);
 
@@ -313,17 +323,24 @@ export function LinearIssueThreadDialog({
       : parsedReference === null
         ? "Use a Linear issue URL or an identifier such as DEL-123."
         : null;
+  const resolutionError =
+    resolvedIssue === null && parsedReference !== null && !isResolving
+      ? issueResolution.error
+      : null;
   const prepareError =
     prepareIssueThreadAction.error instanceof Error
       ? prepareIssueThreadAction.error.message
       : prepareIssueThreadAction.error
         ? "Failed to start a thread from this issue."
         : null;
-  const errorMessage =
-    validationMessage ??
-    (resolvedIssue === null && issueResolution.error ? issueResolution.error : prepareError);
 
   const busy = prepareIssueThreadAction.isPending;
+  const canStart =
+    targetProject !== null &&
+    resolvedIssue !== null &&
+    !isResolving &&
+    !busy &&
+    branchProblem === null;
 
   return (
     <Dialog
@@ -334,148 +351,187 @@ export function LinearIssueThreadDialog({
         }
       }}
     >
-      <DialogPopup className="max-w-xl">
-        <DialogHeader>
+      <DialogPopup className="max-w-4xl sm:h-[42rem]">
+        <DialogHeader className="pb-3">
           <DialogTitle className="flex items-center gap-2">
             <CircleDotIcon className="size-4" />
             Start thread from issue
           </DialogTitle>
           <DialogDescription>
-            Resolve a Linear issue, then create the draft thread on its branch in the main repo or
-            in a dedicated worktree.
+            Pick an issue and read it, then create the draft thread on its branch in the main repo
+            or in a dedicated worktree.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="space-y-4">
-          <label className="grid gap-1.5">
-            <span className="font-medium text-foreground text-xs">Issue</span>
-            <Input
-              ref={referenceInputRef}
-              placeholder="DEL-123 or a linear.app issue URL"
-              value={reference}
-              onChange={(event) => {
-                setReferenceDirty(true);
-                setReference(event.target.value);
-              }}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter") {
-                  return;
-                }
-                event.preventDefault();
-                if (!isResolving && !busy) {
-                  void handleConfirm("worktree");
-                }
-              }}
-            />
-          </label>
 
-          {resolvedIssue ? <ResolvedIssueRow issue={resolvedIssue} /> : null}
-
-          {resolvedIssue && targetProject ? (
-            <div className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs">
-              <span>Starts in</span>
-              {projects.length > 1 ? (
-                <Select
-                  value={targetProject.id}
-                  onValueChange={(next) =>
-                    setOverride({ issueId: resolvedIssue.id, projectId: String(next) as ProjectId })
+        <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] sm:grid-cols-[minmax(0,18rem)_minmax(0,1fr)] sm:grid-rows-none">
+          <div className="flex min-h-0 flex-col gap-3 border-border/60 border-b px-6 pb-4 sm:border-r sm:border-b-0 sm:pr-4 sm:pb-6">
+            <label className="grid gap-1.5">
+              <span className="font-medium text-foreground text-xs">Issue</span>
+              <Input
+                ref={referenceInputRef}
+                placeholder="DEL-123 or a linear.app issue URL"
+                value={reference}
+                onChange={(event) => {
+                  setReferenceDirty(true);
+                  setReference(event.target.value);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") {
+                    return;
                   }
-                >
-                  <SelectTrigger size="xs" className="w-auto min-w-36" aria-label="Project">
-                    <SelectValue>
-                      <span className="truncate">{targetProject.title}</span>
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup align="start" alignItemWithTrigger={false}>
-                    {projects.map((project) => (
-                      <SelectItem hideIndicator key={project.id} value={project.id}>
-                        <span className="truncate">{project.title}</span>
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-              ) : (
-                <span className="font-medium text-foreground">{targetProject.title}</span>
-              )}
-            </div>
-          ) : null}
+                  event.preventDefault();
+                  if (canStart) {
+                    void handleConfirm("worktree");
+                  }
+                }}
+              />
+              {validationMessage ? (
+                <span className="text-destructive text-xs">{validationMessage}</span>
+              ) : null}
+            </label>
 
-          {resolvedIssue && branchIsEditable ? (
-            <div className="grid gap-1.5">
-              <span className="font-medium text-foreground text-xs">Branch</span>
-              <div className="flex items-center gap-2">
-                <Select
-                  value={branchPrefix ?? ""}
-                  onValueChange={(next) => editBranch({ prefix: String(next) })}
+            {!linearConnected && !linearNeedsSetup ? (
+              <p className="text-muted-foreground text-xs">{linearUnavailableSentence}</p>
+            ) : linearNeedsSetup ? (
+              <p className="text-muted-foreground text-xs">
+                Linear is not connected.{" "}
+                <Link
+                  to="/settings/integrations"
+                  className="underline underline-offset-2"
+                  onClick={() => onOpenChange(false)}
                 >
-                  <SelectTrigger size="sm" className="w-auto min-w-24" aria-label="Branch prefix">
-                    <SelectValue>
-                      <span className="truncate">{branchPrefix}</span>
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup align="start" alignItemWithTrigger={false}>
-                    {branchPrefixOptions.map((prefix) => (
-                      <SelectItem hideIndicator key={prefix} value={prefix}>
-                        <span className="truncate">{prefix}</span>
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-                <Input
-                  size="sm"
-                  spellCheck={false}
-                  aria-label="Branch name"
-                  aria-invalid={branchProblem !== null}
-                  className="min-w-0 flex-1 font-mono text-xs"
-                  value={branchName}
-                  onChange={(event) => editBranch({ branch: event.target.value })}
-                />
+                  Connect it in Settings → Integrations
+                </Link>
+                .
+              </p>
+            ) : (
+              <MyIssuesList
+                issues={myIssues.data?.issues ?? null}
+                isPending={myIssues.isPending}
+                error={myIssues.error}
+                selectedIdentifier={parsedReference}
+                onSelect={fillReference}
+              />
+            )}
+          </div>
+
+          <div className="flex min-h-0 flex-col">
+            <ScrollArea scrollFade className="min-h-0 flex-1">
+              <div className="px-6 py-4 sm:pt-0 sm:pl-4">
+                {resolvedIssue ? (
+                  <IssueReader
+                    issue={resolvedIssue}
+                    environmentId={environmentId}
+                    cwd={cwd}
+                    // The reader may already show an older answer while a fresh
+                    // one is on its way; that one refresh does not deserve a
+                    // spinner over a description the person is reading.
+                    refreshing={issueResolution.isFetching}
+                  />
+                ) : isResolving ? (
+                  <ReaderNotice>
+                    <Spinner className="size-3.5" />
+                    Resolving {parsedReference}...
+                  </ReaderNotice>
+                ) : resolutionError ? (
+                  <ReaderNotice tone="error">{resolutionError}</ReaderNotice>
+                ) : (
+                  <ReaderNotice>
+                    Pick an issue from the list, or paste its link, to read it here before starting.
+                  </ReaderNotice>
+                )}
               </div>
-              {branchProblem ? <p className="text-destructive text-xs">{branchProblem}</p> : null}
-            </div>
-          ) : resolvedIssue ? (
-            <div className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs">
-              <span>Branch</span>
-              <span className="font-mono text-foreground">{resolvedIssue.branchName}</span>
-            </div>
-          ) : null}
+            </ScrollArea>
 
-          {isResolving ? (
-            <div className="flex items-center gap-2 text-muted-foreground text-xs">
-              <Spinner className="size-3.5" />
-              Resolving issue...
-            </div>
-          ) : null}
+            {resolvedIssue && targetProject ? (
+              <div className="grid gap-2 border-border/60 border-t px-6 py-3 text-xs sm:pl-4">
+                <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
+                  <span className="w-14 shrink-0">Starts in</span>
+                  {projects.length > 1 ? (
+                    <Select
+                      value={targetProject.id}
+                      onValueChange={(next) =>
+                        setOverride({
+                          issueId: resolvedIssue.id,
+                          projectId: String(next) as ProjectId,
+                        })
+                      }
+                    >
+                      <SelectTrigger size="xs" className="w-auto min-w-36" aria-label="Project">
+                        <SelectValue>
+                          <span className="truncate">{targetProject.title}</span>
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectPopup align="start" alignItemWithTrigger={false}>
+                        {projects.map((project) => (
+                          <SelectItem hideIndicator key={project.id} value={project.id}>
+                            <span className="truncate">{project.title}</span>
+                          </SelectItem>
+                        ))}
+                      </SelectPopup>
+                    </Select>
+                  ) : (
+                    <span className="font-medium text-foreground">{targetProject.title}</span>
+                  )}
+                </div>
 
-          {movedToStateName ? (
-            <p className="text-muted-foreground text-xs">Moved to {movedToStateName}</p>
-          ) : null}
+                {branchIsEditable ? (
+                  <div className="grid gap-1">
+                    <div className="flex items-center gap-2 text-muted-foreground">
+                      <span className="w-14 shrink-0">Branch</span>
+                      <Select
+                        value={branchPrefix ?? ""}
+                        onValueChange={(next) => editBranch({ prefix: String(next) })}
+                      >
+                        <SelectTrigger
+                          size="xs"
+                          className="w-auto min-w-20"
+                          aria-label="Branch prefix"
+                        >
+                          <SelectValue>
+                            <span className="truncate">{branchPrefix}</span>
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectPopup align="start" alignItemWithTrigger={false}>
+                          {branchPrefixOptions.map((prefix) => (
+                            <SelectItem hideIndicator key={prefix} value={prefix}>
+                              <span className="truncate">{prefix}</span>
+                            </SelectItem>
+                          ))}
+                        </SelectPopup>
+                      </Select>
+                      <Input
+                        size="sm"
+                        spellCheck={false}
+                        aria-label="Branch name"
+                        aria-invalid={branchProblem !== null}
+                        className="min-w-0 flex-1 font-mono text-xs"
+                        value={branchName}
+                        onChange={(event) => editBranch({ branch: event.target.value })}
+                      />
+                    </div>
+                    {branchProblem ? (
+                      <p className="pl-16 text-destructive">{branchProblem}</p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
+                    <span className="w-14 shrink-0">Branch</span>
+                    <span className="min-w-0 truncate font-mono text-foreground">
+                      {resolvedIssue.branchName}
+                    </span>
+                  </div>
+                )}
 
-          {errorMessage ? <p className="text-destructive text-xs">{errorMessage}</p> : null}
+                {movedToStateName ? (
+                  <p className="text-muted-foreground">Moved to {movedToStateName}</p>
+                ) : null}
+                {prepareError ? <p className="text-destructive">{prepareError}</p> : null}
+              </div>
+            ) : null}
+          </div>
+        </div>
 
-          {!linearConnected && !linearNeedsSetup ? (
-            <p className="text-muted-foreground text-xs">{linearUnavailableSentence}</p>
-          ) : linearNeedsSetup ? (
-            <p className="text-muted-foreground text-xs">
-              Linear is not connected.{" "}
-              <Link
-                to="/settings/integrations"
-                className="underline underline-offset-2"
-                onClick={() => onOpenChange(false)}
-              >
-                Connect it in Settings → Integrations
-              </Link>
-              .
-            </p>
-          ) : (
-            <MyIssuesList
-              issues={myIssues.data?.issues ?? null}
-              isPending={myIssues.isPending}
-              error={myIssues.error}
-              selectedIdentifier={parsedReference}
-              onSelect={fillReference}
-            />
-          )}
-        </DialogPanel>
         <DialogFooter>
           <Button
             type="button"
@@ -493,9 +549,7 @@ export function LinearIssueThreadDialog({
             onClick={() => {
               void handleConfirm("local");
             }}
-            disabled={
-              !targetProject || !resolvedIssue || isResolving || busy || branchProblem !== null
-            }
+            disabled={!canStart}
           >
             {preparingMode === "local" ? "Preparing local..." : "Local"}
           </Button>
@@ -505,9 +559,7 @@ export function LinearIssueThreadDialog({
             onClick={() => {
               void handleConfirm("worktree");
             }}
-            disabled={
-              !targetProject || !resolvedIssue || isResolving || busy || branchProblem !== null
-            }
+            disabled={!canStart}
           >
             {preparingMode === "worktree" ? "Preparing worktree..." : "Worktree"}
           </Button>
@@ -517,19 +569,104 @@ export function LinearIssueThreadDialog({
   );
 }
 
-function ResolvedIssueRow({ issue }: { readonly issue: LinearIssueDetail }) {
+function ReaderNotice({
+  tone = "muted",
+  children,
+}: {
+  readonly tone?: "muted" | "error";
+  readonly children: React.ReactNode;
+}) {
   return (
-    <div className="rounded-xl border border-border/70 bg-muted/24 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate font-medium text-sm">{issue.title}</p>
-          <p className="truncate text-muted-foreground text-xs">
-            {issue.identifier} · {issue.team.key} ·{" "}
-            {issue.assignee?.displayName ?? issue.assignee?.name ?? "Unassigned"}
-          </p>
-        </div>
-        <IssueStateLabel name={issue.state.name} color={issue.state.color} />
+    <div
+      className={
+        tone === "error"
+          ? "flex items-center gap-2 text-destructive text-xs"
+          : "flex items-center gap-2 text-muted-foreground text-xs"
+      }
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * The issue as Linear has it right now: who owns it, where it stands, and the
+ * description in full. Comments and sub-issues stay on the Issues page; this
+ * pane exists so the thread is started by somebody who has read the brief.
+ */
+function IssueReader({
+  issue,
+  environmentId,
+  cwd,
+  refreshing,
+}: {
+  readonly issue: LinearIssueDetail;
+  readonly environmentId: EnvironmentId;
+  /** Anchors relative links in the markdown, once a checkout is chosen. */
+  readonly cwd: string | null;
+  readonly refreshing: boolean;
+}) {
+  const openIssueLink = useOpenIssueLink();
+  const description = issue.description?.trim() ?? "";
+  const facts = [
+    `${issue.team.name} · ${issue.team.key}`,
+    issue.assignee?.displayName ?? issue.assignee?.name ?? "Unassigned",
+    ...(issue.project ? [issue.project.name] : []),
+  ];
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <a
+          href={issue.url}
+          onClick={(event) => openIssueLink(event, issue.url)}
+          className="inline-flex items-center gap-1 font-mono text-muted-foreground text-xs underline-offset-2 hover:underline"
+        >
+          {issue.identifier}
+          <ExternalLinkIcon aria-hidden className="size-3" />
+        </a>
+        <span className="flex shrink-0 items-center gap-2 text-xs">
+          {refreshing ? <Spinner className="size-3" /> : null}
+          <IssueStateLabel name={issue.state.name} color={issue.state.color} />
+        </span>
       </div>
+      <div className="min-w-0">
+        <h2 className="font-medium text-base text-foreground leading-snug">{issue.title}</h2>
+        <p className="mt-1 truncate text-muted-foreground text-xs">{facts.join(" · ")}</p>
+      </div>
+      {issue.labels.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {issue.labels.map((label) => (
+            <span
+              key={label.id}
+              className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 py-0.5 pr-2 pl-1.5 text-[10px] text-muted-foreground"
+            >
+              <IssueStateDot color={label.color} className="size-1.5" />
+              {label.name}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {description.length > 0 ? (
+        <ChatMarkdown
+          text={description}
+          cwd={cwd ?? undefined}
+          environmentId={environmentId}
+          className="text-sm"
+        />
+      ) : (
+        <p className="text-muted-foreground text-xs">No description.</p>
+      )}
+      {issue.comments.length > 0 ? (
+        <a
+          href={issue.url}
+          onClick={(event) => openIssueLink(event, issue.url)}
+          className="text-muted-foreground text-xs underline-offset-2 hover:underline"
+        >
+          {issue.comments.length === 1
+            ? "1 comment on Linear"
+            : `${issue.comments.length} comments on Linear`}
+        </a>
+      ) : null}
     </div>
   );
 }
@@ -561,7 +698,7 @@ function MyIssuesList({
   readonly onSelect: (identifier: string) => void;
 }) {
   return (
-    <div className="grid gap-1.5">
+    <div className="flex min-h-0 flex-1 flex-col gap-1.5">
       <span className="font-medium text-foreground text-xs">My issues</span>
       {issues === null && isPending ? (
         <div className="flex items-center gap-2 text-muted-foreground text-xs">
@@ -573,7 +710,7 @@ function MyIssuesList({
       ) : issues !== null && issues.length === 0 ? (
         <p className="text-muted-foreground text-xs">No issues are assigned to you right now.</p>
       ) : (
-        <ul className="max-h-56 overflow-y-auto rounded-xl border border-border/70">
+        <ul className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-border/70 max-sm:max-h-44">
           {(issues ?? []).map((issue) => (
             <li key={issue.id}>
               <button
@@ -582,11 +719,11 @@ function MyIssuesList({
                 data-selected={issue.identifier === selectedIdentifier ? "true" : undefined}
                 className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/40 data-[selected=true]:bg-muted/60"
               >
-                <span className="shrink-0 font-medium text-muted-foreground text-xs">
+                <IssueStateDot color={issue.state.color} className="size-2 shrink-0" />
+                <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
                   {issue.identifier}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-sm">{issue.title}</span>
-                <IssueStateLabel name={issue.state.name} color={issue.state.color} />
               </button>
             </li>
           ))}

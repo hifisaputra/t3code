@@ -70,6 +70,7 @@ import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
+import type * as McpInvocationContext from "../../mcp/McpInvocationContext.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
@@ -710,9 +711,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
    * Attach the `t3-code` MCP server to the session that is about to start.
    *
    * This is the only place a credential is minted, so withholding one here is
-   * what disables agent browser access everywhere: every adapter already
-   * treats a missing session as "no MCP server", and the `/mcp` endpoint
-   * accepts nothing but tokens issued from this path.
+   * what disables agent browser access and agent Linear access everywhere:
+   * every adapter already treats a missing session as "no MCP server", and the
+   * `/mcp` endpoint accepts nothing but tokens issued from this path.
    */
   /**
    * Deny on an unreadable settings file rather than letting the read failure
@@ -743,9 +744,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
+  /**
+   * Agent access to Linear is a global setting today: there is no per-project
+   * override the way browser access has one, and adding one was deliberately
+   * left out until it proves necessary. A stored key is part of the grant —
+   * the toolkit has nothing to call without one. Same deny-on-unreadable-
+   * settings reasoning as `agentBrowserAccessEnabled` above.
+   */
+  const linearAgentAccessEnabled = Effect.fn("ProviderService.linearAgentAccessEnabled")(
+    function* () {
+      const settings = yield* serverSettings.getSettings;
+      return settings.linear.agentAccess && settings.linear.apiKey.trim().length > 0;
+    },
+    Effect.catch((cause) =>
+      Effect.logWarning(
+        "Could not read server settings; withholding agent Linear access for this session.",
+        { cause },
+      ).pipe(Effect.as(false)),
+    ),
+  );
+
   const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
     Effect.gen(function* () {
-      if (!(yield* agentBrowserAccessEnabled(threadId))) {
+      const capabilities = new Set<McpInvocationContext.McpCapability>();
+      if (yield* agentBrowserAccessEnabled(threadId)) capabilities.add("preview");
+      if (yield* linearAgentAccessEnabled()) capabilities.add("linear");
+      if (capabilities.size === 0) {
         // Revoke as well as clear. Every other prepare path reaches
         // `issueActiveMcpCredential`, which revokes the thread first, so
         // skipping it here would leave a previously issued bearer token valid
@@ -756,7 +780,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId));
         return undefined;
       }
-      const credential = yield* issueMcpCredential({ threadId, providerInstanceId });
+      const credential = yield* issueMcpCredential({
+        threadId,
+        providerInstanceId,
+        capabilities,
+      });
       if (credential) {
         yield* Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config));
       }

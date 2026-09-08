@@ -126,6 +126,39 @@ describe("pending approvals", () => {
     ]);
   });
 
+  it("derives an integration write approval from its request type alone", () => {
+    const options = [
+      { decision: "decline", label: "Decline" },
+      { decision: "acceptForSession", label: "Allow for this session" },
+      { decision: "accept", label: "Approve" },
+    ];
+    const activities = [
+      makeActivity({
+        kind: "approval.requested",
+        summary: "Linear write approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "req-linear-write",
+          requestType: "integration_write_approval",
+          detail: "Comment on DEL-177\n\nShipped the fix.",
+          appName: "Linear",
+          options,
+        },
+      }),
+    ];
+
+    expect(derivePendingRequests(activities).approvals).toEqual([
+      {
+        requestId: "req-linear-write",
+        requestKind: "integration",
+        createdAt: "2026-02-23T00:00:00.000Z",
+        detail: "Comment on DEL-177\n\nShipped the fix.",
+        appName: "Linear",
+        options,
+      },
+    ]);
+  });
+
   it("keeps app access approvals and persistence choices from remote activities", () => {
     const options = [
       { decision: "decline", label: "Decline" },

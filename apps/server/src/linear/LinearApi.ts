@@ -14,7 +14,9 @@ import {
   type LinearConnectionStatus,
   type LinearGetIssueInput,
   type LinearIssueDetail,
+  type LinearIssueLabel,
   type LinearIssueRelative,
+  type LinearIssueSummary,
   type LinearListIssuesInput,
   type LinearListIssuesResult,
   type LinearWorkflowState,
@@ -186,6 +188,23 @@ const CommentCreateResult = Schema.Struct({
   }),
 });
 
+const IssueCreateResult = Schema.Struct({
+  issueCreate: Schema.Struct({
+    success: Schema.Boolean,
+    issue: Schema.NullOr(RawIssueSummary),
+  }),
+});
+
+const RawIssueLabel = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  color: Schema.String,
+});
+
+const LabelsResult = Schema.Struct({
+  issueLabels: Schema.Struct({ nodes: Schema.Array(RawIssueLabel) }),
+});
+
 const decodeViewerResult = Schema.decodeUnknownEffect(ViewerResult);
 const decodeGetIssueResult = Schema.decodeUnknownEffect(GetIssueResult);
 const decodeListIssuesResult = Schema.decodeUnknownEffect(ListIssuesResult);
@@ -193,6 +212,8 @@ const decodeWorkspaceResult = Schema.decodeUnknownEffect(WorkspaceResult);
 const decodeTeamStatesResult = Schema.decodeUnknownEffect(TeamStatesResult);
 const decodeIssueUpdateResult = Schema.decodeUnknownEffect(IssueUpdateResult);
 const decodeCommentCreateResult = Schema.decodeUnknownEffect(CommentCreateResult);
+const decodeIssueCreateResult = Schema.decodeUnknownEffect(IssueCreateResult);
+const decodeLabelsResult = Schema.decodeUnknownEffect(LabelsResult);
 
 const ISSUE_SUMMARY_FIELDS = `
   id
@@ -261,6 +282,42 @@ const TEAM_STATES_QUERY = `
 const UPDATE_ISSUE_STATE_MUTATION = `
   mutation T3CodeUpdateIssueState($id: String!, $stateId: String!) {
     issueUpdate(id: $id, input: { stateId: $stateId }) { success }
+  }
+`;
+
+/**
+ * The generic issue patch. Only the fields the caller set are put in `$input`,
+ * so an unmentioned field is left alone rather than cleared. Assignment fields
+ * (`assigneeId`, `delegateId`, `subscriberIds`) are deliberately unreachable:
+ * an agent editing an issue must never reassign who owns it.
+ */
+const UPDATE_ISSUE_MUTATION = `
+  mutation T3CodeUpdateIssue($id: String!, $input: IssueUpdateInput!) {
+    issueUpdate(id: $id, input: $input) { success }
+  }
+`;
+
+const CREATE_ISSUE_MUTATION = `
+  mutation T3CodeCreateIssue($input: IssueCreateInput!) {
+    issueCreate(input: $input) {
+      success
+      issue { ${ISSUE_SUMMARY_FIELDS} }
+    }
+  }
+`;
+
+/**
+ * The labels an issue on `$teamId` may carry: the team's own plus the
+ * workspace-level ones, which Linear models as labels with a null team.
+ */
+const LABELS_QUERY = `
+  query T3CodeLabels($teamId: ID!) {
+    issueLabels(
+      first: 250
+      filter: { or: [{ team: { id: { eq: $teamId } } }, { team: { null: true } }] }
+    ) {
+      nodes { id name color }
+    }
   }
 `;
 
@@ -372,6 +429,33 @@ export class LinearApi extends Context.Service<
       readonly issueId: string;
       readonly stateId: string;
     }) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    /**
+     * Patch an issue. Only the fields present are sent, so anything the caller
+     * leaves out keeps its current value. There is deliberately no way to
+     * change the assignee, the delegate, or the subscribers.
+     */
+    readonly updateIssue: (input: {
+      readonly issueId: string;
+      readonly title?: string;
+      readonly description?: string;
+      readonly stateId?: string;
+      readonly labelIds?: ReadonlyArray<string>;
+    }) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    readonly createIssue: (input: {
+      readonly teamId: string;
+      readonly title: string;
+      readonly description?: string;
+      readonly parentId?: string;
+      readonly stateId?: string;
+      readonly labelIds?: ReadonlyArray<string>;
+    }) => Effect.Effect<LinearIssueSummary, LinearUnavailableError | LinearOperationError>;
+    /** Labels an issue on this team may carry, team-owned plus workspace-wide, sorted by name. */
+    readonly labels: (
+      teamId: string,
+    ) => Effect.Effect<
+      ReadonlyArray<LinearIssueLabel>,
+      LinearUnavailableError | LinearOperationError
+    >;
     readonly createComment: (input: {
       readonly issueId: string;
       readonly body: string;
@@ -661,6 +745,79 @@ export const make = Effect.gen(function* () {
     }
   });
 
+  const updateIssue = Effect.fn("LinearApi.updateIssue")(function* (input: {
+    readonly issueId: string;
+    readonly title?: string;
+    readonly description?: string;
+    readonly stateId?: string;
+    readonly labelIds?: ReadonlyArray<string>;
+  }) {
+    const result = yield* request({
+      operation: "updateIssue",
+      query: UPDATE_ISSUE_MUTATION,
+      variables: {
+        id: input.issueId,
+        input: {
+          ...(input.title !== undefined ? { title: input.title } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.stateId !== undefined ? { stateId: input.stateId } : {}),
+          ...(input.labelIds !== undefined ? { labelIds: input.labelIds } : {}),
+        },
+      },
+      decode: decodeIssueUpdateResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.issueUpdate.success) {
+      return yield* new LinearOperationError({
+        operation: "updateIssue",
+        detail: "Linear refused to save the issue.",
+      });
+    }
+  });
+
+  const createIssue = Effect.fn("LinearApi.createIssue")(function* (input: {
+    readonly teamId: string;
+    readonly title: string;
+    readonly description?: string;
+    readonly parentId?: string;
+    readonly stateId?: string;
+    readonly labelIds?: ReadonlyArray<string>;
+  }) {
+    const result = yield* request({
+      operation: "createIssue",
+      query: CREATE_ISSUE_MUTATION,
+      variables: {
+        input: {
+          teamId: input.teamId,
+          title: input.title,
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+          ...(input.stateId !== undefined ? { stateId: input.stateId } : {}),
+          ...(input.labelIds !== undefined ? { labelIds: input.labelIds } : {}),
+        },
+      },
+      decode: decodeIssueCreateResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.issueCreate.success || result.issueCreate.issue === null) {
+      return yield* new LinearOperationError({
+        operation: "createIssue",
+        detail: "Linear refused to create the issue.",
+      });
+    }
+    return result.issueCreate.issue satisfies LinearIssueSummary;
+  });
+
+  const labels = Effect.fn("LinearApi.labels")(function* (teamId: string) {
+    const result = yield* request({
+      operation: "labels",
+      query: LABELS_QUERY,
+      variables: { teamId },
+      decode: decodeLabelsResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    return [...result.issueLabels.nodes].sort((left, right) =>
+      left.name.toLocaleLowerCase().localeCompare(right.name.toLocaleLowerCase()),
+    );
+  });
+
   const createComment = Effect.fn("LinearApi.createComment")(function* (input: {
     readonly issueId: string;
     readonly body: string;
@@ -687,6 +844,9 @@ export const make = Effect.gen(function* () {
     workspace,
     workflowStates,
     updateIssueState,
+    updateIssue,
+    createIssue,
+    labels,
     createComment,
   });
 });

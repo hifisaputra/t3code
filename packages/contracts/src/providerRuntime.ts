@@ -141,6 +141,8 @@ export const CanonicalRequestType = Schema.Literals([
   "apply_patch_approval",
   "exec_command_approval",
   "mcp_elicitation_approval",
+  /** The server asking before one of its own integration tools writes to an external service. */
+  "integration_write_approval",
   "tool_user_input",
   "dynamic_tool_call",
   "auth_tokens_refresh",

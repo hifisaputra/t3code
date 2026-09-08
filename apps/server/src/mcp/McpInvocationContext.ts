@@ -7,7 +7,12 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-export type McpCapability = "preview";
+/**
+ * What a provider session's MCP credential may reach. `preview` is the
+ * collaborative browser; `linear` is the connected Linear workspace, granted
+ * when `settings.linear.agentAccess` is on and a key is stored.
+ */
+export type McpCapability = "preview" | "linear";
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;

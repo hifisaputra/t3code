@@ -67,4 +67,41 @@ describe("runtimeEventToActivities approval details", () => {
       },
     });
   });
+
+  it("labels the server's own integration writes so the card can name them", () => {
+    const options = [
+      { decision: "decline", label: "Decline" },
+      { decision: "acceptForSession", label: "Allow for this session" },
+      { decision: "accept", label: "Approve" },
+    ] as const;
+    const event = {
+      type: "request.opened",
+      eventId: EventId.make("evt-linear-write"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-09-08T00:00:00.000Z",
+      threadId: ThreadId.make("thread-1"),
+      requestId: RuntimeRequestId.make("approval-linear"),
+      payload: {
+        requestType: "integration_write_approval",
+        detail: "Comment on DEL-123\n\nShipped it.",
+        appName: "Linear",
+        options,
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    const [activity] = runtimeEventToActivities(event);
+
+    expect(activity).toMatchObject({
+      kind: "approval.requested",
+      summary: "Integration approval requested",
+      payload: {
+        requestId: "approval-linear",
+        requestKind: "integration",
+        requestType: "integration_write_approval",
+        detail: "Comment on DEL-123\n\nShipped it.",
+        appName: "Linear",
+        options,
+      },
+    });
+  });
 });

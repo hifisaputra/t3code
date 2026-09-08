@@ -59,6 +59,8 @@ export function requestKindFromRequestType(requestType: unknown): ProviderReques
       return "file-change";
     case "mcp_elicitation_approval":
       return "mcp-elicitation";
+    case "integration_write_approval":
+      return "integration";
     default:
       return null;
   }

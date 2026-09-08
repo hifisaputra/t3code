@@ -1,5 +1,7 @@
 import type { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 
+import type { McpCapability } from "./McpInvocationContext.ts";
+
 export interface McpProviderSessionConfig {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -7,6 +9,8 @@ export interface McpProviderSessionConfig {
   readonly providerInstanceId: ProviderInstanceId;
   readonly endpoint: string;
   readonly authorizationHeader: string;
+  /** What the credential grants; adapters use it to describe only the tools the turn has. */
+  readonly capabilities: ReadonlySet<McpCapability>;
 }
 
 const sessionsByThread = new Map<ThreadId, McpProviderSessionConfig>();

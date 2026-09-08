@@ -4440,9 +4440,13 @@ describe("agent browser access", () => {
     enableAgentBrowserAccess: boolean,
     threadId: ThreadId,
     projectOverride?: boolean,
+    linear?: { readonly agentAccess: boolean; readonly apiKey: string },
   ) =>
     Effect.gen(function* () {
-      const issued: Array<ThreadId> = [];
+      const issued: Array<{
+        readonly threadId: ThreadId;
+        readonly capabilities: ReadonlyArray<string>;
+      }> = [];
       const codex = makeFakeCodexAdapter();
       const providerAdapterLayer = Layer.succeed(
         ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -4501,7 +4505,10 @@ describe("agent browser access", () => {
       const providerLayer = makeProviderServiceLive({
         issueMcpCredential: (request) =>
           Effect.sync(() => {
-            issued.push(request.threadId);
+            issued.push({
+              threadId: request.threadId,
+              capabilities: [...request.capabilities].sort(),
+            });
             return undefined;
           }),
         revokeMcpCredential: (revoked) => Effect.sync(() => void revokedThreads.push(revoked)),
@@ -4514,6 +4521,7 @@ describe("agent browser access", () => {
             enableAgentBrowserAccess,
             projectAgentBrowserAccessOverrides:
               projectOverride === undefined ? {} : { [projectId]: projectOverride },
+            ...(linear ? { linear } : {}),
           }),
         ),
         Layer.provide(serverConfigTestLayer),
@@ -4570,7 +4578,7 @@ describe("agent browser access", () => {
 
       const issued = yield* startSessionWith(true, threadId);
 
-      assert.deepEqual(issued, [threadId]);
+      assert.deepEqual(issued, [{ threadId, capabilities: ["preview"] }]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -4588,7 +4596,65 @@ describe("agent browser access", () => {
     Effect.gen(function* () {
       const threadId = asThreadId("thread-project-browser-on");
       const issued = yield* startSessionWith(false, threadId, true);
-      assert.deepEqual(issued, [threadId]);
+      assert.deepEqual(issued, [{ threadId, capabilities: ["preview"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  // The credential is one grant covering several toolkits, so what matters is
+  // that each setting contributes exactly its own capability and nothing else.
+  it.effect("issues a linear-only credential when only Linear agent access is on", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-linear-only");
+
+      const issued = yield* startSessionWith(false, threadId, undefined, {
+        agentAccess: true,
+        apiKey: "lin_api_test",
+      });
+
+      assert.deepEqual(issued, [{ threadId, capabilities: ["linear"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("issues both capabilities when browser and Linear agent access are on", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-linear-and-browser");
+
+      const issued = yield* startSessionWith(true, threadId, undefined, {
+        agentAccess: true,
+        apiKey: "lin_api_test",
+      });
+
+      assert.deepEqual(issued, [{ threadId, capabilities: ["linear", "preview"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  // The toggle alone grants nothing: the toolkit has no key to call Linear
+  // with, so the capability would only advertise tools that cannot work.
+  it.effect("withholds the linear capability when no API key is stored", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-linear-no-key");
+
+      const issued = yield* startSessionWith(true, threadId, undefined, {
+        agentAccess: true,
+        apiKey: "   ",
+      });
+
+      assert.deepEqual(issued, [{ threadId, capabilities: ["preview"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("issues nothing and revokes when both browser and Linear access are off", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-no-capabilities");
+      revokedThreads.length = 0;
+
+      const issued = yield* startSessionWith(false, threadId, undefined, {
+        agentAccess: false,
+        apiKey: "lin_api_test",
+      });
+
+      assert.deepEqual(issued, []);
+      assert.deepEqual(revokedThreads, [threadId]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

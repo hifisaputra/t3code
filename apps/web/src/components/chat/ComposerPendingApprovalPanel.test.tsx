@@ -71,6 +71,28 @@ describe("ComposerPendingApprovalPanel", () => {
     expect(markup).toContain("Allow ChatGPT to use Safari?");
   });
 
+  it("labels an integration write request with its app name and multi-line detail", () => {
+    const detail = "Comment on DEL-177\n\nShipped the fix, deploying now.";
+    const markup = renderToStaticMarkup(
+      <ComposerPendingApprovalPanel
+        approval={{
+          requestId: ApprovalRequestId.make("approval-linear"),
+          requestKind: "integration",
+          createdAt: "2026-09-08T00:00:00.000Z",
+          appName: "Linear",
+          detail,
+        }}
+        pendingCount={1}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Integration approval"');
+    expect(markup).toContain('aria-label="Requested change"');
+    expect(markup).toContain(">Linear<");
+    expect(markup).toContain(detail);
+    expect(markup).toContain("whitespace-pre");
+  });
+
   it("limits long app names so the complete approval message stays readable", () => {
     const appName = "A".repeat(200);
     const detail = "Allow ChatGPT to access the selected application?";

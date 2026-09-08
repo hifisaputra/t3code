@@ -17,9 +17,9 @@ see Troubleshooting below.
 
 Open the Linear issue dialog from the new-thread menu, from the command palette, or with the
 `thread.startFromIssue` keybinding you set in **Settings → Keybindings**. Paste an issue
-identifier such as `DEL-123`, or the issue URL from your browser. The dialog resolves it and shows
-the title and current state. If you would rather browse, **My issues** below the input lists the
-issues assigned to you.
+identifier such as `DEL-123`, or the issue URL from your browser. If you would rather browse,
+**My issues** under the input lists the issues assigned to you. The issue opens beside the picker
+with its state, labels, and full description, so you can read the brief before starting.
 
 Choose **Worktree** to work in a fresh git worktree, or **Local** to work in the checkout you
 already have open. Worktree keeps the checkout you are using free.
@@ -116,6 +116,50 @@ description and comments included.
 **Start thread** on an issue runs the flow described above, with the same worktree and branch
 choices. An issue that already has a thread offers **Open thread** instead.
 
+## Let agents work on issues
+
+Turn on **Let agents read and update Linear issues** in **Settings → Integrations → Linear**. The
+setting belongs to the server, not to one project, so it applies to every project on that server.
+
+Once it is on, the next turn in a thread that is linked to an issue gets Linear tools in its
+`t3-code` MCP server. Threads already running pick the tools up on their next message. Every tool
+defaults to the thread's linked issue, so an agent does not need an identifier to work on the issue
+you started from. Pass one, such as `DEL-123`, to reach a different issue.
+
+The tools are:
+
+- `get_issue` reads an issue: title, description, state, labels, assignee, and links.
+- `list_comments` reads the comment thread on an issue.
+- `list_issue_statuses` lists the workflow states a team can move an issue to.
+- `list_my_issues` lists the open issues assigned to you.
+- `save_comment` posts a comment on an issue.
+- `save_issue` edits an issue's title, description, state, or labels.
+- `create_issue` files a new issue. It files a sub-issue of the linked issue unless the agent is
+  told to file it somewhere else.
+
+Agents cannot assign or delegate an issue, cannot delete one, and cannot change estimates or
+projects. Those stay with you.
+
+Writes wait for you. **Ask before agents write to Linear** sits in the same settings group and is
+on by default. Every comment, edit, or new issue an agent wants to make shows up as an approval in
+the thread's composer, with what will change. **Approve** applies it, **Decline** tells the agent
+you refused, and **Allow for this session** stops asking for the rest of that agent session. Reads
+never ask.
+
+If nobody answers within about ten minutes the change is not made and the agent is told to ask
+again. Agents also have their own tool timeouts, often about a minute, so an agent can give up
+waiting before that. Turn the setting off if you would rather agents write to Linear without
+asking.
+
+Every read and write goes through the key you saved, so changes land in Linear as the connected
+user. Comments and edits an agent makes look like yours in Linear's history. Say in the issue or
+the comment when an agent wrote it, if the rest of your team needs to know.
+
+The key itself never leaves the server. Agents call the tools, the server calls Linear.
+
+Agent browser access is a separate setting, with its own toggle. Turning one on does not turn on
+the other.
+
 ## Replace or remove the key
 
 Use the same **Settings → Integrations → Linear** row. Paste a new key and save to replace the
@@ -132,6 +176,11 @@ want it to work.
 - **Rate limited:** Linear is throttling requests. Wait until the time shown, then check again.
 - **Connection error:** the message names the network problem the server hit while reaching
   Linear. Fix connectivity on the machine running the server, then choose **Check again**.
+- **Agents say the Linear tools are missing:** the toggle is off, no key is saved, or the thread
+  started before the toggle was turned on. Turn it on and send another message.
+- **An agent says its Linear change was declined or timed out:** the change needed an approval you
+  did not give. Look for the approval card in the thread's composer and answer it, or turn off
+  **Ask before agents write to Linear** if you do not want to be asked at all.
 
 The status you see belongs to the server your client is connected to. If you are working against a
 remote environment, the Connection row shows that remote server's Linear connection, not one you

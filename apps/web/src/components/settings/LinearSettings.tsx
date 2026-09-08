@@ -83,6 +83,8 @@ export function LinearSettingsSection() {
       ) : null}
       <LinearBranchNamingSetting />
       <LinearMoveToStartedSetting />
+      <LinearAgentAccessSetting />
+      <LinearConfirmWritesSetting />
     </SettingsSection>
   );
 }
@@ -232,6 +234,54 @@ function LinearMoveToStartedSetting() {
             updateSettings({ linear: { moveToStartedOnThreadStart: Boolean(checked) } })
           }
           aria-label="Move issue to In Progress when a thread starts"
+        />
+      }
+    />
+  );
+}
+
+function LinearAgentAccessSetting() {
+  const agentAccess = usePrimarySettings((settings) => settings.linear.agentAccess);
+  const updateSettings = useUpdatePrimarySettings();
+
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("linear-agent-access")}
+      description="Agents in a thread linked to an issue get server-side tools to read the issue, list your issues, add comments, edit the title, description, state, and labels, and file follow-up issues. They cannot change who an issue is assigned to. Takes effect on the next turn."
+      control={
+        <Switch
+          checked={agentAccess}
+          onCheckedChange={(checked) =>
+            updateSettings({ linear: { agentAccess: Boolean(checked) } })
+          }
+          aria-label="Let agents read and update Linear issues"
+        />
+      }
+    />
+  );
+}
+
+/**
+ * Stays visible while agent access is off: the row is how someone finds out
+ * writes can be gated at all, and its description says when it applies.
+ */
+function LinearConfirmWritesSetting() {
+  const confirmAgentWrites = usePrimarySettings((settings) => settings.linear.confirmAgentWrites);
+  const updateSettings = useUpdatePrimarySettings();
+
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("linear-confirm-agent-writes")}
+      description="Each comment, edit, or new issue an agent wants to make in Linear shows up as an approval in the thread first. Reads never ask. Only matters while agents can update Linear issues."
+      control={
+        <Switch
+          checked={confirmAgentWrites}
+          onCheckedChange={(checked) =>
+            updateSettings({ linear: { confirmAgentWrites: Boolean(checked) } })
+          }
+          aria-label="Ask before agents write to Linear"
         />
       }
     />

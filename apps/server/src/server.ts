@@ -54,6 +54,7 @@ import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as McpApprovalBroker from "./mcp/McpApprovalBroker.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -523,6 +524,11 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
       CloudManagedEndpointRuntimeLive,
     ),
   ),
+  // One instance for the whole process: the MCP routes raise approvals on it,
+  // runtime ingestion turns its events into activities, and the command
+  // reactor answers them. Provided at the runtime level because the routes are
+  // served on top of `RuntimeDependenciesLive`.
+  Layer.provideMerge(McpApprovalBroker.layer),
 );
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
@@ -555,10 +561,10 @@ const commandReadinessLayer = HttpRouter.middleware(
  * reach for them and every call dies with
  * `PreviewAutomationNoAvailableHostError`.
  *
- * Setting `T3CODE_DISABLE_PREVIEW_MCP=1` leaves the registry unmounted, which
- * makes `McpSessionRegistry.issueActiveMcpCredential` return `undefined` and
- * every provider adapter (Claude, Codex, Cursor, Grok, OpenCode) skip its
- * `mcpServers` block — the tools are never advertised in the first place.
+ * Setting `T3CODE_DISABLE_PREVIEW_MCP=1` mounts `/mcp` without the preview
+ * toolkit and stops the registry offering the `preview` capability, so the
+ * tools are never advertised. The Linear toolkit stays, and a session that
+ * needs nothing else gets no `mcpServers` block at all.
  */
 const previewMcpDisabled = /^(1|true|yes)$/i.test(
   process.env.T3CODE_DISABLE_PREVIEW_MCP?.trim() ?? "",
@@ -580,9 +586,13 @@ export const makeRoutesLayer = Layer.mergeAll(
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
   ),
-  previewMcpDisabled
-    ? Layer.empty
-    : McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
+  McpHttpServer.makeLayer({ preview: !previewMcpDisabled }).pipe(
+    Layer.provide(
+      McpSessionRegistry.layerWithOptions({
+        offeredCapabilities: new Set(previewMcpDisabled ? ["linear"] : ["preview", "linear"]),
+      }),
+    ),
+  ),
 ).pipe(
   // Both transports consume the same service instance, so caches single-flight across clients
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.

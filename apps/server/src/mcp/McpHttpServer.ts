@@ -10,6 +10,7 @@ import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import packageJson from "../../package.json" with { type: "json" };
+import * as LinearApi from "../linear/LinearApi.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -17,6 +18,8 @@ import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
 } from "./toolkits/preview/handlers.ts";
+import { LinearToolkitHandlersLive } from "./toolkits/linear/handlers.ts";
+import { LinearToolkit } from "./toolkits/linear/tools.ts";
 import {
   PreviewSnapshotTool,
   PreviewSnapshotToolkit,
@@ -219,6 +222,19 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
   PreviewSnapshotRegistrationLive,
 );
 
+/**
+ * The Linear half of the per-thread MCP server. The API key stays here: the
+ * handlers call `LinearApi` in-process, so nothing the agent can read carries
+ * a credential. `ProjectionSnapshotQuery`, `ServerSettingsService` and
+ * `McpApprovalBroker` are left as requirements because the routes already run
+ * above them in `server.ts` — the broker especially, since the runtime has to
+ * see the same instance the write approvals are raised on.
+ */
+export const LinearToolkitRegistrationLive = McpServer.toolkit(LinearToolkit).pipe(
+  Layer.provide(LinearToolkitHandlersLive),
+  Layer.provide(LinearApi.layer),
+);
+
 const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
@@ -226,4 +242,15 @@ const McpTransportLive = McpServer.layerHttp({
   protocols: [McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
-export const layer = PreviewToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));
+/**
+ * `preview: false` mounts `/mcp` without the browser toolkit, for servers with
+ * no preview host; the registry must then also leave `preview` unoffered so
+ * the two stay in step.
+ */
+export const makeLayer = (options: { readonly preview: boolean }) =>
+  (options.preview
+    ? Layer.mergeAll(PreviewToolkitRegistrationLive, LinearToolkitRegistrationLive)
+    : LinearToolkitRegistrationLive
+  ).pipe(Layer.provideMerge(McpTransportLive));
+
+export const layer = makeLayer({ preview: true });
