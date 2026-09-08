@@ -1,3 +1,4 @@
+import { GoogleCalendar } from "./googleCalendar/GoogleCalendar.ts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -594,6 +595,7 @@ const makeWsRpcLayer = (
       );
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
+      const calendar = yield* GoogleCalendar;
       const linear = yield* LinearApi.LinearApi;
       const linearThreads = yield* LinearThreadService.LinearThreadService;
       const automaticGitFetchInterval = serverSettings.getSettings.pipe(
@@ -2098,6 +2100,13 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
+        [WS_METHODS.googleCalendarStatus]: (_input) => calendar.status,
+        [WS_METHODS.googleCalendarAuthorize]: (_input) => calendar.authorize,
+        [WS_METHODS.googleCalendarDisconnect]: (_input) => calendar.disconnect,
+        [WS_METHODS.googleCalendarCalendars]: (_input) => calendar.calendars,
+        [WS_METHODS.googleCalendarEvents]: (input) => calendar.events(input),
+        [WS_METHODS.googleCalendarSchedule]: (input) => calendar.schedule(input),
+        [WS_METHODS.googleCalendarUpdate]: (input) => calendar.update(input),
         [WS_METHODS.linearStatus]: (_input) =>
           observeRpcEffect(WS_METHODS.linearStatus, linear.status, {
             "rpc.aggregate": "linear",
@@ -2984,6 +2993,7 @@ const makeWsRpcLayer = (
 
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
+    const googleCalendar = yield* GoogleCalendar;
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const baseServerSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const config = yield* ServerConfig.ServerConfig;
@@ -3045,6 +3055,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               clientAnalyticsProps,
               previewAutomationBroker,
             ).pipe(
+              Layer.provide(Layer.succeed(GoogleCalendar, googleCalendar)),
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(AgentSessionScanner.layer),
               Layer.provide(ProviderMaintenanceRunner.layer),

@@ -1687,6 +1687,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("rejects unsolicited Google Calendar callbacks without exposing request details", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({});
+      const response = yield* HttpClient.get(
+        "/oauth/google-calendar/callback?state=invalid&code=secret-code",
+      );
+      assert.equal(response.headers["cache-control"], "no-store");
+      assert.equal(response.headers["referrer-policy"], "no-referrer");
+      const text = yield* response.text;
+      assert.include(text, "could not connect");
+      assert.notInclude(text, "secret-code");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("serves static index content for GET / when staticDir is configured", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

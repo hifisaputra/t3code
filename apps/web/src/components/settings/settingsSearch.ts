@@ -403,6 +403,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["agent opens browser pop into view hide"],
   },
   {
+    id: "google-calendar",
+    title: "Google Calendar",
+    to: "/settings/integrations",
+    searchTerms: ["calendar agenda scheduling google oauth time blocks"],
+  },
+  {
     id: "linear-api-key",
     title: "Linear API key",
     to: "/settings/integrations",

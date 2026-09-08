@@ -119,6 +119,10 @@
       "types": "./src/state/git.ts",
       "default": "./src/state/git.ts"
     },
+    "./state/googleCalendar": {
+      "types": "./src/state/googleCalendar.ts",
+      "default": "./src/state/googleCalendar.ts"
+    },
     "./state/linear": {
       "types": "./src/state/linear.ts",
       "default": "./src/state/linear.ts"

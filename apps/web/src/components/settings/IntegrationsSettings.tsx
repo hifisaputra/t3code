@@ -1,3 +1,4 @@
+import { GoogleCalendarSettingsSection } from "./GoogleCalendarSettings";
 /**
  * Integrations settings - preferences for surfaces T3 Code embeds rather than
  * owns. Browser is the first section: the defaults a preview tab opens at,
@@ -1195,6 +1196,7 @@ export function IntegrationsSettingsPanel() {
         )}
       </SettingsSection>
       <LinearSettingsSection />
+      <GoogleCalendarSettingsSection />
     </SettingsPageContainer>
   );
 }

@@ -1,3 +1,6 @@
+import * as GoogleCalendar from "./googleCalendar/GoogleCalendar.ts";
+import { googleCalendarCallbackLayer } from "./googleCalendar/http.ts";
+import * as LinearApi from "./linear/LinearApi.ts";
 import { EnvironmentHttpApi, ProviderDriverKind } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
@@ -585,6 +588,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     attachmentUploadRouteLayer,
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
+    googleCalendarCallbackLayer,
   ),
   McpHttpServer.makeLayer({ preview: !previewMcpDisabled }).pipe(
     Layer.provide(
@@ -597,6 +601,12 @@ export const makeRoutesLayer = Layer.mergeAll(
   // Both transports consume the same service instance, so caches single-flight across clients
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
   Layer.provide(PullRequestServiceLive),
+  Layer.provide(
+    GoogleCalendar.layer.pipe(
+      Layer.provide(LinearApi.layer),
+      Layer.provide(ServerSecretStore.layer),
+    ),
+  ),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(DesktopAppUpdateLayerLive))),
   Layer.provide(commandReadinessLayer),

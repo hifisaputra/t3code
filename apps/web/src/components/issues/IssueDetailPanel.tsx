@@ -1,3 +1,4 @@
+import { IssueCalendar } from "../calendar/CalendarAgenda";
 import type { EnvironmentId, LinearIssueDetail, LinearIssueRelative } from "@t3tools/contracts";
 import { ExternalLinkIcon } from "lucide-react";
 import type { MouseEvent, ReactNode } from "react";
@@ -102,6 +103,12 @@ export function IssueDetailPanel({
           </Button>
         </div>
       </div>
+
+      <IssueCalendar
+        key={`${environmentId}:${issue.identifier}`}
+        environmentId={environmentId}
+        identifier={issue.identifier}
+      />
 
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 text-xs">
         <IssueFact label="State">

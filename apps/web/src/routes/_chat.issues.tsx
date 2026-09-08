@@ -1,3 +1,5 @@
+import { CalendarPlanner } from "../components/calendar/CalendarPlanner";
+import { CalendarAgenda } from "../components/calendar/CalendarAgenda";
 import type {
   EnvironmentId,
   LinearIssueSummary,
@@ -110,6 +112,7 @@ export const Route = createFileRoute("/_chat/issues")({
 
 function IssuesRouteView() {
   const search = Route.useSearch();
+  const [view, setView] = useState<"issues" | "agenda" | "plan">("issues");
   const navigate = useNavigate({ from: Route.fullPath });
   const { environments } = useEnvironments();
   const allProjects = useProjects();
@@ -172,7 +175,13 @@ function IssuesRouteView() {
       ),
     [filters, issues, queryInput],
   );
-  const linkedThreads = useMemo(() => linkedThreadsByIssueIdentifier(threadShells), [threadShells]);
+  const linkedThreads = useMemo(
+    () =>
+      linkedThreadsByIssueIdentifier(
+        threadShells.filter((thread) => thread.environmentId === environmentId),
+      ),
+    [threadShells, environmentId],
+  );
   // The fallback only matters for issues nothing maps, so it disappears once
   // every issue on screen already knows its repository.
   const everyIssueMapped = useMemo(
@@ -390,6 +399,27 @@ function IssuesRouteView() {
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <WorkspacePageHeader electron={isElectron} className="border-border border-b">
         <h1 className="truncate font-medium text-sm">Issues</h1>
+        <Button
+          size="sm"
+          variant={view === "issues" ? "secondary" : "ghost"}
+          onClick={() => setView("issues")}
+        >
+          List
+        </Button>
+        <Button
+          size="sm"
+          variant={view === "agenda" ? "secondary" : "ghost"}
+          onClick={() => setView("agenda")}
+        >
+          Agenda
+        </Button>
+        <Button
+          size="sm"
+          variant={view === "plan" ? "secondary" : "ghost"}
+          onClick={() => setView("plan")}
+        >
+          Plan
+        </Button>
         <div className="min-w-0 flex-1" />
         <Button
           size="icon-sm"
@@ -488,7 +518,42 @@ function IssuesRouteView() {
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{body}</div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {view === "plan" && environmentId ? (
+          <CalendarPlanner
+            key={environmentId}
+            environmentId={environmentId}
+            issues={visibleIssues}
+            issuesPending={issuesQuery.isPending}
+            issuesError={issuesQuery.error}
+            hasThread={(identifier) =>
+              linkedThreads.get(identifier)?.environmentId === environmentId
+            }
+            onWork={(identifier) => {
+              const thread = linkedThreads.get(identifier);
+              if (thread?.environmentId === environmentId) openThread(thread);
+              else startThread(identifier);
+            }}
+          />
+        ) : view === "agenda" && environmentId ? (
+          <div className="overflow-y-auto p-4">
+            <CalendarAgenda
+              key={environmentId}
+              environmentId={environmentId}
+              hasThread={(identifier) =>
+                linkedThreads.get(identifier)?.environmentId === environmentId
+              }
+              onWork={(identifier) => {
+                const thread = linkedThreads.get(identifier);
+                if (thread?.environmentId === environmentId) openThread(thread);
+                else startThread(identifier);
+              }}
+            />
+          </div>
+        ) : (
+          body
+        )}
+      </div>
 
       {environmentId && dialog ? (
         <LinearIssueThreadDialog

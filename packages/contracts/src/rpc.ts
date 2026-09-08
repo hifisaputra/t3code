@@ -1,3 +1,12 @@
+import {
+  GoogleCalendarError,
+  GoogleCalendarStatus,
+  GoogleCalendarCalendar,
+  GoogleCalendarEvent,
+  GoogleCalendarEventsInput,
+  GoogleCalendarScheduleInput,
+  GoogleCalendarUpdateInput,
+} from "./googleCalendar.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
@@ -393,6 +402,13 @@ export const WS_METHODS = {
   sourceControlPublishRepository: "sourceControl.publishRepository",
 
   // Linear methods
+  googleCalendarStatus: "googleCalendar.status",
+  googleCalendarAuthorize: "googleCalendar.authorize",
+  googleCalendarDisconnect: "googleCalendar.disconnect",
+  googleCalendarCalendars: "googleCalendar.calendars",
+  googleCalendarEvents: "googleCalendar.events",
+  googleCalendarSchedule: "googleCalendar.schedule",
+  googleCalendarUpdate: "googleCalendar.update",
   linearStatus: "linear.status",
   linearWorkspace: "linear.workspace",
   linearListIssues: "linear.listIssues",
@@ -1276,7 +1292,50 @@ const WsLinearPrepareIssueThreadRpc = Rpc.make(WS_METHODS.linearPrepareIssueThre
   ]),
 });
 
+const WsGoogleCalendarStatusRpc = Rpc.make(WS_METHODS.googleCalendarStatus, {
+  payload: Schema.Struct({}),
+  success: GoogleCalendarStatus,
+  error: Schema.Union([GoogleCalendarError, EnvironmentAuthorizationError]),
+});
+const WsGoogleCalendarAuthorizeRpc = Rpc.make(WS_METHODS.googleCalendarAuthorize, {
+  payload: Schema.Struct({}),
+  success: Schema.Struct({ url: Schema.String }),
+  error: Schema.Union([GoogleCalendarError, EnvironmentAuthorizationError]),
+});
+const WsGoogleCalendarDisconnectRpc = Rpc.make(WS_METHODS.googleCalendarDisconnect, {
+  payload: Schema.Struct({}),
+  success: Schema.Void,
+  error: Schema.Union([GoogleCalendarError, EnvironmentAuthorizationError]),
+});
+const WsGoogleCalendarCalendarsRpc = Rpc.make(WS_METHODS.googleCalendarCalendars, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(GoogleCalendarCalendar),
+  error: Schema.Union([GoogleCalendarError, EnvironmentAuthorizationError]),
+});
+const WsGoogleCalendarEventsRpc = Rpc.make(WS_METHODS.googleCalendarEvents, {
+  payload: GoogleCalendarEventsInput,
+  success: Schema.Array(GoogleCalendarEvent),
+  error: Schema.Union([GoogleCalendarError, EnvironmentAuthorizationError]),
+});
+const WsGoogleCalendarScheduleRpc = Rpc.make(WS_METHODS.googleCalendarSchedule, {
+  payload: GoogleCalendarScheduleInput,
+  success: GoogleCalendarEvent,
+  error: Schema.Union([GoogleCalendarError, EnvironmentAuthorizationError]),
+});
+const WsGoogleCalendarUpdateRpc = Rpc.make(WS_METHODS.googleCalendarUpdate, {
+  payload: GoogleCalendarUpdateInput,
+  success: Schema.Void,
+  error: Schema.Union([GoogleCalendarError, EnvironmentAuthorizationError]),
+});
+
 export const WsRpcGroup = RpcGroup.make(
+  WsGoogleCalendarStatusRpc,
+  WsGoogleCalendarAuthorizeRpc,
+  WsGoogleCalendarDisconnectRpc,
+  WsGoogleCalendarCalendarsRpc,
+  WsGoogleCalendarEventsRpc,
+  WsGoogleCalendarScheduleRpc,
+  WsGoogleCalendarUpdateRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
