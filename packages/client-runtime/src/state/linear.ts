@@ -19,6 +19,23 @@ export function createLinearEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
   return {
+    delegationStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "linear:delegation-status",
+      tag: WS_METHODS.linearDelegationStatus,
+      staleTimeMs: 0,
+    }),
+    delegationAuthorize: createEnvironmentRpcCommand(runtime, {
+      label: "linear:delegation-authorize",
+      tag: WS_METHODS.linearDelegationAuthorize,
+    }),
+    delegationDisconnect: createEnvironmentRpcCommand(runtime, {
+      label: "linear:delegation-disconnect",
+      tag: WS_METHODS.linearDelegationDisconnect,
+    }),
+    delegationStop: createEnvironmentRpcCommand(runtime, {
+      label: "linear:delegation-stop",
+      tag: WS_METHODS.linearDelegationStop,
+    }),
     status: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:linear:status",
       tag: WS_METHODS.linearStatus,

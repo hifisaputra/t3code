@@ -649,6 +649,16 @@ const defaultBranchNaming = {
 describe("ServerSettings linear block", () => {
   it("defaults to a disconnected Linear with agent access off", () => {
     expect(decodeServerSettings({}).linear).toEqual({
+      delegation: {
+        enabled: false,
+        clientId: "",
+        clientSecret: "",
+        webhookSecret: "",
+        publicUrl: "",
+        modelSelection: null,
+        runtimeMode: "approval-required",
+        allowedTeamKeys: [],
+      },
       apiKey: "",
       repositories: [],
       branchNaming: defaultBranchNaming,
@@ -657,6 +667,16 @@ describe("ServerSettings linear block", () => {
       moveToStartedOnThreadStart: true,
     });
     expect(decodeServerSettings({ linear: { agentAccess: true } }).linear).toEqual({
+      delegation: {
+        enabled: false,
+        clientId: "",
+        clientSecret: "",
+        webhookSecret: "",
+        publicUrl: "",
+        modelSelection: null,
+        runtimeMode: "approval-required",
+        allowedTeamKeys: [],
+      },
       apiKey: "",
       repositories: [],
       branchNaming: defaultBranchNaming,

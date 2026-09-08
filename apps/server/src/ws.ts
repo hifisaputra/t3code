@@ -1,3 +1,5 @@
+import { LinearOAuth } from "./linear/LinearOAuth.ts";
+import { LinearDelegation } from "./linear/LinearDelegation.ts";
 import { GoogleCalendar } from "./googleCalendar/GoogleCalendar.ts";
 import {
   sameUsageLimitCommandCoverage,
@@ -596,6 +598,8 @@ const makeWsRpcLayer = (
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
       const calendar = yield* GoogleCalendar;
+      const linearOAuth = yield* LinearOAuth;
+      const linearDelegation = yield* LinearDelegation;
       const linear = yield* LinearApi.LinearApi;
       const linearThreads = yield* LinearThreadService.LinearThreadService;
       const automaticGitFetchInterval = serverSettings.getSettings.pipe(
@@ -2107,6 +2111,16 @@ const makeWsRpcLayer = (
         [WS_METHODS.googleCalendarEvents]: (input) => calendar.events(input),
         [WS_METHODS.googleCalendarSchedule]: (input) => calendar.schedule(input),
         [WS_METHODS.googleCalendarUpdate]: (input) => calendar.update(input),
+        [WS_METHODS.linearDelegationStatus]: (input) =>
+          Effect.gen(function* () {
+            return {
+              ...(yield* linearOAuth.status),
+              active: yield* linearDelegation.isActive(input.threadId),
+            };
+          }),
+        [WS_METHODS.linearDelegationAuthorize]: () => linearOAuth.authorize,
+        [WS_METHODS.linearDelegationDisconnect]: () => linearOAuth.disconnect,
+        [WS_METHODS.linearDelegationStop]: (input) => linearDelegation.stop(input.threadId),
         [WS_METHODS.linearStatus]: (_input) =>
           observeRpcEffect(WS_METHODS.linearStatus, linear.status, {
             "rpc.aggregate": "linear",
@@ -2993,6 +3007,8 @@ const makeWsRpcLayer = (
 
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
+    const linearOAuth = yield* LinearOAuth;
+    const linearDelegation = yield* LinearDelegation;
     const googleCalendar = yield* GoogleCalendar;
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const baseServerSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
@@ -3055,6 +3071,8 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               clientAnalyticsProps,
               previewAutomationBroker,
             ).pipe(
+              Layer.provide(Layer.succeed(LinearOAuth, linearOAuth)),
+              Layer.provide(Layer.succeed(LinearDelegation, linearDelegation)),
               Layer.provide(Layer.succeed(GoogleCalendar, googleCalendar)),
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(AgentSessionScanner.layer),

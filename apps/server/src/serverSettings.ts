@@ -189,6 +189,13 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
     usageLimitSources,
     linear: {
       ...settings.linear,
+      delegation: {
+        ...settings.linear.delegation,
+        clientSecret: settings.linear.delegation.clientSecret ? SERVER_SECRET_REDACTED_MARKER : "",
+        webhookSecret: settings.linear.delegation.webhookSecret
+          ? SERVER_SECRET_REDACTED_MARKER
+          : "",
+      },
       apiKey: settings.linear.apiKey.length > 0 ? SERVER_SECRET_REDACTED_MARKER : "",
     },
   };
@@ -581,11 +588,25 @@ const make = Effect.gen(function* () {
             )
           : settings.linear.apiKey;
 
+      const delegation = { ...settings.linear.delegation };
+      for (const field of ["clientSecret", "webhookSecret"] as const) {
+        if (delegation[field] === SERVER_SECRET_REDACTED_MARKER) {
+          const secret = yield* secretStore
+            .get(`linear-delegation-${field}`)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ServerSettingsError({ settingsPath, operation: "read-secret", cause }),
+              ),
+            );
+          delegation[field] = Option.isSome(secret) ? textDecoder.decode(secret.value) : "";
+        }
+      }
       return {
         ...settings,
         providerInstances: providerInstances as ServerSettings["providerInstances"],
         usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
-        linear: { ...settings.linear, apiKey: linearApiKey },
+        linear: { ...settings.linear, apiKey: linearApiKey, delegation },
       };
     });
 
@@ -776,12 +797,30 @@ const make = Effect.gen(function* () {
               );
       }
 
+      const delegation = { ...next.linear.delegation };
+      for (const field of ["clientSecret", "webhookSecret"] as const) {
+        const value = delegation[field];
+        if (value !== SERVER_SECRET_REDACTED_MARKER) {
+          yield* (
+            value
+              ? secretStore.set(`linear-delegation-${field}`, textEncoder.encode(value))
+              : secretStore.remove(`linear-delegation-${field}`)
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({ settingsPath, operation: "write-secret", cause }),
+            ),
+          );
+        }
+        delegation[field] = value ? SERVER_SECRET_REDACTED_MARKER : "";
+      }
       return {
         ...next,
         providerInstances: providerInstances as ServerSettings["providerInstances"],
         usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
         linear: {
           ...next.linear,
+          delegation,
           apiKey: linearApiKey.length === 0 ? "" : SERVER_SECRET_REDACTED_MARKER,
         },
       };

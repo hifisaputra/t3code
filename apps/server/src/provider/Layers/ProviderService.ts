@@ -754,7 +754,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const linearAgentAccessEnabled = Effect.fn("ProviderService.linearAgentAccessEnabled")(
     function* () {
       const settings = yield* serverSettings.getSettings;
-      return settings.linear.agentAccess && settings.linear.apiKey.trim().length > 0;
+      return (
+        settings.linear.agentAccess &&
+        (settings.linear.apiKey.trim().length > 0 || settings.linear.delegation.enabled)
+      );
     },
     Effect.catch((cause) =>
       Effect.logWarning(

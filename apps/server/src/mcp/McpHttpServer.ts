@@ -1,3 +1,5 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { LinearOAuth } from "../linear/LinearOAuth.ts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -46,14 +48,6 @@ type AuthenticatedHttpEffect = Effect.Effect<
   McpInvocationContext.McpInvocationContext
 >;
 
-type McpAuthMiddleware = (
-  httpEffect: AuthenticatedHttpEffect,
-) => Effect.Effect<
-  HttpServerResponse.HttpServerResponse,
-  Types.unhandled,
-  HttpServerRequest.HttpServerRequest
->;
-
 export const normalizeMcpHttpResponse = (
   response: HttpServerResponse.HttpServerResponse,
 ): HttpServerResponse.HttpServerResponse => {
@@ -66,33 +60,49 @@ export const normalizeMcpHttpResponse = (
     : response;
 };
 
-const makeMcpAuthMiddleware = McpSessionRegistry.McpSessionRegistry.pipe(
-  Effect.map((registry): McpAuthMiddleware =>
-    Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
-      const request = yield* HttpServerRequest.HttpServerRequest;
-      const authorization = request.headers.authorization;
-      const token =
-        authorization?.startsWith("Bearer ") === true
-          ? authorization.slice("Bearer ".length).trim()
-          : "";
-      const invocation = yield* registry.resolve(token);
-      if (!invocation) {
-        // Without this the only symptom of a dead credential is the agent
-        // quietly losing the whole `t3-code` toolkit for the rest of its
-        // session, with nothing on the server to explain why.
-        yield* Effect.logWarning("rejected MCP request with an unusable credential", {
-          reason: token.length === 0 ? "missing_bearer_token" : "unknown_or_expired_token",
-        });
-        return unauthorized;
-      }
-      return yield* httpEffect.pipe(
-        Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-        Effect.map(normalizeMcpHttpResponse),
-      );
-    }),
-  ),
-  Effect.withSpan("McpHttpServer.makeAuthMiddleware"),
-);
+const makeMcpAuthMiddleware = Effect.gen(function* () {
+  const registry = yield* McpSessionRegistry.McpSessionRegistry;
+  const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const oauth = yield* Effect.serviceOption(LinearOAuth);
+  return Effect.fn("McpHttpServer.authenticateRequest")(function* (
+    httpEffect: AuthenticatedHttpEffect,
+  ) {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const authorization = request.headers.authorization;
+    const token =
+      authorization?.startsWith("Bearer ") === true
+        ? authorization.slice("Bearer ".length).trim()
+        : "";
+    const invocation = yield* registry.resolve(token);
+    if (!invocation) {
+      // Without this the only symptom of a dead credential is the agent
+      // quietly losing the whole `t3-code` toolkit for the rest of its
+      // session, with nothing on the server to explain why.
+      yield* Effect.logWarning("rejected MCP request with an unusable credential", {
+        reason: token.length === 0 ? "missing_bearer_token" : "unknown_or_expired_token",
+      });
+      return unauthorized;
+    }
+    const delegated =
+      Option.isSome(sql) && Option.isSome(oauth)
+        ? yield* sql.value<{
+            id: string;
+          }>`SELECT id FROM linear_agent_sessions WHERE thread_id = ${invocation.threadId} LIMIT 1`.pipe(
+            Effect.map((rows) => rows.length > 0),
+            Effect.orElseSucceed(() => null),
+          )
+        : false;
+    if (delegated === null) return HttpServerResponse.empty({ status: 503 });
+    return yield* httpEffect.pipe(
+      Effect.provideService(
+        LinearApi.LinearAppCredential,
+        delegated && Option.isSome(oauth) ? oauth.value.accessToken(false) : undefined,
+      ),
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.map(normalizeMcpHttpResponse),
+    );
+  });
+}).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
 
 const McpAuthMiddlewareLive = HttpRouter.middleware<{
   provides: McpInvocationContext.McpInvocationContext;

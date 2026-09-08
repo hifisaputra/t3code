@@ -1,3 +1,4 @@
+import { ThreadId } from "./baseSchemas.ts";
 import {
   GoogleCalendarError,
   GoogleCalendarStatus,
@@ -409,6 +410,10 @@ export const WS_METHODS = {
   googleCalendarEvents: "googleCalendar.events",
   googleCalendarSchedule: "googleCalendar.schedule",
   googleCalendarUpdate: "googleCalendar.update",
+  linearDelegationStatus: "linear.delegationStatus",
+  linearDelegationAuthorize: "linear.delegationAuthorize",
+  linearDelegationDisconnect: "linear.delegationDisconnect",
+  linearDelegationStop: "linear.delegationStop",
   linearStatus: "linear.status",
   linearWorkspace: "linear.workspace",
   linearListIssues: "linear.listIssues",
@@ -1257,6 +1262,31 @@ const LinearRpcError = Schema.Union([
 ]);
 
 /** Never fails on Linear's account: a bad or missing key is a status, not an error. */
+const WsLinearDelegationStatusRpc = Rpc.make(WS_METHODS.linearDelegationStatus, {
+  payload: Schema.Struct({ threadId: Schema.optionalKey(ThreadId) }),
+  success: Schema.Struct({
+    connected: Schema.Boolean,
+    active: Schema.Boolean,
+    organizationId: Schema.NullOr(Schema.String),
+  }),
+  error: LinearOperationError,
+});
+const WsLinearDelegationAuthorizeRpc = Rpc.make(WS_METHODS.linearDelegationAuthorize, {
+  payload: Schema.Struct({}),
+  success: Schema.Struct({ url: Schema.String }),
+  error: LinearOperationError,
+});
+const WsLinearDelegationDisconnectRpc = Rpc.make(WS_METHODS.linearDelegationDisconnect, {
+  payload: Schema.Struct({}),
+  success: Schema.Void,
+  error: LinearOperationError,
+});
+const WsLinearDelegationStopRpc = Rpc.make(WS_METHODS.linearDelegationStop, {
+  payload: Schema.Struct({ threadId: ThreadId }),
+  success: Schema.Void,
+  error: LinearOperationError,
+});
+
 const WsLinearStatusRpc = Rpc.make(WS_METHODS.linearStatus, {
   payload: Schema.Struct({}),
   success: LinearConnectionStatus,
@@ -1397,6 +1427,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlLookupRepositoryRpc,
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,
+  WsLinearDelegationStatusRpc,
+  WsLinearDelegationAuthorizeRpc,
+  WsLinearDelegationDisconnectRpc,
+  WsLinearDelegationStopRpc,
   WsLinearStatusRpc,
   WsLinearWorkspaceRpc,
   WsLinearListIssuesRpc,

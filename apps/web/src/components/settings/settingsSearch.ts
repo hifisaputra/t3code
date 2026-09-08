@@ -455,6 +455,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["linear issues integration workflow state started status"],
   },
   {
+    id: "linear-delegation",
+    title: "Inbound delegation",
+    to: "/settings/integrations",
+    searchTerms: ["linear agent assign mention delegation oauth webhook teams unattended"],
+  },
+  {
     id: "linear-agent-access",
     title: "Let agents read and update Linear issues",
     to: "/settings/integrations",

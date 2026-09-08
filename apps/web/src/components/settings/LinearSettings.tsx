@@ -1,3 +1,4 @@
+import { LinearDelegationSettingsSection } from "./LinearDelegationSettings";
 /**
  * The Linear connection.
  *
@@ -85,6 +86,7 @@ export function LinearSettingsSection() {
       <LinearMoveToStartedSetting />
       <LinearAgentAccessSetting />
       <LinearConfirmWritesSetting />
+      <LinearDelegationSettingsSection />
     </SettingsSection>
   );
 }

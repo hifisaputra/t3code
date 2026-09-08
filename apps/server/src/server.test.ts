@@ -1,3 +1,6 @@
+import { LinearOAuth } from "./linear/LinearOAuth.ts";
+import { LinearDelegation } from "./linear/LinearDelegation.ts";
+import { LinearOperationError } from "@t3tools/contracts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -736,7 +739,30 @@ const buildAppUnderTest = (options?: {
     );
 
     const servedRoutesLayer = HttpRouter.serve(
-      makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
+      makeRoutesLayer.pipe(
+        Layer.provide(serviceLauncherClientLayer),
+        Layer.provide(
+          Layer.mock(LinearOAuth)({
+            complete: () =>
+              Effect.fail(
+                new LinearOperationError({
+                  operation: "delegation",
+                  detail: "Invalid OAuth state.",
+                }),
+              ),
+            status: Effect.succeed({ connected: false, organizationId: null }),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(LinearDelegation)({
+            receive: () =>
+              Effect.fail(
+                new LinearOperationError({ operation: "delegation", detail: "Invalid signature." }),
+              ),
+            isActive: () => Effect.succeed(false),
+          }),
+        ),
+      ),
       {
         disableListenLog: true,
         disableLogger: true,
@@ -1684,6 +1710,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* Deferred.succeed(ready, undefined);
       assert.equal((yield* Fiber.join(request)).status, 200);
       assert.isTrue(yield* Deferred.isDone(completed));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects unsolicited Linear callbacks and unsigned webhooks", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({});
+      const response = yield* HttpClient.get(
+        "/api/linear/oauth/callback?state=invalid&code=secret-code",
+      );
+      assert.equal(response.status, 400);
+      assert.equal(response.headers["cache-control"], "no-store");
+      assert.notInclude(yield* response.text, "secret-code");
+      const webhook = yield* HttpClient.post("/api/webhooks/linear");
+      assert.equal(webhook.status, 400);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

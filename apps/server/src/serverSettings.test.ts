@@ -1281,6 +1281,39 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("keeps delegation secrets off disk and out of client settings", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const saved = yield* service.updateSettings({
+        linear: {
+          delegation: {
+            clientSecret: "app-secret-value",
+            webhookSecret: "webhook-secret-value",
+            clientId: "app",
+          },
+        },
+      });
+      const raw = yield* fs.readFileString(config.settingsPath);
+      assert.notInclude(raw, "app-secret-value");
+      assert.notInclude(raw, "webhook-secret-value");
+      const redacted = ServerSettingsModule.redactServerSettingsForClient(saved);
+      assert.equal(redacted.linear.delegation.clientSecret, SERVER_SECRET_REDACTED_MARKER);
+      assert.equal(redacted.linear.delegation.webhookSecret, SERVER_SECRET_REDACTED_MARKER);
+      const retained = yield* service.updateSettings({
+        linear: { delegation: { clientSecret: SERVER_SECRET_REDACTED_MARKER, enabled: true } },
+      });
+      assert.equal(retained.linear.delegation.clientSecret, "app-secret-value");
+      assert.equal(retained.linear.delegation.webhookSecret, "webhook-secret-value");
+      const cleared = yield* service.updateSettings({
+        linear: { delegation: { clientSecret: "" } },
+      });
+      assert.equal(cleared.linear.delegation.clientSecret, "");
+      assert.equal(cleared.linear.delegation.webhookSecret, "webhook-secret-value");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("keeps the Linear API key in the secret store and the marker on disk", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;

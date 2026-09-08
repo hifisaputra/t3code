@@ -478,6 +478,13 @@ export class LinearApi extends Context.Service<
   }
 >()("t3/linear/LinearApi") {}
 
+/** Delegated runs authenticate as the app; interactive requests keep the personal key. */
+export class LinearAppCredential extends Context.Reference<
+  Effect.Effect<string, LinearOperationError> | undefined
+>("t3/linear/LinearAppCredential", {
+  defaultValue: () => undefined as Effect.Effect<string, LinearOperationError> | undefined,
+}) {}
+
 export const make = Effect.gen(function* () {
   const baseUrl = yield* LinearApiBaseUrl;
   const httpClient = yield* HttpClient.HttpClient;
@@ -508,7 +515,10 @@ export const make = Effect.gen(function* () {
   }): Effect.Effect<A, LinearUnavailableError | LinearRequestFailure> =>
     Effect.gen(function* () {
       const operation = input.operation;
-      const apiKey = yield* readApiKey(operation);
+      const appCredential = yield* LinearAppCredential;
+      const apiKey = appCredential
+        ? `Bearer ${yield* appCredential.pipe(Effect.mapError(() => new LinearRequestFailure({ operation, detail: "Reconnect the Linear app.", code: "" })))}`
+        : yield* readApiKey(operation);
       if (apiKey.length === 0) {
         return yield* new LinearUnavailableError({ reason: "unconfigured" });
       }

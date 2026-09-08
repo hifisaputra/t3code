@@ -849,7 +849,26 @@ export const LinearBranchNaming = Schema.Struct({
 });
 export type LinearBranchNaming = typeof LinearBranchNaming.Type;
 
+export const LinearDelegationSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  clientId: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  clientSecret: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  webhookSecret: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  publicUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  modelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  runtimeMode: Schema.Literals(["approval-required", "full-access"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("approval-required" as const)),
+  ),
+  allowedTeamKeys: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([] as string[])),
+  ),
+});
+export type LinearDelegationSettings = typeof LinearDelegationSettings.Type;
+
 export const LinearSettings = Schema.Struct({
+  delegation: LinearDelegationSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   apiKey: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   repositories: Schema.Array(LinearRepositoryMapping).pipe(
     Schema.withDecodingDefault(Effect.succeed([] as ReadonlyArray<LinearRepositoryMapping>)),
@@ -1280,6 +1299,18 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   linear: Schema.optionalKey(
     Schema.Struct({
+      delegation: Schema.optionalKey(
+        Schema.Struct({
+          enabled: Schema.optionalKey(Schema.Boolean),
+          clientId: Schema.optionalKey(TrimmedString),
+          clientSecret: Schema.optionalKey(TrimmedString),
+          webhookSecret: Schema.optionalKey(TrimmedString),
+          publicUrl: Schema.optionalKey(TrimmedString),
+          modelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+          runtimeMode: Schema.optionalKey(Schema.Literals(["approval-required", "full-access"])),
+          allowedTeamKeys: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+        }),
+      ),
       apiKey: Schema.optionalKey(TrimmedString),
       repositories: Schema.optionalKey(Schema.Array(LinearRepositoryMapping)),
       branchNaming: Schema.optionalKey(

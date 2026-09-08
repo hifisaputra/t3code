@@ -1,3 +1,4 @@
+import { LinearDelegationControl } from "./LinearDelegationControl";
 import {
   type EnvironmentId,
   type EditorId,
@@ -434,6 +435,12 @@ export const ChatHeader = memo(function ChatHeader({
           "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:motion-safe:ease-out",
         )}
       >
+        {linkedIssue && activeThreadId && (
+          <LinearDelegationControl
+            environmentId={activeThreadEnvironmentId}
+            threadId={activeThreadId}
+          />
+        )}
         {issueStatus ? (
           <IssueStatusChip
             status={issueStatus}

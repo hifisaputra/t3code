@@ -222,3 +222,40 @@ set up locally. Connect each server you want to use with Linear.
 The key is stored on the server alongside your other credentials. Settings and logs show it
 redacted, and it is never sent to any client. Clients ask the server for Linear data, and the
 server makes the calls.
+
+## Delegate work from Linear
+
+Inbound delegation lets teammates mention T3 Code or delegate an issue to it in
+Linear. Your always-on T3 environment creates a worktree, starts the configured
+provider, and sends questions and results back to Linear. Everyone with access
+to the allowed Linear teams can direct work using this environment's repositories
+and provider credentials.
+
+Set this up in the web or desktop client under **Settings → Integrations → Linear**:
+
+1. Make the environment reachable over HTTPS through T3 Connect. Enter its public
+   URL in the delegation settings.
+2. In Linear, create an OAuth application named **T3 Code**. Use the OAuth callback
+   and webhook URLs shown in T3 Settings, and enable **Agent session events**.
+3. Save the app client ID, client secret, and webhook signing secret in T3. Select
+   **Connect**, open the authorization page, and install as a Linear workspace
+   admin. Return to T3 and refresh the connection.
+4. Choose a delegation model and allowed team keys. An empty team list allows all
+   teams the app can access. Set repository mappings, or declare `linear.teams`
+   and optionally `linear.projects` and `linear.baseBranch` in each repository's
+   `t3.json`. Ambiguous repositories produce a question in Linear.
+5. Enable inbound delegation. Permission prompts are relayed to Linear by default.
+   Enable **Run without permission prompts** only when you want full access for
+   unattended commands. The separate **Confirm agent writes** setting still
+   controls approvals for changes made through T3's Linear tools.
+
+Delegate an issue or mention the app in an issue comment. Follow its thread link
+to inspect the run in T3, including from mobile. Reply to questions in Linear;
+permission requests accept `approve` or `deny`. When several questions arrive
+together, answer one per line using the question identifiers shown.
+
+Use **Stop delegation** in the T3 thread header, or send `stop delegation` in the
+Linear session, to interrupt work and stop forwarding replies for that session.
+Disabling inbound delegation prevents new incoming requests; existing runs may
+finish. Disconnecting disables delegation and removes this environment's saved
+app tokens. To uninstall the app from the workspace, remove it in Linear too.

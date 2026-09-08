@@ -27,7 +27,8 @@ export interface ProviderRuntimeIngestionShape {
 
   /**
    * Resolves when the internal processing queue is empty and idle.
-   * Intended for test use to replace timing-sensitive sleeps.
+   * Used by consumers that need finalized message bodies (such as Linear
+   * delegation) and by tests instead of timing-sensitive sleeps.
    */
   readonly drain: Effect.Effect<void>;
 }
