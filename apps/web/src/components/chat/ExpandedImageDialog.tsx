@@ -134,6 +134,18 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     }
     onClose();
   }, [onClose]);
+  // A swipe ends in a click on whatever it lifted over, so the tap zones share
+  // the backdrop's guard — without it a swipe would page twice.
+  const onTapZoneClick = useCallback(
+    (direction: -1 | 1) => () => {
+      if (swipeHandledRef.current) {
+        swipeHandledRef.current = false;
+        return;
+      }
+      navigateImage(direction);
+    },
+    [navigateImage],
+  );
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -189,29 +201,53 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         onClick={onBackdropClick}
       />
       {preview.images.length > 1 && (
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          className="absolute left-2 top-1/2 z-20 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:left-6"
-          aria-label="Previous image"
-          onClick={() => navigateImage(-1)}
-        >
-          <ChevronLeftIcon className="size-5" />
-        </Button>
-      )}
-      <MediaActions source={actionsSource}>
-        <div className="relative isolate z-10 max-h-[92vh] max-w-[92vw]">
+        <>
+          {/*
+            The arrows are too small to hit on a phone, so a third of each edge
+            pages as well. Above the image (z-10) and below the controls (z-30),
+            so the arrows and close button stay clickable.
+          */}
+          <button
+            type="button"
+            className="absolute inset-y-0 left-0 z-20 w-1/3 cursor-pointer"
+            aria-label="Previous image"
+            onClick={onTapZoneClick(-1)}
+          />
+          <button
+            type="button"
+            className="absolute inset-y-0 right-0 z-20 w-1/3 cursor-pointer"
+            aria-label="Next image"
+            onClick={onTapZoneClick(1)}
+          />
           <Button
             type="button"
-            size="icon-xs"
+            size="icon"
             variant="ghost"
-            className="absolute right-2 top-2 z-20"
-            onClick={onClose}
-            aria-label={`Close ${mediaLabel} preview`}
+            className="absolute left-2 top-1/2 z-30 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:left-6"
+            aria-label="Previous image"
+            onClick={() => navigateImage(-1)}
           >
-            <XIcon />
+            <ChevronLeftIcon className="size-5" />
           </Button>
+        </>
+      )}
+      {/*
+        Anchored to the viewport, not the image corner: the image sits in an
+        `isolate` stacking context, so a close button inside it could not rise
+        above the tap zone covering that edge however high its z-index went.
+      */}
+      <Button
+        type="button"
+        size="icon-xs"
+        variant="ghost"
+        className="absolute right-2 top-2 z-30 sm:right-4 sm:top-4"
+        onClick={onClose}
+        aria-label={`Close ${mediaLabel} preview`}
+      >
+        <XIcon />
+      </Button>
+      <MediaActions source={actionsSource}>
+        <div className="relative isolate z-10 max-h-[92vh] max-w-[92vw]">
           {item.type === "video" ? (
             <ExpandedVideo key={index} item={item} />
           ) : item.src === null || failedImageSrc === item.src ? (
@@ -243,7 +279,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
           type="button"
           size="icon"
           variant="ghost"
-          className="absolute right-2 top-1/2 z-20 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:right-6"
+          className="absolute right-2 top-1/2 z-30 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:right-6"
           aria-label="Next image"
           onClick={() => navigateImage(1)}
         >

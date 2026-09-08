@@ -85,6 +85,7 @@ import {
 import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
 import {
   resolveMarkdownMediaPreview,
+  type ExpandedImageItem,
   type ExpandedImagePreview,
 } from "./chat/ExpandedImagePreview";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -1294,35 +1295,71 @@ const CHAT_MARKDOWN_WORKSPACE_IMAGE_CLASS_NAME = cn(
 );
 const MarkdownLinkContext = React.createContext(false);
 
+/**
+ * The preview each expandable image would open with, kept against the rendered
+ * element so a click can page through its whole message. The DOM is the source
+ * of order — document order is the reading order, and it stays correct through
+ * the streamed remounts that make a registration list drift.
+ */
+const markdownImagePreviews = new WeakMap<Element, ExpandedImageItem>();
+
+/** Marks the images one lightbox pages through: those expandable in one message. */
+const EXPANDABLE_MARKDOWN_IMAGE_SELECTOR = "img[data-markdown-expandable]";
+
+interface ExpandableMarkdownImageProps {
+  readonly role?: "button";
+  readonly tabIndex?: number;
+  readonly "aria-label"?: string;
+  readonly "data-markdown-expandable"?: string;
+  /** Not a DOM prop: the caller composes it with the image's own ref. */
+  readonly registerPreview?: (element: HTMLImageElement | null) => void;
+  readonly onClick?: (event: ReactMouseEvent<HTMLImageElement>) => void;
+  readonly onKeyDown?: (event: ReactKeyboardEvent<HTMLImageElement>) => void;
+}
+
 function expandableMarkdownImageProps(
   onImageExpand: ((preview: ExpandedImagePreview) => void) | undefined,
   src: string,
   alt: string,
   originalUrl?: string,
   actionsSource?: MediaActionSource,
-) {
+): ExpandableMarkdownImageProps {
   if (!onImageExpand) return {};
   const previewName = alt.trim() || "image";
+  const item: ExpandedImageItem = {
+    src,
+    name: previewName,
+    ...(originalUrl ? { originalUrl } : {}),
+    ...(actionsSource ? { actionsSource } : {}),
+  };
   const expand = (event: ReactMouseEvent | ReactKeyboardEvent) => {
     if (event.currentTarget.closest("a")) return;
     event.preventDefault();
     event.stopPropagation();
-    onImageExpand({
-      images: [
-        {
-          src,
-          name: previewName,
-          ...(originalUrl ? { originalUrl } : {}),
-          ...(actionsSource ? { actionsSource } : {}),
-        },
-      ],
-      index: 0,
-    });
+    const clicked = event.currentTarget;
+    // Siblings resolve their own URLs, so a neighbour still loading has no entry
+    // yet and is skipped rather than paged to as a broken frame.
+    const siblings = clicked
+      .closest(".chat-markdown")
+      ?.querySelectorAll(EXPANDABLE_MARKDOWN_IMAGE_SELECTOR);
+    const images: ExpandedImageItem[] = [];
+    let index = -1;
+    for (const sibling of siblings ?? []) {
+      const preview = sibling === clicked ? item : markdownImagePreviews.get(sibling);
+      if (!preview) continue;
+      if (sibling === clicked) index = images.length;
+      images.push(preview);
+    }
+    onImageExpand(index === -1 ? { images: [item], index: 0 } : { images, index });
   };
   return {
     role: "button" as const,
     tabIndex: 0,
     "aria-label": `Preview ${previewName}`,
+    "data-markdown-expandable": "",
+    registerPreview: (element: HTMLImageElement | null) => {
+      if (element) markdownImagePreviews.set(element, item);
+    },
     onClick: expand,
     onKeyDown: (event: ReactKeyboardEvent) => {
       if (event.key === "Enter" || event.key === " ") expand(event);
@@ -1426,11 +1463,17 @@ function ChatMarkdownImage(props: {
   });
 
   if (settled) {
+    const { registerPreview, ...expandProps } = expandableMarkdownImageProps(
+      props.onImageExpand,
+      src,
+      props.alt,
+      props.originalUrl,
+      props.actionsSource,
+    );
     return (
       <MediaActions source={props.actionsSource}>
         <img
           {...props.imageProps}
-          ref={markLoadedIfComplete}
           src={src}
           alt={props.alt}
           data-markdown-copy={props.copyMarkdown}
@@ -1442,13 +1485,13 @@ function ChatMarkdownImage(props: {
             props.onImageExpand && "cursor-zoom-in",
           )}
           style={props.style}
-          {...expandableMarkdownImageProps(
-            props.onImageExpand,
-            src,
-            props.alt,
-            props.originalUrl,
-            props.actionsSource,
-          )}
+          {...expandProps}
+          // Re-registered on every render: a re-signed URL rebuilds the preview,
+          // and a stale entry would page the lightbox to a dead URL.
+          ref={(image) => {
+            markLoadedIfComplete(image);
+            registerPreview?.(image);
+          }}
           {...imageEvents(src)}
         />
       </MediaActions>
