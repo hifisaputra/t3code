@@ -16,6 +16,12 @@ linked issue when you leave the id out. If the tools are missing, the ticket was
 quoted in the message inside a `linear-issue` fenced block. Work from that block,
 and put anything you would have posted to Linear in your reply instead.
 
+Use those tools, not Linear's own MCP server. If tools named `mcp__linear-server__*`
+are also present, they authenticate as the person who set them up, so anything you
+post through them arrives under their name. The `t3-code` tools post as the app when
+you were delegated the issue in Linear, and route through the user's approvals when
+you are working their thread. Both are wrong to bypass.
+
 ## 1. Read everything before you touch anything
 
 1. `get_issue` with no arguments. Then `list_comments`. The composer preview or the
