@@ -540,6 +540,36 @@ it.effect("asks before it comments, and writes only once the user approves", () 
   );
 });
 
+// A delegated run writes as the app, so the write borrows nobody's name and
+// the approval would have no one to address. Completing without an answer is
+// the proof: a confirmed write parks on the broker until the user replies.
+it.effect("writes without asking when the run is delegated", () => {
+  const created: Array<string> = [];
+
+  return callTool("save_comment", { body: "Shipped it." }).pipe(
+    Effect.provideService(LinearApi.LinearAppCredential, Effect.succeed("app-token")),
+    Effect.map(() => {
+      assert.deepStrictEqual(created, ["Shipped it."]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          createComment: (input) =>
+            Effect.sync(() => {
+              created.push(input.body);
+              return {
+                id: "comment-3",
+                url: "https://linear.app/acme/issue/DEL-123#comment-3",
+              };
+            }),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
+
 it.effect("tells the agent to stop when the user declines, without calling Linear", () =>
   Effect.scoped(
     Effect.gen(function* () {

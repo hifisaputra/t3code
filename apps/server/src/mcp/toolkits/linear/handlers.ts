@@ -188,7 +188,8 @@ const describeChange = (change: IntegrationApprovalChange): string => {
 
 /**
  * Asks the user before a Linear write lands, unless
- * `settings.linear.confirmAgentWrites` is off. Call it once every lookup has
+ * `settings.linear.confirmAgentWrites` is off or the run is delegated and
+ * writes as the app rather than as the user. Call it once every lookup has
  * resolved and immediately before the mutation, so a mistyped state or label
  * fails on its own terms instead of interrupting the user for a write that
  * could never happen.
@@ -217,6 +218,10 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
     ),
   );
   if (!settings.linear.confirmAgentWrites) return;
+  // A delegated run writes as the Linear app, not as the user, so there is no
+  // borrowed identity to approve. The credential that decides the author
+  // decides the prompt, so the two cannot drift apart.
+  if ((yield* LinearApi.LinearAppCredential) !== undefined) return;
 
   const projections = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const shell = yield* projections.getThreadShellById(scope.threadId).pipe(
