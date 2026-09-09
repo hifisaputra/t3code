@@ -519,7 +519,7 @@ it.effect("returns the created comment", () => {
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("sends only the fields the caller set, and never an assignment field", () => {
+it.effect("sends only the fields the caller set", () => {
   const { execute, layer } = makeLayer({
     response: () => Response.json({ data: { issueUpdate: { success: true } } }),
   });
@@ -538,11 +538,6 @@ it.effect("sends only the fields the caller set, and never an assignment field",
       id: "issue-uuid",
       input: { title: "Wire up Linear tools", labelIds: ["label-1"] },
     });
-    // `deepStrictEqual` above already pins the exact patch; the query must not
-    // offer an assignment field either.
-    for (const forbidden of ["assigneeId", "delegateId", "subscriberIds"]) {
-      assert.isFalse(sent.query.includes(forbidden), `${forbidden} must not be sent`);
-    }
   }).pipe(Effect.provide(layer));
 });
 
@@ -693,3 +688,223 @@ for (const payload of [
     }).pipe(Effect.provide(layer));
   });
 }
+
+for (const assigneeId of ["user-1", null]) {
+  it.effect(`sends an explicit assignee patch: ${assigneeId}`, () => {
+    const { execute, layer } = makeLayer({
+      response: () => Response.json({ data: { issueUpdate: { success: true } } }),
+    });
+    return Effect.gen(function* () {
+      const linear = yield* LinearApi.LinearApi;
+      yield* linear.updateIssue({ issueId: "issue-uuid", assigneeId });
+      assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+        id: "issue-uuid",
+        input: { assigneeId },
+      });
+    }).pipe(Effect.provide(layer));
+  });
+}
+
+for (const reference of ["Ada", "ada@example.com", "12345678-1234-1234-1234-123456789abc"]) {
+  it.effect(`resolves an assignee by ${reference}`, () => {
+    const user = { id: "user-1", name: "Ada Lovelace", displayName: "ada" };
+    const { execute, layer } = makeLayer({
+      response: () => Response.json({ data: { users: { nodes: [user] } } }),
+    });
+    return Effect.gen(function* () {
+      const linear = yield* LinearApi.LinearApi;
+      assert.deepStrictEqual(yield* linear.resolveAssignee(reference), user);
+      assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+        filter: reference.startsWith("12345678")
+          ? { id: { eq: reference } }
+          : {
+              or: [
+                { name: { eqIgnoreCase: reference } },
+                { displayName: { eqIgnoreCase: reference } },
+                { email: { eqIgnoreCase: reference } },
+              ],
+            },
+      });
+    }).pipe(Effect.provide(layer));
+  });
+}
+
+for (const count of [0, 2]) {
+  it.effect(`rejects assignee lookup with ${count} matches`, () => {
+    const { layer } = makeLayer({
+      response: () =>
+        Response.json({
+          data: {
+            users: {
+              nodes: Array.from({ length: count }, (_, i) => ({
+                id: `user-${i}`,
+                name: "Ada",
+                displayName: "ada",
+              })),
+            },
+          },
+        }),
+    });
+    return Effect.gen(function* () {
+      const linear = yield* LinearApi.LinearApi;
+      const error = yield* Effect.flip(linear.resolveAssignee("Ada"));
+      assert.strictEqual(error._tag, "LinearOperationError");
+    }).pipe(Effect.provide(layer));
+  });
+}
+
+it.effect("sends and clears every issue planning field without losing zero estimates", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { issueUpdate: { success: true } } }),
+  });
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+    const patch = {
+      projectId: "project-1",
+      projectMilestoneId: "milestone-1",
+      cycleId: "cycle-1",
+      estimate: 0,
+      priority: 1,
+      dueDate: "2026-10-01",
+    };
+    yield* api.updateIssue({ issueId: "issue-1", ...patch });
+    yield* api.updateIssue({
+      issueId: "issue-1",
+      projectId: null,
+      projectMilestoneId: null,
+      cycleId: null,
+      estimate: null,
+      dueDate: null,
+    });
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      id: "issue-1",
+      input: patch,
+    });
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[1]![0]).variables, {
+      id: "issue-1",
+      input: {
+        projectId: null,
+        projectMilestoneId: null,
+        cycleId: null,
+        estimate: null,
+        dueDate: null,
+      },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("paginates resource discovery and scopes milestones and cycles", () => {
+  const page = {
+    nodes: [{ id: "resource-1", name: "Launch" }],
+    pageInfo: { hasNextPage: true, endCursor: "next" },
+  };
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { resources: page } }),
+  });
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(
+      yield* api.listResources({
+        kind: "milestone",
+        projectId: "p1",
+        exact: "Launch",
+        cursor: "previous",
+        limit: 200,
+      }),
+      page,
+    );
+    yield* api.listResources({ kind: "cycle", teamId: "t1", exact: "current" });
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      filter: { and: [{ name: { eqIgnoreCase: "Launch" } }, { project: { id: { eq: "p1" } } }] },
+      first: 100,
+      after: "previous",
+    });
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[1]![0]).variables, {
+      filter: { and: [{ isActive: { eq: true } }, { team: { id: { eq: "t1" } } }] },
+      first: 50,
+      after: null,
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+for (const kind of ["project", "milestone", "cycle", "label"] as const) {
+  it.effect(`creates or updates a ${kind} with only supported fields`, () => {
+    const resource = { id: "r1", name: "Ready" };
+    const { execute, layer } = makeLayer({
+      response: () => Response.json({ data: { result: { success: true, resource } } }),
+    });
+    return Effect.gen(function* () {
+      const api = yield* LinearApi.LinearApi;
+      assert.deepStrictEqual(
+        yield* api.saveResource({ kind, id: "r1", name: "Ready", description: null }),
+        resource,
+      );
+      assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+        id: "r1",
+        input: { name: "Ready", description: null },
+      });
+    }).pipe(Effect.provide(layer));
+  });
+}
+
+it.effect("rejects a resource mutation when Linear refuses it", () => {
+  const { layer } = makeLayer({
+    response: () => Response.json({ data: { result: { success: false, resource: null } } }),
+  });
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(api.saveResource({ kind: "project", id: "r1", name: "No" }));
+    assert.strictEqual(error._tag, "LinearOperationError");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("preserves resource creation scope and distinguishes create from update", () => {
+  const resource = { id: "r1", name: "Ready" };
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { result: { success: true, resource } } }),
+  });
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+    yield* api.saveResource({ kind: "project", name: "Ready", teamIds: ["team-1"] });
+    yield* api.saveResource({ kind: "milestone", name: "Ready", projectId: "project-1" });
+    yield* api.saveResource({ kind: "label", name: "Ready", teamId: "team-1" });
+    assert.deepStrictEqual(
+      execute.mock.calls.map((call) => sentGraphQL(call[0]).variables),
+      [
+        { input: { name: "Ready", teamIds: ["team-1"] } },
+        { input: { name: "Ready", projectId: "project-1" } },
+        { input: { name: "Ready", teamId: "team-1" } },
+      ],
+    );
+    assert.include(sentGraphQL(execute.mock.calls[0]![0]).query, "projectCreate");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("passes issue search filters and pagination through to Linear", () => {
+  const pageInfo = { hasNextPage: true, endCursor: "more" };
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { issues: { nodes: [], pageInfo } } }),
+  });
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(
+      yield* api.listIssues({
+        assignedToMe: false,
+        assigneeId: null,
+        query: "retry",
+        cursor: "next",
+        limit: 20,
+      }),
+      { issues: [], pageInfo },
+    );
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      filter: {
+        assignee: { null: true },
+        title: { containsIgnoreCase: "retry" },
+        state: { type: { in: ["unstarted", "started"] } },
+      },
+      first: 20,
+      after: "next",
+    });
+  }).pipe(Effect.provide(layer));
+});

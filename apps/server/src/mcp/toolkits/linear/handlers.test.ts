@@ -134,6 +134,10 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       workflowStates: () => Effect.die("unused"),
       updateIssueState: () => Effect.die("unused"),
       updateIssue: () => Effect.die("unused"),
+      resolveAssignee: () => Effect.die("unused"),
+      listResources: () => Effect.die("unused"),
+      getResource: () => Effect.die("unused"),
+      saveResource: () => Effect.die("unused"),
       createIssue: () => Effect.die("unused"),
       labels: () => Effect.die("unused"),
       createComment: () => Effect.die("unused"),
@@ -350,7 +354,7 @@ it.effect("refuses a save that would change nothing", () =>
     Effect.map((error) => {
       assert.strictEqual(
         operationError(error).detail,
-        "Nothing to save: pass at least one of title, description, state, or labels.",
+        "Nothing to save: pass at least one issue field to update.",
       );
     }),
     Effect.provide(testLayer({ linear: {} })),
@@ -818,3 +822,380 @@ it.effect("rejects a comment from a different issue before approval or mutation"
     ),
   ),
 );
+
+for (const assignee of ["Ada", null]) {
+  it.effect(`updates assignment with ${assignee}`, () => {
+    const patches: unknown[] = [];
+    return callTool("save_issue", { assignee }).pipe(
+      Effect.map(() =>
+        assert.deepStrictEqual(patches, [
+          {
+            issueId: issue.id,
+            assigneeId: assignee === null ? null : "user-1",
+          },
+        ]),
+      ),
+      Effect.provide(
+        testLayer({
+          linear: {
+            getIssue: () => Effect.succeed(issue),
+            resolveAssignee: (reference) => {
+              assert.equal(reference, "Ada");
+              return Effect.succeed({ id: "user-1", name: "Ada Lovelace", displayName: "ada" });
+            },
+            updateIssue: (patch) => Effect.sync(() => void patches.push(patch)),
+          },
+        }),
+      ),
+    );
+  });
+}
+
+it.effect("shows the assignee for approval and does not reassign after rejection", () => {
+  const patches: unknown[] = [];
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const pending = yield* Effect.forkScoped(
+        callTool("save_issue", { assignee: "Ada" }).pipe(Effect.flip),
+      );
+      const opened = yield* nextApprovalEvent;
+      assert.deepStrictEqual(
+        (opened.payload as { readonly change: { readonly fields: unknown } }).change.fields,
+        [{ label: "Assignee", value: "ada (user-1)" }],
+      );
+      yield* answer(opened, "decline");
+      yield* Fiber.join(pending);
+      assert.deepStrictEqual(patches, []);
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          resolveAssignee: () =>
+            Effect.succeed({ id: "user-1", name: "Ada Lovelace", displayName: "ada" }),
+          updateIssue: (patch) => Effect.sync(() => void patches.push(patch)),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
+
+it.effect(
+  "resolves project, milestone, and cycle in context and returns stored planning fields",
+  () => {
+    const patches: unknown[] = [];
+    const lookups: unknown[] = [];
+    const updated = { ...issue, estimate: 3, milestone: { id: "milestone-1", name: "Launch" } };
+    return callTool("save_issue", {
+      project: "Website",
+      milestone: "Launch",
+      cycle: "current",
+      estimate: 3,
+      priority: 2,
+      dueDate: "2026-10-01",
+      labels: ["Urgent"],
+    }).pipe(
+      Effect.map((result) => {
+        assert.deepStrictEqual(patches, [
+          {
+            issueId: issue.id,
+            projectId: "project-1",
+            projectMilestoneId: "milestone-1",
+            cycleId: "cycle-1",
+            estimate: 3,
+            priority: 2,
+            dueDate: "2026-10-01",
+            labelIds: ["label-2"],
+          },
+        ]);
+        assert.deepStrictEqual(lookups, [
+          { kind: "project", exact: "Website", teamId: issue.team.id, limit: 2 },
+          { kind: "milestone", exact: "Launch", projectId: "project-1", limit: 2 },
+          { kind: "cycle", exact: "current", teamId: issue.team.id, limit: 2 },
+        ]);
+        assert.deepStrictEqual(result, updated);
+      }),
+      Effect.provide(
+        testLayer({
+          linear: {
+            getIssue: () => Effect.succeed(patches.length ? updated : issue),
+            listResources: (input) =>
+              Effect.sync(() => {
+                lookups.push(input);
+                return {
+                  nodes: [{ id: `${input.kind}-1`, name: input.exact! }],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                };
+              }),
+            labels: () => Effect.succeed(labels),
+            updateIssue: (patch) => Effect.sync(() => void patches.push(patch)),
+          },
+        }),
+      ),
+    );
+  },
+);
+
+it.effect("clears project and its milestone while preserving omitted fields", () => {
+  const patches: unknown[] = [];
+  return callTool("save_issue", { project: null, estimate: 0 }).pipe(
+    Effect.map(() =>
+      assert.deepStrictEqual(patches, [
+        { issueId: issue.id, projectId: null, projectMilestoneId: null, estimate: 0 },
+      ]),
+    ),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () =>
+            Effect.succeed({
+              ...issue,
+              project: { id: "p1", name: "Old", url: "https://linear.app/project/p1" },
+            }),
+          updateIssue: (patch) => Effect.sync(() => void patches.push(patch)),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("refuses a milestone without a project before any write", () =>
+  Effect.flip(callTool("save_issue", { milestone: "Launch" })).pipe(
+    Effect.map((error) => assert.include(operationError(error).detail, "Set a project")),
+    Effect.provide(
+      testLayer({ linear: { getIssue: () => Effect.succeed({ ...issue, project: null }) } }),
+    ),
+  ),
+);
+
+it.effect("rejects ambiguous project names before writing", () =>
+  Effect.flip(callTool("save_issue", { project: "Website" })).pipe(
+    Effect.map((error) => assert.include(operationError(error).detail, "More than one project")),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          listResources: () =>
+            Effect.succeed({
+              nodes: [
+                { id: "p1", name: "Website" },
+                { id: "p2", name: "Website" },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            }),
+        },
+      }),
+    ),
+  ),
+);
+
+it.effect("creates issues with planning metadata", () => {
+  const created: unknown[] = [];
+  return callTool("create_issue", {
+    title: "Plan",
+    project: "Website",
+    milestone: "Launch",
+    cycle: "12",
+    estimate: 2,
+  }).pipe(
+    Effect.map(() =>
+      assert.deepStrictEqual(created, [
+        {
+          teamId: issue.team.id,
+          title: "Plan",
+          parentId: issue.id,
+          projectId: "project-1",
+          projectMilestoneId: "milestone-1",
+          cycleId: "cycle-1",
+          estimate: 2,
+        },
+      ]),
+    ),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          listResources: (input) =>
+            Effect.succeed({
+              nodes: [{ id: `${input.kind}-1`, name: input.exact! }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            }),
+          createIssue: (input) =>
+            Effect.sync(() => {
+              created.push(input);
+              return issue;
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("resource creation waits for approval and rejection performs no write", () => {
+  const writes: unknown[] = [];
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const pending = yield* Effect.forkScoped(
+        callTool("save_issue_label", { name: "Regression", color: "#ff0000" }).pipe(Effect.flip),
+      );
+      const opened = yield* nextApprovalEvent;
+      assert.include((opened.payload as { detail: string }).detail, "Regression");
+      assert.deepStrictEqual(writes, []);
+      yield* answer(opened, "decline");
+      yield* Fiber.join(pending);
+      assert.deepStrictEqual(writes, []);
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          saveResource: (input) =>
+            Effect.sync(() => {
+              writes.push(input);
+              return { id: "label-1", name: "Regression" };
+            }),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
+
+it.effect("creates a project in the linked issue's team", () => {
+  const writes: unknown[] = [];
+  return callTool("save_project", { name: "Website", targetDate: "2026-10-01" }).pipe(
+    Effect.map(() =>
+      assert.deepStrictEqual(writes, [
+        { kind: "project", name: "Website", teamIds: [issue.team.id], targetDate: "2026-10-01" },
+      ]),
+    ),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          saveResource: (input) =>
+            Effect.sync(() => {
+              writes.push(input);
+              return { id: "project-1", name: "Website" };
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("lists cycles with pagination in the linked team", () => {
+  const calls: unknown[] = [];
+  return callTool("list_cycles", { cursor: "next", limit: 10 }).pipe(
+    Effect.map(() =>
+      assert.deepStrictEqual(calls, [
+        { kind: "cycle", cursor: "next", limit: 10, teamId: issue.team.id },
+      ]),
+    ),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          listResources: (input) =>
+            Effect.sync(() => {
+              calls.push(input);
+              return { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("searches issues across assignees with a title and cursor", () => {
+  const calls: unknown[] = [];
+  return callTool("list_issues", {
+    query: "retry",
+    assignee: null,
+    cursor: "next",
+    limit: 20,
+  }).pipe(
+    Effect.map(() =>
+      assert.deepStrictEqual(calls, [
+        { assignedToMe: false, query: "retry", assigneeId: null, cursor: "next", limit: 20 },
+      ]),
+    ),
+    Effect.provide(
+      testLayer({
+        linear: {
+          listIssues: (input) =>
+            Effect.sync(() => {
+              calls.push(input);
+              return { issues: [], pageInfo: { hasNextPage: false, endCursor: null } };
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("rejects impossible due dates without writing", () =>
+  Effect.flip(callTool("save_issue", { dueDate: "2026-02-30" })).pipe(
+    Effect.map((error) => assert.include(operationError(error).detail, "valid YYYY-MM-DD")),
+    Effect.provide(testLayer({ linear: { getIssue: () => Effect.succeed(issue) } })),
+  ),
+);
+
+it.effect("includes cleared planning fields in the approval before writing", () => {
+  const patches: unknown[] = [];
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const pending = yield* Effect.forkScoped(
+        callTool("save_issue", { milestone: null, cycle: null, estimate: null }),
+      );
+      const opened = yield* nextApprovalEvent;
+      assert.deepStrictEqual((opened.payload as { change: { fields: unknown } }).change.fields, [
+        { label: "Milestone", value: "None" },
+        { label: "Cycle", value: "None" },
+        { label: "Estimate", value: "None" },
+      ]);
+      assert.deepStrictEqual(patches, []);
+      yield* answer(opened, "accept");
+      yield* Fiber.join(pending);
+      assert.deepStrictEqual(patches, [
+        { issueId: issue.id, projectMilestoneId: null, cycleId: null, estimate: null },
+      ]);
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          updateIssue: (patch) => Effect.sync(() => void patches.push(patch)),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
+
+it.effect("edits a cycle by ID without requiring a linked issue", () => {
+  const id = "12345678-1234-1234-1234-123456789abc";
+  const writes: unknown[] = [];
+  return callTool("update_cycle", { id, name: "Sprint" }).pipe(
+    Effect.map(() => assert.deepStrictEqual(writes, [{ kind: "cycle", id, name: "Sprint" }])),
+    Effect.provide(
+      testLayer({
+        linear: {
+          listResources: () =>
+            Effect.succeed({
+              nodes: [{ id, name: "Old" }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            }),
+          saveResource: (input) =>
+            Effect.sync(() => {
+              writes.push(input);
+              return { id, name: "Sprint" };
+            }),
+        },
+      }),
+    ),
+  );
+});

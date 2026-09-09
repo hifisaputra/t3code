@@ -1,3 +1,4 @@
+import { LinearResource, LinearResourcePage } from "../../../linear/LinearResources.ts";
 import {
   LinearIssueComment,
   LinearIssueDetail,
@@ -171,12 +172,60 @@ export const SaveCommentTool = linearTool(
     .annotate(Tool.Idempotent, false),
 );
 
+const IssuePlanningFields = {
+  assignee: Schema.optional(
+    Schema.NullOr(
+      describedText(
+        "Assignee user ID, exact name, or email. Pass null to unassign; omit to leave assignment unchanged. Assignment does not delegate the issue to an agent.",
+      ),
+    ),
+  ),
+  project: Schema.optional(
+    Schema.NullOr(
+      describedText(
+        "Project ID or exact name. Null removes the project and its milestone; omit to keep it.",
+      ),
+    ),
+  ),
+  milestone: Schema.optional(
+    Schema.NullOr(
+      describedText(
+        "Milestone ID or exact name within the issue's project (or the project supplied here). Null clears it.",
+      ),
+    ),
+  ),
+  cycle: Schema.optional(
+    Schema.NullOr(
+      describedText(
+        "Cycle ID, number, exact name, or current/next/previous within the issue's team. Null clears it.",
+      ),
+    ),
+  ),
+  estimate: Schema.optional(
+    Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({
+      description:
+        "Numeric estimate in the team's estimation scale. Null clears it; omit to keep it. Linear validates the team's allowed values.",
+    }),
+  ),
+  priority: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 4 })).annotate({
+      description: "Priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. Omit to keep it.",
+    }),
+  ),
+  dueDate: Schema.optional(
+    Schema.NullOr(Schema.String).annotate({
+      description: "Due date in YYYY-MM-DD format. Null clears it; omit to keep it.",
+    }),
+  ),
+};
+
 export const SaveIssueTool = linearTool(
   Tool.make("save_issue", {
     description:
-      "Update a Linear issue's title, description, workflow state, or labels, leaving every field you omit untouched. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is saved. This tool cannot change who an issue is assigned to.",
+      "Update a Linear issue's title, description, workflow state, labels, assignee, project, milestone, estimate, cycle, priority, or due date, leaving every field you omit untouched. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is saved.",
     parameters: Schema.Struct({
       id: IssueIdParameter,
+      ...IssuePlanningFields,
       title: Schema.optional(
         describedText("Replacement issue title. Omit to leave the title alone."),
       ),
@@ -212,6 +261,7 @@ export const CreateIssueTool = linearTool(
     description:
       "Create a Linear issue. By default it lands on the team of the issue this thread is linked to, as a sub-issue of it; pass team to file it elsewhere, and parentId null to create a standalone issue instead.",
     parameters: Schema.Struct({
+      ...IssuePlanningFields,
       title: describedText("The issue title, written so someone outside the work can read it."),
       description: Schema.optional(
         Schema.String.annotate({
@@ -249,6 +299,240 @@ export const CreateIssueTool = linearTool(
     .annotate(Tool.Idempotent, false),
 );
 
+const ResourceListFields = {
+  query: Schema.optional(
+    describedText("Filter names by text; omit to list all accessible records."),
+  ),
+  cursor: Schema.optional(
+    describedText("endCursor from a previous response to fetch the next page."),
+  ),
+  limit: Schema.optional(
+    PositiveInt.annotate({ description: "Page size, defaults to 50 and is capped at 100." }),
+  ),
+};
+const ResourceId = describedText(
+  "Record ID or exact name. Use the corresponding list tool to find it; ambiguous names require an ID.",
+);
+const OptionalTeam = Schema.optional(
+  describedText("Team ID, key, or exact name. Omit to use the linked issue's team where required."),
+);
+const ResourceWriteFields = {
+  id: Schema.optional(ResourceId),
+  name: Schema.optional(
+    describedText("Name of the record. Required when creating a project, milestone, or label."),
+  ),
+  description: Schema.optional(
+    Schema.NullOr(Schema.String).annotate({
+      description: "Replacement description. Omit to keep it; null clears it.",
+    }),
+  ),
+};
+const TargetDate = Schema.optional(
+  Schema.NullOr(Schema.String).annotate({
+    description: "Target date in YYYY-MM-DD format. Omit to keep it; null clears it.",
+  }),
+);
+const StartDate = Schema.optional(
+  Schema.NullOr(Schema.String).annotate({
+    description: "Start date in YYYY-MM-DD format. Omit to keep it; null clears it.",
+  }),
+);
+
+const ListProjectsTool = readonlyLinearTool(
+  Tool.make("list_projects", {
+    description:
+      "Find accessible Linear projects by name, optionally restricted to a team. Returns IDs and pagination for assigning issues or editing projects.",
+    parameters: Schema.Struct({ ...ResourceListFields, team: OptionalTeam }),
+    success: LinearResourcePage,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const ListIssuesTool = readonlyLinearTool(
+  Tool.make("list_issues", {
+    description:
+      "Search Linear issues across assignees by title, team, project, assignee, or workflow state type. Defaults to open issues; pass stateTypes for completed or canceled work. Supports pagination.",
+    parameters: Schema.Struct({
+      ...ResourceListFields,
+      team: OptionalTeam,
+      project: Schema.optional(ResourceId),
+      assignee: IssuePlanningFields.assignee,
+      stateTypes: Schema.optional(
+        Schema.Array(LinearWorkflowStateType).annotate({
+          description: "Workflow state types to include; defaults to unstarted and started.",
+        }),
+      ),
+    }),
+    success: LinearListIssuesResult,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const GetProjectTool = readonlyLinearTool(
+  Tool.make("get_project", {
+    description:
+      "Read one Linear project by ID or exact name, including its description, dates, and associated teams.",
+    parameters: Schema.Struct({ query: ResourceId }),
+    success: LinearResource,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const SaveProjectTool = linearTool(
+  Tool.make("save_project", {
+    description:
+      "Create or update a Linear project. Omit id to create; pass id to update only the fields provided. Creating requires a name and teams (defaults to the linked issue's team).",
+    parameters: Schema.Struct({
+      ...ResourceWriteFields,
+      teams: Schema.optional(
+        Schema.Array(Schema.String).annotate({
+          description:
+            "Complete set of team IDs, keys, or names for this project. On update, omit to keep its teams.",
+        }),
+      ),
+      startDate: StartDate,
+      targetDate: TargetDate,
+    }),
+    success: LinearResource,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, false),
+);
+const ListMilestonesTool = readonlyLinearTool(
+  Tool.make("list_milestones", {
+    description:
+      "List milestones for a Linear project, including their IDs, descriptions, and target dates. Omit project to use the linked issue's project.",
+    parameters: Schema.Struct({ ...ResourceListFields, project: Schema.optional(ResourceId) }),
+    success: LinearResourcePage,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const GetMilestoneTool = readonlyLinearTool(
+  Tool.make("get_milestone", {
+    description:
+      "Read a Linear project milestone by ID or exact name. Supply its project when matching by name.",
+    parameters: Schema.Struct({ query: ResourceId, project: Schema.optional(ResourceId) }),
+    success: LinearResource,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const SaveMilestoneTool = linearTool(
+  Tool.make("save_milestone", {
+    description:
+      "Create or update a project milestone. Omit id to create. New milestones require a name and project, defaulting to the linked issue's project.",
+    parameters: Schema.Struct({
+      ...ResourceWriteFields,
+      project: Schema.optional(ResourceId),
+      targetDate: TargetDate,
+    }),
+    success: LinearResource,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, false),
+);
+const ListCyclesTool = readonlyLinearTool(
+  Tool.make("list_cycles", {
+    description:
+      "List cycles for a Linear team with cycle IDs, numbers, dates, and names. Omit team to use the linked issue's team.",
+    parameters: Schema.Struct({ ...ResourceListFields, team: OptionalTeam }),
+    success: LinearResourcePage,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const UpdateCycleTool = linearTool(
+  Tool.make("update_cycle", {
+    description:
+      "Update an existing Linear cycle's name, description, or dates. Linear schedules new cycles automatically; this tool edits an existing cycle only.",
+    parameters: Schema.Struct({
+      ...ResourceWriteFields,
+      id: ResourceId,
+      team: OptionalTeam,
+      startsAt: Schema.optional(describedText("Cycle start as an ISO 8601 timestamp.")),
+      endsAt: Schema.optional(describedText("Cycle end as an ISO 8601 timestamp.")),
+    }),
+    success: LinearResource,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
+);
+const ListIssueLabelsTool = readonlyLinearTool(
+  Tool.make("list_issue_labels", {
+    description:
+      "Find Linear issue labels by name. When team is supplied, includes that team's labels and workspace-wide labels.",
+    parameters: Schema.Struct({ ...ResourceListFields, team: OptionalTeam }),
+    success: LinearResourcePage,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const SaveIssueLabelTool = linearTool(
+  Tool.make("save_issue_label", {
+    description:
+      "Create or update a Linear issue label. New labels require a name. Omit team for a workspace label; an existing label's team is unchanged.",
+    parameters: Schema.Struct({
+      ...ResourceWriteFields,
+      team: OptionalTeam,
+      color: Schema.optional(
+        describedText("Label color as a hexadecimal color string such as #5e6ad2."),
+      ),
+    }),
+    success: LinearResource,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, false),
+);
+const ListUsersTool = readonlyLinearTool(
+  Tool.make("list_users", {
+    description:
+      "Find Linear workspace users, returning IDs, names, email addresses, and active status for assigning work.",
+    parameters: Schema.Struct(ResourceListFields),
+    success: LinearResourcePage,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const GetUserTool = readonlyLinearTool(
+  Tool.make("get_user", {
+    description:
+      "Look up a Linear user by user ID, exact name, display name, or email address. Ambiguous names require an email or ID.",
+    parameters: Schema.Struct({ query: ResourceId }),
+    success: LinearResource,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const ListTeamsTool = readonlyLinearTool(
+  Tool.make("list_teams", {
+    description:
+      "List accessible Linear teams and their IDs and keys for filtering work or creating projects and issues.",
+    parameters: Schema.Struct(ResourceListFields),
+    success: LinearResourcePage,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+const GetTeamTool = readonlyLinearTool(
+  Tool.make("get_team", {
+    description:
+      "Read a Linear team by ID, key, or name to find its identifier and description before organizing work.",
+    parameters: Schema.Struct({ query: ResourceId }),
+    success: LinearResource,
+    failure: LinearToolError,
+    dependencies,
+  }),
+);
+
 export const LinearToolkit = Toolkit.make(
   GetIssueTool,
   ListCommentsTool,
@@ -257,4 +541,19 @@ export const LinearToolkit = Toolkit.make(
   SaveCommentTool,
   SaveIssueTool,
   CreateIssueTool,
+  ListIssuesTool,
+  ListProjectsTool,
+  GetProjectTool,
+  SaveProjectTool,
+  ListMilestonesTool,
+  GetMilestoneTool,
+  SaveMilestoneTool,
+  ListCyclesTool,
+  UpdateCycleTool,
+  ListIssueLabelsTool,
+  SaveIssueLabelTool,
+  ListUsersTool,
+  GetUserTool,
+  ListTeamsTool,
+  GetTeamTool,
 );

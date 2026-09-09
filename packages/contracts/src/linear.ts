@@ -90,6 +90,10 @@ const LinearIssueSummaryFields = {
   branchName: TrimmedNonEmptyString,
   /** 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
   priority: Schema.Int,
+  estimate: Schema.optional(Schema.NullOr(Schema.Number)),
+  milestone: Schema.optional(
+    Schema.NullOr(Schema.Struct({ id: TrimmedNonEmptyString, name: Schema.String })),
+  ),
   state: LinearWorkflowState,
   team: LinearTeamRef,
   assignee: Schema.NullOr(LinearUser),
@@ -211,6 +215,9 @@ export type LinearConnectionStatus = typeof LinearConnectionStatus.Type;
 export const LinearListIssuesInput = Schema.Struct({
   /** Defaults to true; false includes other assignees and unassigned issues. */
   assignedToMe: Schema.optional(Schema.Boolean),
+  assigneeId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  query: Schema.optional(TrimmedNonEmptyString),
+  cursor: Schema.optional(TrimmedNonEmptyString),
   teamKey: Schema.optional(TrimmedNonEmptyString),
   /** Defaults to `unstarted` and `started` when absent. */
   stateTypes: Schema.optional(Schema.Array(LinearWorkflowStateType)),
@@ -222,6 +229,9 @@ export type LinearListIssuesInput = typeof LinearListIssuesInput.Type;
 
 export const LinearListIssuesResult = Schema.Struct({
   issues: Schema.Array(LinearIssueSummary),
+  pageInfo: Schema.optional(
+    Schema.Struct({ hasNextPage: Schema.Boolean, endCursor: Schema.NullOr(Schema.String) }),
+  ),
 });
 export type LinearListIssuesResult = typeof LinearListIssuesResult.Type;
 

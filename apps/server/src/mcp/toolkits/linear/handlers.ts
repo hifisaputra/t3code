@@ -1,3 +1,8 @@
+import * as DateTime from "effect/DateTime";
+import type {
+  LinearResourceKind,
+  LinearResourceSaveInput,
+} from "../../../linear/LinearResources.ts";
 import {
   isProviderDriverKind,
   LinearOperationError,
@@ -272,7 +277,349 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
   }
 });
 
+const isResourceId = (value: string | undefined) =>
+  value !== undefined &&
+  /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value.trim());
+
+const resolveResource = Effect.fn("LinearToolkit.resolveResource")(function* (
+  kind: LinearResourceKind,
+  reference: string,
+  scope: { teamId?: string | undefined; projectId?: string | undefined } = {},
+) {
+  const linear = yield* LinearApi.LinearApi;
+  if (!reference.trim())
+    return yield* new LinearOperationError({
+      operation: "resolveResource",
+      detail: `Pass a non-empty ${kind} name or ID.`,
+    });
+  const result = yield* linear.listResources({ kind, exact: reference, ...scope, limit: 2 });
+  if (result.nodes.length !== 1 || result.pageInfo.hasNextPage)
+    return yield* new LinearOperationError({
+      operation: "resolveResource",
+      detail: result.nodes.length
+        ? `More than one ${kind} matches "${reference}". Use its ID.`
+        : `No ${kind} matches "${reference}" in the selected team or project. Use the corresponding list tool.`,
+    });
+  return result.nodes[0]!;
+});
+
+const issueProject = Effect.fn("LinearToolkit.issueProject")(function* (
+  scope: Scope,
+  reference?: string | undefined,
+) {
+  if (reference) return (yield* resolveResource("project", reference)).id;
+  const issue = yield* resolveIssue("project", scope, undefined);
+  if (!issue.project)
+    return yield* new LinearOperationError({
+      operation: "project",
+      detail: "This issue has no project. Pass a project explicitly.",
+    });
+  return issue.project.id;
+});
+
+function validDate(value: string): boolean {
+  const date = DateTime.make(value);
+  return (
+    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Option.isSome(date) &&
+    DateTime.formatIsoDateUtc(date.value) === value
+  );
+}
+
+const resolveIssuePlanning = Effect.fn("LinearToolkit.resolveIssuePlanning")(function* (
+  input: {
+    project?: string | undefined | null;
+    milestone?: string | undefined | null;
+    cycle?: string | undefined | null;
+    estimate?: number | undefined | null;
+    priority?: number | undefined;
+    dueDate?: string | undefined | null;
+  },
+  teamId: string,
+  currentProjectId: string | null,
+) {
+  const patch: {
+    projectId?: string | null;
+    projectMilestoneId?: string | null;
+    cycleId?: string | null;
+    estimate?: number | null;
+    priority?: number;
+    dueDate?: string | null;
+  } = {};
+  const fields: Array<{ label: string; value: string }> = [];
+  let projectId = currentProjectId;
+  if (input.project !== undefined) {
+    const project =
+      input.project === null ? null : yield* resolveResource("project", input.project, { teamId });
+    projectId = project?.id ?? null;
+    patch.projectId = projectId;
+    fields.push({ label: "Project", value: project?.name ?? "None" });
+  }
+  if (input.milestone !== undefined) {
+    if (input.milestone !== null && !projectId)
+      return yield* new LinearOperationError({
+        operation: "save_issue",
+        detail: "Set a project before assigning a milestone.",
+      });
+    const milestone =
+      input.milestone === null
+        ? null
+        : yield* resolveResource("milestone", input.milestone, { projectId: projectId! });
+    patch.projectMilestoneId = milestone?.id ?? null;
+    fields.push({ label: "Milestone", value: milestone?.name ?? "None" });
+  } else if (input.project !== undefined && projectId !== currentProjectId) {
+    patch.projectMilestoneId = null;
+    fields.push({ label: "Milestone", value: "None (project changed)" });
+  }
+  if (input.cycle !== undefined) {
+    const cycle =
+      input.cycle === null ? null : yield* resolveResource("cycle", input.cycle, { teamId });
+    patch.cycleId = cycle?.id ?? null;
+    fields.push({
+      label: "Cycle",
+      value: cycle ? (cycle.name ?? `Cycle ${cycle.number}`) : "None",
+    });
+  }
+  if (input.estimate !== undefined) {
+    patch.estimate = input.estimate;
+    fields.push({
+      label: "Estimate",
+      value: input.estimate === null ? "None" : String(input.estimate),
+    });
+  }
+  if (input.priority !== undefined) {
+    patch.priority = input.priority;
+    fields.push({
+      label: "Priority",
+      value: ["None", "Urgent", "High", "Medium", "Low"][input.priority]!,
+    });
+  }
+  if (input.dueDate !== undefined) {
+    if (input.dueDate !== null && !validDate(input.dueDate))
+      return yield* new LinearOperationError({
+        operation: "save_issue",
+        detail: "Use a valid YYYY-MM-DD due date, or null to clear it.",
+      });
+    patch.dueDate = input.dueDate;
+    fields.push({ label: "Due date", value: input.dueDate ?? "None" });
+  }
+  return { patch, fields };
+});
+
+const listResources = Effect.fn("LinearToolkit.listResources")(function* (
+  kind: LinearResourceKind,
+  input: {
+    query?: string | undefined;
+    cursor?: string | undefined;
+    limit?: number | undefined;
+    team?: string | undefined;
+    project?: string | undefined;
+  },
+) {
+  const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+  const linear = yield* LinearApi.LinearApi;
+  const teamId = input.team
+    ? (yield* lookupTeam("list_resources", input.team)).id
+    : kind === "cycle"
+      ? (yield* resolveTeam("list_cycles", scope, undefined)).id
+      : undefined;
+  const projectId = kind === "milestone" ? yield* issueProject(scope, input.project) : undefined;
+  return yield* linear.listResources({
+    kind,
+    ...input,
+    ...(teamId ? { teamId } : {}),
+    ...(projectId ? { projectId } : {}),
+  });
+});
+
+const saveResource = Effect.fn("LinearToolkit.saveResource")(function* (
+  kind: LinearResourceSaveInput["kind"],
+  input: {
+    id?: string | undefined;
+    name?: string | undefined;
+    description?: string | undefined | null;
+    teams?: ReadonlyArray<string> | undefined;
+    team?: string | undefined;
+    project?: string | undefined;
+    startDate?: string | undefined | null;
+    targetDate?: string | undefined | null;
+    startsAt?: string | undefined;
+    endsAt?: string | undefined;
+    color?: string | undefined;
+  },
+) {
+  const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+  const linear = yield* LinearApi.LinearApi;
+  const teamId = input.team
+    ? (yield* lookupTeam("save_resource", input.team)).id
+    : kind === "cycle" && !isResourceId(input.id)
+      ? (yield* resolveTeam("update_cycle", scope, undefined)).id
+      : undefined;
+  const projectId = input.project
+    ? (yield* resolveResource("project", input.project)).id
+    : kind === "milestone" && !input.id
+      ? yield* issueProject(scope)
+      : undefined;
+  const current = input.id
+    ? yield* resolveResource(kind, input.id, {
+        ...(teamId ? { teamId } : {}),
+        ...(projectId && !isResourceId(input.id) ? { projectId } : {}),
+      })
+    : undefined;
+  if (!current && kind === "cycle")
+    return yield* new LinearOperationError({
+      operation: "update_cycle",
+      detail: "Pass an existing cycle ID or name; Linear schedules new cycles automatically.",
+    });
+  const teamIds = input.teams
+    ? yield* Effect.forEach(input.teams, (team) =>
+        lookupTeam("save_project", team).pipe(Effect.map((t) => t.id)),
+      )
+    : kind === "project" && !current
+      ? [(yield* resolveTeam("save_project", scope, undefined)).id]
+      : undefined;
+  const name = input.name?.trim();
+  if ((!current && !name) || (input.name !== undefined && !name))
+    return yield* new LinearOperationError({
+      operation: "save_resource",
+      detail: "A non-empty name is required.",
+    });
+  if (teamIds && !teamIds.length)
+    return yield* new LinearOperationError({
+      operation: "save_project",
+      detail: "A project must have at least one team.",
+    });
+  for (const value of [input.startDate, input.targetDate])
+    if (value != null && !validDate(value))
+      return yield* new LinearOperationError({
+        operation: "save_resource",
+        detail: "Dates must be valid YYYY-MM-DD dates.",
+      });
+  for (const value of [input.startsAt, input.endsAt])
+    if (value !== undefined && !Number.isFinite(Date.parse(value)))
+      return yield* new LinearOperationError({
+        operation: "update_cycle",
+        detail: "Cycle dates must be valid ISO 8601 timestamps.",
+      });
+  const start = input.startsAt ?? current?.startsAt;
+  const end = input.endsAt ?? current?.endsAt;
+  if (kind === "cycle" && start && end && Date.parse(start) >= Date.parse(end))
+    return yield* new LinearOperationError({
+      operation: "update_cycle",
+      detail: "Cycle end must be after its start.",
+    });
+  const patch = {
+    ...(name !== undefined ? { name } : {}),
+    ...(input.description !== undefined ? { description: input.description } : {}),
+    ...(teamIds !== undefined ? { teamIds } : {}),
+    ...(projectId !== undefined ? { projectId } : {}),
+    ...(input.startDate !== undefined ? { startDate: input.startDate } : {}),
+    ...(input.targetDate !== undefined ? { targetDate: input.targetDate } : {}),
+    ...(input.startsAt !== undefined ? { startsAt: input.startsAt } : {}),
+    ...(input.endsAt !== undefined ? { endsAt: input.endsAt } : {}),
+    ...(input.color !== undefined ? { color: input.color } : {}),
+  };
+  if (current && !Object.keys(patch).length)
+    return yield* new LinearOperationError({
+      operation: "save_resource",
+      detail: "Pass at least one field to update.",
+    });
+  const labels: Record<string, string> = {
+    name: "Name",
+    description: "Description",
+    teamIds: "Teams",
+    projectId: "Project",
+    startDate: "Start date",
+    targetDate: "Target date",
+    startsAt: "Starts at",
+    endsAt: "Ends at",
+    color: "Color",
+  };
+  yield* confirmWrite(`save_${kind}`, scope, {
+    appName: "Linear",
+    change: {
+      summary: `${current ? "Update" : "Create"} ${kind}${current ? `: ${current.name ?? current.id}` : ""}`,
+      ...(current?.url ? { record: { label: current.name ?? current.id, url: current.url } } : {}),
+      fields: [
+        ...Object.entries(patch).map(([key, value]) => ({
+          label: labels[key] ?? key,
+          value: value === null ? "None" : Array.isArray(value) ? value.join(", ") : String(value),
+        })),
+        ...(!current && kind === "label"
+          ? [{ label: "Team", value: input.team ?? "Workspace-wide" }]
+          : []),
+      ],
+    },
+    args: { kind, ...patch, ...(current ? { id: current.id } : {}), ...(teamId ? { teamId } : {}) },
+  });
+  return yield* linear.saveResource({
+    kind,
+    ...patch,
+    ...(current ? { id: current.id } : {}),
+    ...(teamId ? { teamId } : {}),
+  });
+});
+
 export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
+  list_issues: (input) =>
+    Effect.gen(function* () {
+      yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const team = input.team ? yield* lookupTeam("list_issues", input.team) : undefined;
+      const project = input.project
+        ? yield* resolveResource("project", input.project, team ? { teamId: team.id } : {})
+        : undefined;
+      const assignee =
+        input.assignee == null ? input.assignee : yield* linear.resolveAssignee(input.assignee);
+      return yield* linear.listIssues({
+        assignedToMe: false,
+        ...(team ? { teamKey: team.key } : {}),
+        ...(project ? { projectId: project.id } : {}),
+        ...(assignee !== undefined ? { assigneeId: assignee?.id ?? null } : {}),
+        ...(input.query !== undefined ? { query: input.query } : {}),
+        ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
+        ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        ...(input.stateTypes !== undefined ? { stateTypes: input.stateTypes } : {}),
+      });
+    }),
+  list_projects: (input) => listResources("project", input),
+  list_milestones: (input) => listResources("milestone", input),
+  list_cycles: (input) => listResources("cycle", input),
+  list_issue_labels: (input) => listResources("label", input),
+  list_users: (input) => listResources("user", input),
+  list_teams: (input) => listResources("team", input),
+  get_project: (input) =>
+    Effect.gen(function* () {
+      yield* McpInvocationContext.requireMcpCapability("linear");
+      return yield* resolveResource("project", input.query);
+    }),
+  get_milestone: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      if (!input.project && isResourceId(input.query)) {
+        return yield* (yield* LinearApi.LinearApi).getResource("milestone", input.query.trim());
+      }
+      const projectId = yield* issueProject(scope, input.project);
+      return yield* resolveResource("milestone", input.query, { projectId });
+    }),
+  get_user: (input) =>
+    Effect.gen(function* () {
+      yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const user = yield* linear.resolveAssignee(input.query);
+      return yield* linear.getResource("user", user.id);
+    }),
+  get_team: (input) =>
+    Effect.gen(function* () {
+      yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const team = yield* lookupTeam("get_team", input.query);
+      return yield* linear.getResource("team", team.id);
+    }),
+  save_project: (input) => saveResource("project", input),
+  save_milestone: (input) => saveResource("milestone", input),
+  update_cycle: (input) => saveResource("cycle", input),
+  save_issue_label: (input) => saveResource("label", input),
   get_issue: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
@@ -369,11 +716,18 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         title === undefined &&
         input.description === undefined &&
         state === undefined &&
-        input.labels === undefined
+        input.labels === undefined &&
+        input.assignee === undefined &&
+        input.project === undefined &&
+        input.milestone === undefined &&
+        input.cycle === undefined &&
+        input.estimate === undefined &&
+        input.priority === undefined &&
+        input.dueDate === undefined
       ) {
         return yield* new LinearOperationError({
           operation: "save_issue",
-          detail: "Nothing to save: pass at least one of title, description, state, or labels.",
+          detail: "Nothing to save: pass at least one issue field to update.",
         });
       }
       const issue = yield* resolveIssue("save_issue", scope, named(input.id));
@@ -383,6 +737,15 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         input.labels === undefined
           ? undefined
           : yield* resolveLabels("save_issue", issue.team.id, input.labels);
+      const resolvedAssignee =
+        input.assignee === undefined || input.assignee === null
+          ? input.assignee
+          : yield* linear.resolveAssignee(input.assignee);
+      const assigneeId =
+        resolvedAssignee === undefined || resolvedAssignee === null
+          ? resolvedAssignee
+          : resolvedAssignee.id;
+      const planning = yield* resolveIssuePlanning(input, issue.team.id, issue.project?.id ?? null);
       const stateId = resolvedState?.id;
       const labelIds = resolvedLabels?.map((label) => label.id);
       yield* confirmWrite("save_issue", scope, {
@@ -391,6 +754,18 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
           summary: `Update ${issue.identifier}`,
           record: { label: issue.identifier, url: issue.url },
           fields: [
+            ...planning.fields,
+            ...(resolvedAssignee === undefined
+              ? []
+              : [
+                  {
+                    label: "Assignee",
+                    value:
+                      resolvedAssignee === null
+                        ? "Unassigned"
+                        : `${resolvedAssignee.displayName} (${resolvedAssignee.id})`,
+                  },
+                ]),
             ...(title === undefined ? [] : [{ label: "Title", value: title }]),
             ...(resolvedState === undefined ? [] : [{ label: "State", value: resolvedState.name }]),
             ...(resolvedLabels === undefined
@@ -417,12 +792,16 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         args: {
           ...input,
           issueId: issue.id,
+          ...planning.patch,
+          ...(assigneeId !== undefined ? { assigneeId } : {}),
           ...(stateId ? { stateId } : {}),
           ...(labelIds ? { labelIds } : {}),
         },
       });
       yield* linear.updateIssue({
         issueId: issue.id,
+        ...planning.patch,
+        ...(assigneeId !== undefined ? { assigneeId } : {}),
         ...(title !== undefined ? { title } : {}),
         ...(input.description !== undefined ? { description: input.description } : {}),
         ...(stateId !== undefined ? { stateId } : {}),
@@ -460,6 +839,10 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         input.labels === undefined
           ? undefined
           : yield* resolveLabels("create_issue", team.id, input.labels);
+      const planning = yield* resolveIssuePlanning(input, team.id, null);
+      const assignee =
+        input.assignee == null ? input.assignee : yield* linear.resolveAssignee(input.assignee);
+      const assigneeId = assignee == null ? assignee : assignee.id;
       const stateId = resolvedState?.id;
       const labelIds = resolvedLabels?.map((label) => label.id);
       const title = input.title.trim();
@@ -471,6 +854,16 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
             ? {}
             : { record: { label: parent.identifier, url: parent.url } }),
           fields: [
+            ...planning.fields,
+            ...(assignee === undefined
+              ? []
+              : [
+                  {
+                    label: "Assignee",
+                    value:
+                      assignee === null ? "Unassigned" : `${assignee.displayName} (${assignee.id})`,
+                  },
+                ]),
             { label: "Title", value: title },
             ...(parent === undefined ? [] : [{ label: "Parent", value: parent.identifier }]),
             ...(resolvedState === undefined ? [] : [{ label: "State", value: resolvedState.name }]),
@@ -496,6 +889,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         args: {
           ...input,
           teamId: team.id,
+          ...planning.patch,
+          ...(assigneeId !== undefined ? { assigneeId } : {}),
           ...(parentId ? { parentId } : {}),
           ...(stateId ? { stateId } : {}),
           ...(labelIds ? { labelIds } : {}),
@@ -503,6 +898,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       });
       return yield* linear.createIssue({
         teamId: team.id,
+        ...planning.patch,
+        ...(assigneeId !== undefined ? { assigneeId } : {}),
         title,
         ...(input.description !== undefined ? { description: input.description } : {}),
         ...(parentId !== undefined ? { parentId } : {}),

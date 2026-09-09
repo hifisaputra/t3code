@@ -1,3 +1,11 @@
+import {
+  LinearResource,
+  LinearResourcePage,
+  resourceDefinitions,
+  type LinearResourceKind,
+  type LinearResourceListInput,
+  type LinearResourceSaveInput,
+} from "./LinearResources.ts";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
@@ -11,6 +19,7 @@ import {
   LinearUnavailableError,
   LinearWorkflowStateType,
   TrimmedNonEmptyString,
+  type LinearUser,
   type LinearConnectionStatus,
   type LinearGetIssueInput,
   type LinearIssueDetail,
@@ -67,6 +76,24 @@ const RawUser = Schema.Struct({
   displayName: TrimmedNonEmptyString,
 });
 
+const decodeAssigneeResult = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    users: Schema.Struct({ nodes: Schema.Array(RawUser) }),
+  }),
+);
+
+const decodeResourcePage = Schema.decodeUnknownEffect(
+  Schema.Struct({ resources: LinearResourcePage }),
+);
+const decodeResource = Schema.decodeUnknownEffect(
+  Schema.Struct({ resource: Schema.NullOr(LinearResource) }),
+);
+const decodeResourceMutation = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    result: Schema.Struct({ success: Schema.Boolean, resource: Schema.NullOr(LinearResource) }),
+  }),
+);
+
 const RawProject = Schema.Struct({
   id: TrimmedNonEmptyString,
   name: TrimmedNonEmptyString,
@@ -80,6 +107,10 @@ const RawIssueSummary = Schema.Struct({
   url: Schema.String,
   branchName: TrimmedNonEmptyString,
   priority: Schema.Number,
+  estimate: Schema.optional(Schema.NullOr(Schema.Number)),
+  milestone: Schema.optional(
+    Schema.NullOr(Schema.Struct({ id: Schema.String, name: Schema.String })),
+  ),
   updatedAt: Schema.String,
   state: RawWorkflowState,
   team: Schema.Struct({
@@ -148,7 +179,10 @@ const ViewerResult = Schema.Struct({
 const GetIssueResult = Schema.Struct({ issue: Schema.NullOr(RawIssueDetail) });
 
 const ListIssuesResult = Schema.Struct({
-  issues: Schema.Struct({ nodes: Schema.Array(RawIssueSummary) }),
+  issues: Schema.Struct({
+    nodes: Schema.Array(RawIssueSummary),
+    pageInfo: Schema.optional(LinearResourcePage.fields.pageInfo),
+  }),
 });
 
 const WorkspaceResult = Schema.Struct({
@@ -248,6 +282,8 @@ const ISSUE_SUMMARY_FIELDS = `
   url
   branchName
   priority
+  estimate
+  milestone: projectMilestone { id name }
   updatedAt
   state { id name type color position }
   team { id key name }
@@ -278,8 +314,9 @@ const GET_ISSUE_QUERY = `
 `;
 
 const LIST_ISSUES_QUERY = `
-  query T3CodeIssues($filter: IssueFilter!, $first: Int!) {
-    issues(filter: $filter, orderBy: updatedAt, first: $first) {
+  query T3CodeIssues($filter: IssueFilter!, $first: Int!, $after: String) {
+    issues(filter: $filter, orderBy: updatedAt, first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
       nodes { ${ISSUE_SUMMARY_FIELDS} }
     }
   }
@@ -313,9 +350,7 @@ const UPDATE_ISSUE_STATE_MUTATION = `
 
 /**
  * The generic issue patch. Only the fields the caller set are put in `$input`,
- * so an unmentioned field is left alone rather than cleared. Assignment fields
- * (`assigneeId`, `delegateId`, `subscriberIds`) are deliberately unreachable:
- * an agent editing an issue must never reassign who owns it.
+ * so an unmentioned field is left alone rather than cleared.
  */
 const UPDATE_ISSUE_MUTATION = `
   mutation T3CodeUpdateIssue($id: String!, $input: IssueUpdateInput!) {
@@ -469,25 +504,51 @@ export class LinearApi extends Context.Service<
       readonly issueId: string;
       readonly stateId: string;
     }) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    readonly listResources: (
+      input: LinearResourceListInput,
+    ) => Effect.Effect<LinearResourcePage, LinearUnavailableError | LinearOperationError>;
+    readonly getResource: (
+      kind: LinearResourceKind,
+      id: string,
+    ) => Effect.Effect<LinearResource, LinearUnavailableError | LinearOperationError>;
+    readonly saveResource: (
+      input: LinearResourceSaveInput,
+    ) => Effect.Effect<LinearResource, LinearUnavailableError | LinearOperationError>;
+    readonly resolveAssignee: (
+      reference: string,
+    ) => Effect.Effect<LinearUser, LinearUnavailableError | LinearOperationError>;
     /**
      * Patch an issue. Only the fields present are sent, so anything the caller
-     * leaves out keeps its current value. There is deliberately no way to
-     * change the assignee, the delegate, or the subscribers.
+     * leaves out keeps its current value. A null assigneeId clears assignment.
      */
     readonly updateIssue: (input: {
       readonly issueId: string;
+      readonly assigneeId?: string | null;
       readonly title?: string;
       readonly description?: string;
       readonly stateId?: string;
       readonly labelIds?: ReadonlyArray<string>;
+      readonly projectId?: string | null;
+      readonly projectMilestoneId?: string | null;
+      readonly cycleId?: string | null;
+      readonly estimate?: number | null;
+      readonly priority?: number;
+      readonly dueDate?: string | null;
     }) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
     readonly createIssue: (input: {
       readonly teamId: string;
+      readonly assigneeId?: string | null;
       readonly title: string;
       readonly description?: string;
       readonly parentId?: string;
       readonly stateId?: string;
       readonly labelIds?: ReadonlyArray<string>;
+      readonly projectId?: string | null;
+      readonly projectMilestoneId?: string | null;
+      readonly cycleId?: string | null;
+      readonly estimate?: number | null;
+      readonly priority?: number;
+      readonly dueDate?: string | null;
     }) => Effect.Effect<LinearIssueSummary, LinearUnavailableError | LinearOperationError>;
     /** Labels an issue on this team may carry, team-owned plus workspace-wide, sorted by name. */
     readonly labels: (
@@ -737,16 +798,28 @@ export const make = Effect.gen(function* () {
       query: LIST_ISSUES_QUERY,
       variables: {
         filter: {
-          ...(input.assignedToMe !== false ? { assignee: { isMe: { eq: true } } } : {}),
+          ...(input.assigneeId !== undefined
+            ? {
+                assignee:
+                  input.assigneeId === null ? { null: true } : { id: { eq: input.assigneeId } },
+              }
+            : input.assignedToMe !== false
+              ? { assignee: { isMe: { eq: true } } }
+              : {}),
+          ...(input.query !== undefined ? { title: { containsIgnoreCase: input.query } } : {}),
           state: { type: { in: stateTypes } },
           ...(input.teamKey !== undefined ? { team: { key: { eq: input.teamKey } } } : {}),
           ...(input.projectId !== undefined ? { project: { id: { eq: input.projectId } } } : {}),
         },
         first: Math.min(input.limit ?? DEFAULT_ISSUE_LIMIT, MAX_ISSUE_LIMIT),
+        ...(input.cursor !== undefined ? { after: input.cursor } : {}),
       },
       decode: decodeListIssuesResult,
     }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
-    return { issues: result.issues.nodes } satisfies LinearListIssuesResult;
+    return {
+      issues: result.issues.nodes,
+      ...(result.issues.pageInfo ? { pageInfo: result.issues.pageInfo } : {}),
+    } satisfies LinearListIssuesResult;
   });
 
   const workspace: Effect.Effect<
@@ -810,12 +883,146 @@ export const make = Effect.gen(function* () {
     }
   });
 
+  const listResources = Effect.fn("LinearApi.listResources")(function* (
+    input: LinearResourceListInput,
+  ) {
+    const definition = resourceDefinitions[input.kind];
+    const filters: Array<Record<string, unknown>> = [];
+    const reference = input.exact?.trim();
+    if (reference) {
+      if (/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(reference))
+        filters.push({ id: { eq: reference } });
+      else if (input.kind === "cycle" && /^\d+$/.test(reference))
+        filters.push({ number: { eq: Number(reference) } });
+      else if (
+        input.kind === "cycle" &&
+        ["current", "next", "previous"].includes(reference.toLowerCase())
+      ) {
+        const key = { current: "isActive", next: "isNext", previous: "isPrevious" }[
+          reference.toLowerCase()
+        ]!;
+        filters.push({ [key]: { eq: true } });
+      } else filters.push({ name: { eqIgnoreCase: reference } });
+    } else if (input.query?.trim())
+      filters.push({ name: { containsIgnoreCase: input.query.trim() } });
+    if (input.teamId) {
+      if (input.kind === "project")
+        filters.push({ accessibleTeams: { some: { id: { eq: input.teamId } } } });
+      else if (input.kind === "label")
+        filters.push({ or: [{ team: { id: { eq: input.teamId } } }, { team: { null: true } }] });
+      else if (input.kind === "cycle") filters.push({ team: { id: { eq: input.teamId } } });
+    }
+    if (input.projectId && input.kind === "milestone")
+      filters.push({ project: { id: { eq: input.projectId } } });
+    const result = yield* request({
+      operation: "listResources",
+      query: `query T3CodeResources($filter: ${definition.type}Filter!, $first: Int!, $after: String) {
+        resources: ${definition.plural}(filter: $filter, first: $first, after: $after) {
+          nodes { ${definition.fields} } pageInfo { hasNextPage endCursor }
+        }
+      }`,
+      variables: {
+        filter: filters.length ? { and: filters } : {},
+        first: Math.max(1, Math.min(input.limit ?? 50, 100)),
+        after: input.cursor ?? null,
+      },
+      decode: decodeResourcePage,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    return result.resources;
+  });
+  const getResource = Effect.fn("LinearApi.getResource")(function* (
+    kind: LinearResourceKind,
+    id: string,
+  ) {
+    const definition = resourceDefinitions[kind];
+    const result = yield* request({
+      operation: "getResource",
+      query: `query T3CodeResource($id: String!) { resource: ${definition.entity}(id: $id) { ${definition.fields} } }`,
+      variables: { id },
+      decode: decodeResource,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.resource)
+      return yield* new LinearOperationError({
+        operation: "getResource",
+        detail: `Linear ${kind} was not found.`,
+      });
+    return result.resource;
+  });
+  const saveResource = Effect.fn("LinearApi.saveResource")(function* (
+    input: LinearResourceSaveInput,
+  ) {
+    const definition = resourceDefinitions[input.kind];
+    const action = input.id ? "Update" : "Create";
+    const fields: Record<string, unknown> = {};
+    for (const key of definition.writable) if (input[key] !== undefined) fields[key] = input[key];
+    if (!input.id && (input.kind === "cycle" || input.kind === "label") && input.teamId)
+      fields.teamId = input.teamId;
+    const result = yield* request({
+      operation: "saveResource",
+      query: `mutation T3CodeSaveResource(${input.id ? "$id: String!, " : ""}$input: ${definition.type}${action}Input!) {
+        result: ${definition.entity}${action}( ${input.id ? "id: $id, " : ""}input: $input) {
+          success resource: ${definition.entity} { ${definition.fields} }
+        }
+      }`,
+      variables: { ...(input.id ? { id: input.id } : {}), input: fields },
+      decode: decodeResourceMutation,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.result.success || !result.result.resource)
+      return yield* new LinearOperationError({
+        operation: "saveResource",
+        detail: `Linear refused to save the ${input.kind}.`,
+      });
+    return result.result.resource;
+  });
+
+  const resolveAssignee = Effect.fn("LinearApi.resolveAssignee")(function* (reference: string) {
+    const value = reference.trim();
+    if (!value)
+      return yield* new LinearOperationError({
+        operation: "resolveAssignee",
+        detail: "Pass an assignee name, email, or user ID; use null to unassign.",
+      });
+    const filter = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value)
+      ? { id: { eq: value } }
+      : {
+          or: [
+            { name: { eqIgnoreCase: value } },
+            { displayName: { eqIgnoreCase: value } },
+            { email: { eqIgnoreCase: value } },
+          ],
+        };
+    const result = yield* request({
+      operation: "resolveAssignee",
+      query: `query T3CodeAssignee($filter: UserFilter!) {
+        users(first: 2, filter: $filter) { nodes { id name displayName } }
+      }`,
+      variables: { filter },
+      decode: decodeAssigneeResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    const user = result.users.nodes[0];
+    if (result.users.nodes.length !== 1 || !user)
+      return yield* new LinearOperationError({
+        operation: "resolveAssignee",
+        detail: user
+          ? `More than one Linear user matches "${value}". Pass an email or user ID.`
+          : `No Linear user matches "${value}". Pass an exact name, email, or user ID.`,
+      });
+    return user;
+  });
+
   const updateIssue = Effect.fn("LinearApi.updateIssue")(function* (input: {
     readonly issueId: string;
+    readonly assigneeId?: string | null;
     readonly title?: string;
     readonly description?: string;
     readonly stateId?: string;
     readonly labelIds?: ReadonlyArray<string>;
+    readonly projectId?: string | null;
+    readonly projectMilestoneId?: string | null;
+    readonly cycleId?: string | null;
+    readonly estimate?: number | null;
+    readonly priority?: number;
+    readonly dueDate?: string | null;
   }) {
     const result = yield* request({
       operation: "updateIssue",
@@ -823,10 +1030,19 @@ export const make = Effect.gen(function* () {
       variables: {
         id: input.issueId,
         input: {
+          ...(input.assigneeId !== undefined ? { assigneeId: input.assigneeId } : {}),
           ...(input.title !== undefined ? { title: input.title } : {}),
           ...(input.description !== undefined ? { description: input.description } : {}),
           ...(input.stateId !== undefined ? { stateId: input.stateId } : {}),
           ...(input.labelIds !== undefined ? { labelIds: input.labelIds } : {}),
+          ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+          ...(input.projectMilestoneId !== undefined
+            ? { projectMilestoneId: input.projectMilestoneId }
+            : {}),
+          ...(input.cycleId !== undefined ? { cycleId: input.cycleId } : {}),
+          ...(input.estimate !== undefined ? { estimate: input.estimate } : {}),
+          ...(input.priority !== undefined ? { priority: input.priority } : {}),
+          ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
         },
       },
       decode: decodeIssueUpdateResult,
@@ -841,11 +1057,18 @@ export const make = Effect.gen(function* () {
 
   const createIssue = Effect.fn("LinearApi.createIssue")(function* (input: {
     readonly teamId: string;
+    readonly assigneeId?: string | null;
     readonly title: string;
     readonly description?: string;
     readonly parentId?: string;
     readonly stateId?: string;
     readonly labelIds?: ReadonlyArray<string>;
+    readonly projectId?: string | null;
+    readonly projectMilestoneId?: string | null;
+    readonly cycleId?: string | null;
+    readonly estimate?: number | null;
+    readonly priority?: number;
+    readonly dueDate?: string | null;
   }) {
     const result = yield* request({
       operation: "createIssue",
@@ -853,11 +1076,20 @@ export const make = Effect.gen(function* () {
       variables: {
         input: {
           teamId: input.teamId,
+          ...(input.assigneeId !== undefined ? { assigneeId: input.assigneeId } : {}),
           title: input.title,
           ...(input.description !== undefined ? { description: input.description } : {}),
           ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
           ...(input.stateId !== undefined ? { stateId: input.stateId } : {}),
           ...(input.labelIds !== undefined ? { labelIds: input.labelIds } : {}),
+          ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+          ...(input.projectMilestoneId !== undefined
+            ? { projectMilestoneId: input.projectMilestoneId }
+            : {}),
+          ...(input.cycleId !== undefined ? { cycleId: input.cycleId } : {}),
+          ...(input.estimate !== undefined ? { estimate: input.estimate } : {}),
+          ...(input.priority !== undefined ? { priority: input.priority } : {}),
+          ...(input.dueDate !== undefined ? { dueDate: input.dueDate } : {}),
         },
       },
       decode: decodeIssueCreateResult,
@@ -947,6 +1179,10 @@ export const make = Effect.gen(function* () {
     workflowStates,
     updateIssueState,
     updateIssue,
+    resolveAssignee,
+    listResources,
+    getResource,
+    saveResource,
     createIssue,
     labels,
     createComment,

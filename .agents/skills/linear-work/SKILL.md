@@ -105,9 +105,22 @@ For research or other work without a PR, report the findings and link the
 deliverable when the requested work is complete. Do not use the issue-description
 template for either update.
 
-Never set the state to Done. Linear moves the issue when the pull request merges,
-and a hand-set Done reads as shipped when it is not. Do not change the assignee,
-labels, estimate, project, or cycle either. Those belong to the person.
+Leave status changes to the linked PR automation unless the user explicitly requests a
+manual change. Report implemented, merged, and released accurately. Change planning
+metadata when the user or ticket asks for it, rather than inventing ownership or scheduling.
+
+`save_issue` can set assignee, project, milestone, cycle, estimate, labels, priority, and
+dueDate. Omitted fields stay unchanged; null clears nullable fields and an empty label
+array removes all labels. Setting labels replaces the complete set. Changing the project
+clears the old milestone unless a replacement is supplied. Resolve milestones within the
+project and cycles within the team; use IDs when names are ambiguous.
+
+Use `list_issues` for work across assignees. Find resources with `list_projects`,
+`list_milestones`, `list_cycles`, `list_issue_labels`, `list_users`, and `list_teams`;
+follow pagination when more results are available. Use `save_project`, `save_milestone`,
+and `save_issue_label` to create or edit those resources when requested. `update_cycle`
+edits an existing cycle; Linear schedules new cycles automatically. These tools use the
+same posting identity and approval flow as issue updates.
 
 ## 8. When blocked
 

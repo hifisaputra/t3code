@@ -143,17 +143,28 @@ you started from. Pass one, such as `DEL-123`, to reach a different issue.
 
 The tools are:
 
-- `get_issue` reads an issue: title, description, state, labels, assignee, and links.
-- `list_comments` reads the comment thread on an issue.
-- `list_issue_statuses` lists the workflow states a team can move an issue to.
-- `list_my_issues` lists the open issues assigned to you.
-- `save_comment` posts a comment on an issue, or edits an existing comment when given its `id` from `list_comments`. Editing replaces the body and requires permission from Linear.
-- `save_issue` edits an issue's title, description, state, or labels.
-- `create_issue` files a new issue. It files a sub-issue of the linked issue unless the agent is
-  told to file it somewhere else.
+- `get_issue` reads an issue, including its assignee, project, milestone, cycle, estimate, and labels.
+- `list_issues` searches across assignees by title, team, project, assignee, or workflow state, with pagination. `list_my_issues` lists your open issues.
+- `list_comments` reads the comment thread; `save_comment` posts or edits a comment.
+- `list_issue_statuses` lists a team's workflow states.
+- `save_issue` updates an issue's title, description, state, labels, assignee, project, milestone, cycle, estimate, priority, or due date. `create_issue` accepts these fields when filing a new issue.
+- `list_projects`, `get_project`, and `save_project` find, read, create, or edit projects.
+- `list_milestones`, `get_milestone`, and `save_milestone` find, read, create, or edit project milestones.
+- `list_cycles` finds a team's cycles; `update_cycle` edits an existing cycle's name, description, or dates. Linear schedules new cycles automatically.
+- `list_issue_labels` and `save_issue_label` find, create, or edit issue labels.
+- `list_users`, `get_user`, `list_teams`, and `get_team` find people and teams.
 
-Agents cannot assign or delegate an issue, cannot delete one, and cannot change estimates or
-projects. Those stay with you.
+Use exact names or IDs for projects and milestones, and names, emails, or IDs for assignees.
+Cycles accept an ID, name, number, or `current`, `next`, or `previous`. Ambiguous names need
+an ID. Milestones belong to a project; cycles belong to a team.
+
+Omitted issue fields stay unchanged. Pass `null` to clear an assignee, project, milestone,
+cycle, estimate, or due date; pass `labels: []` to remove all labels. Setting labels replaces
+the complete label set. Changing the project clears its old milestone unless a new one is
+supplied. Estimates use the team's numeric scale and dates use `YYYY-MM-DD`.
+
+These tools cover issue planning and common resource management; they do not provide every
+operation from Linear's official MCP server. Deletion and agent delegation are not exposed.
 
 Writes wait for you. **Ask before agents write to Linear** sits in the same settings group and is
 on by default. Every comment, edit, or new issue an agent wants to make shows up as an approval in
@@ -168,8 +179,8 @@ again. Agents also have their own tool timeouts, often about a minute, so an age
 waiting before that. Turn the setting off if you would rather agents write to Linear without
 asking.
 
-Every read and write goes through the key you saved, so changes land in Linear as the connected
-user. Comments and edits an agent makes look like yours in Linear's history, and a thread started
+Manual threads use the key you saved, so changes land in Linear as the connected
+user. Delegated runs use the Linear app identity and do not ask for per-write approval. Comments and edits an agent makes look like yours in Linear's history, and a thread started
 from an issue is told to post unsigned — no footer naming the agent or T3 Code, since an agent
 that has just read a ticket's comments otherwise picks up the habit of signing. Whether the rest
 of your team is told an agent wrote it is your call: say so in the issue or the comment.
@@ -183,8 +194,8 @@ the other.
 
 The `linear-work` skill is the runbook for working a ticket: read everything before deciding
 anything, restate what done looks like, ask and stop when a product decision is missing, post one
-plan comment and then report the pull request or completed research, file follow-ups as sub-issues, and never
-set an issue to Done. When it is installed for a provider, the kickoff message mentions it as
+plan comment and then report the pull request or completed research, and file follow-ups as sub-issues.
+It leaves status changes to PR automation unless you explicitly request a manual change. When it is installed for a provider, the kickoff message mentions it as
 `$linear-work` so the agent follows it from the first turn.
 
 The repository includes `linear-work`, `linear-task`, `linear-comment`, and `unslop` under

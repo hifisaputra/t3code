@@ -38,15 +38,32 @@ it("exports provider-compatible object schemas with described parameters", () =>
 });
 
 it("mirrors the Linear MCP tool names so an existing skill keeps working", () => {
-  expect(Object.keys(LinearToolkit.tools).sort()).toEqual([
-    "create_issue",
-    "get_issue",
-    "list_comments",
-    "list_issue_statuses",
-    "list_my_issues",
-    "save_comment",
-    "save_issue",
-  ]);
+  expect(Object.keys(LinearToolkit.tools).sort()).toEqual(
+    [
+      "create_issue",
+      "get_milestone",
+      "get_project",
+      "get_team",
+      "get_user",
+      "list_cycles",
+      "list_issue_labels",
+      "list_issues",
+      "list_milestones",
+      "list_projects",
+      "list_teams",
+      "list_users",
+      "save_issue_label",
+      "save_milestone",
+      "save_project",
+      "update_cycle",
+      "get_issue",
+      "list_comments",
+      "list_issue_statuses",
+      "list_my_issues",
+      "save_comment",
+      "save_issue",
+    ].sort(),
+  );
 });
 
 it("tells the agent which tools default to the thread's linked issue", () => {
@@ -68,9 +85,24 @@ it("marks only the reads as readonly and repeatable", () => {
     list_comments: true,
     list_issue_statuses: true,
     list_my_issues: true,
+    list_issues: true,
     save_comment: false,
     save_issue: false,
     create_issue: false,
+    get_milestone: true,
+    get_project: true,
+    get_team: true,
+    get_user: true,
+    list_cycles: true,
+    list_issue_labels: true,
+    list_milestones: true,
+    list_projects: true,
+    list_teams: true,
+    list_users: true,
+    save_issue_label: false,
+    save_milestone: false,
+    save_project: false,
+    update_cycle: false,
   });
 
   for (const tool of Object.values(LinearToolkit.tools)) {
