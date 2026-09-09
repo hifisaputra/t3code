@@ -52,8 +52,13 @@ const original = {
   action: "created" as const,
   webhookTimestamp: 0,
   organizationId: "org",
-  agentSession: { id: "session-1", issue: { id: "issue-1" } },
+  agentSession: {
+    id: "session-1",
+    issue: { id: "issue-1" },
+    comment: { body: "Original delegation comment" },
+  },
   promptContext: "Fix the bug carefully",
+  guidance: "Run focused tests before finishing",
 };
 const encode = Schema.encodeSync(Schema.fromJsonString(Delegation.AgentEvent));
 const signed = (event: typeof Delegation.AgentEvent.Type) => {
@@ -189,8 +194,16 @@ it.effect("deduplicates deliveries and starts one linked thread in a worktree", 
       assert.equal(created.linkedIssue?.identifier, "DEL-1");
     }
     const start = h.commands[1];
-    if (start?.type === "thread.turn.start")
-      assert.include(start.message.text, "Fix the bug carefully");
+    assert.equal(start?.type, "thread.turn.start");
+    if (start?.type === "thread.turn.start") {
+      assert.include(start.message.text, "$linear-work DEL-1: A fix");
+      assert.include(start.message.text, issue.url);
+      assert.include(start.message.text, "get_issue and list_comments MCP tools");
+      assert.include(start.message.text, original.guidance);
+      assert.notInclude(start.message.text, original.promptContext);
+      assert.notInclude(start.message.text, issue.description!);
+      assert.notInclude(start.message.text, original.agentSession.comment.body);
+    }
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
 });
 it.effect("asks which repository to use and resumes with the original issue context", () => {
@@ -213,8 +226,44 @@ it.effect("asks which repository to use and resumes with the original issue cont
     yield* service.process("d2");
     assert.deepEqual(h.prepared, ["/repos/Two"]);
     const start = h.commands[1];
-    if (start?.type === "thread.turn.start")
-      assert.include(start.message.text, "Fix the bug carefully");
+    assert.equal(start?.type, "thread.turn.start");
+    if (start?.type === "thread.turn.start") {
+      assert.include(start.message.text, "$linear-work DEL-1: A fix");
+      assert.include(start.message.text, "get_issue and list_comments MCP tools");
+      assert.include(start.message.text, original.guidance);
+      assert.notInclude(start.message.text, original.promptContext);
+      assert.notInclude(start.message.text, original.agentSession.comment.body);
+    }
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});
+
+it.effect("forwards follow-up replies without copying prompt context", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const service = yield* h.make;
+    const first = signed(original);
+    yield* service.receive(first.body, first.signature, "d1");
+    yield* service.process("d1");
+    for (const [id, body] of [
+      ["reply", "Focus on the regression"],
+      ["refresh", ""],
+    ] as const) {
+      const next = signed({
+        ...original,
+        action: "prompted",
+        agentActivity: { id, content: { body } },
+      });
+      yield* service.receive(next.body, next.signature, id);
+      yield* service.process(id);
+      const start = h.commands.at(-1);
+      assert.equal(start?.type, "thread.turn.start");
+      if (start?.type === "thread.turn.start") {
+        if (body) assert.equal(start.message.text, body);
+        else assert.include(start.message.text, "get_issue and list_comments MCP tools");
+        assert.notInclude(start.message.text, original.promptContext);
+        assert.notInclude(start.message.text, original.agentSession.comment.body);
+      }
+    }
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
 });
 

@@ -398,8 +398,9 @@ export const make = Effect.gen(function* () {
           });
           const text =
             session.status === "pending" || pending?.kind === "repository"
-              ? `$linear-work ${issue.identifier}: ${issue.title}\n${issue.url}\nYou were delegated this issue in Linear. Work in this thread's prepared worktree. Ask questions through the provider's user-input tool so replies from Linear can resume you.\n${initial.promptContext ?? issue.description ?? ""}\n${initial.guidance ? yield* encodeGuidance(initial.guidance) : ""}\n${initial.agentSession.comment?.body ?? ""}`
-              : prompt || event.promptContext || "Continue working on the delegated issue.";
+              ? `$linear-work ${issue.identifier}: ${issue.title}\n${issue.url}\nYou were delegated this issue in Linear. Read the current issue description and comments with the get_issue and list_comments MCP tools before starting. Work in this thread's prepared worktree. Ask questions through the provider's user-input tool so replies from Linear can resume you.\n${initial.guidance ? yield* encodeGuidance(initial.guidance) : ""}`
+              : prompt ||
+                "Read the current issue description and comments with the get_issue and list_comments MCP tools, then continue working on the delegated issue.";
           yield* sql`UPDATE linear_agent_sessions SET status = 'running', pending_question = NULL, updated_at = ${yield* Clock.currentTimeMillis} WHERE id = ${sessionId}`;
           yield* engine.dispatch({
             type: "thread.turn.start",
