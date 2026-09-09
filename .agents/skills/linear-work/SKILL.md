@@ -120,5 +120,7 @@ build by narrowing the ticket. Someone else decides that.
 
 Use `linear-comment` for every comment and reply delivered to Linear, including
 plans, questions, blockers, research findings, and completion updates. Use
-`linear-task` only when creating or editing an issue description. Say plainly
-when an agent wrote it, if the team needs to know.
+`linear-task` only when creating or editing an issue description. Follow
+`linear-comment`'s posting-identity rules: manual threads describe outcomes without
+personal attribution; delegated runs speak as the Linear agent/app. Leave updates unsigned
+unless the user explicitly requests an authorship disclosure.

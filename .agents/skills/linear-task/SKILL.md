@@ -99,6 +99,10 @@ decision inside an implementation step.]
 
 ## Writing rules
 
+Describe the product, problem, or requested outcome in a neutral voice, regardless
+of who posts the edit. Keep personal work reports such as "I completed..." or
+"Hifi has done..." in comments, using `linear-comment`'s posting-identity rules.
+
 - **Bold exactly one thing.** The fact that would cause a bad demo or a wrong decision. Put it in the first two paragraphs.
 - **Numbers beat adjectives.** "$5.20 to $2.32 per article, down 55%" not "significantly cheaper".
 - **Name the guarantee, not the mechanism.** A shared function name means nothing to a PM. The promise it enforces means everything.
