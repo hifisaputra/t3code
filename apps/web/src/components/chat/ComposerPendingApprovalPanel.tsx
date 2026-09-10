@@ -3,6 +3,7 @@ import type {
   EnvironmentId,
   IntegrationApprovalChangeField,
   ProviderApprovalDecision,
+  ThreadId,
 } from "@t3tools/contracts";
 import { memo, useState } from "react";
 import { type PendingApproval } from "../../session-logic";
@@ -15,6 +16,8 @@ interface ComposerPendingApprovalPanelProps {
   approval: PendingApproval;
   pendingCount: number;
   environmentId: EnvironmentId;
+  /** Lets the review dialog show an image the agent is about to send. */
+  threadId?: ThreadId | undefined;
   isResponding: boolean;
   onRespondToApproval: (
     requestId: ApprovalRequestId,
@@ -94,6 +97,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
   approval,
   pendingCount,
   environmentId,
+  threadId,
   isResponding,
   onRespondToApproval,
   className,
@@ -171,6 +175,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           record={record}
           fields={fields}
           environmentId={environmentId}
+          threadId={threadId}
           options={approval.options ?? DEFAULT_APPROVAL_OPTIONS}
           isResponding={isResponding}
           onRespondToApproval={onRespondToApproval}

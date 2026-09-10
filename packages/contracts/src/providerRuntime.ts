@@ -518,7 +518,12 @@ export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
 export const IntegrationApprovalChangeField = Schema.Struct({
   label: TrimmedNonEmptyStringSchema,
   value: Schema.String,
-  format: Schema.optional(Schema.Literals(["text", "markdown"])),
+  /**
+   * How `value` reads. `image` means it is the workspace-relative path of an
+   * image in the thread's workspace: the row shows the path, and the review
+   * dialog shows the picture, so the person approves what they can see.
+   */
+  format: Schema.optional(Schema.Literals(["text", "markdown", "image"])),
 });
 export type IntegrationApprovalChangeField = typeof IntegrationApprovalChangeField.Type;
 

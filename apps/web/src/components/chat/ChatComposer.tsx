@@ -4818,6 +4818,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         approval={activePendingApproval}
                         pendingCount={pendingApprovals.length}
                         environmentId={environmentId}
+                        threadId={activeThread?.id}
                         isResponding={respondingRequestIds.includes(
                           activePendingApproval.requestId,
                         )}

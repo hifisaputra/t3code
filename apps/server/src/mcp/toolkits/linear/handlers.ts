@@ -844,7 +844,7 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         change: {
           summary: `Upload ${image.fileName} to Linear`,
           fields: [
-            { label: "File", value: image.relativePath },
+            { label: "File", value: image.relativePath, format: "image" },
             { label: "Type", value: `${image.contentType}, ${formatBytes(image.sizeBytes)}` },
           ],
         },

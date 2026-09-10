@@ -1365,12 +1365,12 @@ it.effect("asks before the bytes leave the machine when confirmation is on", () 
               { decision: "acceptForSession", label: "Allow for this session" },
               { decision: "accept", label: "Approve" },
             ],
-            // The review dialog names the file that is about to leave the
+            // The review dialog shows the file that is about to leave the
             // machine, its type, and its size.
             change: {
               summary: "Upload after.png to Linear",
               fields: [
-                { label: "File", value: "shots/after.png" },
+                { label: "File", value: "shots/after.png", format: "image" },
                 { label: "Type", value: "image/png, 1 KB" },
               ],
             },

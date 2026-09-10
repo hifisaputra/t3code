@@ -4,11 +4,12 @@ import type {
   IntegrationApprovalChangeField,
   ProviderApprovalDecision,
   ProviderApprovalOption,
+  ThreadId,
 } from "@t3tools/contracts";
 import { ExternalLinkIcon } from "lucide-react";
 import { memo } from "react";
 
-import ChatMarkdown from "../ChatMarkdown";
+import ChatMarkdown, { ChatMarkdownAssetImage } from "../ChatMarkdown";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -29,6 +30,8 @@ interface IntegrationApprovalDialogProps {
   readonly record: { readonly label: string; readonly url?: string | undefined } | undefined;
   readonly fields: ReadonlyArray<IntegrationApprovalChangeField>;
   readonly environmentId: EnvironmentId;
+  /** The thread the write comes from; image fields resolve against its workspace. */
+  readonly threadId: ThreadId | undefined;
   readonly options: ReadonlyArray<ProviderApprovalOption>;
   readonly isResponding: boolean;
   readonly onRespondToApproval: (
@@ -59,6 +62,7 @@ export const IntegrationApprovalDialog = memo(function IntegrationApprovalDialog
   record,
   fields,
   environmentId,
+  threadId,
   options,
   isResponding,
   onRespondToApproval,
@@ -110,6 +114,18 @@ export const IntegrationApprovalDialog = memo(function IntegrationApprovalDialog
                   ) : (
                     <p className="min-w-0 text-sm break-words whitespace-pre-wrap">{field.value}</p>
                   )}
+                  {field.format === "image" && threadId !== undefined ? (
+                    // The bytes have not left the machine yet, so the picture
+                    // comes from the thread's workspace, the same root the
+                    // server read the path against.
+                    <ChatMarkdownAssetImage
+                      environmentId={environmentId}
+                      resource={{ _tag: "workspace-file", threadId, path: field.value }}
+                      alt={field.value}
+                      standalone
+                      maxHeightRem={20}
+                    />
+                  ) : null}
                 </div>
               ))
             )}
