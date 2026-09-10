@@ -1,11 +1,31 @@
 import type { EnvironmentId, LinearIssueSummary } from "@t3tools/contracts";
+import { CalendarPlusIcon, ClockIcon, EllipsisIcon, XIcon } from "lucide-react";
 import { useCallback, useState } from "react";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { CalendarFeed, type Snapshot } from "./CalendarFeed";
 import { dailyWork, type CalendarEntry } from "./calendarPlanning";
+import { formatClockTime } from "./calendarPresentation";
 import { calendarDayRange, localCalendarDate } from "./calendarTime";
 import { useCalendarNow } from "./useCalendarRefresh";
 
+/** What each block is called, and the badge tone that says it at a glance. */
+const BLOCK_LABELS = {
+  now: { label: "Now", variant: "success" },
+  next: { label: "Up next", variant: "info" },
+  later: { label: "Later", variant: "outline" },
+  ended: { label: "Ended", variant: "warning" },
+} as const;
+
+type BlockKind = keyof typeof BLOCK_LABELS;
+
+/**
+ * Today's linked work blocks, stacked for the planner's side column. Reads
+ * today on its own so it stays right while the grid shows another week.
+ */
 export function CalendarToday({
   environmentId,
   calendars,
@@ -64,50 +84,76 @@ export function CalendarToday({
       issue?.state.type !== "canceled"
     );
   });
-  const renderBlock = (event: CalendarEntry, label: string, followUp = false) => (
-    <li
-      key={`${event.calendarId}:${event.id}`}
-      className="flex flex-wrap items-center gap-2 rounded border p-2"
-    >
-      <span className="text-xs font-medium">{label}</span>
-      <span className="text-xs">
-        {new Date(event.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}–
-        {new Date(event.end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ·{" "}
-        {event.title} · {event.calendarTitle}
-      </span>
-      <Button size="sm" variant="outline" onClick={() => onWork(event.issueIdentifier!)}>
-        {hasThread(event.issueIdentifier!) ? "Resume thread" : "Start working"}
-      </Button>
-      {followUp ? (
-        <>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={disabled}
-            onClick={() => {
-              const next = new Date(Math.ceil((Date.now() + 60_000) / 1_800_000) * 1_800_000);
-              onSchedule(
-                event.issueIdentifier!,
-                localCalendarDate(next),
-                `${String(next.getHours()).padStart(2, "0")}:${String(next.getMinutes()).padStart(2, "0")}`,
-              );
-            }}
-          >
-            Plan another session
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setDismissed((current) => [...current, keyFor(event)])}
-          >
-            Dismiss
-          </Button>
-        </>
-      ) : null}
-    </li>
-  );
+  const renderBlock = (event: CalendarEntry, kind: BlockKind) => {
+    const tone = BLOCK_LABELS[kind];
+    return (
+      <li
+        key={`${event.calendarId}:${event.id}`}
+        className="rounded-lg px-2.5 py-1.5 transition-colors hover:bg-accent/40"
+      >
+        <div className="flex items-center gap-2">
+          <Badge size="sm" variant={tone.variant}>
+            {tone.label}
+          </Badge>
+          <span className="tabular-nums text-xs text-muted-foreground">
+            {formatClockTime(event.start)}–{formatClockTime(event.end)}
+          </span>
+          <span className="ml-auto flex shrink-0 items-center gap-0.5">
+            <Button size="xs" variant="ghost" onClick={() => onWork(event.issueIdentifier!)}>
+              {hasThread(event.issueIdentifier!) ? "Resume" : "Start"}
+            </Button>
+            {kind === "ended" ? (
+              <Menu>
+                <MenuTrigger
+                  render={
+                    <Button
+                      aria-label={`More for ${event.title}`}
+                      size="icon-xs"
+                      variant="ghost-muted"
+                    />
+                  }
+                >
+                  <EllipsisIcon aria-hidden />
+                </MenuTrigger>
+                <MenuPopup align="end" side="bottom" className="min-w-52">
+                  <MenuItem
+                    disabled={disabled}
+                    onClick={() => {
+                      const next = new Date(
+                        Math.ceil((Date.now() + 60_000) / 1_800_000) * 1_800_000,
+                      );
+                      onSchedule(
+                        event.issueIdentifier!,
+                        localCalendarDate(next),
+                        `${String(next.getHours()).padStart(2, "0")}:${String(next.getMinutes()).padStart(2, "0")}`,
+                      );
+                    }}
+                  >
+                    <CalendarPlusIcon aria-hidden />
+                    Plan another session
+                  </MenuItem>
+                  <MenuItem onClick={() => setDismissed((current) => [...current, keyFor(event)])}>
+                    <XIcon aria-hidden />
+                    Dismiss
+                  </MenuItem>
+                </MenuPopup>
+              </Menu>
+            ) : null}
+          </span>
+        </div>
+        <Tooltip>
+          <TooltipTrigger render={<p className="mt-0.5 truncate text-sm" />}>
+            {event.title}
+          </TooltipTrigger>
+          <TooltipPopup>
+            {event.title} · {event.calendarTitle}
+          </TooltipPopup>
+        </Tooltip>
+      </li>
+    );
+  };
   return (
-    <section className="space-y-2 rounded border p-2">
+    <section className="flex flex-col gap-1">
       {calendars.map((calendar) => (
         <CalendarFeed
           key={calendar.id}
@@ -118,48 +164,56 @@ export function CalendarToday({
           report={report}
         />
       ))}
-      <p className="text-sm font-medium">Today / Up next</p>
-      {incomplete ? (
-        <p role="status" className="text-xs">
-          Today’s schedule is incomplete. Use Refresh to retry.
-        </p>
-      ) : null}
+      <div className="flex items-center gap-2 px-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <ClockIcon aria-hidden className="size-3.5" />
+        Today
+        {incomplete ? (
+          <span role="status" className="font-normal normal-case tracking-normal">
+            incomplete, refresh to retry
+          </span>
+        ) : null}
+        {dismissed.length ? (
+          <Button
+            className="ms-auto normal-case tracking-normal"
+            size="xs"
+            variant="ghost"
+            onClick={() => setDismissed([])}
+          >
+            Restore dismissed
+          </Button>
+        ) : null}
+      </div>
       {selected
         .filter(({ snapshot }) => snapshot?.error)
         .map(({ calendar, snapshot }) => (
-          <p key={calendar.id} role="alert" className="text-xs text-destructive">
+          <p key={calendar.id} role="alert" className="px-2.5 text-xs text-destructive">
             {calendar.title}: {snapshot?.error}
           </p>
         ))}
-      <ul className="max-h-48 space-y-1 overflow-auto">
-        {work.current.map((event) => renderBlock(event, "Now"))}
-        {work.upcoming.map((event, index) =>
-          renderBlock(event, index === 0 ? "Up next" : "Later today"),
-        )}
-      </ul>
-      {!work.current.length && !work.upcoming.length && !incomplete ? (
-        <p className="text-xs text-muted-foreground">
-          No remaining linked work blocks today on the displayed calendars.
-        </p>
-      ) : null}
-      {dismissed.length ? (
-        <Button size="sm" variant="ghost" onClick={() => setDismissed([])}>
-          Restore dismissed reminders
-        </Button>
-      ) : null}
+      {work.current.length || work.upcoming.length ? (
+        <ul className="flex max-h-56 flex-col gap-0.5 overflow-y-auto">
+          {work.current.map((event) => renderBlock(event, "now"))}
+          {work.upcoming.map((event, index) => renderBlock(event, index === 0 ? "next" : "later"))}
+        </ul>
+      ) : incomplete ? null : (
+        <p className="px-2.5 text-xs text-muted-foreground">Nothing more scheduled today.</p>
+      )}
       {ended.length ? (
-        <details>
-          <summary className="cursor-pointer text-xs">
-            Ended blocks ({ended.length}) · Still unfinished?
-          </summary>
-          <p className="py-1 text-xs text-muted-foreground">
-            Plan more time if needed. Ending a block never completes the Linear issue. Dismiss hides
-            this reminder for this visit.
-          </p>
-          <ul className="max-h-48 space-y-1 overflow-auto">
-            {ended.map((event) => renderBlock(event, "Ended", true))}
-          </ul>
-        </details>
+        <Collapsible>
+          <CollapsibleTrigger className="px-2.5 text-xs text-muted-foreground hover:text-foreground">
+            Ended ({ended.length})
+          </CollapsibleTrigger>
+          <CollapsiblePanel>
+            <div className="flex flex-col gap-1 pt-1">
+              <p className="px-2.5 text-xs text-muted-foreground">
+                Ending a block never completes the Linear issue. Dismiss hides it for this visit.
+              </p>
+              <ul className="flex max-h-40 flex-col gap-0.5 overflow-y-auto">
+                {ended.map((event) => renderBlock(event, "ended"))}
+              </ul>
+            </div>
+          </CollapsiblePanel>
+        </Collapsible>
       ) : null}
     </section>
   );

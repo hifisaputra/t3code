@@ -15,10 +15,27 @@ export const defaultPlanningHours: PlanningHours = {
   breakMinutes: 15,
   focusMinutes: 240,
 };
-const clockMinute = (time: string) =>
+/** Minutes since local midnight for an `HH:MM` clock time, `NaN` when malformed. */
+export const clockMinute = (time: string) =>
   /^([01]\d|2[0-3]):[0-5]\d$/.test(time)
     ? Number(time.slice(0, 2)) * 60 + Number(time.slice(3))
     : NaN;
+
+const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+
+/**
+ * "Mon–Fri, 09:00–17:00" for the planner's captions. Consecutive days collapse
+ * to a range; anything else lists the days, Sunday first as `Date.getDay()`.
+ */
+export function formatPlanningHours(hours: PlanningHours): string {
+  const days = [...new Set(hours.weekdays)].filter((day) => day >= 0 && day <= 6).sort();
+  const consecutive =
+    days.length > 2 && days.every((day, index) => index === 0 || day === days[index - 1]! + 1);
+  const dayLabel = consecutive
+    ? `${WEEKDAY_NAMES[days[0]!]}–${WEEKDAY_NAMES[days[days.length - 1]!]}`
+    : days.map((day) => WEEKDAY_NAMES[day]).join(", ");
+  return `${dayLabel}, ${hours.start}–${hours.end}`;
+}
 export function validPlanningHours(value: PlanningHours): boolean {
   return (
     value.weekdays.length > 0 &&

@@ -16,25 +16,27 @@ To use an appointment you already created, find it on the selected day and choos
 
 ## Plan your week
 
-Open **Issues → Plan** to see your filtered Linear issues beside a Monday–Sunday calendar. Choose where to schedule work and choose other calendars in the searchable **Visible calendars** dropdown. T3 remembers your calendar choices and default duration on this device for each environment.
+Open **Issues → Plan** to see a Monday–Sunday calendar. The column beside it lists today's linked work blocks, then your filtered Linear issues. Hours outside your working hours are shaded.
 
-Drag an issue onto a time, or select an issue and enter its date, time, and duration. Review the proposed time and save it to Google Calendar. Drag a T3 work block to move it, or drag its bottom handle to change its end time; clicking the block also opens the time form. Calendar changes are saved only when you confirm the proposal.
+Open **Calendars** to choose which calendars appear in the week and which of those are checked for conflicts. Your scheduling calendar is always shown. The gear opens **Planning preferences**: the length of a new block and your working hours. T3 remembers these choices on this device for each environment.
 
-Busy events across the displayed calendars produce overlap warnings, but you can still save. Events marked Free in Google remain visible without blocking time. Open **Conflict calendars** to exclude individual visible calendars. Hidden calendars are excluded; these checks do not guarantee availability. Issue cards count linked blocks in the displayed week and calendars. Google changes refresh every minute while the calendar is visible and when you return to T3. **Refresh** retries immediately and preserves your unsaved proposal. To remove a block or link an existing appointment, use the agenda or issue detail scheduling controls.
+Drag an issue onto a time, or click the issue to open the scheduling form in the side column. Set the date, start time, length, and the calendar the block saves to, or click a time in the week to move the proposal there. Save it to Google Calendar when the dashed preview is where you want it. Drag a T3 work block to move it, or drag its bottom handle to change its end time; clicking the block opens the same form. Calendar changes are saved only when you confirm.
+
+Busy events on the calendars checked for conflicts produce overlap warnings, but you can still save. Events marked Free in Google remain visible without blocking time. Hidden calendars are never checked; these checks do not guarantee availability. Issue rows count linked blocks in the displayed week and calendars. Google changes refresh every minute while the calendar is visible and when you return to T3. **Refresh** retries immediately and preserves your unsaved proposal. To remove a block or link an existing appointment, use the agenda or issue detail scheduling controls.
 
 ## Find time for an issue
 
-In **Issues → Plan**, select an issue, enter the session duration, and choose **Find time**. T3 suggests up to six times in the displayed week, starting from now. Pick a suggestion to see its placement in the calendar, adjust it if needed, then save. You can also use Find time after choosing **Plan another session** for unfinished work.
+While scheduling a new block in **Issues → Plan**, the form lists **Suggested times**: up to six free slots in the displayed week that fit the block's length, starting from now. Pick one to place the proposal, adjust it if needed, then save. Suggestions also appear after choosing **Plan another session** for unfinished work.
 
-Expand **Working hours and planning limits** to set working days, start/end times, breaks around busy events, and a daily focus limit. Defaults are Monday–Friday, 09:00–17:00, 15-minute breaks, and four hours of focus time. The focus limit counts busy linked issue blocks on calendars selected for conflict checks, including earlier blocks that day. These preferences are saved on this device for each environment and can be reset.
+Open **Planning preferences** (the gear beside the calendar picker) to set working days, start and end times, breaks around busy events, and a daily focus limit. Defaults are Monday–Friday, 09:00–17:00, 15-minute breaks, and four hours of focus time. The focus limit counts busy linked issue blocks on calendars checked for conflicts, including earlier blocks that day. These preferences are saved on this device for each environment and can be reset.
 
-Suggestions use the displayed calendars selected for conflict checks and wait for complete reads. Free events do not block slots; busy all-day events do. Hidden or excluded calendars are not checked, and Google availability can change before saving. If nothing fits, try another week or a shorter session. This release suggests one session at a time; repeat to split work across sessions.
+Suggestions use the shown calendars that are checked for conflicts and wait for complete reads. Free events do not block slots; busy all-day events do. Hidden or unchecked calendars are not consulted, and Google availability can change before saving. If nothing fits, try another week, a shorter block, or wider working hours. Suggestions cover one session at a time; repeat to split work across sessions.
 
 ## Follow today’s work
 
-In **Issues → Plan**, **Today / Up next** shows current and upcoming linked work blocks across your displayed calendars, even while browsing a different week. Start or resume the issue’s thread from a block.
+In **Issues → Plan**, the **Today** section at the top of the side column shows current and upcoming linked work blocks across your shown calendars, even while browsing a different week. Start or resume the issue’s thread from a block.
 
-Open **Ended blocks** when you need more time. **Plan another session** proposes a new block in your selected write calendar; adjust the date, time, and duration, then save. It leaves the original event intact and never completes the Linear issue. Dismiss a reminder for this visit, or restore dismissed reminders. Known completed or canceled issues in the current issue list are omitted; other ended blocks ask whether more work is needed.
+Open **Ended** when you need more time. **Plan another session** proposes a new block in your scheduling calendar; adjust the date, time, and length, then save. It leaves the original event intact and never completes the Linear issue. Dismiss a reminder for this visit, or restore dismissed reminders. Known completed or canceled issues in the current issue list are omitted; other ended blocks ask whether more work is needed.
 
 ## Work from your agenda
 

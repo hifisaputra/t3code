@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import {
   availableCalendarSlots,
+  formatPlanningHours,
   defaultPlanningHours,
   readPlanningHours,
 } from "./calendarAvailability";
@@ -113,4 +114,14 @@ it("rejects invalid durations, settings and unreadable busy data", () => {
     defaultPlanningHours,
   );
   expect(readPlanningHours(null)).toEqual(defaultPlanningHours);
+});
+
+it("names working hours as a day range when the days run consecutively", () => {
+  expect(formatPlanningHours(defaultPlanningHours)).toBe("Mon–Fri, 09:00–17:00");
+  expect(formatPlanningHours({ ...defaultPlanningHours, weekdays: [1, 3, 5] })).toBe(
+    "Mon, Wed, Fri, 09:00–17:00",
+  );
+  expect(formatPlanningHours({ ...defaultPlanningHours, weekdays: [6, 0] })).toBe(
+    "Sun, Sat, 09:00–17:00",
+  );
 });
