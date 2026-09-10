@@ -30,6 +30,7 @@ import {
   type CanonicalRequestType,
   type ClaudeSettings,
   EventId,
+  MCP_TOOL_CALL_TIMEOUT_MS,
   type ProviderApprovalDecision,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -4703,6 +4704,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   headers: {
                     Authorization: mcpSession.authorizationHeader,
                   },
+                  // A write that raises an approval waits for a person, which
+                  // takes longer than the SDK's default per-call timeout. The
+                  // server's own approval window expires first and answers the
+                  // agent in words; this only keeps the call alive that long.
+                  timeout: MCP_TOOL_CALL_TIMEOUT_MS,
                 },
               },
             }

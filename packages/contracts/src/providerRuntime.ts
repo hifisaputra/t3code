@@ -523,6 +523,26 @@ export const IntegrationApprovalChangeField = Schema.Struct({
 export type IntegrationApprovalChangeField = typeof IntegrationApprovalChangeField.Type;
 
 /**
+ * How long an integration approval card stays answerable.
+ *
+ * The person answering it may be on a phone, away from the machine, or reading
+ * the change in full before deciding, so the window is minutes rather than the
+ * seconds a tool call usually takes.
+ */
+export const INTEGRATION_APPROVAL_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * What an adapter gives one `t3-code` MCP tool call before it gives up.
+ *
+ * Deliberately longer than the approval window: a call that is waiting on a
+ * person has to outlive the card, so the server resolves it with a sentence
+ * the agent can act on rather than the client aborting into an opaque timeout.
+ * An adapter whose runtime cannot set a per-server timeout leaves its own
+ * default in place and the agent sees that instead.
+ */
+export const MCP_TOOL_CALL_TIMEOUT_MS = INTEGRATION_APPROVAL_TIMEOUT_MS + 30_000;
+
+/**
  * Everything an integration write will change, whole.
  *
  * `detail` is the sentence the approval row shows and stays short enough for

@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import {
   ApprovalRequestId,
   EventId,
+  INTEGRATION_APPROVAL_TIMEOUT_MS,
   IsoDateTime,
   RuntimeRequestId,
   type IntegrationApprovalChange,
@@ -78,10 +79,12 @@ interface PendingApproval {
 }
 
 /**
- * An unanswered request cannot hold the MCP request fiber open forever: the
- * agent's own tool-call timeout would fire first and leave the card stranded.
+ * An unanswered request cannot hold the MCP request fiber open forever. The
+ * adapters give a `t3-code` call longer than this (`MCP_TOOL_CALL_TIMEOUT_MS`),
+ * so this is what expires first and the agent is told the person did not
+ * answer, rather than its own client aborting into an opaque timeout.
  */
-const DEFAULT_TIMEOUT = Duration.minutes(10);
+const DEFAULT_TIMEOUT = Duration.millis(INTEGRATION_APPROVAL_TIMEOUT_MS);
 
 const DEFAULT_OPTIONS: ReadonlyArray<ProviderApprovalOption> = [
   { decision: "decline", label: "Decline" },
