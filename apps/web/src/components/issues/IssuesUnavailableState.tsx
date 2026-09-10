@@ -38,7 +38,7 @@ export function IssuesUnavailableState({
       </EmptyMedia>
       <EmptyHeader>
         <EmptyTitle>{title}</EmptyTitle>
-        <EmptyDescription>{message}</EmptyDescription>
+        <EmptyDescription className="max-w-sm">{message}</EmptyDescription>
       </EmptyHeader>
       {onRetry || showSettingsLink ? (
         <EmptyContent className="flex-row flex-wrap justify-center gap-2">

@@ -3,19 +3,61 @@ import type {
   GoogleCalendarEvent,
   GoogleCalendarUpdateInput,
 } from "@t3tools/contracts";
+import { Link } from "@tanstack/react-router";
+import {
+  CalendarIcon,
+  CalendarOffIcon,
+  CalendarPlusIcon,
+  CheckCircle2Icon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CircleDotIcon,
+  EllipsisIcon,
+  ExternalLinkIcon,
+  Link2Icon,
+  Link2OffIcon,
+  MessageSquareIcon,
+  PlayIcon,
+  RepeatIcon,
+  SettingsIcon,
+  Trash2Icon,
+  XIcon,
+} from "lucide-react";
 import { useRef, useState } from "react";
-import { randomUUID } from "~/lib/utils";
+import { cn, randomUUID } from "~/lib/utils";
 import { ensureLocalApi } from "~/localApi";
 import { googleCalendarEnvironment as calendar } from "~/state/googleCalendar";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { Alert, AlertAction, AlertTitle } from "../ui/alert";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../ui/empty";
 import { Input } from "../ui/input";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
+import { RefreshIcon } from "../ui/refresh-icon";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { calendarSyncLabel, useCalendarRefresh } from "./useCalendarRefresh";
+import { Spinner } from "../ui/spinner";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { shiftCalendarDay } from "./calendarPlanning";
 import { useCalendarPreferences } from "./calendarPreferences";
+import { formatDayLabel, formatEventTimeRange } from "./calendarPresentation";
 import { calendarBlockRange, calendarDayRange, localCalendarDate } from "./calendarTime";
+import { calendarSyncLabel, useCalendarRefresh } from "./useCalendarRefresh";
 
+/**
+ * Scheduling for one issue, folded away until asked for. The agenda mounts only
+ * while the panel is open so the issue detail costs nothing until then.
+ */
 export function IssueCalendar({
   environmentId,
   identifier,
@@ -25,12 +67,45 @@ export function IssueCalendar({
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <section className="space-y-3">
-      <Button size="sm" variant="outline" onClick={() => setOpen(!open)}>
-        {open ? "Close scheduling" : "Schedule / Link calendar event"}
-      </Button>
-      {open ? <CalendarAgenda environmentId={environmentId} issueIdentifier={identifier} /> : null}
-    </section>
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger render={<Button size="sm" variant="outline" />}>
+        <CalendarPlusIcon aria-hidden className="size-3.5" />
+        {open ? "Hide scheduling" : "Schedule time"}
+        <ChevronDownIcon aria-hidden className={cn("size-3.5", open && "rotate-180")} />
+      </CollapsibleTrigger>
+      <CollapsiblePanel>
+        {open ? (
+          <div className="pt-3">
+            <CalendarAgenda environmentId={environmentId} issueIdentifier={identifier} />
+          </div>
+        ) : null}
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
+/** Bars in the geometry of an event row, pulsing on one composited layer. */
+function AgendaGhost() {
+  return (
+    <div
+      role="status"
+      aria-label="Loading events"
+      className="divide-y divide-border/60 motion-safe:animate-skeleton"
+    >
+      {["w-3/5", "w-2/5", "w-1/2"].map((width) => (
+        <div
+          key={width}
+          className="grid grid-cols-[5.5rem_minmax(0,1fr)_auto] items-start gap-3 px-3 py-2.5"
+        >
+          <div aria-hidden className="h-3.5 w-16 rounded bg-muted-foreground/15" />
+          <div className="min-w-0 space-y-1.5">
+            <div aria-hidden className={cn("h-3.5 rounded bg-muted-foreground/15", width)} />
+            <div aria-hidden className="h-3 w-1/4 rounded bg-muted-foreground/15" />
+          </div>
+          <div aria-hidden className="h-6 w-20 rounded bg-muted-foreground/15" />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -133,55 +208,124 @@ export function CalendarAgenda({
     }
   };
 
-  if (!status.data?.connected)
-    return (
-      <div className="space-y-2 text-sm text-muted-foreground">
-        <p role="status">
-          {status.error ??
-            (status.isPending
-              ? "Checking Google Calendar…"
-              : "Connect Google Calendar in Settings → Integrations to schedule issues.")}
+  const embedded = !!issueIdentifier;
+
+  if (!status.data?.connected) {
+    if (status.isPending && !status.data)
+      return (
+        <p className="flex items-center gap-2 text-xs text-muted-foreground" role="status">
+          <Spinner className="size-3.5" />
+          Checking Google Calendar…
         </p>
-        <Button size="sm" variant="outline" onClick={status.refresh}>
-          Check connection
-        </Button>
-      </div>
+      );
+    // Inside the issue detail the connection story is one line; the page can afford the
+    // full empty state.
+    if (embedded)
+      return (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span role="status">{status.error ?? "Google Calendar is not connected."}</span>
+          <Button size="xs" variant="link" render={<Link to="/settings/integrations" />}>
+            Open Integrations
+          </Button>
+        </div>
+      );
+    return (
+      <Empty className="px-4 py-12 md:px-4">
+        <EmptyMedia variant="icon">
+          <CalendarOffIcon />
+        </EmptyMedia>
+        <EmptyHeader>
+          <EmptyTitle>Google Calendar is not connected</EmptyTitle>
+          <EmptyDescription>
+            {status.error ??
+              "Connect it in Settings → Integrations to see your day and schedule issues."}
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent className="flex-row flex-wrap justify-center gap-2">
+          <Button size="sm" render={<Link to="/settings/integrations" />}>
+            <SettingsIcon aria-hidden className="size-3.5" />
+            Open Integrations
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={status.refresh}
+            disabled={status.isPending}
+            aria-busy={status.isPending}
+          >
+            <RefreshIcon className="size-3.5" refreshing={status.isPending} />
+            Check connection
+          </Button>
+        </EmptyContent>
+      </Empty>
     );
+  }
+
+  const loading =
+    (calendars.data === null && calendars.isPending) || (events.data === null && events.isPending);
+  const selectedTitle = calendars.data?.find((c) => c.id === calendarId)?.title;
 
   return (
-    <div className="space-y-4 p-1">
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="space-y-1 text-xs">
-          Calendar
-          <Select
-            value={calendarId}
-            onValueChange={(value) => {
-              if (value) {
-                savePreferences({ writeCalendarId: value });
-                setEditing(null);
-                setNotice(null);
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-0.5 rounded-lg border border-border/60 bg-card p-0.5">
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  aria-label="Previous day"
+                  size="icon-xs"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setDay(shiftCalendarDay(day, -1));
+                    setNotice(null);
+                  }}
+                />
               }
-            }}
-            disabled={busy}
-          >
-            <SelectTrigger className="w-56">
-              <SelectValue>
-                {calendars.data?.find((c) => c.id === calendarId)?.title ?? "Choose calendar"}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {calendars.data?.map((c) => (
-                <SelectItem key={c.id} value={c.id}>
-                  {c.title}
-                  {c.writable ? "" : " (read only)"}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-        </label>
-        <label className="space-y-1 text-xs">
-          Date
+            >
+              <ChevronLeftIcon aria-hidden />
+            </TooltipTrigger>
+            <TooltipPopup>Previous day</TooltipPopup>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  aria-label="Next day"
+                  size="icon-xs"
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() => {
+                    setDay(shiftCalendarDay(day, 1));
+                    setNotice(null);
+                  }}
+                />
+              }
+            >
+              <ChevronRightIcon aria-hidden />
+            </TooltipTrigger>
+            <TooltipPopup>Next day</TooltipPopup>
+          </Tooltip>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => {
+            setDay(localCalendarDate());
+            setNotice(null);
+          }}
+        >
+          Today
+        </Button>
+        {embedded ? (
+          <span className="text-sm font-medium tabular-nums">{formatDayLabel(day)}</span>
+        ) : (
           <Input
+            aria-label="Date"
+            className="w-40 text-sm"
+            size="sm"
             type="date"
             value={day}
             disabled={busy}
@@ -190,225 +334,367 @@ export function CalendarAgenda({
               setNotice(null);
             }}
           />
-        </label>
-        <Button
-          size="sm"
-          variant="outline"
+        )}
+        <Select
+          value={calendarId}
+          onValueChange={(value) => {
+            if (value) {
+              savePreferences({ writeCalendarId: value });
+              setEditing(null);
+              setNotice(null);
+            }
+          }}
           disabled={busy}
-          onClick={() => setDay(localCalendarDate())}
         >
-          Today
-        </Button>
-        <Button size="sm" variant="outline" disabled={busy || events.isPending} onClick={refresh}>
-          Refresh
-        </Button>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Times shown in {timeZone}. Refreshes every minute while visible and when you return.{" "}
-        {calendarSyncLabel(refreshedAt)}.
-      </p>
-      {issueIdentifier || editing ? (
-        <div className="flex flex-wrap items-end gap-2 rounded border border-border/60 p-3">
-          <label className="space-y-1 text-xs">
-            Start time
-            <Input
-              type="time"
-              value={time}
-              disabled={busy}
-              onChange={(e) => {
-                setTime(e.target.value);
-                setNotice(null);
-              }}
-            />
-          </label>
-          <label className="space-y-1 text-xs">
-            Minutes
-            <Input
-              className="w-24"
-              type="number"
-              min={5}
-              max={1440}
-              step={5}
-              value={minutes}
-              disabled={busy}
-              onChange={(e) => {
-                setMinutes(Number(e.target.value));
-                setNotice(null);
-              }}
-            />
-          </label>
-          {!editing ? (
-            <Button
-              size="sm"
-              disabled={busy || !writable || !blockRange}
-              onClick={() => void create()}
+          <SelectTrigger aria-label="Calendar" className="w-52 min-w-0" size="sm">
+            <CalendarIcon aria-hidden className="size-3.5" />
+            <SelectValue>{selectedTitle ?? "Choose calendar"}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            {calendars.data?.map((c) => (
+              <SelectItem key={c.id} value={c.id}>
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate">{c.title}</span>
+                  {c.writable ? null : (
+                    <span className="shrink-0 text-xs text-muted-foreground">Read only</span>
+                  )}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+        <div className="ms-auto flex items-center gap-2">
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  aria-label="Refresh calendar"
+                  size="icon-sm"
+                  variant="ghost"
+                  disabled={busy || events.isPending}
+                  aria-busy={events.isPending}
+                  onClick={refresh}
+                />
+              }
             >
-              Schedule {issueIdentifier}
+              <RefreshIcon className="size-3.5" refreshing={events.isPending} />
+            </TooltipTrigger>
+            <TooltipPopup className="max-w-64" side="bottom">
+              {calendarSyncLabel(refreshedAt)}. Refreshes every minute while visible.
+            </TooltipPopup>
+          </Tooltip>
+          <span className="hidden text-xs text-muted-foreground sm:inline">{timeZone}</span>
+        </div>
+      </div>
+
+      {notice ? (
+        <Alert role="status" variant="success">
+          <CheckCircle2Icon />
+          <AlertTitle>{notice}</AlertTitle>
+          <AlertAction>
+            <Button
+              aria-label="Dismiss"
+              size="icon-xs"
+              variant="ghost"
+              onClick={() => setNotice(null)}
+            >
+              <XIcon aria-hidden />
             </Button>
+          </AlertAction>
+        </Alert>
+      ) : null}
+      {calendars.error || events.error ? (
+        <Alert role="alert" variant="error">
+          <AlertTitle>{calendars.error ?? events.error}</AlertTitle>
+        </Alert>
+      ) : null}
+      {!dayRange ? (
+        <Alert role="alert" variant="error">
+          <AlertTitle>Choose a valid date.</AlertTitle>
+        </Alert>
+      ) : null}
+
+      {dayRange ? (
+        <div className="overflow-hidden rounded-lg border border-border/60 bg-card">
+          {loading ? (
+            <AgendaGhost />
+          ) : calendars.data?.length === 0 ? (
+            <Empty className="p-6 md:p-8">
+              <EmptyHeader>
+                <EmptyDescription>No readable calendars were found.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : events.data?.length === 0 ? (
+            <Empty className="p-6 md:p-8">
+              <EmptyHeader>
+                <EmptyDescription>No events on this day.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : (
-            <>
+            <ul className="divide-y divide-border/60">
+              {events.data?.map((event) => {
+                const editable = writable && !event.allDay && !event.recurring;
+                const target = { calendarId, eventId: event.id, etag: event.etag };
+                const canLink = editable && !!issueIdentifier && !event.issueIdentifier;
+                const canUnlink = editable && !!event.issueIdentifier;
+                const canMove = editable && event.createdByT3;
+                const hasMenu = !!event.url || canLink || canUnlink || canMove;
+                return (
+                  <li
+                    key={event.id}
+                    className="grid grid-cols-[5.5rem_minmax(0,1fr)_auto] items-start gap-3 px-3 py-2.5"
+                  >
+                    <div className="text-xs tabular-nums text-muted-foreground">
+                      <div>{formatEventTimeRange(event)}</div>
+                      {event.blocksTime === false ? (
+                        <div className="text-muted-foreground/70">Free</div>
+                      ) : null}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{event.title}</p>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                        {event.issueIdentifier ? (
+                          <Badge size="sm" variant="info">
+                            <CircleDotIcon aria-hidden />
+                            {event.issueIdentifier}
+                          </Badge>
+                        ) : null}
+                        {event.createdByT3 ? (
+                          <span className="text-[11px] text-muted-foreground">
+                            Scheduled from T3
+                          </span>
+                        ) : null}
+                        {event.recurring ? (
+                          <Tooltip>
+                            <TooltipTrigger render={<span className="inline-flex" />}>
+                              <RepeatIcon
+                                aria-label="Recurring event"
+                                className="size-3 text-muted-foreground"
+                              />
+                            </TooltipTrigger>
+                            <TooltipPopup>Recurring event</TooltipPopup>
+                          </Tooltip>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {event.issueIdentifier && onWork ? (
+                        <Button
+                          size="xs"
+                          onClick={() => {
+                            if (event.issueIdentifier) onWork(event.issueIdentifier);
+                          }}
+                        >
+                          {hasThread?.(event.issueIdentifier) ? (
+                            <>
+                              <MessageSquareIcon aria-hidden />
+                              Resume thread
+                            </>
+                          ) : (
+                            <>
+                              <PlayIcon aria-hidden />
+                              Start working
+                            </>
+                          )}
+                        </Button>
+                      ) : null}
+                      {hasMenu ? (
+                        <Menu>
+                          <MenuTrigger
+                            render={
+                              <Button
+                                aria-label={`Actions for ${event.title}`}
+                                size="icon-xs"
+                                variant="ghost-muted"
+                                disabled={busy}
+                              />
+                            }
+                          >
+                            <EllipsisIcon aria-hidden />
+                          </MenuTrigger>
+                          <MenuPopup align="end" side="bottom" className="min-w-52">
+                            {event.url ? (
+                              <MenuItem
+                                onClick={() => {
+                                  void ensureLocalApi()
+                                    .shell.openExternal(event.url)
+                                    .catch(() => setNotice("Could not open Google Calendar."));
+                                }}
+                              >
+                                <ExternalLinkIcon aria-hidden />
+                                Open in Google
+                              </MenuItem>
+                            ) : null}
+                            {canLink ? (
+                              <MenuItem
+                                onClick={() =>
+                                  void mutate({
+                                    ...target,
+                                    action: "link",
+                                    reference: issueIdentifier,
+                                  })
+                                }
+                              >
+                                <Link2Icon aria-hidden />
+                                Link to {issueIdentifier}
+                              </MenuItem>
+                            ) : null}
+                            {canUnlink ? (
+                              <MenuItem
+                                onClick={() => void mutate({ ...target, action: "unlink" })}
+                              >
+                                <Link2OffIcon aria-hidden />
+                                Unlink issue
+                              </MenuItem>
+                            ) : null}
+                            {canMove ? (
+                              <>
+                                <MenuSeparator />
+                                <MenuItem
+                                  onClick={() => {
+                                    const start = new Date(event.start);
+                                    setTime(
+                                      `${String(start.getHours()).padStart(2, "0")}:${String(start.getMinutes()).padStart(2, "0")}`,
+                                    );
+                                    setMinutes(
+                                      Math.round(
+                                        (Date.parse(event.end) - Date.parse(event.start)) / 60_000,
+                                      ),
+                                    );
+                                    setEditing(event);
+                                  }}
+                                >
+                                  <CalendarIcon aria-hidden />
+                                  Reschedule
+                                </MenuItem>
+                                <MenuItem
+                                  variant="destructive"
+                                  onClick={async () => {
+                                    const confirmed = await ensureLocalApi().dialogs.confirm(
+                                      `Remove “${event.title}” from Google Calendar? The Linear issue and its T3 thread will remain.`,
+                                    );
+                                    if (confirmed) void mutate({ ...target, action: "delete" });
+                                  }}
+                                >
+                                  <Trash2Icon aria-hidden />
+                                  Unschedule
+                                </MenuItem>
+                              </>
+                            ) : null}
+                          </MenuPopup>
+                        </Menu>
+                      ) : null}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      ) : null}
+
+      {issueIdentifier || editing ? (
+        <div className="rounded-lg border border-border/60 bg-card p-3">
+          <p className="text-sm font-medium">
+            {editing ? `Reschedule ${editing.title}` : `Schedule ${issueIdentifier}`}
+          </p>
+          <div className="mt-2 flex flex-wrap items-end gap-2">
+            {embedded ? (
+              <label className="flex flex-col gap-1">
+                <span className="text-xs text-muted-foreground">Date</span>
+                <Input
+                  aria-label="Date"
+                  className="w-40 text-sm"
+                  size="sm"
+                  type="date"
+                  value={day}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setDay(e.target.value);
+                    setNotice(null);
+                  }}
+                />
+              </label>
+            ) : null}
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">Start</span>
+              <Input
+                aria-label="Start time"
+                className="w-28 text-sm"
+                size="sm"
+                type="time"
+                value={time}
+                disabled={busy}
+                onChange={(e) => {
+                  setTime(e.target.value);
+                  setNotice(null);
+                }}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">Duration</span>
+              <span className="flex items-center gap-1.5">
+                <Input
+                  aria-label="Duration in minutes"
+                  className="w-20 text-sm"
+                  size="sm"
+                  type="number"
+                  min={5}
+                  max={1440}
+                  step={5}
+                  value={minutes}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setMinutes(Number(e.target.value));
+                    setNotice(null);
+                  }}
+                />
+                <span className="text-xs text-muted-foreground">min</span>
+              </span>
+            </label>
+            {editing ? (
+              <>
+                <Button
+                  size="sm"
+                  disabled={busy || !writable || !blockRange}
+                  onClick={() => {
+                    const event = editing;
+                    if (event && blockRange)
+                      void mutate({
+                        action: "move",
+                        calendarId,
+                        eventId: event.id,
+                        etag: event.etag,
+                        ...blockRange,
+                      });
+                  }}
+                >
+                  Save time
+                </Button>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>
+                  Cancel
+                </Button>
+              </>
+            ) : (
               <Button
                 size="sm"
                 disabled={busy || !writable || !blockRange}
-                onClick={() => {
-                  const event = editing;
-                  if (event && blockRange)
-                    void mutate({
-                      action: "move",
-                      calendarId,
-                      eventId: event.id,
-                      etag: event.etag,
-                      ...blockRange,
-                    });
-                }}
+                onClick={() => void create()}
               >
-                Save new time
+                Schedule
               </Button>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditing(null)}>
-                Cancel
-              </Button>
-            </>
-          )}
+            )}
+          </div>
           {!blockRange ? (
-            <p className="w-full text-xs" role="alert">
+            <p className="mt-2 text-xs text-destructive" role="alert">
               Choose a valid local time and a duration between 5 and 1,440 minutes.
             </p>
           ) : null}
+          {!writable ? (
+            <p className="mt-2 text-xs text-muted-foreground">This calendar is read only.</p>
+          ) : null}
         </div>
       ) : null}
-      {notice ? (
-        <p role="status" className="text-sm">
-          {notice}
-        </p>
-      ) : null}
-      {calendars.error || events.error ? (
-        <p role="alert" className="text-sm text-destructive">
-          {calendars.error ?? events.error}
-        </p>
-      ) : null}
-      {(calendars.data === null && calendars.isPending) ||
-      (events.data === null && events.isPending) ? (
-        <p role="status" className="text-sm text-muted-foreground">
-          Loading calendar…
-        </p>
-      ) : null}
-      {!dayRange ? (
-        <p role="alert" className="text-sm">
-          Choose a valid date.
-        </p>
-      ) : null}
-      {calendars.data?.length === 0 ? (
-        <p className="text-sm">No readable calendars were found.</p>
-      ) : null}
-      {events.data?.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No events on this day.</p>
-      ) : null}
-      <ul className="space-y-2">
-        {events.data?.map((event) => {
-          const editable = writable && !event.allDay && !event.recurring;
-          const target = { calendarId, eventId: event.id, etag: event.etag };
-          return (
-            <li key={event.id} className="space-y-2 rounded border border-border/60 p-3">
-              <div className="text-xs text-muted-foreground">
-                {eventTimeLabel(event)}
-                {event.blocksTime === false ? " · Free" : " · Busy"}
-              </div>
-              <p className="text-sm font-medium">{event.title}</p>
-              {event.issueIdentifier ? (
-                <p className="text-xs text-muted-foreground">Linked to {event.issueIdentifier}</p>
-              ) : null}
-              <div className="flex flex-wrap gap-2">
-                {event.url ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      void ensureLocalApi()
-                        .shell.openExternal(event.url)
-                        .catch(() => setNotice("Could not open Google Calendar."));
-                    }}
-                  >
-                    Open in Google
-                  </Button>
-                ) : null}
-                {event.issueIdentifier && onWork ? (
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      if (event.issueIdentifier) onWork(event.issueIdentifier);
-                    }}
-                  >
-                    {hasThread?.(event.issueIdentifier) ? "Resume thread" : "Start working"}
-                  </Button>
-                ) : null}
-                {editable && issueIdentifier && !event.issueIdentifier ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() =>
-                      void mutate({ ...target, action: "link", reference: issueIdentifier })
-                    }
-                  >
-                    Link to {issueIdentifier}
-                  </Button>
-                ) : null}
-                {editable && event.issueIdentifier ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => void mutate({ ...target, action: "unlink" })}
-                  >
-                    Unlink issue
-                  </Button>
-                ) : null}
-                {editable && event.createdByT3 ? (
-                  <>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() => {
-                        const start = new Date(event.start);
-                        setTime(
-                          `${String(start.getHours()).padStart(2, "0")}:${String(start.getMinutes()).padStart(2, "0")}`,
-                        );
-                        setMinutes(
-                          Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60_000),
-                        );
-                        setEditing(event);
-                      }}
-                    >
-                      Reschedule
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy}
-                      onClick={async () => {
-                        const confirmed = await ensureLocalApi().dialogs.confirm(
-                          `Remove “${event.title}” from Google Calendar? The Linear issue and its T3 thread will remain.`,
-                        );
-                        if (confirmed) void mutate({ ...target, action: "delete" });
-                      }}
-                    >
-                      Unschedule
-                    </Button>
-                  </>
-                ) : null}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
     </div>
   );
-}
-
-function eventTimeLabel(event: GoogleCalendarEvent): string {
-  if (event.allDay) return "All day";
-  const format = (value: string) =>
-    new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return `${format(event.start)} – ${format(event.end)}`;
 }

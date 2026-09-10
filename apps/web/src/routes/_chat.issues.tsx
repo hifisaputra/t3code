@@ -9,11 +9,13 @@ import type {
 import { resolveLinearRepositoryMapping } from "@t3tools/contracts";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useDebouncedCallback } from "@tanstack/react-pacer";
-import { SearchIcon } from "lucide-react";
+import { ArrowLeftIcon, CalendarDaysIcon, CalendarRangeIcon, ListIcon } from "lucide-react";
 import { useCallback, useEffectEvent, useMemo, useState } from "react";
 
 import { LinearIssueThreadDialog } from "../components/LinearIssueThreadDialog";
 import { IssueDetailPanel } from "../components/issues/IssueDetailPanel";
+import { IssueListGhost } from "../components/issues/IssueGhosts";
+import { IssueListToolbar } from "../components/issues/IssueListToolbar";
 import { IssueRow } from "../components/issues/IssueRow";
 import { IssuesUnavailableState } from "../components/issues/IssuesUnavailableState";
 import {
@@ -32,7 +34,6 @@ import {
   writeIssueListPreferences,
   type IssueListPreferencePatch,
   type IssueListPreferences,
-  type IssueListStateFilter,
 } from "../components/issues/issueListPreferences";
 import { Button } from "../components/ui/button";
 import {
@@ -42,18 +43,11 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "../components/ui/empty";
-import { Input } from "../components/ui/input";
 import { RefreshIcon } from "../components/ui/refresh-icon";
-import {
-  Select,
-  SelectItem,
-  SelectPopup,
-  SelectTrigger,
-  SelectValue,
-} from "../components/ui/select";
 import { SidebarInset } from "../components/ui/sidebar";
-import { Switch } from "../components/ui/switch";
 import { Spinner } from "../components/ui/spinner";
+import { Toggle, ToggleGroup } from "../components/ui/toggle-group";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { isElectron } from "../env";
 import { cn } from "../lib/utils";
@@ -66,19 +60,22 @@ import { buildThreadRouteParams } from "../threadRoutes";
 /** One fetch feeds every client-side filter; the server clamps anything larger. */
 const ISSUE_LIST_LIMIT = 100;
 const SEARCH_DEBOUNCE_MS = 250;
-/** Base UI selects carry a string value, so "no filter" needs one of its own. */
-const ALL = "__all__";
 
-const STATE_OPTIONS = [
-  { value: "open", label: "Open" },
-  { value: "active", label: "Active" },
-  { value: "todo", label: "Todo" },
-  { value: "backlog", label: "Backlog" },
-] as const satisfies ReadonlyArray<{ value: IssueListStateFilter; label: string }>;
+/** The list, or one of the two calendar views the same issues feed. */
+type IssuesView = "list" | "agenda" | "plan";
+
+const VIEW_TABS = [
+  { value: "list", label: "List", Icon: ListIcon },
+  { value: "agenda", label: "Agenda", Icon: CalendarDaysIcon },
+  { value: "plan", label: "Plan", Icon: CalendarRangeIcon },
+] as const satisfies ReadonlyArray<{ value: IssuesView; label: string; Icon: typeof ListIcon }>;
 
 type IssuesSearch = IssueListPreferences & {
   /** The issue identifier the detail panel is showing, e.g. `DEL-123`. */
   readonly selected?: string;
+  /** Which view is on screen; absent is the list. Never stored: it is where
+      the reader is, not how they narrowed the issues. */
+  readonly view?: "agenda" | "plan";
 };
 
 const boundedSearchValue = (raw: unknown): string | undefined =>
@@ -105,6 +102,7 @@ export const Route = createFileRoute("/_chat/issues")({
       ...(cycle ? { cycle } : {}),
       ...(q ? { q } : {}),
       ...(selected ? { selected } : {}),
+      ...(raw.view === "agenda" || raw.view === "plan" ? { view: raw.view } : {}),
     };
   },
   component: IssuesRouteView,
@@ -112,7 +110,7 @@ export const Route = createFileRoute("/_chat/issues")({
 
 function IssuesRouteView() {
   const search = Route.useSearch();
-  const [view, setView] = useState<"issues" | "agenda" | "plan">("issues");
+  const view: IssuesView = search.view ?? "list";
   const navigate = useNavigate({ from: Route.fullPath });
   const { environments } = useEnvironments();
   const allProjects = useProjects();
@@ -194,7 +192,12 @@ function IssuesRouteView() {
   // Rebuilt rather than spread so a cleared control leaves the URL instead of
   // lingering as an explicit `undefined`.
   const updateSearch = useCallback(
-    (patch: IssueListPreferencePatch & { selected?: string | undefined }) =>
+    (
+      patch: IssueListPreferencePatch & {
+        selected?: string | undefined;
+        view?: IssuesView | undefined;
+      },
+    ) =>
       void navigate({
         search: (previous: IssuesSearch): IssuesSearch => {
           const next = { ...previous, ...patch };
@@ -207,6 +210,7 @@ function IssuesRouteView() {
             ...(next.cycle ? { cycle: next.cycle } : {}),
             ...(next.q ? { q: next.q } : {}),
             ...(next.selected ? { selected: next.selected } : {}),
+            ...(next.view === "agenda" || next.view === "plan" ? { view: next.view } : {}),
           };
         },
         replace: true,
@@ -215,7 +219,7 @@ function IssuesRouteView() {
   );
 
   // A list control changes what the sidebar link should restore; the selected
-  // row is a URL concern and never reaches storage.
+  // row and the view are URL concerns and never reach storage.
   const updateListScope = useCallback(
     (patch: IssueListPreferencePatch) => {
       writeIssueListPreferences(
@@ -234,6 +238,13 @@ function IssuesRouteView() {
   // The URL is shared and stored, so it settles once the typing stops rather
   // than recording every keystroke as a destination.
   const commitQueryDebounced = useDebouncedCallback(commitQuery, { wait: SEARCH_DEBOUNCE_MS });
+  const changeQuery = useCallback(
+    (next: string) => {
+      setQueryInput(next);
+      commitQueryDebounced(next);
+    },
+    [commitQueryDebounced],
+  );
 
   const [dialog, setDialog] = useState<{ reference: string; key: number } | null>(null);
   const openThread = useCallback(
@@ -278,6 +289,7 @@ function IssuesRouteView() {
   // No server holds a key, or the one that did says it is gone: both are the
   // same missing setup, and the filters have nothing to filter until it exists.
   const linearConfigured = environmentId !== null && status.data?.status !== "unconfigured";
+  const refreshing = issuesQuery.isPending;
 
   const body = !linearConfigured ? (
     <IssuesUnavailableState
@@ -300,9 +312,8 @@ function IssuesRouteView() {
       refreshing={status.isPending}
     />
   ) : issues === null && issuesQuery.isPending ? (
-    <div className="flex items-center gap-2 p-6 text-muted-foreground text-xs">
-      <Spinner className="size-3.5" />
-      Loading issues...
+    <div className="min-h-0 overflow-y-auto px-2 py-2">
+      <IssueListGhost />
     </div>
   ) : issues === null ? (
     <IssuesUnavailableState
@@ -364,6 +375,7 @@ function IssuesRouteView() {
                 <IssueRow
                   issue={issue}
                   selected={issue.identifier === selectedIdentifier}
+                  showAssignee={search.scope === "all"}
                   linkedThread={linkedThreads.get(issue.identifier) ?? null}
                   onSelect={selectIssue}
                   onStartThread={startThreadForIssue}
@@ -376,8 +388,11 @@ function IssuesRouteView() {
       </div>
       {selectedIdentifier ? (
         <div className="min-h-0 overflow-y-auto border-border/60 md:border-l">
-          <div className="px-4 pt-3 md:hidden">
+          {/* Narrow enough and the detail is the whole page, so the way back
+              rides above it rather than scrolling away with the issue. */}
+          <div className="sticky top-0 z-10 flex items-center border-border/60 border-b bg-background/90 px-2 py-1.5 backdrop-blur md:hidden">
             <Button size="sm" variant="ghost" onClick={() => updateSearch({ selected: undefined })}>
+              <ArrowLeftIcon aria-hidden />
               Back to issues
             </Button>
           </div>
@@ -399,123 +414,70 @@ function IssuesRouteView() {
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <WorkspacePageHeader electron={isElectron} className="border-border border-b">
         <h1 className="truncate font-medium text-sm">Issues</h1>
-        <Button
-          size="sm"
-          variant={view === "issues" ? "secondary" : "ghost"}
-          onClick={() => setView("issues")}
-        >
-          List
-        </Button>
-        <Button
-          size="sm"
-          variant={view === "agenda" ? "secondary" : "ghost"}
-          onClick={() => setView("agenda")}
-        >
-          Agenda
-        </Button>
-        <Button
-          size="sm"
-          variant={view === "plan" ? "secondary" : "ghost"}
-          onClick={() => setView("plan")}
-        >
-          Plan
-        </Button>
-        <div className="min-w-0 flex-1" />
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          aria-label="Refresh issues"
-          disabled={issuesQuery.isPending}
-          onClick={() => {
-            status.refresh();
-            issuesQuery.refresh();
+        <ToggleGroup
+          aria-label="Issues view"
+          variant="segmented"
+          value={[view]}
+          onValueChange={(next) => {
+            const value = next[0];
+            if (!value || value === view) return;
+            updateSearch({ view: value === "list" ? undefined : (value as IssuesView) });
           }}
         >
-          <RefreshIcon className="size-3.5" refreshing={issuesQuery.isPending} />
-        </Button>
+          {VIEW_TABS.map((tab) => (
+            <Toggle key={tab.value} value={tab.value} aria-label={tab.label}>
+              <tab.Icon aria-hidden />
+              <span className="sr-only sm:not-sr-only">{tab.label}</span>
+            </Toggle>
+          ))}
+        </ToggleGroup>
+        <div className="min-w-0 flex-1" />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                aria-label="Refresh issues"
+                disabled={refreshing}
+                onClick={() => {
+                  status.refresh();
+                  issuesQuery.refresh();
+                }}
+              />
+            }
+          >
+            <RefreshIcon className="size-3.5" refreshing={refreshing} />
+          </TooltipTrigger>
+          <TooltipPopup>Refresh</TooltipPopup>
+        </Tooltip>
       </WorkspacePageHeader>
 
-      {/* The topbar is one fixed-height row, so the controls sit under it where
-          they can wrap instead of overflowing a narrow window. */}
-      {linearConfigured ? (
-        <div className="flex flex-wrap items-center gap-2 border-border/60 border-b px-3 py-2 sm:px-5">
-          <label className="flex items-center gap-2 text-sm">
-            <Switch
-              checked={search.scope !== "all"}
-              onCheckedChange={(checked) => updateListScope({ scope: checked ? undefined : "all" })}
-              aria-label="Assigned to me only"
-            />
-            Assigned to me only
-          </label>
-          <FilterSelect
-            label="State"
-            value={search.state}
-            options={STATE_OPTIONS.map((option) => ({ value: option.value, label: option.label }))}
-            onChange={(next) => updateListScope({ state: next as IssueListStateFilter })}
-          />
-          {linearEnvironments.length > 1 ? (
-            <FilterSelect
-              label="Server"
-              value={environmentId ?? ALL}
-              options={linearEnvironments.map((environment) => ({
-                value: environment.environmentId,
-                label: environment.label,
-              }))}
-              onChange={(next) => updateListScope({ environmentId: next as EnvironmentId })}
-            />
-          ) : null}
-          {facets.teams.length > 1 ? (
-            <FilterSelect
-              label="Team"
-              value={search.team ?? ALL}
-              allLabel="All teams"
-              options={facets.teams.map((team) => ({ value: team.key, label: team.name }))}
-              onChange={(next) => updateListScope({ team: next === ALL ? undefined : next })}
-            />
-          ) : null}
-          {facets.projects.length > 1 ? (
-            <FilterSelect
-              label="Project"
-              value={search.project ?? ALL}
-              allLabel="All projects"
-              options={facets.projects.map((entry) => ({ value: entry.id, label: entry.name }))}
-              onChange={(next) => updateListScope({ project: next === ALL ? undefined : next })}
-            />
-          ) : null}
-          {facets.cycles.length > 1 ? (
-            <FilterSelect
-              label="Cycle"
-              value={search.cycle ?? ALL}
-              allLabel="All cycles"
-              options={facets.cycles.map((cycle) => ({ value: cycle.id, label: cycle.label }))}
-              onChange={(next) => updateListScope({ cycle: next === ALL ? undefined : next })}
-            />
-          ) : null}
-          {projects.length > 1 && !everyIssueMapped ? (
-            <FilterSelect
-              label="Default repository"
-              value={project?.id ?? ALL}
-              options={projects.map((entry) => ({ value: entry.id, label: entry.title }))}
-              onChange={(next) => setPickedProjectId(next as ProjectId)}
-            />
-          ) : null}
-          <div className="relative min-w-40 flex-1 sm:max-w-64">
-            <SearchIcon
-              aria-hidden
-              className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-2.5 size-3.5 text-muted-foreground"
-            />
-            <Input
-              value={queryInput}
-              placeholder="Search issues"
-              aria-label="Search issues"
-              className="h-8 pl-8 text-sm"
-              onChange={(event) => {
-                setQueryInput(event.target.value);
-                commitQueryDebounced(event.target.value);
-              }}
-            />
-          </div>
-        </div>
+      {/* The agenda is the calendar's own list of days, which none of these
+          narrow; the plan reads the same filtered issues the list does. */}
+      {linearConfigured && view !== "agenda" ? (
+        <IssueListToolbar
+          state={search.state}
+          scope={search.scope === "all" ? "all" : "mine"}
+          query={queryInput}
+          onQueryChange={changeQuery}
+          facets={facets}
+          team={search.team}
+          project={search.project}
+          cycle={search.cycle}
+          environments={linearEnvironments}
+          environmentId={environmentId}
+          projects={projects}
+          projectId={project?.id ?? null}
+          showRepositoryPicker={!everyIssueMapped}
+          onPickProject={setPickedProjectId}
+          onChange={updateListScope}
+        >
+          <span className="ml-auto flex shrink-0 items-center gap-1.5 text-muted-foreground text-xs tabular-nums">
+            {visibleIssues.length === 1 ? "1 issue" : `${visibleIssues.length} issues`}
+            {issues !== null && refreshing ? <Spinner className="size-3" /> : null}
+          </span>
+        </IssueListToolbar>
       ) : null}
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -536,19 +498,21 @@ function IssuesRouteView() {
             }}
           />
         ) : view === "agenda" && environmentId ? (
-          <div className="overflow-y-auto p-4">
-            <CalendarAgenda
-              key={environmentId}
-              environmentId={environmentId}
-              hasThread={(identifier) =>
-                linkedThreads.get(identifier)?.environmentId === environmentId
-              }
-              onWork={(identifier) => {
-                const thread = linkedThreads.get(identifier);
-                if (thread?.environmentId === environmentId) openThread(thread);
-                else startThread(identifier);
-              }}
-            />
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="mx-auto w-full max-w-4xl px-4 py-4 sm:px-6">
+              <CalendarAgenda
+                key={environmentId}
+                environmentId={environmentId}
+                hasThread={(identifier) =>
+                  linkedThreads.get(identifier)?.environmentId === environmentId
+                }
+                onWork={(identifier) => {
+                  const thread = linkedThreads.get(identifier);
+                  if (thread?.environmentId === environmentId) openThread(thread);
+                  else startThread(identifier);
+                }}
+              />
+            </div>
           </div>
         ) : (
           body
@@ -570,43 +534,5 @@ function IssuesRouteView() {
         />
       ) : null}
     </SidebarInset>
-  );
-}
-
-function FilterSelect({
-  label,
-  value,
-  allLabel,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  /** Present only for a filter that can be cleared back to everything. */
-  allLabel?: string;
-  options: ReadonlyArray<{ value: string; label: string }>;
-  onChange: (value: string) => void;
-}) {
-  const active = options.find((option) => option.value === value);
-  return (
-    <Select value={value} onValueChange={(next) => onChange(String(next))}>
-      <SelectTrigger size="sm" className="w-auto min-w-28" aria-label={label}>
-        <SelectValue>
-          <span className="truncate">{active?.label ?? allLabel ?? label}</span>
-        </SelectValue>
-      </SelectTrigger>
-      <SelectPopup align="start" alignItemWithTrigger={false}>
-        {allLabel ? (
-          <SelectItem hideIndicator value={ALL}>
-            {allLabel}
-          </SelectItem>
-        ) : null}
-        {options.map((option) => (
-          <SelectItem hideIndicator key={option.value} value={option.value}>
-            <span className="truncate">{option.label}</span>
-          </SelectItem>
-        ))}
-      </SelectPopup>
-    </Select>
   );
 }
