@@ -135,3 +135,17 @@ export function inferImageExtension(input: { mimeType: string; fileName?: string
 
   return ".bin";
 }
+
+/**
+ * The image type a file name claims, for callers that must name the bytes to
+ * something outside this server. Extension-driven and allowlisted, so a file
+ * this server cannot identify as an image is `undefined` rather than a guess.
+ */
+export function imageMimeTypeForFileName(fileName: string): string | undefined {
+  const extensionMatch = /\.([a-z0-9]{1,8})$/i.exec(fileName.trim());
+  const extension = extensionMatch ? `.${extensionMatch[1]!.toLowerCase()}` : "";
+  if (!SAFE_IMAGE_FILE_EXTENSIONS.has(extension)) return undefined;
+
+  const mimeType = Mime.getType(extension);
+  return mimeType !== null && mimeType.startsWith("image/") ? mimeType : undefined;
+}

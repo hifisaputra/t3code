@@ -406,6 +406,39 @@ const CREATE_COMMENT_MUTATION = `
 `;
 
 /**
+ * Linear signs an upload rather than accepting the bytes: the mutation hands
+ * back a storage URL and the headers that URL was signed with, and the file
+ * goes there directly. `assetUrl` is the permanent address the markdown then
+ * points at.
+ */
+const FILE_UPLOAD_MUTATION = `
+  mutation T3CodeFileUpload($contentType: String!, $filename: String!, $size: Int!) {
+    fileUpload(contentType: $contentType, filename: $filename, size: $size) {
+      success
+      uploadFile {
+        assetUrl
+        uploadUrl
+        headers { key value }
+      }
+    }
+  }
+`;
+
+const FileUploadResult = Schema.Struct({
+  fileUpload: Schema.Struct({
+    success: Schema.Boolean,
+    uploadFile: Schema.NullOr(
+      Schema.Struct({
+        assetUrl: TrimmedNonEmptyString,
+        uploadUrl: TrimmedNonEmptyString,
+        headers: Schema.Array(Schema.Struct({ key: TrimmedNonEmptyString, value: Schema.String })),
+      }),
+    ),
+  }),
+});
+const decodeFileUploadResult = Schema.decodeUnknownEffect(FileUploadResult);
+
+/**
  * A failure that reached Linear, kept internal so an operation can tell a missing
  * issue from a broken request before it turns into a contract error.
  */
@@ -577,6 +610,16 @@ export class LinearApi extends Context.Service<
       { readonly id: string; readonly url: string },
       LinearUnavailableError | LinearOperationError
     >;
+    /**
+     * Store a file in the workspace's asset storage and return the URL that
+     * addresses it. The URL belongs to the workspace, not to one issue, so the
+     * same upload can be embedded in any comment or description in it.
+     */
+    readonly uploadFile: (input: {
+      readonly fileName: string;
+      readonly contentType: string;
+      readonly bytes: Uint8Array;
+    }) => Effect.Effect<{ readonly url: string }, LinearUnavailableError | LinearOperationError>;
   }
 >()("t3/linear/LinearApi") {}
 
@@ -1169,6 +1212,63 @@ export const make = Effect.gen(function* () {
     return result.commentUpdate.comment;
   });
 
+  const uploadFile = Effect.fn("LinearApi.uploadFile")(function* (input: {
+    readonly fileName: string;
+    readonly contentType: string;
+    readonly bytes: Uint8Array;
+  }) {
+    const result = yield* request({
+      operation: "uploadFile",
+      query: FILE_UPLOAD_MUTATION,
+      variables: {
+        contentType: input.contentType,
+        filename: input.fileName,
+        size: input.bytes.byteLength,
+      },
+      decode: decodeFileUploadResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    const upload = result.fileUpload.uploadFile;
+    if (!result.fileUpload.success || upload === null) {
+      return yield* new LinearOperationError({
+        operation: "uploadFile",
+        detail: "Linear refused the upload. The file may be larger than this workspace allows.",
+      });
+    }
+
+    // The signed headers are replayed exactly as Linear sent them; storage
+    // checks them against the signature and rejects an upload that drops one.
+    const response = yield* httpClient
+      .execute(
+        HttpClientRequest.put(upload.uploadUrl).pipe(
+          HttpClientRequest.setHeaders(
+            Object.fromEntries(upload.headers.map((header) => [header.key, header.value])),
+          ),
+          HttpClientRequest.setHeader("cache-control", "public, max-age=31536000"),
+          HttpClientRequest.bodyUint8Array(input.bytes, input.contentType),
+        ),
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new LinearOperationError({
+              operation: "uploadFile",
+              detail: "Could not reach Linear's file storage.",
+              cause,
+            }),
+        ),
+      );
+    // Storage answers a stored file with an empty body; draining it anyway
+    // releases the connection instead of leaving it open for the pool.
+    yield* Effect.ignore(response.text);
+    if (response.status < 200 || response.status >= 300) {
+      return yield* new LinearOperationError({
+        operation: "uploadFile",
+        detail: `Linear's file storage returned HTTP ${response.status}.`,
+      });
+    }
+    return { url: upload.assetUrl };
+  });
+
   return LinearApi.of({
     getComment,
     updateComment,
@@ -1186,6 +1286,7 @@ export const make = Effect.gen(function* () {
     createIssue,
     labels,
     createComment,
+    uploadFile,
   });
 });
 

@@ -1,8 +1,10 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   ApprovalRequestId,
   EnvironmentId,
   LinearOperationError,
+  OrchestrationProjectShell,
   OrchestrationThreadShell,
   PreviewAutomationUnavailableError,
   ProjectId,
@@ -17,8 +19,10 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -27,6 +31,7 @@ import { McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import * as LinearApi from "../../../linear/LinearApi.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
+import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
 import * as McpApprovalBroker from "../../McpApprovalBroker.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { LinearToolkitHandlersLive } from "./handlers.ts";
@@ -143,6 +148,7 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       createComment: () => Effect.die("unused"),
       getComment: () => Effect.die("unused"),
       updateComment: () => Effect.die("unused"),
+      uploadFile: () => Effect.die("unused"),
       ...overrides,
     }),
   );
@@ -188,7 +194,24 @@ const threadShell = (linkedIssue: { readonly id: string } | null, session: boole
           },
   });
 
-const projectionLayer = (linkedIssue: { readonly id: string } | null, session: boolean = false) =>
+const decodeProjectShell = Schema.decodeUnknownSync(OrchestrationProjectShell);
+
+const projectShell = (workspaceRoot: string) =>
+  decodeProjectShell({
+    id: projectId,
+    title: "Linear MCP test",
+    workspaceRoot,
+    defaultModelSelection: null,
+    scripts: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+
+const projectionLayer = (
+  linkedIssue: { readonly id: string } | null,
+  session: boolean = false,
+  workspaceRoot?: string,
+) =>
   Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
     getTurnStartMessage: () => Effect.die("unused"),
     getImportedAgentSessionSources: () => Effect.die("unused"),
@@ -201,7 +224,10 @@ const projectionLayer = (linkedIssue: { readonly id: string } | null, session: b
     getCounts: () => Effect.die("unused"),
     getEventReplayStats: () => Effect.die("unused"),
     getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
-    getProjectShellById: () => Effect.die("unused"),
+    getProjectShellById: () =>
+      workspaceRoot === undefined
+        ? Effect.die("unused")
+        : Effect.succeed(Option.some(projectShell(workspaceRoot))),
     getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
     getThreadCheckpointContext: () => Effect.die("unused"),
     getFullThreadDiffContext: () => Effect.die("unused"),
@@ -221,6 +247,8 @@ const testLayer = (input: {
   readonly linkedIssue?: { readonly id: string } | null;
   readonly confirmAgentWrites?: boolean;
   readonly session?: boolean;
+  /** Set for the tools that read files the agent named, unset for the rest. */
+  readonly workspaceRoot?: string;
 }) =>
   // `provideMerge` because the toolkit's own `handle` keeps the tool
   // dependencies in its requirements; the layer has to satisfy both sides.
@@ -231,13 +259,16 @@ const testLayer = (input: {
         projectionLayer(
           input.linkedIssue === undefined ? { id: issue.id } : input.linkedIssue,
           input.session ?? input.confirmAgentWrites === true,
+          input.workspaceRoot,
         ),
         McpApprovalBroker.layer,
         ServerSettingsService.layerTest({
           linear: { confirmAgentWrites: input.confirmAgentWrites ?? false },
         }),
+        WorkspacePaths.layer.pipe(Layer.provide(NodeServices.layer)),
       ),
     ),
+    Layer.provideMerge(NodeServices.layer),
   );
 
 const callTool = <Name extends keyof typeof LinearToolkit.tools>(
@@ -1199,3 +1230,174 @@ it.effect("edits a cycle by ID without requiring a linked issue", () => {
     ),
   );
 });
+
+/** A PNG signature is enough: the server names the type from the extension. */
+const pngBytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+const withWorkspace = <A, E, R>(
+  run: (input: {
+    readonly root: string;
+    readonly write: (relativePath: string, bytes: Uint8Array) => Effect.Effect<void>;
+  }) => Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-linear-upload-" });
+    return yield* run({
+      root,
+      write: (relativePath, bytes) =>
+        Effect.gen(function* () {
+          const target = path.join(root, relativePath);
+          yield* fileSystem.makeDirectory(path.dirname(target), { recursive: true });
+          yield* fileSystem.writeFile(target, bytes);
+        }).pipe(Effect.orDie),
+    });
+  }).pipe(Effect.provide(NodeServices.layer));
+
+it.effect("uploads a workspace image and hands back markdown to embed", () =>
+  withWorkspace(({ root, write }) =>
+    Effect.gen(function* () {
+      yield* write("shots/after.png", pngBytes);
+      const uploaded: Array<{ readonly fileName: string; readonly contentType: string }> = [];
+
+      const result = yield* callTool("upload_image", {
+        path: "shots/after.png",
+        alt: "The empty state, after",
+      }).pipe(
+        Effect.provide(
+          testLayer({
+            workspaceRoot: root,
+            linear: {
+              uploadFile: (input) =>
+                Effect.sync(() => {
+                  uploaded.push({ fileName: input.fileName, contentType: input.contentType });
+                  assert.deepStrictEqual(input.bytes, pngBytes);
+                  return { url: "https://uploads.linear.app/acme/after.png" };
+                }),
+            },
+          }),
+        ),
+      );
+
+      assert.deepStrictEqual(uploaded, [{ fileName: "after.png", contentType: "image/png" }]);
+      assert.deepStrictEqual(result, {
+        url: "https://uploads.linear.app/acme/after.png",
+        name: "after.png",
+        markdown: "![The empty state, after](https://uploads.linear.app/acme/after.png)",
+      });
+    }),
+  ),
+);
+
+it.effect("names the file in the markdown when the agent wrote no alt text", () =>
+  withWorkspace(({ root, write }) =>
+    Effect.gen(function* () {
+      yield* write("after.png", pngBytes);
+
+      const result = yield* callTool("upload_image", { path: "after.png" }).pipe(
+        Effect.provide(
+          testLayer({
+            workspaceRoot: root,
+            linear: {
+              uploadFile: () => Effect.succeed({ url: "https://uploads.linear.app/a.png" }),
+            },
+          }),
+        ),
+      );
+
+      assert.strictEqual(
+        (result as { readonly markdown: string }).markdown,
+        "![after.png](https://uploads.linear.app/a.png)",
+      );
+    }),
+  ),
+);
+
+it.effect("refuses a path that climbs out of the thread's workspace", () =>
+  withWorkspace(({ root }) =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        callTool("upload_image", { path: "../elsewhere/secret.png" }).pipe(
+          Effect.provide(testLayer({ workspaceRoot: root, linear: {} })),
+        ),
+      );
+      assert.include(operationError(error).detail, "outside this thread's workspace");
+    }),
+  ),
+);
+
+it.effect("refuses a file it cannot identify as an image", () =>
+  withWorkspace(({ root, write }) =>
+    Effect.gen(function* () {
+      yield* write("notes.txt", new TextEncoder().encode("not an image"));
+
+      const error = yield* Effect.flip(
+        callTool("upload_image", { path: "notes.txt" }).pipe(
+          Effect.provide(testLayer({ workspaceRoot: root, linear: {} })),
+        ),
+      );
+      assert.include(operationError(error).detail, "not an image");
+    }),
+  ),
+);
+
+it.effect("asks before the bytes leave the machine when confirmation is on", () =>
+  withWorkspace(({ root, write }) =>
+    Effect.gen(function* () {
+      yield* write("shots/after.png", pngBytes);
+      const uploaded: Array<string> = [];
+
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const pending = yield* Effect.forkScoped(
+            callTool("upload_image", { path: "shots/after.png" }),
+          );
+          const opened = yield* nextApprovalEvent;
+
+          assert.strictEqual(opened.type, "request.opened");
+          assert.deepStrictEqual(opened.payload, {
+            requestType: "integration_write_approval",
+            appName: "Linear",
+            detail: "Upload after.png to Linear\nFile: shots/after.png\nType: image/png, 1 KB",
+            options: [
+              { decision: "decline", label: "Decline" },
+              { decision: "acceptForSession", label: "Allow for this session" },
+              { decision: "accept", label: "Approve" },
+            ],
+            // The review dialog names the file that is about to leave the
+            // machine, its type, and its size.
+            change: {
+              summary: "Upload after.png to Linear",
+              fields: [
+                { label: "File", value: "shots/after.png" },
+                { label: "Type", value: "image/png, 1 KB" },
+              ],
+            },
+            args: { path: "shots/after.png" },
+          });
+          // Nothing leaves the machine while the card is open.
+          assert.deepStrictEqual(uploaded, []);
+
+          assert.isTrue(yield* answer(opened, "accept"));
+          yield* Fiber.join(pending);
+          assert.deepStrictEqual(uploaded, ["after.png"]);
+        }),
+      ).pipe(
+        Effect.provide(
+          testLayer({
+            workspaceRoot: root,
+            confirmAgentWrites: true,
+            linear: {
+              uploadFile: (input) =>
+                Effect.sync(() => {
+                  uploaded.push(input.fileName);
+                  return { url: "https://uploads.linear.app/acme/after.png" };
+                }),
+            },
+          }),
+        ),
+      );
+    }),
+  ),
+);

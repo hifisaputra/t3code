@@ -908,3 +908,90 @@ it.effect("passes issue search filters and pagination through to Linear", () => 
     });
   }).pipe(Effect.provide(layer));
 });
+
+const signedUpload = {
+  fileUpload: {
+    success: true,
+    uploadFile: {
+      assetUrl: "https://uploads.linear.app/acme/after.png",
+      uploadUrl: "https://storage.linear.test/signed",
+      headers: [{ key: "x-amz-signature", value: "signature" }],
+    },
+  },
+};
+
+it.effect("signs an upload, replays the signed headers, and returns the asset URL", () => {
+  const { execute, layer } = makeLayer({
+    response: (request) =>
+      request.method === "PUT"
+        ? new Response(null, { status: 200 })
+        : Response.json({ data: signedUpload }),
+  });
+
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+    const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+
+    assert.deepStrictEqual(
+      yield* api.uploadFile({ fileName: "after.png", contentType: "image/png", bytes }),
+      { url: "https://uploads.linear.app/acme/after.png" },
+    );
+
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      contentType: "image/png",
+      filename: "after.png",
+      size: 4,
+    });
+
+    // The bytes go to storage, not through Linear's API, under the headers the
+    // signature was issued for.
+    const upload = execute.mock.calls[1]![0];
+    assert.strictEqual(upload.url, "https://storage.linear.test/signed");
+    assert.strictEqual(upload.method, "PUT");
+    assert.strictEqual(upload.headers["x-amz-signature"], "signature");
+    assert.strictEqual(upload.headers["cache-control"], "public, max-age=31536000");
+    assert.strictEqual(upload.body._tag, "Uint8Array");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reports the status when storage rejects the upload", () => {
+  const { layer } = makeLayer({
+    response: (request) =>
+      request.method === "PUT"
+        ? new Response("expired", { status: 403 })
+        : Response.json({ data: signedUpload }),
+  });
+
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(
+      api.uploadFile({
+        fileName: "after.png",
+        contentType: "image/png",
+        bytes: Uint8Array.from([1]),
+      }),
+    );
+    assert.instanceOf(error, LinearOperationError);
+    assert.include(error.detail, "HTTP 403");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("refuses an upload Linear declines to sign", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { fileUpload: { success: false, uploadFile: null } } }),
+  });
+
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(
+      api.uploadFile({
+        fileName: "after.png",
+        contentType: "image/png",
+        bytes: Uint8Array.from([1]),
+      }),
+    );
+    assert.instanceOf(error, LinearOperationError);
+    // Nothing left the machine once Linear refused to sign for it.
+    assert.strictEqual(execute.mock.calls.length, 1);
+  }).pipe(Effect.provide(layer));
+});

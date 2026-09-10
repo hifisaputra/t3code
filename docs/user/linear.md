@@ -146,6 +146,7 @@ The tools are:
 - `get_issue` reads an issue, including its assignee, project, milestone, cycle, estimate, and labels.
 - `list_issues` searches across assignees by title, team, project, assignee, or workflow state, with pagination. `list_my_issues` lists your open issues.
 - `list_comments` reads the comment thread; `save_comment` posts or edits a comment.
+- `upload_image` puts a screenshot on the issue. See [Screenshots on issues](#screenshots-on-issues).
 - `list_issue_statuses` lists a team's workflow states.
 - `save_issue` updates an issue's title, description, state, labels, assignee, project, milestone, cycle, estimate, priority, or due date. `create_issue` accepts these fields when filing a new issue.
 - `list_projects`, `get_project`, and `save_project` find, read, create, or edit projects.
@@ -165,6 +166,18 @@ supplied. Estimates use the team's numeric scale and dates use `YYYY-MM-DD`.
 
 These tools cover issue planning and common resource management; they do not provide every
 operation from Linear's official MCP server. Deletion and agent delegation are not exposed.
+
+### Screenshots on issues
+
+An agent can show its work instead of only describing it. It saves an image in the project,
+such as a screenshot of the page it changed, passes that path to `upload_image`, and gets back
+a Linear URL with the markdown to embed. That markdown in a comment or an issue description
+renders in Linear like any image you upload yourself.
+
+The file has to be inside the thread's workspace, or its worktree when the thread has one, up
+to 20 MB, in a common image format. The upload belongs to the Linear workspace rather than to
+one issue, so the same URL can be embedded in as many comments and issues as the agent needs.
+Uploads ask for approval like any other write.
 
 Writes wait for you. **Ask before agents write to Linear** sits in the same settings group and is
 on by default. Every comment, edit, or new issue an agent wants to make shows up as an approval in

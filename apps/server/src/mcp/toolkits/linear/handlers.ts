@@ -10,11 +10,15 @@ import {
   type LinearTeamRef,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 
+import { imageMimeTypeForFileName } from "../../../imageMime.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
+import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
 import { McpApprovalBroker } from "../../McpApprovalBroker.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { LinearToolkit } from "./tools.ts";
@@ -275,6 +279,129 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
       detail: "The user did not approve this change in time. Ask them, then try again.",
     });
   }
+});
+
+/**
+ * Large enough for a full-page screenshot, small enough that a mistyped path
+ * to a video or a database dump is refused here rather than by storage after
+ * the bytes have already left the machine.
+ */
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+const formatBytes = (bytes: number): string =>
+  bytes < 1024 * 1024
+    ? `${Math.max(1, Math.round(bytes / 1024))} KB`
+    : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+
+/**
+ * Where the agent's own paths are rooted: its worktree when the thread has
+ * one, and the project's workspace otherwise. This is the directory the
+ * provider runs in, so a path the agent just wrote is a path it can name here.
+ */
+const threadWorkspaceRoot = Effect.fn("LinearToolkit.threadWorkspaceRoot")(function* (
+  operation: string,
+  scope: Scope,
+) {
+  const projections = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const unreadable = new LinearOperationError({
+    operation,
+    detail: "Could not read this thread's workspace.",
+  });
+  const thread = Option.getOrUndefined(
+    yield* projections.getThreadShellById(scope.threadId).pipe(Effect.mapError(() => unreadable)),
+  );
+  if (thread === undefined) return yield* unreadable;
+  if (thread.worktreePath !== null) return thread.worktreePath;
+
+  const project = Option.getOrUndefined(
+    yield* projections
+      .getProjectShellById(thread.projectId)
+      .pipe(Effect.mapError(() => unreadable)),
+  );
+  if (project === undefined) return yield* unreadable;
+  return project.workspaceRoot;
+});
+
+/**
+ * Everything about an image the agent named except its bytes: enough to
+ * describe the upload in an approval, and to refuse a bad path before anything
+ * is read.
+ *
+ * The path is confined to the thread's workspace twice: once as written, and
+ * again after the filesystem resolves it, because a symlink inside the
+ * workspace can still point outside it.
+ */
+const inspectWorkspaceImage = Effect.fn("LinearToolkit.inspectWorkspaceImage")(function* (
+  operation: string,
+  scope: Scope,
+  requested: string,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+  const root = yield* threadWorkspaceRoot(operation, scope);
+  const outside = new LinearOperationError({
+    operation,
+    detail: `"${requested}" is outside this thread's workspace. Pass a path inside it, relative to its root.`,
+  });
+  const unreadable = new LinearOperationError({
+    operation,
+    detail: `Could not read "${requested}". Pass the path of an image file inside this thread's workspace.`,
+  });
+
+  // An agent that names an absolute path is naming a place, not escaping one:
+  // it is confined to the same root as any relative path.
+  const asWritten = path.isAbsolute(requested) ? path.relative(root, requested) : requested;
+  const resolved = yield* workspacePaths
+    .resolveRelativePathWithinRoot({ workspaceRoot: root, relativePath: asWritten })
+    .pipe(Effect.mapError(() => outside));
+
+  const [canonicalRoot, canonicalFile] = yield* Effect.all([
+    fileSystem.realPath(root),
+    fileSystem.realPath(resolved.absolutePath),
+  ]).pipe(Effect.mapError(() => unreadable));
+  const canonicalRelative = path.relative(canonicalRoot, canonicalFile);
+  if (
+    canonicalRelative.length === 0 ||
+    canonicalRelative.startsWith("..") ||
+    path.isAbsolute(canonicalRelative)
+  ) {
+    return yield* outside;
+  }
+
+  const info = yield* fileSystem.stat(canonicalFile).pipe(Effect.mapError(() => unreadable));
+  if (info.type !== "File") return yield* unreadable;
+
+  const fileName = path.basename(canonicalFile);
+  const contentType = imageMimeTypeForFileName(fileName);
+  if (contentType === undefined) {
+    return yield* new LinearOperationError({
+      operation,
+      detail: `"${resolved.relativePath}" is not an image this server can identify. Pass a PNG, JPEG, GIF, WebP, AVIF, BMP, TIFF, HEIC, ICO, or SVG file.`,
+    });
+  }
+  if (info.size === 0n) {
+    return yield* new LinearOperationError({
+      operation,
+      detail: `"${resolved.relativePath}" is empty.`,
+    });
+  }
+  if (info.size > BigInt(MAX_UPLOAD_BYTES)) {
+    return yield* new LinearOperationError({
+      operation,
+      detail: `"${resolved.relativePath}" is ${formatBytes(Number(info.size))}, over the ${formatBytes(MAX_UPLOAD_BYTES)} upload limit.`,
+    });
+  }
+
+  return {
+    contentType,
+    fileName,
+    relativePath: resolved.relativePath,
+    sizeBytes: Number(info.size),
+    // The approval can sit for minutes; re-reading after it keeps the file out
+    // of memory until it is actually going somewhere.
+    read: fileSystem.readFile(canonicalFile).pipe(Effect.mapError(() => unreadable)),
+  };
 });
 
 const isResourceId = (value: string | undefined) =>
@@ -704,6 +831,31 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       return yield* comment === undefined
         ? linear.createComment({ issueId: issue.id, body })
         : linear.updateComment({ id: comment.id, body });
+    }),
+
+  upload_image: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const image = yield* inspectWorkspaceImage("upload_image", scope, input.path.trim());
+      const alt = named(input.alt) ?? image.fileName;
+      yield* confirmWrite("upload_image", scope, {
+        appName: "Linear",
+        change: {
+          summary: `Upload ${image.fileName} to Linear`,
+          fields: [
+            { label: "File", value: image.relativePath },
+            { label: "Type", value: `${image.contentType}, ${formatBytes(image.sizeBytes)}` },
+          ],
+        },
+        args: input,
+      });
+      const { url } = yield* linear.uploadFile({
+        fileName: image.fileName,
+        contentType: image.contentType,
+        bytes: yield* image.read,
+      });
+      return { url, name: image.fileName, markdown: `![${alt}](${url})` };
     }),
 
   save_issue: (input) =>

@@ -14,12 +14,15 @@ import {
   PreviewAutomationUnavailableError,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
 
 import * as LinearApi from "../../../linear/LinearApi.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
+import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
 import { McpApprovalBroker } from "../../McpApprovalBroker.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -31,6 +34,14 @@ const dependencies = [
   // call so the confirmation setting can change mid-session.
   ServerSettingsService,
   McpApprovalBroker,
+];
+
+/** Reading a file the agent named needs the workspace on top of the rest. */
+const uploadDependencies = [
+  ...dependencies,
+  FileSystem.FileSystem,
+  Path.Path,
+  WorkspacePaths.WorkspacePaths,
 ];
 
 /**
@@ -168,6 +179,35 @@ export const SaveCommentTool = linearTool(
     dependencies,
   })
     .annotate(Tool.Title, "Comment on Linear issue")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, false),
+);
+
+export const UploadImageTool = linearTool(
+  Tool.make("upload_image", {
+    description:
+      "Upload an image from this thread's workspace to Linear and get back a URL to embed. Use it for screenshots and other visual evidence of the work: save the image in the workspace, upload it here, then put the returned markdown in a save_comment body or a save_issue description. The URL belongs to the Linear workspace, so one upload can be embedded in as many comments and issues as you like.",
+    parameters: Schema.Struct({
+      path: describedText(
+        "Path to the image file, relative to this thread's workspace root. PNG, JPEG, GIF, WebP, AVIF, BMP, TIFF, HEIC, ICO, and SVG are accepted, up to 20 MB.",
+      ),
+      alt: Schema.optional(
+        describedText(
+          "Alt text describing what the image shows, for the markdown. Defaults to the file name.",
+        ),
+      ),
+    }),
+    success: Schema.Struct({
+      /** The workspace asset URL, permanent and usable in any Linear markdown. */
+      url: Schema.String,
+      name: TrimmedNonEmptyString,
+      /** Ready to paste into a comment or description, so the agent need not build it. */
+      markdown: TrimmedNonEmptyString,
+    }),
+    failure: LinearToolError,
+    dependencies: uploadDependencies,
+  })
+    .annotate(Tool.Title, "Upload image to Linear")
     .annotate(Tool.Readonly, false)
     .annotate(Tool.Idempotent, false),
 );
@@ -539,6 +579,7 @@ export const LinearToolkit = Toolkit.make(
   ListIssueStatusesTool,
   ListMyIssuesTool,
   SaveCommentTool,
+  UploadImageTool,
   SaveIssueTool,
   CreateIssueTool,
   ListIssuesTool,

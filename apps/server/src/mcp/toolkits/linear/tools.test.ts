@@ -62,6 +62,9 @@ it("mirrors the Linear MCP tool names so an existing skill keeps working", () =>
       "list_my_issues",
       "save_comment",
       "save_issue",
+      // Linear's own MCP server cannot reach the agent's workspace, so the
+      // upload has no name over there to mirror.
+      "upload_image",
     ].sort(),
   );
 });
@@ -88,6 +91,7 @@ it("marks only the reads as readonly and repeatable", () => {
     list_issues: true,
     save_comment: false,
     save_issue: false,
+    upload_image: false,
     create_issue: false,
     get_milestone: true,
     get_project: true,

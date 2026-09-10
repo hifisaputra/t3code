@@ -11,8 +11,8 @@ is the ticket, and only the ticket.
 
 Linear tools live on the `t3-code` MCP server, with the same names as Linear's own
 MCP server: `get_issue`, `list_comments`, `list_issue_statuses`, `list_my_issues`,
-`save_comment`, `save_issue`, `create_issue`. Every one of them defaults to the
-linked issue when you leave the id out. If the tools are missing, the ticket was
+`save_comment`, `save_issue`, `create_issue`, plus `upload_image` for screenshots.
+Every one of them defaults to the linked issue when you leave the id out. If the tools are missing, the ticket was
 quoted in the message inside a `linear-issue` fenced block. Work from that block,
 and put anything you would have posted to Linear in your reply instead.
 
@@ -101,6 +101,9 @@ embarrassed to file, fix it and mention it.
 
 When the pull request is up, use `save_comment` with `linear-comment` to report
 what was completed, link the PR, and note relevant validation or remaining limits.
+When the change is visible, show it: save the screenshot in the workspace, pass its
+path to `upload_image`, and put the markdown it returns in the comment. One image of
+the state that changed beats a paragraph describing it.
 For research or other work without a PR, report the findings and link the
 deliverable when the requested work is complete. Do not use the issue-description
 template for either update.
