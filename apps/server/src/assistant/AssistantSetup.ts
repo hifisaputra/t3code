@@ -140,7 +140,10 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const existing =
       yield* sql<SetupRow>`SELECT * FROM assistant_setups WHERE project_id = ${input.projectId}`;
     let row = existing[0];
-    if (row && Option.isNone(yield* snapshots.getThreadShellById(ThreadId.make(row.thread_id)))) {
+    const thread = row
+      ? yield* snapshots.getThreadShellById(ThreadId.make(row.thread_id))
+      : Option.none();
+    if (row && Option.isNone(thread)) {
       yield* sql`DELETE FROM assistant_setups WHERE project_id = ${input.projectId}`;
       row = undefined;
     }
@@ -150,24 +153,27 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
       row = yield* get(threadId);
     }
     const value = yield* decode(row);
-    yield* engine.dispatch({
-      type: "thread.create",
-      commandId: CommandId.make(`${value.threadId}:create`),
-      threadId: value.threadId,
-      projectId: input.projectId,
-      title: `Assistant setup · ${root.value.title}`,
-      modelSelection: value.preferences.modelSelection,
-      runtimeMode: "approval-required",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      createdAt: yield* now,
-    });
-    yield* engine.dispatch({
-      type: "thread.unarchive",
-      commandId: CommandId.make(NodeCrypto.randomUUID()),
-      threadId: value.threadId,
-    });
+    // Resuming reuses the existing conversation; the engine rejects unarchiving a live thread.
+    if (Option.isNone(thread))
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${value.threadId}:create`),
+        threadId: value.threadId,
+        projectId: input.projectId,
+        title: `Assistant setup · ${root.value.title}`,
+        modelSelection: value.preferences.modelSelection,
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: yield* now,
+      });
+    else if (thread.value.archivedAt !== null)
+      yield* engine.dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make(NodeCrypto.randomUUID()),
+        threadId: value.threadId,
+      });
     yield* options.changed;
     // A stable command id makes retries after a disconnect reuse the first turn.
     yield* engine.dispatch({

@@ -364,7 +364,8 @@ export const make = Effect.gen(function* () {
           return yield* fail(
             "Enable Linear agent access in Settings → Integrations → Linear first.",
           );
-        if (Option.isNone(yield* snapshots.getThreadShellById(ThreadId.make(p.thread_id)))) {
+        const coordinator = yield* snapshots.getThreadShellById(ThreadId.make(p.thread_id));
+        if (Option.isNone(coordinator)) {
           const replacement = `assistant-${newId()}`;
           yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${p.thread_id}`;
           yield* sql`UPDATE assistant_decisions SET resolved = 1 WHERE thread_id = ${p.thread_id}`;
@@ -379,11 +380,13 @@ export const make = Effect.gen(function* () {
           runtimeMode: p.config.runtimeMode,
           createdAt: yield* now,
         });
-        yield* engine.dispatch({
-          type: "thread.unarchive",
-          commandId: CommandId.make(newId()),
-          threadId: ThreadId.make(p.thread_id),
-        });
+        // Archiving stops the assistant, so resuming restores its conversation.
+        if (Option.isSome(coordinator) && coordinator.value.archivedAt !== null)
+          yield* engine.dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make(newId()),
+            threadId: ThreadId.make(p.thread_id),
+          });
         yield* sql`UPDATE assistant_projects SET status = 'running', error = NULL, external_waits = 0 WHERE project_id = ${input.projectId}`;
         yield* wake(
           input.projectId,

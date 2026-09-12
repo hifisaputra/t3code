@@ -24,6 +24,7 @@ import {
 } from "@t3tools/contracts";
 import { LinearApi } from "../linear/LinearApi.ts";
 import { LinearThreadService } from "../linear/LinearThreadService.ts";
+import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
@@ -166,8 +167,24 @@ function harness() {
       readEvents: (after) =>
         Stream.fromIterable(replayEvents.filter((event) => event.sequence > after)),
       dispatch: (command) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           if (seen.has(command.commandId)) return { sequence: commands.length };
+          // Mirror the decider's thread lifecycle invariants so callers cannot rely
+          // on commands the real engine rejects.
+          const invariant = (detail: string) =>
+            new OrchestrationCommandInvariantError({ commandType: command.type, detail });
+          if (command.type === "thread.create" && threads.has(command.threadId))
+            return yield* invariant(`Thread '${command.threadId}' already exists.`);
+          if (
+            command.type === "thread.unarchive" &&
+            (threads.get(command.threadId)?.archivedAt ?? null) === null
+          )
+            return yield* invariant(`Thread '${command.threadId}' is not archived.`);
+          if (
+            command.type === "thread.archive" &&
+            (threads.get(command.threadId)?.archivedAt ?? null) !== null
+          )
+            return yield* invariant(`Thread '${command.threadId}' is already archived.`);
           seen.add(command.commandId);
           commands.push(command);
           if (command.type === "thread.create")
@@ -201,6 +218,8 @@ function harness() {
             });
           if (thread && command.type === "thread.archive")
             threads.set(thread.id, { ...thread, archivedAt: timestamp });
+          if (thread && command.type === "thread.unarchive")
+            threads.set(thread.id, { ...thread, archivedAt: null });
           if (thread && command.type === "thread.turn.interrupt")
             threads.set(thread.id, { ...thread, session: null });
           return { sequence: commands.length };
@@ -787,6 +806,37 @@ it.effect("deleting a setup thread releases the project for another conversation
     });
     assert.lengthOf((yield* service.board(null)).setups ?? [], 0);
     assert.notEqual((yield* service.beginSetup(setupInput)).threadId, draft.threadId);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("resuming setup restores its archived conversation", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    const draft = yield* service.beginSetup(setupInput);
+    h.finish(draft.threadId);
+    h.threads.set(draft.threadId, { ...h.threads.get(draft.threadId)!, archivedAt: timestamp });
+    assert.equal((yield* service.beginSetup(setupInput)).threadId, draft.threadId);
+    assert.isNull(h.threads.get(draft.threadId)?.archivedAt);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("starting after the coordinator was archived restores its conversation", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    h.finish(caller);
+    h.threads.set(caller, { ...h.threads.get(caller)!, archivedAt: timestamp });
+    yield* service.observe({
+      ...eventBase(caller),
+      type: "thread.archived",
+      payload: { threadId: caller, archivedAt: timestamp, updatedAt: timestamp },
+    });
+    assert.equal((yield* service.board(null)).projects[0]?.status, "stopped");
+    const board = yield* service.control({ projectId: config.projectId, action: "start" });
+    assert.equal(board.projects[0]?.threadId, caller);
+    assert.equal(board.projects[0]?.status, "running");
+    assert.isNull(h.threads.get(caller)?.archivedAt);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
