@@ -13,6 +13,7 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+import { getAssistantSetupState } from "@t3tools/client-runtime/state/developerAssistant";
 import { createModelSelection } from "@t3tools/shared/model";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -85,6 +86,20 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
   const allProjects = useProjects();
   const projects = allProjects.filter((p) => p.environmentId === environmentId);
   const board = useEnvironmentQuery(developerAssistant.board({ environmentId, input: {} }));
+  const setup = getAssistantSetupState(
+    projects.map((project) => project.id),
+    board,
+  );
+  const setupMessage =
+    setup.unavailableReason === "loading"
+      ? "Loading your assistant projects…"
+      : setup.unavailableReason === "connection"
+        ? "Reconnect to this environment to set up a project."
+        : setup.unavailableReason === "no-projects"
+          ? "Add your repository as a T3 project from the sidebar, then return here to set up its assistant."
+          : setup.unavailableReason === "all-configured"
+            ? "All projects in this environment already have an assistant. Use Setup on a project below to change it."
+            : null;
   const control = useAtomCommand(developerAssistant.control);
   const answer = useAtomCommand(developerAssistant.answer);
   const review = useAtomCommand(developerAssistant.review);
@@ -127,16 +142,18 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
           </div>
           <Button
             onClick={() => setEditing("new")}
-            disabled={
-              !projects.some(
-                (project) => !board.data?.projects.some((p) => p.config.projectId === project.id),
-              ) || board.isPending
-            }
+            disabled={setup.unavailableReason !== null}
+            aria-describedby={setupMessage ? "assistant-setup-status" : undefined}
           >
             <PlusIcon className="size-4" />
             Set up project
           </Button>
         </div>
+        {setupMessage && (
+          <p id="assistant-setup-status" role="status" className="text-sm text-muted-foreground">
+            {setupMessage}
+          </p>
+        )}
         {(error || board.error) && (
           <p
             role="alert"
@@ -149,16 +166,7 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
           <AssistantSetup
             key={editing}
             environment={environment}
-            projectIds={
-              editing === "new"
-                ? projects
-                    .filter(
-                      (project) =>
-                        !board.data?.projects.some((p) => p.config.projectId === project.id),
-                    )
-                    .map((project) => project.id)
-                : [editing]
-            }
+            projectIds={editing === "new" ? setup.availableProjectIds : [editing]}
             initial={
               board.data?.projects.find((p) => p.config.projectId === editing)?.config ?? null
             }
@@ -256,11 +264,13 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
               </div>
             </article>
           ))}
-          {!board.data?.projects.length && !board.isPending && (
-            <p className="col-span-full rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-              Set up a project, choose the models, and tell your assistant what to focus on.
-            </p>
-          )}
+          {board.data !== null &&
+            !board.data.projects.length &&
+            setup.unavailableReason === null && (
+              <p className="col-span-full rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
+                Set up a project, choose the models, and tell your assistant what to focus on.
+              </p>
+            )}
         </section>
         <section aria-label="Decisions">
           <h2 className="mb-3 flex items-center gap-2 font-medium">

@@ -88,7 +88,10 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
           {error ?? board.error}
         </Text>
       )}
-      {!board.data?.projects.length && (
+      {board.data === null && !board.error && (
+        <Text className="text-foreground-muted">Loading your assistant projects…</Text>
+      )}
+      {board.data !== null && !board.data.projects.length && (
         <Text className="text-foreground-muted">
           Set up a project and its models from Developer assistant on web or desktop. You can manage
           it here afterward.
