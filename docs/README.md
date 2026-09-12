@@ -10,6 +10,7 @@
 - [Terminal history](./user/terminal.md)
 - [Source control](./user/source-control.md)
 - [Linear](./user/linear.md)
+- [Developer assistant](./user/developer-assistant.md)
 - [Google Calendar](./user/google-calendar.md)
 - [Project settings](./user/project-settings.md)
 - [Appearance and themes](./user/appearance.md)

@@ -467,3 +467,23 @@ it.effect("reports a detached checkout as no branch rather than failing", () => 
     assert.strictEqual(result.branch, null);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("uses the assistant's explicit integration branch ahead of repository mappings", () => {
+  const { layer, gitCalls } = makeHarness({
+    projectFile: { linear: { baseBranch: "main" } },
+    linearRepositories: [
+      {
+        teamKey: "DEL",
+        linearProjectId: null,
+        projectId: ProjectId.make("project-1"),
+        baseBranch: "release",
+      },
+    ],
+  });
+  return Effect.gen(function* () {
+    const service = yield* LinearThreadService.LinearThreadService;
+    const result = yield* service.prepareIssueThread({ ...input, baseBranch: "develop" });
+    assert.strictEqual(gitCalls[0]?.baseBranch, "develop");
+    assert.strictEqual(result.baseBranch, "develop");
+  }).pipe(Effect.provide(layer));
+});

@@ -1,5 +1,6 @@
 import {
   ArrowLeftIcon,
+  BotIcon,
   ChartNoAxesColumnIcon,
   CircleDotIcon,
   GitPullRequestIcon,
@@ -220,6 +221,16 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               icon={<GitPullRequestIcon />}
               label="Pull Requests"
               onClick={handlePullRequestsClick}
+            />
+          ) : null}
+          {issuesSupported ? (
+            <SidebarUtilityItem
+              icon={<BotIcon />}
+              label="Developer assistant"
+              onClick={() => {
+                closeMobileSidebar();
+                void navigate({ to: "/assistant" });
+              }}
             />
           ) : null}
           {issuesSupported ? (

@@ -22,6 +22,7 @@ import {
 } from "./toolkits/preview/handlers.ts";
 import { LinearToolkitHandlersLive } from "./toolkits/linear/handlers.ts";
 import { LinearToolkit } from "./toolkits/linear/tools.ts";
+import { AssistantToolkit, AssistantToolkitHandlers } from "./toolkits/assistant/tools.ts";
 import {
   PreviewSnapshotTool,
   PreviewSnapshotToolkit,
@@ -258,9 +259,11 @@ const McpTransportLive = McpServer.layerHttp({
  * the two stay in step.
  */
 export const makeLayer = (options: { readonly preview: boolean }) =>
-  (options.preview
-    ? Layer.mergeAll(PreviewToolkitRegistrationLive, LinearToolkitRegistrationLive)
-    : LinearToolkitRegistrationLive
+  Layer.mergeAll(
+    McpServer.toolkit(AssistantToolkit).pipe(Layer.provide(AssistantToolkitHandlers)),
+    options.preview
+      ? Layer.mergeAll(PreviewToolkitRegistrationLive, LinearToolkitRegistrationLive)
+      : LinearToolkitRegistrationLive,
   ).pipe(Layer.provideMerge(McpTransportLive));
 
 export const layer = makeLayer({ preview: true });

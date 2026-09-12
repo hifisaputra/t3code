@@ -13,6 +13,13 @@ or joining from another machine. The key stays on the server and is never sent t
 The Connection row then reads **Connected as \<your name\> in \<your workspace\>**. If it does not,
 see Troubleshooting below.
 
+## Let an assistant manage issue threads
+
+Use the [Developer assistant](./developer-assistant.md) to select eligible issues, start and manage
+coding threads, review changes, and deliver them to staging. It works on one issue at a time per
+repository and continues after verified staging deployment while your reviews remain pending.
+Configure it on web or desktop; decisions, reviews, and queue controls are also available on mobile.
+
 ## Start a thread from an issue
 
 Open the Linear issue dialog from the new-thread menu, from the command palette, or with the

@@ -131,6 +131,7 @@ function LocalSettingsRouteScreen() {
         }}
       >
         <SettingsSection title="Configuration">
+          <SettingsRow icon="sparkles" label="Developer assistant" target="SettingsAssistant" />
           <SettingsRow
             icon="desktopcomputer"
             label="Environments"
@@ -479,6 +480,7 @@ function ConfiguredSettingsRouteScreen() {
         </View>
 
         <SettingsSection title="Configuration">
+          <SettingsRow icon="sparkles" label="Developer assistant" target="SettingsAssistant" />
           <SettingsRow
             icon="desktopcomputer"
             label="Environments"

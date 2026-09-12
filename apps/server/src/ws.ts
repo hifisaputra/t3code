@@ -1,5 +1,6 @@
 import { LinearOAuth } from "./linear/LinearOAuth.ts";
 import { LinearDelegation } from "./linear/LinearDelegation.ts";
+import { DeveloperAssistant } from "./assistant/DeveloperAssistant.ts";
 import { GoogleCalendar } from "./googleCalendar/GoogleCalendar.ts";
 import {
   sameUsageLimitCommandCoverage,
@@ -600,6 +601,7 @@ const makeWsRpcLayer = (
       const calendar = yield* GoogleCalendar;
       const linearOAuth = yield* LinearOAuth;
       const linearDelegation = yield* LinearDelegation;
+      const developerAssistant = yield* DeveloperAssistant;
       const linear = yield* LinearApi.LinearApi;
       const linearThreads = yield* LinearThreadService.LinearThreadService;
       const automaticGitFetchInterval = serverSettings.getSettings.pipe(
@@ -2125,6 +2127,18 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.linearStatus, linear.status, {
             "rpc.aggregate": "linear",
           }),
+        [WS_METHODS.assistantBoard]: () =>
+          observeRpcEffect(WS_METHODS.assistantBoard, developerAssistant.board(null)),
+        [WS_METHODS.assistantConfigure]: (input) =>
+          observeRpcEffect(WS_METHODS.assistantConfigure, developerAssistant.configure(input)),
+        [WS_METHODS.assistantControl]: (input) =>
+          observeRpcEffect(WS_METHODS.assistantControl, developerAssistant.control(input)),
+        [WS_METHODS.assistantAnswer]: (input) =>
+          observeRpcEffect(WS_METHODS.assistantAnswer, developerAssistant.answer(input)),
+        [WS_METHODS.assistantReview]: (input) =>
+          observeRpcEffect(WS_METHODS.assistantReview, developerAssistant.review(input)),
+        [WS_METHODS.assistantSubscribe]: () =>
+          observeRpcStream(WS_METHODS.assistantSubscribe, developerAssistant.stream),
         [WS_METHODS.linearWorkspace]: (_input) =>
           observeRpcEffect(WS_METHODS.linearWorkspace, linear.workspace, {
             "rpc.aggregate": "linear",
@@ -3009,6 +3023,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const linearOAuth = yield* LinearOAuth;
     const linearDelegation = yield* LinearDelegation;
+    const developerAssistant = yield* DeveloperAssistant;
     const googleCalendar = yield* GoogleCalendar;
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const baseServerSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
@@ -3073,6 +3088,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
             ).pipe(
               Layer.provide(Layer.succeed(LinearOAuth, linearOAuth)),
               Layer.provide(Layer.succeed(LinearDelegation, linearDelegation)),
+              Layer.provide(Layer.succeed(DeveloperAssistant, developerAssistant)),
               Layer.provide(Layer.succeed(GoogleCalendar, googleCalendar)),
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(AgentSessionScanner.layer),

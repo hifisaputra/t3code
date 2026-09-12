@@ -1,6 +1,9 @@
 import * as LinearOAuth from "./linear/LinearOAuth.ts";
 import * as LinearAgentApi from "./linear/LinearAgentApi.ts";
 import * as LinearDelegation from "./linear/LinearDelegation.ts";
+import { ProjectionTurnRepositoryLive } from "./persistence/Layers/ProjectionTurns.ts";
+import * as DeveloperAssistant from "./assistant/DeveloperAssistant.ts";
+import * as StagingVerifier from "./assistant/StagingVerifier.ts";
 import * as LinearThreadService from "./linear/LinearThreadService.ts";
 import { linearRoutes } from "./linear/http.ts";
 import * as GoogleCalendar from "./googleCalendar/GoogleCalendar.ts";
@@ -295,6 +298,15 @@ const PlatformServicesLive = Layer.unwrap(
 const LinearOAuthLive = LinearOAuth.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
 const ReactorLayerLive = Layer.empty.pipe(
+  Layer.provideMerge(
+    DeveloperAssistant.layer.pipe(
+      Layer.provide(ProjectionTurnRepositoryLive),
+      Layer.provide(StagingVerifier.layer.pipe(Layer.provide(ProcessRunner.layer))),
+      Layer.provide(LinearThreadService.layer),
+      Layer.provide(LinearApi.layer),
+      Layer.provide(T3ProjectFileLoader.layer),
+    ),
+  ),
   Layer.provideMerge(
     LinearDelegation.layer.pipe(
       Layer.provide(LinearAgentApi.layer),

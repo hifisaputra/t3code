@@ -1,5 +1,6 @@
 import { LinearOAuth } from "./linear/LinearOAuth.ts";
 import { LinearDelegation } from "./linear/LinearDelegation.ts";
+import { DeveloperAssistant } from "./assistant/DeveloperAssistant.ts";
 import { LinearOperationError } from "@t3tools/contracts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
@@ -753,6 +754,7 @@ const buildAppUnderTest = (options?: {
             status: Effect.succeed({ connected: false, organizationId: null }),
           }),
         ),
+        Layer.provide(Layer.mock(DeveloperAssistant)({})),
         Layer.provide(
           Layer.mock(LinearDelegation)({
             receive: () =>

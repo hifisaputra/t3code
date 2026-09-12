@@ -228,6 +228,7 @@ export const make = Effect.gen(function* () {
 
     const projectFile = yield* projectFiles.load(input.cwd);
     const baseBranch =
+      input.baseBranch ??
       mapping?.baseBranch ??
       Option.match(projectFile, {
         onNone: () => null,

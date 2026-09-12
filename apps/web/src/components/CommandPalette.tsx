@@ -1627,6 +1627,16 @@ function OpenCommandPaletteDialog(props: {
   if (hasLinearKey) {
     actionItems.push({
       kind: "action",
+      value: "action:developer-assistant",
+      searchTerms: ["assistant", "developer", "orchestrator", "automation"],
+      title: "Open developer assistant",
+      icon: <CircleDotIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({ to: "/assistant" });
+      },
+    });
+    actionItems.push({
+      kind: "action",
       value: "action:issues",
       searchTerms: ["issues", "linear", "tickets", "my issues"],
       title: "Open issues",

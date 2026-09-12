@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/developerAssistant": {
+      "types": "./src/state/developerAssistant.ts",
+      "default": "./src/state/developerAssistant.ts"
+    },
     "./load-balancing": {
       "types": "./src/load-balancing.ts",
       "default": "./src/load-balancing.ts"

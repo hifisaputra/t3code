@@ -1,4 +1,5 @@
 export type SettingsSheetTarget =
+  | "SettingsAssistant"
   | "SettingsEnvironments"
   | "SettingsArchive"
   | "SettingsAppearance"

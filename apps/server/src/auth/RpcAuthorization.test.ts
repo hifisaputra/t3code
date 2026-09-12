@@ -30,6 +30,20 @@ describe("RPC authorization scopes", () => {
     );
   });
 
+  it("keeps assistant observation separate from starting agents and executing project commands", () => {
+    for (const method of [WS_METHODS.assistantBoard, WS_METHODS.assistantSubscribe]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
+    for (const method of [
+      WS_METHODS.assistantConfigure,
+      WS_METHODS.assistantControl,
+      WS_METHODS.assistantAnswer,
+      WS_METHODS.assistantReview,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    }
+  });
+
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });

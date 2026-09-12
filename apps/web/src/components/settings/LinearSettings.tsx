@@ -22,6 +22,7 @@ import {
   type LinearRepositoryMapping,
   type ProjectId,
 } from "@t3tools/contracts";
+import { Link } from "@tanstack/react-router";
 import { Trash2Icon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -91,6 +92,15 @@ export function LinearSettingsSection() {
       <SettingsSection title="Agent permissions">
         <LinearAgentAccessSetting />
         <LinearConfirmWritesSetting />
+      </SettingsSection>
+      <SettingsSection title="Developer assistant">
+        <p className="text-sm text-muted-foreground">
+          Let an assistant manage issue threads and staging delivery while you handle decisions and
+          reviews.
+        </p>
+        <Button variant="outline" render={<Link to="/assistant" />}>
+          Open developer assistant
+        </Button>
       </SettingsSection>
       <SettingsSection title="Inbound delegation">
         <LinearDelegationSettingsSection />

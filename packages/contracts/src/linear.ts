@@ -267,6 +267,8 @@ export const LinearPrepareIssueThreadInput = Schema.Struct({
    * Must contain the issue identifier, so Linear still links the pull request.
    */
   branch: Schema.optional(TrimmedNonEmptyString),
+  /** Explicit base for a managed project; overrides repository mappings. */
+  baseBranch: Schema.optional(TrimmedNonEmptyString),
   /** Defaults to `issue`. Under `current`, `branch` is ignored and git is left alone. */
   branchMode: Schema.optional(LinearIssueThreadBranchMode),
   threadId: Schema.optional(ThreadId),

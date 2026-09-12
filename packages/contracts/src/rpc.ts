@@ -1,5 +1,13 @@
 import { ThreadId } from "./baseSchemas.ts";
 import {
+  AssistantAnswerInput,
+  AssistantBoard,
+  AssistantControlInput,
+  AssistantProjectConfig,
+  AssistantReviewInput,
+  DeveloperAssistantError,
+} from "./developerAssistant.ts";
+import {
   GoogleCalendarError,
   GoogleCalendarStatus,
   GoogleCalendarCalendar,
@@ -419,6 +427,12 @@ export const WS_METHODS = {
   linearListIssues: "linear.listIssues",
   linearGetIssue: "linear.getIssue",
   linearPrepareIssueThread: "linear.prepareIssueThread",
+  assistantBoard: "assistant.board",
+  assistantConfigure: "assistant.configure",
+  assistantControl: "assistant.control",
+  assistantAnswer: "assistant.answer",
+  assistantReview: "assistant.review",
+  assistantSubscribe: "assistant.subscribe",
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
@@ -1359,6 +1373,37 @@ const WsGoogleCalendarUpdateRpc = Rpc.make(WS_METHODS.googleCalendarUpdate, {
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WS_METHODS.assistantBoard, {
+    payload: Schema.Struct({}),
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantConfigure, {
+    payload: AssistantProjectConfig,
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantControl, {
+    payload: AssistantControlInput,
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantAnswer, {
+    payload: AssistantAnswerInput,
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantReview, {
+    payload: AssistantReviewInput,
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantSubscribe, {
+    payload: Schema.Struct({}),
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+    stream: true,
+  }),
   WsGoogleCalendarStatusRpc,
   WsGoogleCalendarAuthorizeRpc,
   WsGoogleCalendarDisconnectRpc,
