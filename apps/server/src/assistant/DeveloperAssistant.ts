@@ -29,9 +29,11 @@ import {
   type AssistantSetupPlan,
   type AssistantSetupResolveInput,
   type OrchestrationEvent,
+  type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   type LinearIssueSummary,
 } from "@t3tools/contracts";
+import { isStaleRequestFailureDetail } from "../orchestration/decider.ts";
 import { LinearApi } from "../linear/LinearApi.ts";
 import { LinearThreadService } from "../linear/LinearThreadService.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
@@ -67,6 +69,20 @@ const encodeTask = Schema.encodeSync(Schema.fromJsonString(AssistantTask));
 const encodeDecision = Schema.encodeSync(Schema.fromJsonString(AssistantDecision));
 const isAssistantError = Schema.is(DeveloperAssistantError);
 const decodeRequest = Schema.decodeUnknownEffect(Schema.Struct({ requestId: Schema.String }));
+// Answering a request the provider no longer knows (e.g. after a server restart)
+// closes it, matching the thread's pending accounting.
+const isStale = (activity: Pick<OrchestrationThreadActivity, "kind" | "payload">) => {
+  if (
+    !["provider.approval.respond.failed", "provider.user-input.respond.failed"].includes(
+      activity.kind,
+    ) ||
+    typeof activity.payload !== "object" ||
+    activity.payload === null
+  )
+    return false;
+  const payload = activity.payload as Record<string, unknown>;
+  return typeof payload.requestId === "string" && isStaleRequestFailureDetail(payload);
+};
 const fail = (detail: string) => new DeveloperAssistantError({ detail });
 const wrap = (error: unknown) =>
   isAssistantError(error)
@@ -266,7 +282,9 @@ export const make = Effect.gen(function* () {
         "This repository already has a developer assistant. Use its existing project to preserve sequential work.",
       );
     const previousThread = existing[0]
-      ? yield* snapshots.getThreadShellById(ThreadId.make(existing[0].thread_id))
+      ? yield* snapshots.getThreadShellById(ThreadId.make(existing[0].thread_id), {
+          includeArchived: true,
+        })
       : Option.none();
     if (Option.isSome(previousThread) && (yield* threadBusy(previousThread.value)))
       return yield* fail(
@@ -338,12 +356,15 @@ export const make = Effect.gen(function* () {
         if (input.action === "interrupt") {
           const b = yield* board(input.projectId);
           for (const t of b.tasks.filter((t) => assistantTaskHoldsProject(t.status))) {
-            yield* engine.dispatch({
-              type: "thread.turn.interrupt",
-              commandId: CommandId.make(newId()),
-              threadId: t.threadId,
-              createdAt: yield* now,
-            });
+            // A worker whose worktree setup failed never got a thread to interrupt.
+            yield* engine
+              .dispatch({
+                type: "thread.turn.interrupt",
+                commandId: CommandId.make(newId()),
+                threadId: t.threadId,
+                createdAt: yield* now,
+              })
+              .pipe(Effect.catch(() => Effect.void));
             yield* terminals.close({ threadId: t.threadId });
             yield* saveTask({
               ...t,
@@ -364,7 +385,10 @@ export const make = Effect.gen(function* () {
           return yield* fail(
             "Enable Linear agent access in Settings → Integrations → Linear first.",
           );
-        const coordinator = yield* snapshots.getThreadShellById(ThreadId.make(p.thread_id));
+        // Only a deleted coordinator is replaced; an archived one keeps its decisions.
+        const coordinator = yield* snapshots.getThreadShellById(ThreadId.make(p.thread_id), {
+          includeArchived: true,
+        });
         if (Option.isNone(coordinator)) {
           const replacement = `assistant-${newId()}`;
           yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${p.thread_id}`;
@@ -691,7 +715,9 @@ export const make = Effect.gen(function* () {
       if (t.deployment) return t;
       if (!assistantTaskHoldsProject(t.status))
         return yield* fail("This issue is no longer active.");
-      const worker = yield* snapshots.getThreadShellById(t.threadId);
+      // An archived worker still owns its worktree, and a retry after the final
+      // archive below must still find it.
+      const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
       const root = yield* snapshots.getProjectShellById(t.projectId);
       if (Option.isNone(worker) || Option.isNone(root) || !worker.value.worktreePath)
         return yield* fail("The worker's worktree could not be found.");
@@ -723,11 +749,17 @@ export const make = Effect.gen(function* () {
         ...(targetIds ? { targetIds } : {}),
       });
       yield* terminals.close({ threadId: t.threadId });
-      yield* engine.dispatch({
-        type: "thread.archive",
-        commandId: CommandId.make(`${t.id}:archive`),
-        threadId: t.threadId,
-      });
+      // Verification can take minutes, so the person may archive the worker meanwhile.
+      // The engine keeps rejected command ids, so never reuse one across attempts.
+      const verified = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
+      if (Option.isSome(verified) && verified.value.archivedAt === null)
+        yield* engine
+          .dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make(newId()),
+            threadId: t.threadId,
+          })
+          .pipe(Effect.catchTag("OrchestrationCommandInvariantError", () => Effect.void));
       let updated = yield* saveTask({
         ...t,
         status: "review",
@@ -961,14 +993,17 @@ export const make = Effect.gen(function* () {
             projectId,
             `${t.issue.identifier} needs input in its thread. Surface the pending decision to the person.`,
           );
-      } else if (["user-input.resolved", "approval.resolved"].includes(a.kind)) {
+      } else if (["user-input.resolved", "approval.resolved"].includes(a.kind) || isStale(a)) {
         const payload = yield* decodeRequest(a.payload);
+        const answer = isStale(a)
+          ? "The request expired before it was answered"
+          : "Answered in the thread";
         const ds = yield* sql<{
           id: string;
           data: string;
         }>`SELECT * FROM assistant_decisions WHERE thread_id = ${threadId} AND request_id = ${payload.requestId} AND resolved = 0`;
         for (const d of ds)
-          yield* sql`UPDATE assistant_decisions SET resolved = 1, data = ${encodeDecision({ ...(yield* decodeDecision(d.data)), answer: "Answered in the thread" })} WHERE id = ${d.id}`;
+          yield* sql`UPDATE assistant_decisions SET resolved = 1, data = ${encodeDecision({ ...(yield* decodeDecision(d.data)), answer })} WHERE id = ${d.id}`;
         if (t && t.status === "waiting") yield* saveTask({ ...t, status: "working" });
       }
     } else if (event.type === "thread.session-set") {
@@ -1103,12 +1138,13 @@ export const make = Effect.gen(function* () {
     event.type === "thread.archived" ||
     event.type === "thread.deleted" ||
     (event.type === "thread.activity-appended" &&
-      [
+      ([
         "user-input.requested",
         "approval.requested",
         "user-input.resolved",
         "approval.resolved",
-      ].includes(event.payload.activity.kind));
+      ].includes(event.payload.activity.kind) ||
+        isStale(event.payload.activity)));
   const eventLock = yield* Semaphore.make(1);
   const record = Effect.fn("Assistant.recordEvent")(function* (event: OrchestrationEvent) {
     const cursors = yield* sql<{

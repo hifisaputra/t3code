@@ -911,9 +911,21 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           "None",
         );
       }
+      const archivedId = ThreadId.make("thread-archived");
+      assert.equal((yield* snapshotQuery.getThreadShellById(archivedId))._tag, "None");
+      const archivedShell = yield* snapshotQuery.getThreadShellById(archivedId, {
+        includeArchived: true,
+      });
+      assert.equal(Option.getOrUndefined(archivedShell)?.archivedAt, "2026-04-06T00:00:06.000Z");
       yield* sql`UPDATE projection_threads SET deleted_at = '2026-04-06T00:00:08.000Z' WHERE thread_id = 'thread-active'`;
       assert.equal(
         (yield* snapshotQuery.getThreadRuntimeContext(ThreadId.make("thread-active")))._tag,
+        "None",
+      );
+      assert.equal(
+        (yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-active"), {
+          includeArchived: true,
+        }))._tag,
         "None",
       );
     }),

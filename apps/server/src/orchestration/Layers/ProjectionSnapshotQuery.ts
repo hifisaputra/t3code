@@ -189,6 +189,10 @@ const ProjectionImportedAgentSessionSourcesRowSchema = Schema.Struct({
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
+const ThreadShellLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  includeArchived: Schema.optional(Schema.Boolean),
+});
 const TurnStartMessageLookupInput = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
@@ -1064,10 +1068,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const getActiveThreadRowById = SqlSchema.findOneOption({
-    Request: ThreadIdLookupInput,
+  const getThreadRowById = SqlSchema.findOneOption({
+    Request: ThreadShellLookupInput,
     Result: ProjectionThreadDbRowSchema,
-    execute: ({ threadId }) =>
+    execute: ({ threadId, includeArchived }) =>
       sql`
         SELECT
           thread_id AS "threadId",
@@ -1103,7 +1107,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL
-          AND archived_at IS NULL
+          ${includeArchived === true ? sql`` : sql`AND archived_at IS NULL`}
         LIMIT 1
       `,
   });
@@ -2869,10 +2873,16 @@ pending_approval_requests AS (
       });
     });
 
-  const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
+  const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (
+    threadId,
+    options,
+  ) =>
     Effect.gen(function* () {
       const [threadRow, latestTurnRow, sessionRow] = yield* Effect.all([
-        getActiveThreadRowById({ threadId }).pipe(
+        getThreadRowById({
+          threadId,
+          ...(options?.includeArchived === true ? { includeArchived: true } : {}),
+        }).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
               "ProjectionSnapshotQuery.getThreadShellById:getThread:query",
@@ -3130,7 +3140,7 @@ pending_approval_requests AS (
         latestTurnRow,
         sessionRow,
       ] = yield* Effect.all([
-        getActiveThreadRowById({ threadId }).pipe(
+        getThreadRowById({ threadId }).pipe(
           Effect.mapError(
             toPersistenceSqlOrDecodeError(
               "ProjectionSnapshotQuery.getThreadDetailById:getThread:query",

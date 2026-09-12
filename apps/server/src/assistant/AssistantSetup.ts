@@ -140,8 +140,11 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const existing =
       yield* sql<SetupRow>`SELECT * FROM assistant_setups WHERE project_id = ${input.projectId}`;
     let row = existing[0];
+    // Archived conversations resume in place; only a deleted thread starts over.
     const thread = row
-      ? yield* snapshots.getThreadShellById(ThreadId.make(row.thread_id))
+      ? yield* snapshots.getThreadShellById(ThreadId.make(row.thread_id), {
+          includeArchived: true,
+        })
       : Option.none();
     if (row && Option.isNone(thread)) {
       yield* sql`DELETE FROM assistant_setups WHERE project_id = ${input.projectId}`;
@@ -153,7 +156,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
       row = yield* get(threadId);
     }
     const value = yield* decode(row);
-    // Resuming reuses the existing conversation; the engine rejects unarchiving a live thread.
+    // The engine rejects unarchiving a live thread, so only restore an archived one.
     if (Option.isNone(thread))
       yield* engine.dispatch({
         type: "thread.create",

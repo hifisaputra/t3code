@@ -55,7 +55,7 @@ const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLin
  * failure detail marks the request stale/unknown — or settle would be
  * rejected on threads whose shell flags read as clear.
  */
-function isStaleRequestFailureDetail(payload: Record<string, unknown> | null): boolean {
+export function isStaleRequestFailureDetail(payload: Record<string, unknown> | null): boolean {
   const detail = typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
   if (detail === null) return false;
   return (

@@ -24,7 +24,10 @@ import {
 } from "@t3tools/contracts";
 import { LinearApi } from "../linear/LinearApi.ts";
 import { LinearThreadService } from "../linear/LinearThreadService.ts";
-import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
+import {
+  OrchestrationCommandInvariantError,
+  OrchestrationCommandPreviouslyRejectedError,
+} from "../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
@@ -91,7 +94,13 @@ function harness() {
   const replayEvents: OrchestrationEvent[] = [];
   let dispatchObserver = (_command: OrchestrationCommand): Effect.Effect<void> => Effect.void;
   const seen = new Set<string>();
+  const rejected = new Map<string, string>();
   const threads = new Map<ThreadId, OrchestrationThreadShell>();
+  // Like the real projection, lookups hide archived threads unless asked.
+  const visibleThread = (id: ThreadId, options?: { readonly includeArchived?: boolean }) =>
+    Option.fromNullishOr(threads.get(id)).pipe(
+      Option.filter((t) => options?.includeArchived === true || t.archivedAt === null),
+    );
   const issues = [makeIssue(1), makeIssue(2), makeIssue(3)];
   const transitions: string[] = [];
   const pendingStarts = new Set<ThreadId>();
@@ -169,22 +178,31 @@ function harness() {
       dispatch: (command) =>
         Effect.gen(function* () {
           if (seen.has(command.commandId)) return { sequence: commands.length };
-          // Mirror the decider's thread lifecycle invariants so callers cannot rely
-          // on commands the real engine rejects.
-          const invariant = (detail: string) =>
-            new OrchestrationCommandInvariantError({ commandType: command.type, detail });
-          if (command.type === "thread.create" && threads.has(command.threadId))
-            return yield* invariant(`Thread '${command.threadId}' already exists.`);
-          if (
-            command.type === "thread.unarchive" &&
-            (threads.get(command.threadId)?.archivedAt ?? null) === null
-          )
-            return yield* invariant(`Thread '${command.threadId}' is not archived.`);
-          if (
-            command.type === "thread.archive" &&
-            (threads.get(command.threadId)?.archivedAt ?? null) !== null
-          )
-            return yield* invariant(`Thread '${command.threadId}' is already archived.`);
+          // Like the real engine, a rejected command id stays rejected.
+          const previous = rejected.get(command.commandId);
+          if (previous !== undefined)
+            return yield* new OrchestrationCommandPreviouslyRejectedError({
+              commandId: command.commandId,
+              detail: previous,
+            });
+          // Mirror the decider's thread invariants so callers cannot rely on
+          // commands the real engine rejects.
+          const target = "threadId" in command ? threads.get(command.threadId) : undefined;
+          const violation =
+            command.type === "thread.create"
+              ? target && "Thread already exists."
+              : command.type === "thread.unarchive"
+                ? (target?.archivedAt ?? null) === null && "Thread is not archived."
+                : command.type === "thread.archive"
+                  ? (!target || target.archivedAt !== null) && "Thread is missing or archived."
+                  : "threadId" in command && !target && "Thread does not exist.";
+          if (violation) {
+            rejected.set(command.commandId, violation);
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: violation,
+            });
+          }
           seen.add(command.commandId);
           commands.push(command);
           if (command.type === "thread.create")
@@ -234,9 +252,9 @@ function harness() {
           snapshotSequence: commands.length,
           updatedAt: timestamp,
         }),
-      getThreadShellById: (id) => Effect.succeed(Option.fromNullishOr(threads.get(id))),
+      getThreadShellById: (id, options) => Effect.succeed(visibleThread(id, options)),
       getThreadDetailById: (id) =>
-        Effect.succeed(Option.fromNullishOr(threads.get(id))).pipe(
+        Effect.succeed(visibleThread(id)).pipe(
           Effect.map(
             Option.map((thread) => ({
               ...thread,
@@ -833,10 +851,75 @@ it.effect("starting after the coordinator was archived restores its conversation
       payload: { threadId: caller, archivedAt: timestamp, updatedAt: timestamp },
     });
     assert.equal((yield* service.board(null)).projects[0]?.status, "stopped");
+    yield* service.configure({ ...config, maxWorkerTurns: 4 });
+    assert.equal((yield* service.board(null)).projects[0]?.threadId, caller);
     const board = yield* service.control({ projectId: config.projectId, action: "start" });
     assert.equal(board.projects[0]?.threadId, caller);
     assert.equal(board.projects[0]?.status, "running");
     assert.isNull(h.threads.get(caller)?.archivedAt);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("verifies staging for a worker the person already archived", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    const first = yield* service.startIssue(caller, "APP-1", "Fix it");
+    yield* service.deliver();
+    h.finish(first.threadId);
+    h.threads.set(first.threadId, { ...h.threads.get(first.threadId)!, archivedAt: timestamp });
+    const delivered = yield* service.verifyStaging(caller, first.id, "Done", "Check the page");
+    assert.equal(delivered.status, "review");
+    assert.lengthOf(
+      h.commands.filter((c) => c.type === "thread.archive" && c.threadId === first.threadId),
+      0,
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("interrupting a worker whose worktree setup failed stops the project", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    h.setSetupHealthy(false);
+    const first = yield* service.startIssue(caller, "APP-1", "Fix it");
+    assert.equal(first.status, "blocked");
+    const board = yield* service.control({ projectId: config.projectId, action: "interrupt" });
+    assert.equal(board.projects[0]?.status, "stopped");
+    assert.equal(board.tasks[0]?.status, "blocked");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a provider request that expired before it was answered closes its decision", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    const activity = (kind: string, detail?: string) => ({
+      ...eventBase(caller),
+      type: "thread.activity-appended" as const,
+      payload: {
+        threadId: caller,
+        activity: {
+          id: EventId.make(kind),
+          kind,
+          summary: "Approve the command",
+          tone: "approval" as const,
+          turnId: null,
+          createdAt: timestamp,
+          payload: { requestId: "approval-1", ...(detail ? { detail } : {}) },
+        },
+      },
+    });
+    yield* service.observe(activity("approval.requested"));
+    yield* service.observe(activity("provider.approval.respond.failed", "Provider unavailable"));
+    assert.isNull((yield* service.board(null)).decisions[0]?.answer);
+    yield* service.observe(
+      activity("provider.approval.respond.failed", "Stale pending approval request: approval-1"),
+    );
+    assert.equal(
+      (yield* service.board(null)).decisions[0]?.answer,
+      "The request expired before it was answered",
+    );
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
