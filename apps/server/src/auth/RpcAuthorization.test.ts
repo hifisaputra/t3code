@@ -36,6 +36,8 @@ describe("RPC authorization scopes", () => {
     }
     for (const method of [
       WS_METHODS.assistantConfigure,
+      WS_METHODS.assistantSetupBegin,
+      WS_METHODS.assistantSetupResolve,
       WS_METHODS.assistantControl,
       WS_METHODS.assistantAnswer,
       WS_METHODS.assistantReview,

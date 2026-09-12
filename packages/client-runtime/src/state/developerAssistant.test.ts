@@ -62,6 +62,33 @@ it.effect("enables setup after the first snapshot while the board subscription r
     assert.equal(readSetup().unavailableReason, null);
     assert.deepEqual(readSetup().availableProjectIds, [projectId, secondProjectId]);
 
+    const preferences = configuredBoard.projects[0]!.config;
+    yield* Queue.offer(updates, {
+      ...emptyBoard,
+      setups: [
+        {
+          preferences: { ...preferences, context: "Inspect staging" },
+          threadId: ThreadId.make("assistant-setup-app"),
+          proposal: null,
+          summary: "",
+          revision: 0,
+        },
+      ],
+    });
+    yield* AtomRegistry.toStreamResult(registry, atom).pipe(
+      Stream.filter((board) => board.setups?.length === 1),
+      Stream.runHead,
+    );
+    assert.deepEqual(readSetup().availableProjectIds, [secondProjectId]);
+
+    // Cancelling an unfinished conversation makes the project available again.
+    yield* Queue.offer(updates, emptyBoard);
+    yield* AtomRegistry.toStreamResult(registry, atom).pipe(
+      Stream.filter((board) => !board.setups?.length && !board.projects.length),
+      Stream.runHead,
+    );
+    assert.deepEqual(readSetup().availableProjectIds, [projectId, secondProjectId]);
+
     yield* Queue.offer(updates, configuredBoard);
     yield* AtomRegistry.toStreamResult(registry, atom).pipe(
       Stream.filter((board) => board.projects.length === 1),

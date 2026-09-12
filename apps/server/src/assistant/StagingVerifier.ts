@@ -4,8 +4,13 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { AssistantDeployment, DeveloperAssistantError } from "@t3tools/contracts";
+import {
+  AssistantDeployment,
+  DeveloperAssistantError,
+  type AssistantDeploymentTarget,
+} from "@t3tools/contracts";
 import { ProcessRunner } from "../processRunner.ts";
+import { checkDeployment } from "./deploymentChecks.ts";
 
 const Receipt = Schema.Struct({
   revision: AssistantDeployment.fields.revision,
@@ -24,6 +29,9 @@ export class StagingVerifier extends Context.Service<
       worktreePath: string;
       baseBranch: string;
       command: string;
+      stagingUrl?: string;
+      targets?: ReadonlyArray<AssistantDeploymentTarget>;
+      targetIds?: ReadonlyArray<string>;
     }) => Effect.Effect<AssistantDeployment, DeveloperAssistantError>;
   }
 >()("t3/assistant/StagingVerifier") {}
@@ -65,6 +73,50 @@ export const layer = Layer.effect(
             });
           }
           const workerRevision = yield* git(input.worktreePath, ["rev-parse", "HEAD"]);
+          if (!input.command.trim()) {
+            const configured = input.targets ?? [];
+            const targets =
+              input.targetIds === undefined
+                ? configured
+                : configured.filter((t) => input.targetIds?.includes(t.id));
+            if (
+              !input.stagingUrl ||
+              !targets.length ||
+              (input.targetIds &&
+                (new Set(input.targetIds).size !== input.targetIds.length ||
+                  targets.length !== input.targetIds.length))
+            )
+              return yield* new DeveloperAssistantError({
+                detail:
+                  "Select at least one known staging deployment target from the saved project setup.",
+              });
+            const evidence = yield* Effect.forEach(targets, (target) =>
+              checkDeployment(target, input.cwd, input.baseBranch).pipe(
+                Effect.provideService(ProcessRunner, runner),
+              ),
+            );
+            yield* git(input.cwd, ["fetch", "origin", input.baseBranch]);
+            for (const receipt of evidence) {
+              yield* git(input.cwd, [
+                "merge-base",
+                "--is-ancestor",
+                workerRevision,
+                receipt.revision,
+              ]);
+              yield* git(input.cwd, [
+                "merge-base",
+                "--is-ancestor",
+                receipt.revision,
+                `refs/remotes/origin/${input.baseBranch}`,
+              ]);
+            }
+            return {
+              revision: evidence[0]!.revision,
+              url: input.stagingUrl,
+              verifiedAt: DateTime.formatIso(yield* DateTime.now),
+              evidence,
+            };
+          }
           // Values are passed in the environment, never interpolated into shell code.
           const output = yield* runner.run({
             command: platform === "win32" ? "powershell.exe" : "/bin/sh",

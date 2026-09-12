@@ -2131,6 +2131,13 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.assistantBoard, developerAssistant.board(null)),
         [WS_METHODS.assistantConfigure]: (input) =>
           observeRpcEffect(WS_METHODS.assistantConfigure, developerAssistant.configure(input)),
+        [WS_METHODS.assistantSetupBegin]: (input) =>
+          observeRpcEffect(WS_METHODS.assistantSetupBegin, developerAssistant.beginSetup(input)),
+        [WS_METHODS.assistantSetupResolve]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.assistantSetupResolve,
+            developerAssistant.resolveSetup(input),
+          ),
         [WS_METHODS.assistantControl]: (input) =>
           observeRpcEffect(WS_METHODS.assistantControl, developerAssistant.control(input)),
         [WS_METHODS.assistantAnswer]: (input) =>

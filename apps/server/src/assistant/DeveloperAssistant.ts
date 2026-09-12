@@ -25,6 +25,9 @@ import {
   type AssistantAnswerInput,
   type AssistantControlInput,
   type AssistantReviewInput,
+  type AssistantSetupInput,
+  type AssistantSetupPlan,
+  type AssistantSetupResolveInput,
   type OrchestrationEvent,
   type OrchestrationThreadShell,
   type LinearIssueSummary,
@@ -40,6 +43,7 @@ import { TerminalManager } from "../terminal/Manager.ts";
 import { forkParked } from "../serverActivation.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 import { assistantInstructions, workerInstructions } from "./prompts.ts";
+import { makeSetup, validateDeploymentConfig } from "./AssistantSetup.ts";
 
 type ProjectRow = {
   project_id: string;
@@ -139,6 +143,7 @@ export const make = Effect.gen(function* () {
       SELECT id FROM assistant_decisions WHERE resolved = 1 ORDER BY rowid DESC LIMIT 50
     )) ORDER BY resolved, rowid DESC`;
     return {
+      setups: yield* setup.list(projectId),
       projects: yield* Effect.forEach(projects, (p) =>
         decodeConfig(p.config).pipe(
           Effect.map((config) => ({
@@ -235,51 +240,87 @@ export const make = Effect.gen(function* () {
   });
   type AwaitedProject = Effect.Success<ReturnType<typeof project>>;
 
-  const configure = Effect.fn("Assistant.configure")(
-    function* (config: AssistantProjectConfig) {
-      const shell = yield* snapshots.getProjectShellById(config.projectId);
-      if (Option.isNone(shell)) return yield* fail("Select an existing T3 project.");
-      const existing =
-        yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE project_id = ${config.projectId}`;
-      if (existing[0]?.status === "running")
-        return yield* fail("Stop the assistant before changing its project setup.");
-      const active =
-        yield* sql`SELECT id FROM assistant_tasks WHERE project_id = ${config.projectId} AND status IN ('preparing','working','waiting','blocked')`;
-      if (active.length)
-        return yield* fail(
-          "Finish or skip the active issue before changing the project's environment or scope.",
-        );
-      const repositoryKey = yield* verifier.repositoryKey(shell.value.workspaceRoot);
-      const sameRepo =
-        yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE repository_key = ${repositoryKey} AND project_id != ${config.projectId}`;
-      if (sameRepo.length)
-        return yield* fail(
-          "This repository already has a developer assistant. Use its existing project to preserve sequential work.",
-        );
-      const previousThread = existing[0]
-        ? yield* snapshots.getThreadShellById(ThreadId.make(existing[0].thread_id))
-        : Option.none();
-      if (Option.isSome(previousThread) && (yield* threadBusy(previousThread.value)))
-        return yield* fail(
-          "Wait for the assistant's interrupted turn to finish before changing its setup.",
-        );
-      const threadId = Option.isSome(previousThread)
-        ? previousThread.value.id
-        : `assistant-${newId()}`;
-      if (existing[0] && existing[0].thread_id !== threadId) {
-        yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${existing[0].thread_id}`;
-        yield* sql`UPDATE assistant_decisions SET resolved = 1 WHERE thread_id = ${existing[0].thread_id}`;
-      }
-      yield* sql`INSERT INTO assistant_projects (project_id, repository_key, thread_id, config) VALUES (${config.projectId}, ${repositoryKey}, ${threadId}, ${encodeConfig(config)})
+  const configureProject = Effect.fn("Assistant.configure")(function* (
+    config: AssistantProjectConfig,
+  ) {
+    const deploymentError = validateDeploymentConfig(config);
+    if (deploymentError) return yield* deploymentError;
+    const shell = yield* snapshots.getProjectShellById(config.projectId);
+    if (Option.isNone(shell)) return yield* fail("Select an existing T3 project.");
+    const existing =
+      yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE project_id = ${config.projectId}`;
+    if (existing[0]?.status === "running")
+      return yield* fail("Stop the assistant before changing its project setup.");
+    const active =
+      yield* sql`SELECT id FROM assistant_tasks WHERE project_id = ${config.projectId} AND status IN ('preparing','working','waiting','blocked')`;
+    if (active.length)
+      return yield* fail(
+        "Finish or skip the active issue before changing the project's environment or scope.",
+      );
+    const repositoryKey = yield* verifier.repositoryKey(shell.value.workspaceRoot);
+    const sameRepo =
+      yield* sql`SELECT project_id FROM assistant_projects WHERE repository_key = ${repositoryKey} AND project_id != ${config.projectId}
+          UNION SELECT project_id FROM assistant_setups WHERE repository_key = ${repositoryKey} AND project_id != ${config.projectId}`;
+    if (sameRepo.length)
+      return yield* fail(
+        "This repository already has a developer assistant. Use its existing project to preserve sequential work.",
+      );
+    const previousThread = existing[0]
+      ? yield* snapshots.getThreadShellById(ThreadId.make(existing[0].thread_id))
+      : Option.none();
+    if (Option.isSome(previousThread) && (yield* threadBusy(previousThread.value)))
+      return yield* fail(
+        "Wait for the assistant's interrupted turn to finish before changing its setup.",
+      );
+    const threadId = Option.isSome(previousThread)
+      ? previousThread.value.id
+      : `assistant-${newId()}`;
+    if (existing[0] && existing[0].thread_id !== threadId) {
+      yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${existing[0].thread_id}`;
+      yield* sql`UPDATE assistant_decisions SET resolved = 1 WHERE thread_id = ${existing[0].thread_id}`;
+    }
+    yield* sql`INSERT INTO assistant_projects (project_id, repository_key, thread_id, config) VALUES (${config.projectId}, ${repositoryKey}, ${threadId}, ${encodeConfig(config)})
       ON CONFLICT(project_id) DO UPDATE SET repository_key = excluded.repository_key, thread_id = excluded.thread_id, config = excluded.config, error = NULL`;
-      yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${threadId} AND delivered = 0`;
-      yield* createCoordinator(yield* project(config.projectId));
-      yield* changed;
+    yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${threadId} AND delivered = 0`;
+    yield* createCoordinator(yield* project(config.projectId));
+    yield* changed;
+  }, Effect.mapError(wrap));
+
+  const setup = yield* makeSetup({
+    changed,
+    threadBusy: (thread) => threadBusy(thread).pipe(Effect.mapError(wrap)),
+    configure: configureProject,
+  });
+  const configure = Effect.fn("Assistant.configureFromClient")(
+    function* (config: AssistantProjectConfig) {
+      const pending = yield* setup.list(config.projectId);
+      if (pending.length)
+        return yield* fail(
+          "Finish or cancel the setup conversation before changing configuration directly.",
+        );
+      yield* configureProject(config);
       return yield* board(null);
     },
     lock.withPermits(1),
+    deliveryLock.withPermits(1),
     Effect.mapError(wrap),
   );
+  const beginSetup = (input: AssistantSetupInput) =>
+    setup
+      .begin(input)
+      .pipe(lock.withPermits(1), deliveryLock.withPermits(1), Effect.mapError(wrap));
+  const getSetup = (caller: ThreadId) => setup.read(caller).pipe(Effect.mapError(wrap));
+  const proposeSetup = (caller: ThreadId, plan: AssistantSetupPlan, summary: string) =>
+    setup.propose(caller, plan, summary).pipe(lock.withPermits(1), Effect.mapError(wrap));
+  const resolveSetup = (input: typeof AssistantSetupResolveInput.Type) =>
+    setup
+      .resolve(input)
+      .pipe(
+        Effect.andThen(board(null)),
+        lock.withPermits(1),
+        deliveryLock.withPermits(1),
+        Effect.mapError(wrap),
+      );
 
   const control = Effect.fn("Assistant.control")(
     function* (input: typeof AssistantControlInput.Type) {
@@ -312,6 +353,10 @@ export const make = Effect.gen(function* () {
           }
         }
       } else {
+        if ((yield* setup.list(input.projectId)).length)
+          return yield* fail(
+            "Save or cancel the project's setup conversation before starting the queue.",
+          );
         const connection = yield* linear.status;
         if (connection.status !== "connected")
           return yield* fail("Connect Linear before starting the assistant.");
@@ -628,7 +673,13 @@ export const make = Effect.gen(function* () {
   });
 
   const verifyStaging = Effect.fn("Assistant.verifyStaging")(
-    function* (caller: ThreadId, taskId: string, summary: string, reviewInstructions: string) {
+    function* (
+      caller: ThreadId,
+      taskId: string,
+      summary: string,
+      reviewInstructions: string,
+      targetIds?: ReadonlyArray<string>,
+    ) {
       const p = yield* authorize(caller);
       if (p.status !== "running") return yield* fail("The assistant is stopped.");
       const t = yield* task(taskId);
@@ -664,6 +715,9 @@ export const make = Effect.gen(function* () {
         worktreePath: worker.value.worktreePath,
         baseBranch: p.config.baseBranch,
         command: p.config.stagingCheckCommand,
+        ...(p.config.stagingUrl ? { stagingUrl: p.config.stagingUrl } : {}),
+        ...(p.config.deploymentTargets ? { targets: p.config.deploymentTargets } : {}),
+        ...(targetIds ? { targetIds } : {}),
       });
       yield* terminals.close({ threadId: t.threadId });
       yield* engine.dispatch({
@@ -846,6 +900,11 @@ export const make = Effect.gen(function* () {
   const observe = Effect.fn("Assistant.observe")(function* (event: OrchestrationEvent) {
     if (!("threadId" in event.payload)) return;
     const threadId = event.payload.threadId;
+    if (event.type === "thread.deleted") {
+      const removed =
+        yield* sql`DELETE FROM assistant_setups WHERE thread_id = ${threadId} RETURNING project_id`;
+      if (removed.length) yield* changed;
+    }
     const projects =
       yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE thread_id = ${threadId}`;
     const tasks = yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE thread_id = ${threadId}`;
@@ -1010,6 +1069,10 @@ export const make = Effect.gen(function* () {
     }),
   );
   const service = {
+    getSetup,
+    beginSetup,
+    proposeSetup,
+    resolveSetup,
     pause,
     board,
     configure,

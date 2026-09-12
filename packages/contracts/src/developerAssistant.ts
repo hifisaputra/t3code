@@ -13,6 +13,24 @@ export class DeveloperAssistantError extends Schema.TaggedErrorClass<DeveloperAs
   }
 }
 
+const ReviewUrl = Schema.String.check(Schema.isPattern(/^https?:\/\//));
+export const AssistantDeploymentTarget = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("github-actions"),
+    id: TrimmedNonEmptyString,
+    repository: Schema.String.check(Schema.isPattern(/^[\w.-]+\/[\w.-]+$/)),
+    workflow: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("railway"),
+    id: TrimmedNonEmptyString,
+    railwayProjectId: Schema.String.check(Schema.isUUID()),
+    environmentId: Schema.String.check(Schema.isUUID()),
+    serviceId: Schema.String.check(Schema.isUUID()),
+  }),
+]);
+export type AssistantDeploymentTarget = typeof AssistantDeploymentTarget.Type;
+
 export const AssistantProjectConfig = Schema.Struct({
   projectId: ProjectId,
   linearProjectId: TrimmedNonEmptyString,
@@ -23,12 +41,52 @@ export const AssistantProjectConfig = Schema.Struct({
   runtimeMode: RuntimeMode,
   baseBranch: TrimmedNonEmptyString,
   instructions: Schema.String.check(Schema.isMaxLength(20000)),
-  stagingCheckCommand: TrimmedNonEmptyString,
+  stagingCheckCommand: Schema.String,
+  stagingUrl: Schema.optionalKey(ReviewUrl),
+  deploymentTargets: Schema.optionalKey(Schema.Array(AssistantDeploymentTarget)),
   reviewState: Schema.String,
   acceptedState: Schema.String,
   maxWorkerTurns: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 30 })),
 });
 export type AssistantProjectConfig = typeof AssistantProjectConfig.Type;
+
+export const AssistantSetupInput = Schema.Struct({
+  projectId: ProjectId,
+  linearProjectId: TrimmedNonEmptyString,
+  assignedToMe: Schema.Boolean,
+  modelSelection: ModelSelection,
+  workerModelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  context: Schema.String.check(Schema.isMaxLength(20000)),
+});
+export type AssistantSetupInput = typeof AssistantSetupInput.Type;
+
+export const AssistantSetupPlan = Schema.Struct({
+  baseBranch: AssistantProjectConfig.fields.baseBranch,
+  readyStates: AssistantProjectConfig.fields.readyStates,
+  instructions: AssistantProjectConfig.fields.instructions,
+  stagingCheckCommand: AssistantProjectConfig.fields.stagingCheckCommand,
+  stagingUrl: AssistantProjectConfig.fields.stagingUrl,
+  deploymentTargets: AssistantProjectConfig.fields.deploymentTargets,
+  reviewState: AssistantProjectConfig.fields.reviewState,
+  acceptedState: AssistantProjectConfig.fields.acceptedState,
+  maxWorkerTurns: AssistantProjectConfig.fields.maxWorkerTurns,
+});
+export type AssistantSetupPlan = typeof AssistantSetupPlan.Type;
+
+export const AssistantSetup = Schema.Struct({
+  preferences: AssistantSetupInput,
+  threadId: ThreadId,
+  proposal: Schema.NullOr(AssistantProjectConfig),
+  summary: Schema.String,
+  revision: Schema.Int,
+});
+export type AssistantSetup = typeof AssistantSetup.Type;
+export const AssistantSetupResolveInput = Schema.Struct({
+  threadId: ThreadId,
+  action: Schema.Literals(["save", "cancel"]),
+  revision: Schema.Int,
+});
 
 export const AssistantTaskStatus = Schema.Literals([
   "preparing",
@@ -44,8 +102,17 @@ export type AssistantTaskStatus = typeof AssistantTaskStatus.Type;
 
 export const AssistantDeployment = Schema.Struct({
   revision: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40,64}$/)),
-  url: Schema.String.check(Schema.isPattern(/^https?:\/\//)),
+  url: ReviewUrl,
   verifiedAt: IsoDateTime,
+  evidence: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        targetId: Schema.String,
+        revision: Schema.String,
+        reference: Schema.String,
+      }),
+    ),
+  ),
 });
 export type AssistantDeployment = typeof AssistantDeployment.Type;
 
@@ -90,6 +157,7 @@ export const AssistantProject = Schema.Struct({
 export type AssistantProject = typeof AssistantProject.Type;
 
 export const AssistantBoard = Schema.Struct({
+  setups: Schema.optionalKey(Schema.Array(AssistantSetup)),
   projects: Schema.Array(AssistantProject),
   tasks: Schema.Array(AssistantTask),
   decisions: Schema.Array(AssistantDecision),

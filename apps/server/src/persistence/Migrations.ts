@@ -63,6 +63,7 @@ import Migration0048 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts
 import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import Migration0051 from "./Migrations/051_LinearDelegation.ts";
 import Migration0052 from "./Migrations/052_DeveloperAssistant.ts";
+import Migration0053 from "./Migrations/053_AssistantSetup.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadLinkedIssue.ts";
 
 /**
@@ -128,6 +129,7 @@ export const migrationEntries = [
   [50, "ProjectionThreadLinkedIssue", Migration0050],
   [51, "LinearDelegation", Migration0051],
   [52, "DeveloperAssistant", Migration0052],
+  [53, "AssistantSetup", Migration0053],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

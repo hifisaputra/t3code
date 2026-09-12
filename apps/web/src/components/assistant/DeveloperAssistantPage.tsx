@@ -15,7 +15,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { getAssistantSetupState } from "@t3tools/client-runtime/state/developerAssistant";
 import { createModelSelection } from "@t3tools/shared/model";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   BotIcon,
   CheckIcon,
@@ -40,6 +40,7 @@ import { buildThreadRouteParams } from "../../threadRoutes";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { AssistantSetupReview } from "./AssistantSetupReview";
 import { SidebarInset, SidebarTrigger } from "../ui/sidebar";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 
@@ -48,7 +49,8 @@ const textareaClass = "min-h-24 w-full rounded-md border border-input bg-backgro
 
 export function DeveloperAssistantPage() {
   const { environments } = useEnvironments();
-  const [chosen, setChosen] = useState<EnvironmentId | null>(null);
+  const { environment: chosen } = useSearch({ from: "/_chat/assistant" });
+  const navigate = useNavigate();
   const environment =
     environments.find((e) => e.environmentId === chosen) ??
     environments.find((e) => e.serverConfig?.settings.linear.apiKey) ??
@@ -63,7 +65,12 @@ export function DeveloperAssistantPage() {
           aria-label="Environment"
           className={`${selectClass} ml-auto max-w-56`}
           value={environment?.environmentId ?? ""}
-          onChange={(e) => setChosen(e.target.value as EnvironmentId)}
+          onChange={(e) =>
+            void navigate({
+              to: "/assistant",
+              search: { environment: e.target.value as EnvironmentId },
+            })
+          }
         >
           {environments.map((e) => (
             <option key={e.environmentId} value={e.environmentId}>
@@ -98,7 +105,7 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
         : setup.unavailableReason === "no-projects"
           ? "Add your repository as a T3 project from the sidebar, then return here to set up its assistant."
           : setup.unavailableReason === "all-configured"
-            ? "All projects in this environment already have an assistant. Use Setup on a project below to change it."
+            ? "All projects have an assistant or a setup in progress. Continue a setup below, or use Setup to change an existing assistant."
             : null;
   const control = useAtomCommand(developerAssistant.control);
   const answer = useAtomCommand(developerAssistant.answer);
@@ -171,7 +178,27 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
               board.data?.projects.find((p) => p.config.projectId === editing)?.config ?? null
             }
             onClose={() => setEditing(null)}
+            onStarted={openThread}
           />
+        )}
+        {(board.data?.setups?.length ?? 0) > 0 && (
+          <section aria-label="Setups in progress" className="space-y-3">
+            <h2 className="font-medium">Setups in progress</h2>
+            {board.data?.setups?.map((draft) => (
+              <article key={draft.threadId} className="rounded-xl border p-4">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <h3 className="font-medium">
+                    {projects.find((p) => p.id === draft.preferences.projectId)?.title ??
+                      "Project setup"}
+                  </h3>
+                  <Button size="sm" variant="outline" onClick={() => openThread(draft.threadId)}>
+                    Continue conversation
+                  </Button>
+                </div>
+                <AssistantSetupReview setup={draft} environmentId={environmentId} />
+              </article>
+            ))}
+          </section>
         )}
         <section aria-label="Projects" className="grid gap-3 sm:grid-cols-2">
           {board.data?.projects.map((p) => (
@@ -201,7 +228,14 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
                 </Button>
                 <Button
                   size="sm"
-                  disabled={busy}
+                  disabled={
+                    busy ||
+                    Boolean(
+                      board.data?.setups?.some(
+                        (s) => s.preferences.projectId === p.config.projectId,
+                      ),
+                    )
+                  }
                   onClick={() =>
                     void act(() =>
                       control({
@@ -240,7 +274,13 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
                   size="sm"
                   variant="ghost"
                   disabled={p.status === "running"}
-                  onClick={() => setEditing(p.config.projectId)}
+                  onClick={() => {
+                    const draft = board.data?.setups?.find(
+                      (s) => s.preferences.projectId === p.config.projectId,
+                    );
+                    if (draft) openThread(draft.threadId);
+                    else setEditing(p.config.projectId);
+                  }}
                 >
                   Setup
                 </Button>
@@ -507,11 +547,13 @@ function AssistantSetup({
   projectIds,
   initial,
   onClose,
+  onStarted,
 }: {
   environment: EnvironmentPresentation;
   projectIds: ReadonlyArray<ProjectId>;
   initial: AssistantProjectConfig | null;
   onClose: () => void;
+  onStarted: (threadId: ThreadId) => void;
 }) {
   const allProjects = useProjects();
   const projects = allProjects.filter(
@@ -520,7 +562,7 @@ function AssistantSetup({
   const workspace = useEnvironmentQuery(
     linearEnvironment.workspace({ environmentId: environment.environmentId, input: {} }),
   );
-  const configure = useAtomCommand(developerAssistant.configure);
+  const beginSetup = useAtomCommand(developerAssistant.beginSetup);
   const providers = environment.serverConfig?.providers ?? [];
   const defaultModel = resolveDefaultProviderModelSelection(providers, initial?.modelSelection);
   const [projectId, setProjectId] = useState(initial?.projectId ?? projects[0]?.id ?? "");
@@ -530,14 +572,8 @@ function AssistantSetup({
     initial?.workerModelSelection ?? defaultModel,
   );
   const [assignedToMe, setAssignedToMe] = useState(initial?.assignedToMe ?? true);
-  const [readyStates, setReadyStates] = useState(initial?.readyStates.join(", ") ?? "");
-  const [baseBranch, setBaseBranch] = useState(initial?.baseBranch ?? "develop");
-  const [instructions, setInstructions] = useState(initial?.instructions ?? "");
-  const [command, setCommand] = useState(initial?.stagingCheckCommand ?? "");
   const [runtimeMode, setRuntimeMode] = useState(initial?.runtimeMode ?? "approval-required");
-  const [reviewState, setReviewState] = useState(initial?.reviewState ?? "In Review");
-  const [acceptedState, setAcceptedState] = useState(initial?.acceptedState ?? "Done");
-  const [maxTurns, setMaxTurns] = useState(initial?.maxWorkerTurns ?? 6);
+  const [context, setContext] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const linearProjects = [
@@ -572,40 +608,37 @@ function AssistantSetup({
       className="rounded-xl border bg-muted/20 p-5"
       onSubmit={async (e) => {
         e.preventDefault();
-        if (!model || !workerModel || !projectId) return;
+        if (!model || !workerModel || !projectId || !linearProjectId) return;
         setBusy(true);
         setError(null);
         try {
-          const result = await configure({
+          const result = await beginSetup({
             environmentId: environment.environmentId,
             input: {
               projectId: ProjectId.make(projectId),
               linearProjectId,
               assignedToMe,
-              readyStates: readyStates
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean),
               modelSelection: model,
               workerModelSelection: workerModel,
               runtimeMode,
-              baseBranch,
-              instructions,
-              stagingCheckCommand: command,
-              reviewState,
-              acceptedState,
-              maxWorkerTurns: maxTurns,
+              context,
             },
           });
-          if (result._tag === "Success") onClose();
-          else if (result._tag === "Failure") setError(String(squashAtomCommandFailure(result)));
+          if (result._tag === "Success") {
+            onClose();
+            onStarted(result.value.threadId);
+          } else if (result._tag === "Failure") setError(String(squashAtomCommandFailure(result)));
         } finally {
           setBusy(false);
         }
       }}
     >
-      <h2 className="mb-4 font-medium">Project setup</h2>
-      <div className="grid gap-4 sm:grid-cols-2">
+      <h2 className="font-medium">Set up with your assistant</h2>
+      <p className="mt-1 mb-5 max-w-2xl text-sm text-muted-foreground">
+        Choose the project and models. Your assistant will inspect the repository and staging
+        deployment, ask for missing details, and propose a setup for you to review.
+      </p>
+      <fieldset disabled={busy} className="grid gap-4 sm:grid-cols-2">
         <label className="grid gap-1 text-sm">
           T3 project
           <select
@@ -630,7 +663,9 @@ function AssistantSetup({
             value={linearProjectId}
             onChange={(e) => setLinearProjectId(e.target.value)}
           >
-            <option value="">Choose project</option>
+            <option value="">
+              {workspace.data ? "Choose project" : "Loading Linear projects…"}
+            </option>
             {linearProjects.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
@@ -653,28 +688,12 @@ function AssistantSetup({
             value={assignedToMe ? "me" : "all"}
             onChange={(e) => setAssignedToMe(e.target.value === "me")}
           >
-            <option value="me">Assigned to the connected Linear account</option>
+            <option value="me">Assigned to your Linear account</option>
             <option value="all">All issues in the project</option>
           </select>
         </label>
         <label className="grid gap-1 text-sm">
-          Ready state names
-          <Input
-            value={readyStates}
-            onChange={(e) => setReadyStates(e.target.value)}
-            placeholder="Empty: all unstarted issues"
-          />
-        </label>
-        <label className="grid gap-1 text-sm">
-          Integration branch
-          <Input required value={baseBranch} onChange={(e) => setBaseBranch(e.target.value)} />
-          <span className="text-xs text-muted-foreground">
-            The assistant reviews and merges passing work into this branch on origin. Use merge
-            commits or fast-forward merges and enable staging deployment from it.
-          </span>
-        </label>
-        <label className="grid gap-1 text-sm">
-          Agent permissions
+          Permissions when working on issues
           <select
             className={selectClass}
             value={runtimeMode}
@@ -687,65 +706,33 @@ function AssistantSetup({
           </select>
         </label>
         <label className="grid gap-1 text-sm sm:col-span-2">
-          Project instructions
+          Anything your assistant should know? (optional)
           <textarea
             className={textareaClass}
-            value={instructions}
-            onChange={(e) => setInstructions(e.target.value)}
-            placeholder="Environment setup, isolated database, verification commands, code review requirements, and deployment workflow…"
+            maxLength={20000}
+            value={context}
+            onChange={(e) => setContext(e.target.value)}
+            placeholder="For example: staging is called test in Railway. Use the existing test account for browser checks."
           />
         </label>
-        <label className="grid gap-1 text-sm sm:col-span-2">
-          Staging verification command
-          <Input
-            required
-            value={command}
-            onChange={(e) => setCommand(e.target.value)}
-            placeholder="node scripts/check-staging.mjs"
-          />
-          <span className="text-xs text-muted-foreground">
-            Runs on the T3 server at the project root. Check the actual staging deployment and its
-            health, then print JSON with a full commit SHA in “revision” and the review address in
-            “url”. Exit nonzero while deployment is pending or failed.
-          </span>
-        </label>
-        <label className="grid gap-1 text-sm">
-          Linear state after staging
-          <Input
-            value={reviewState}
-            onChange={(e) => setReviewState(e.target.value)}
-            placeholder="Leave empty to keep the state"
-          />
-        </label>
-        <label className="grid gap-1 text-sm">
-          Linear state after acceptance
-          <Input
-            value={acceptedState}
-            onChange={(e) => setAcceptedState(e.target.value)}
-            placeholder="Leave empty to keep the state"
-          />
-        </label>
-        <label className="grid gap-1 text-sm">
-          Worker turns before asking for help
-          <Input
-            type="number"
-            min={1}
-            max={30}
-            value={maxTurns}
-            onChange={(e) => setMaxTurns(Number(e.target.value))}
-          />
-        </label>
-      </div>
+      </fieldset>
+      <p className="mt-3 text-xs text-muted-foreground">
+        Setup inspects your project with command approvals enabled. Issue processing begins only
+        after you save the setup and choose Start.
+      </p>
       {(error || workspace.error) && (
         <p role="alert" className="mt-3 text-sm text-destructive">
           {error ?? workspace.error}
         </p>
       )}
-      <div className="mt-5 flex gap-2">
-        <Button type="submit" disabled={busy || !model || !workerModel || !linearProjectId}>
-          Save setup
+      <div className="mt-4 flex gap-2">
+        <Button
+          type="submit"
+          disabled={busy || !model || !workerModel || !projectId || !linearProjectId}
+        >
+          {busy ? "Opening conversation…" : "Start setup conversation"}
         </Button>
-        <Button type="button" variant="ghost" onClick={onClose}>
+        <Button variant="ghost" disabled={busy} onClick={onClose}>
           Cancel
         </Button>
       </div>

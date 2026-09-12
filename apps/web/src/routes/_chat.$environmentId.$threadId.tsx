@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import ChatView from "../components/ChatView";
+import { AssistantSetupThreadPanel } from "../components/assistant/AssistantSetupReview";
 import { threadHasStarted } from "../components/ChatView.logic";
 import { finalizePromotedDraftThreadByRef, useComposerDraftStore } from "../composerDraftStore";
 import { resolveThreadRouteRef, resolveThreadRouteRenderState } from "../threadRoutes";
@@ -80,6 +81,12 @@ function ChatThreadRouteView() {
 
   return (
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
+      {threadRef.threadId.startsWith("assistant-setup-") && (
+        <AssistantSetupThreadPanel
+          environmentId={threadRef.environmentId}
+          threadId={threadRef.threadId}
+        />
+      )}
       {renderState === "ready" || (renderState === "loading" && serverThreadShell !== null) ? (
         <ChatView
           environmentId={threadRef.environmentId}

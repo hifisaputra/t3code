@@ -5,6 +5,9 @@ import {
   AssistantControlInput,
   AssistantProjectConfig,
   AssistantReviewInput,
+  AssistantSetup,
+  AssistantSetupInput,
+  AssistantSetupResolveInput,
   DeveloperAssistantError,
 } from "./developerAssistant.ts";
 import {
@@ -429,6 +432,8 @@ export const WS_METHODS = {
   linearPrepareIssueThread: "linear.prepareIssueThread",
   assistantBoard: "assistant.board",
   assistantConfigure: "assistant.configure",
+  assistantSetupBegin: "assistant.setupBegin",
+  assistantSetupResolve: "assistant.setupResolve",
   assistantControl: "assistant.control",
   assistantAnswer: "assistant.answer",
   assistantReview: "assistant.review",
@@ -1373,6 +1378,16 @@ const WsGoogleCalendarUpdateRpc = Rpc.make(WS_METHODS.googleCalendarUpdate, {
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WS_METHODS.assistantSetupBegin, {
+    payload: AssistantSetupInput,
+    success: AssistantSetup,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantSetupResolve, {
+    payload: AssistantSetupResolveInput,
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
   Rpc.make(WS_METHODS.assistantBoard, {
     payload: Schema.Struct({}),
     success: AssistantBoard,

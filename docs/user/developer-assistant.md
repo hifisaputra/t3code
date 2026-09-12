@@ -13,15 +13,26 @@ review can happen later. Production releases remain outside this workflow.
 Connect Linear and enable **Agent access** in **Settings → Integrations → Linear**. Add your
 application's repository as a T3 project on the environment that will run the agents.
 
-On web or desktop, open **Developer assistant** from the sidebar or command palette and choose
+On the web, open **Developer assistant** from the sidebar or command palette and choose
 **Set up project**. Select the T3 project, Linear project, issue scope, and the assistant and coding
-models. “Assigned to me” means the account connected to Linear on that T3 server. Empty ready
-state names select unstarted issues; specify names if you also want selected backlog states.
+models. “Assigned to me” means the account connected to Linear on that T3 server.
 
-Choose an integration branch, usually `develop`, and provide the project's environment,
-verification, review, and deployment instructions. The assistant's branch setting takes priority
-over Linear repository mappings. This version expects an `origin` remote and merge commits or
-fast-forward merges. Squash and rebase merges cannot pass its commit ancestry check.
+Choose **Start setup conversation**. The assistant inspects the repository's instructions,
+deployment workflows, staging services, databases, and verification requirements. It uses existing
+provider access on the server and asks you for missing details in the thread. Setup uses command
+approvals and does not authorize repository changes or deployments. Do not paste credentials into
+chat; configure access through the provider's normal login or secret settings.
+
+Review the proposed setup above the conversation or under **Setups in progress** on the assistant
+board. Discuss corrections in the thread; the assistant can revise its proposal. **Save setup**
+configures the project and leaves its queue stopped. Choose **Start** when you want it to process
+issues. You can leave and resume a setup conversation across reloads. **Cancel setup** keeps the
+conversation in history without applying its proposal. To revise an existing assistant, stop it,
+finish or skip its active issue, and choose **Setup**.
+
+The integration branch usually is `develop`. It takes priority over Linear repository mappings.
+This version expects an `origin` remote and merge commits or fast-forward merges; squash and rebase
+merges cannot pass its commit ancestry check.
 
 Before starting, prepare the application:
 
@@ -36,9 +47,10 @@ Before starting, prepare the application:
 - Verification commands and cleanup are documented. One worker per project can reuse a project's
   development port and database, but concurrently running projects still need separate ports and
   resources. Workers should stop the servers and background processes they start before delivery.
-- The staging verification command described below reports an actual healthy deployment.
+- The saved staging targets identify the actual deployment workflows/services, and the assistant
+  has the access needed to exercise the affected staging behavior.
 
-The approval mode applies to both the assistant and workers. With approvals required, permission
+The saved approval mode applies to both the coordinator and coding workers after setup. With approvals required, permission
 requests wait for you in their original threads. Full access allows unattended commands within the
 provider's configured permissions. Use models and providers with working T3 MCP tool access.
 
@@ -48,10 +60,23 @@ not stop the assistant. The T3 server and its provider runtimes must remain runn
 
 ## Verify staging
 
-Supply a command such as `node scripts/check-staging.mjs`. T3 runs it at the project's root on the
-server, with a 90-second timeout. The command must check your hosting provider's deployment status
-and the application's staging health. It should finish promptly with a nonzero exit code if the
-expected deployment is still pending or has failed.
+A custom script is optional. Setup can use a GitHub Actions deployment workflow or Railway staging
+services. The T3 server needs the corresponding authenticated `gh` or `railway` CLI. T3 checks the
+latest workflow run or active service deployment and verifies that its commit contains the worker's
+changes on the integration branch. The assistant selects the targets affected by each issue; when
+it does not select targets, all configured targets must pass.
+
+Deployment success alone does not prove a feature works. The assistant also follows the saved
+project instructions to choose and run issue-specific staging checks, including migration,
+background worker, and browser checks where relevant. The review summary should include their
+evidence and any coverage limits. Staging access, test accounts, different staging/production data
+providers, and components without staging coverage should be discussed during setup. A workflow
+that skips deployment for some paths needs a documented delivery procedure for those changes.
+
+For other hosting or an existing project check, setup can propose a custom command such as
+`node scripts/check-staging.mjs`. Review the exact command before saving; saving authorizes T3 to
+run it at the project root on the server, with a 90-second timeout. The script must already exist
+and check the hosting provider and staging health. It must exit nonzero while pending or failed.
 
 On success, print only a JSON object to stdout:
 
@@ -64,8 +89,8 @@ or a trusted version endpoint in that deployment. `url` is the HTTP or HTTPS add
 Do not return the latest local Git commit merely because it exists. Send diagnostics to stderr.
 
 The command receives `T3_ASSISTANT_WORKER_REVISION` and `T3_ASSISTANT_BASE_BRANCH` as environment
-variables. For Railway, Cloudflare, or another host, your script translates that platform's
-successful deployment into this common result. T3 does not provision hosting or databases.
+variables. For custom checks, your script translates the hosting platform's successful deployment into this
+common result. T3 does not provision hosting or databases.
 
 T3 then fetches `origin` and verifies both that the deployed commit contains the worker's HEAD and
 that the deployed commit belongs to the configured integration branch. Uncommitted work, unresolved

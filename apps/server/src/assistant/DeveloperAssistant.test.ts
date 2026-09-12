@@ -32,6 +32,7 @@ import * as Settings from "../serverSettings.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import Migration from "../persistence/Migrations/052_DeveloperAssistant.ts";
+import SetupMigration from "../persistence/Migrations/053_AssistantSetup.ts";
 import * as Assistant from "./DeveloperAssistant.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 
@@ -234,16 +235,21 @@ function harness() {
     Effect.provide(dependencies),
     Effect.provideService(Assistant.DeveloperAssistantWorkers, false),
   );
-  const setup = Effect.gen(function* () {
+  const initialize = Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TABLE orchestration_events (sequence INTEGER)`;
     yield* Migration;
-    const service = yield* make;
+    yield* SetupMigration;
+    return yield* make;
+  });
+  const setup = Effect.gen(function* () {
+    const service = yield* initialize;
     yield* service.configure(config);
     const board = yield* service.control({ projectId: config.projectId, action: "start" });
     return { service, caller: board.projects[0]!.threadId };
   });
   return {
+    initialize,
     setup,
     make,
     makeWithWorkers: Assistant.make.pipe(Effect.provide(dependencies)),
@@ -269,6 +275,207 @@ function harness() {
   };
 }
 const database = NodeSqliteClient.layerMemory;
+
+const setupInput = {
+  projectId: config.projectId,
+  linearProjectId: config.linearProjectId,
+  assignedToMe: true,
+  modelSelection: config.modelSelection,
+  workerModelSelection: config.workerModelSelection,
+  runtimeMode: "full-access" as const,
+  context: "Inspect the existing staging deployment.",
+};
+const setupPlan = {
+  baseBranch: "develop",
+  readyStates: [],
+  instructions: "Use the staging database and verify the affected UI.",
+  stagingCheckCommand: "",
+  stagingUrl: "https://staging.example.test",
+  deploymentTargets: [
+    { kind: "github-actions" as const, id: "web", repository: "owner/app", workflow: "deploy.yml" },
+  ],
+  reviewState: "In Review",
+  acceptedState: "Done",
+  maxWorkerTurns: 6,
+};
+
+it.effect("setup is a durable conversation and saving never starts the issue queue", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    const draft = yield* service.beginSetup(setupInput);
+    assert.equal(
+      (yield* service.getSetup(draft.threadId)).setup.preferences.context,
+      setupInput.context,
+    );
+    assert.isTrue(yield* service.getSetup(ThreadId.make("unrelated")).pipe(Effect.isFailure));
+    assert.equal((yield* service.beginSetup(setupInput)).threadId, draft.threadId);
+    assert.lengthOf(
+      h.commands.filter((c) => c.type === "thread.turn.start"),
+      1,
+    );
+    assert.equal(h.threads.get(draft.threadId)?.runtimeMode, "approval-required");
+    assert.lengthOf((yield* service.board(null)).projects, 0);
+    assert.isTrue(
+      yield* service
+        .startIssue(draft.threadId, "APP-1", "Not allowed during setup")
+        .pipe(Effect.isFailure),
+    );
+    assert.isTrue(
+      yield* service
+        .proposeSetup(ThreadId.make("unrelated"), setupPlan, "Not authorized")
+        .pipe(Effect.isFailure),
+    );
+    const proposed = yield* service.proposeSetup(
+      draft.threadId,
+      setupPlan,
+      "Deploy through GitHub Actions.",
+    );
+    assert.equal(proposed.proposal?.runtimeMode, "full-access");
+    const save = { threadId: draft.threadId, action: "save" as const, revision: proposed.revision };
+    assert.isTrue(yield* service.resolveSetup(save).pipe(Effect.isFailure));
+    h.finish(draft.threadId);
+    const restarted = yield* h.make;
+    assert.equal(
+      (yield* restarted.board(null)).setups?.[0]?.summary,
+      "Deploy through GitHub Actions.",
+    );
+    const board = yield* restarted.resolveSetup(save);
+    assert.lengthOf(board.setups ?? [], 0);
+    assert.equal(board.projects[0]?.status, "stopped");
+    assert.deepEqual(board.projects[0]?.config.deploymentTargets, setupPlan.deploymentTargets);
+    assert.equal(board.projects[0]?.config.workerModelSelection.model, "worker-model");
+    assert.lengthOf(board.tasks, 0);
+    assert.lengthOf(h.transitions, 0);
+    assert.lengthOf(
+      h.commands.filter((c) => c.type === "thread.turn.start"),
+      1,
+    );
+    assert.equal(h.threads.get(draft.threadId)?.archivedAt, timestamp);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("requires a fresh proposal after more discussion and rejects stale saves", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    const draft = yield* service.beginSetup(setupInput);
+    const first = yield* service.proposeSetup(draft.threadId, setupPlan, "First plan");
+    h.finish(draft.threadId);
+    h.threads.set(draft.threadId, {
+      ...h.threads.get(draft.threadId)!,
+      latestUserMessageAt: "2026-09-12T00:01:00.000Z",
+    });
+    assert.isTrue(
+      yield* service
+        .resolveSetup({ threadId: draft.threadId, action: "save", revision: first.revision })
+        .pipe(Effect.isFailure),
+    );
+    const revised = yield* service.proposeSetup(
+      draft.threadId,
+      { ...setupPlan, maxWorkerTurns: 3 },
+      "Revised plan",
+    );
+    assert.isTrue(
+      yield* service
+        .resolveSetup({ threadId: draft.threadId, action: "save", revision: first.revision })
+        .pipe(Effect.isFailure),
+    );
+    const saved = yield* service.resolveSetup({
+      threadId: draft.threadId,
+      action: "save",
+      revision: revised.revision,
+    });
+    assert.equal(saved.projects[0]?.config.maxWorkerTurns, 3);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("cancelling setup interrupts its turn, retains history and permits a new setup", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    const draft = yield* service.beginSetup(setupInput);
+    const board = yield* service.resolveSetup({
+      threadId: draft.threadId,
+      action: "cancel",
+      revision: 0,
+    });
+    assert.lengthOf(board.setups ?? [], 0);
+    assert.lengthOf(board.projects, 0);
+    assert.isNull(h.threads.get(draft.threadId)?.session);
+    assert.equal(h.threads.get(draft.threadId)?.archivedAt, timestamp);
+    assert.isTrue(
+      yield* service.proposeSetup(draft.threadId, setupPlan, "Too late").pipe(Effect.isFailure),
+    );
+    assert.notEqual((yield* service.beginSetup(setupInput)).threadId, draft.threadId);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("blocks setup during managed work and blocks starting while setup is in progress", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    assert.isTrue(yield* service.beginSetup(setupInput).pipe(Effect.isFailure));
+    const task = yield* service.startIssue(caller, "APP-1", "Implement");
+    yield* service.control({ projectId: config.projectId, action: "stop" });
+    assert.isTrue(yield* service.beginSetup(setupInput).pipe(Effect.isFailure));
+    yield* service.review({ taskId: task.id, action: "skip", feedback: "Set up first" });
+    const draft = yield* service.beginSetup(setupInput);
+    assert.isTrue(
+      yield* service
+        .control({ projectId: config.projectId, action: "start" })
+        .pipe(Effect.isFailure),
+    );
+    assert.isTrue(yield* service.configure(config).pipe(Effect.isFailure));
+    const cancelled = yield* service.resolveSetup({
+      threadId: draft.threadId,
+      action: "cancel",
+      revision: 0,
+    });
+    assert.equal(cancelled.projects[0]?.config.stagingCheckCommand, "check-staging");
+    assert.equal(cancelled.projects[0]?.status, "stopped");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("rejects missing deployment checks and duplicate repository setup", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    const draft = yield* service.beginSetup(setupInput);
+    assert.isTrue(
+      yield* service
+        .beginSetup({ ...setupInput, projectId: ProjectId.make("same-repo") })
+        .pipe(Effect.isFailure),
+    );
+    assert.isTrue(
+      yield* service
+        .configure({ ...config, projectId: ProjectId.make("same-repo") })
+        .pipe(Effect.isFailure),
+    );
+    assert.isTrue(
+      yield* service
+        .proposeSetup(
+          draft.threadId,
+          { ...setupPlan, deploymentTargets: [] },
+          "No deployment evidence",
+        )
+        .pipe(Effect.isFailure),
+    );
+    assert.isTrue(
+      yield* service
+        .proposeSetup(
+          draft.threadId,
+          {
+            ...setupPlan,
+            deploymentTargets: [...setupPlan.deploymentTargets, ...setupPlan.deploymentTargets],
+          },
+          "Duplicate targets",
+        )
+        .pipe(Effect.isFailure),
+    );
+    assert.isNull((yield* service.board(null)).setups?.[0]?.proposal);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
 
 it.effect("claims an issue once and prevents a second worker until staging succeeds", () =>
   Effect.gen(function* () {
@@ -566,6 +773,22 @@ const eventBase = (threadId: ThreadId) => ({
   correlationId: null,
   metadata: {},
 });
+
+it.effect("deleting a setup thread releases the project for another conversation", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    const draft = yield* service.beginSetup(setupInput);
+    h.threads.delete(draft.threadId);
+    yield* service.observe({
+      ...eventBase(draft.threadId),
+      type: "thread.deleted",
+      payload: { threadId: draft.threadId, deletedAt: timestamp },
+    });
+    assert.lengthOf((yield* service.board(null)).setups ?? [], 0);
+    assert.notEqual((yield* service.beginSetup(setupInput)).threadId, draft.threadId);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
 
 it.effect(
   "routes provider questions to their thread and wakes the coordinator on worker completion",

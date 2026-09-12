@@ -5,6 +5,8 @@ import {
   AssistantBoard,
   AssistantDecision,
   AssistantTask,
+  AssistantSetup,
+  AssistantSetupPlan,
   DeveloperAssistantError,
   LinearIssueSummary,
   PreviewAutomationUnavailableError,
@@ -18,6 +20,22 @@ const text = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(20000))
 const taskId = Schema.String.check(Schema.isNonEmpty());
 
 export const AssistantToolkit = Toolkit.make(
+  Tool.make("assistant_get_setup", {
+    description:
+      "Read the saved setup brief, selected preferences, existing proposal, and inspection instructions. Call this first when helping the person set up their developer assistant. Only active setup conversations may read it. Setup is read-only inspection and discussion; do not start issues, mutate the repository or deploy.",
+    parameters: Schema.Struct({}),
+    success: Schema.Struct({ setup: AssistantSetup, instructions: Schema.String }),
+    failure,
+    dependencies,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("assistant_propose_setup", {
+    description:
+      "Propose or revise the configuration from an active assistant setup conversation after inspecting the repository and staging workflow. Does not save configuration or start issues. The person reviews and saves it in the web UI. Only the setup thread can use this tool; models, issue scope and permissions remain the person's selected preferences.",
+    parameters: Schema.Struct({ plan: AssistantSetupPlan, summary: text }),
+    success: AssistantSetup,
+    failure,
+    dependencies,
+  }),
   Tool.make("assistant_pause", {
     description:
       "Pause this project's assistant queue when the person asks you to stop. Existing worker work is preserved. The person can resume from the assistant board.",
@@ -76,8 +94,13 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_verify_staging", {
     description:
-      "Verify delivery using the project's configured staging check, then archive the worker and release the project for the next issue. Requires an idle worker, clean committed worktree and resolved decisions. The deployed revision must contain the worker commit and belong to origin's configured base branch. Review the code and checks first, merge with a merge commit or fast-forward, and stop development servers before calling. On success start the next issue immediately; do not wait for human review.",
-    parameters: Schema.Struct({ taskId, summary: text, reviewInstructions: text }),
+      "Verify delivery using the saved deployment targets or custom check, then archive the worker and release the project. Supply relevant targetIds for this issue, or omit to check all targets. First exercise issue-specific staging acceptance checks and include evidence in summary. Requires an idle worker, committed worktree and resolved decisions. Every selected deployment must contain the worker commit and belong to origin's integration branch. Review code, merge with a merge commit or fast-forward, and stop local servers first. On success start the next issue without waiting for human review.",
+    parameters: Schema.Struct({
+      taskId,
+      summary: text,
+      reviewInstructions: text,
+      targetIds: Schema.optionalKey(Schema.Array(text)),
+    }),
     success: AssistantTask,
     failure,
     dependencies,
@@ -97,6 +120,16 @@ const scope = Effect.gen(function* () {
   return { service: yield* DeveloperAssistant, caller: invocation.threadId };
 });
 export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
+  assistant_get_setup: () =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.getSetup(caller);
+    }),
+  assistant_propose_setup: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.proposeSetup(caller, input.plan, input.summary.trim());
+    }),
   assistant_pause: () =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
@@ -135,6 +168,7 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         input.taskId,
         input.summary.trim(),
         input.reviewInstructions.trim(),
+        input.targetIds,
       );
     }),
   assistant_wait: (input) =>

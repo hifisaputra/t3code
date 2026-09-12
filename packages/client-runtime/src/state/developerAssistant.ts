@@ -11,6 +11,7 @@ export function getAssistantSetupState(
   board: { readonly data: AssistantBoard | null; readonly error: string | null },
 ) {
   const configured = new Set(board.data?.projects.map((p) => p.config.projectId));
+  for (const setup of board.data?.setups ?? []) configured.add(setup.preferences.projectId);
   const availableProjectIds = projectIds.filter((id) => !configured.has(id));
   // Stream atoms keep waiting=true while listening for the next update. Setup
   // needs the first snapshot, not completion of the live subscription.
@@ -31,6 +32,14 @@ export function createDeveloperAssistantAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
   return {
+    beginSetup: createEnvironmentRpcCommand(runtime, {
+      label: "assistant:setup-begin",
+      tag: WS_METHODS.assistantSetupBegin,
+    }),
+    resolveSetup: createEnvironmentRpcCommand(runtime, {
+      label: "assistant:setup-resolve",
+      tag: WS_METHODS.assistantSetupResolve,
+    }),
     board: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "assistant:board",
       tag: WS_METHODS.assistantSubscribe,
