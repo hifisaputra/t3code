@@ -124,6 +124,10 @@ export const make = Effect.gen(function* () {
     );
   });
   const changed = PubSub.publish(changes, undefined).pipe(Effect.asVoid);
+  // The coordinator's conversation keeps its operating instructions, so wakes
+  // repeat them only when they changed, the conversation was compacted, or the
+  // person started the assistant. Kept in memory: a restart re-sends them once.
+  const briefed = new Map<string, string>();
 
   const project = Effect.fn("Assistant.project")(function* (id: string) {
     const rows = yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE project_id = ${id}`;
@@ -412,6 +416,7 @@ export const make = Effect.gen(function* () {
             commandId: CommandId.make(newId()),
             threadId: ThreadId.make(p.thread_id),
           });
+        if (input.action === "start") briefed.delete(input.projectId);
         yield* sql`UPDATE assistant_projects SET status = 'running', error = NULL, external_waits = 0 WHERE project_id = ${input.projectId}`;
         yield* wake(
           input.projectId,
@@ -903,12 +908,16 @@ export const make = Effect.gen(function* () {
           !(yield* threadBusy(coordinator.value))
         ) {
           const id = `assistant:${p.thread_id}:wake:${p.wake_version}`;
+          const instructions = assistantInstructions(p.config);
+          const brief = `${p.thread_id}\n${instructions}`;
+          const wakeText = `Wake reason: ${p.wake_reason}\nRead assistant_get_board before taking action.`;
           yield* queueMessage(
             p.project_id,
             ThreadId.make(p.thread_id),
             id,
-            `${assistantInstructions(p.config)}\n\nWake reason: ${p.wake_reason}\nRead assistant_get_board before taking action.`,
+            briefed.get(p.project_id) === brief ? wakeText : `${instructions}\n\n${wakeText}`,
           );
+          briefed.set(p.project_id, brief);
           yield* sql`UPDATE assistant_projects SET delivered_version = ${p.wake_version} WHERE project_id = ${p.project_id}`;
         }
       }
@@ -991,7 +1000,10 @@ export const make = Effect.gen(function* () {
       }
     } else if (event.type === "thread.activity-appended") {
       const a = event.payload.activity;
-      if (["user-input.requested", "approval.requested"].includes(a.kind)) {
+      if (a.kind === "context-compaction") {
+        // A compacted summary may drop the instructions; the next wake restores them.
+        if (projects[0]) briefed.delete(projectId);
+      } else if (["user-input.requested", "approval.requested"].includes(a.kind)) {
         const payload = yield* decodeRequest(a.payload);
         const id = `provider:${threadId}:${payload.requestId}`;
         const decision: AssistantDecision = {

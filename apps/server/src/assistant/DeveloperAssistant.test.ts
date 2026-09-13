@@ -1183,6 +1183,48 @@ it.effect(
     }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
+it.effect("sends the coordinator its instructions once, and again after compaction", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    const briefing = "You are the persistent developer assistant";
+    const nextWake = Effect.gen(function* () {
+      h.finish(caller);
+      yield* service.control({ projectId: config.projectId, action: "wake" });
+      yield* service.deliver();
+      const turns = h.commands.filter(
+        (c) => c.type === "thread.turn.start" && c.threadId === caller,
+      );
+      const last = turns.at(-1);
+      return last?.type === "thread.turn.start" ? last.message.text : "";
+    });
+    yield* service.deliver();
+    const first = h.commands.find((c) => c.type === "thread.turn.start" && c.threadId === caller);
+    assert.include(first?.type === "thread.turn.start" ? first.message.text : "", briefing);
+    const repeated = yield* nextWake;
+    assert.notInclude(repeated, briefing);
+    assert.include(repeated, "Wake reason: The person asked you to check the project");
+    yield* service.observe({
+      ...eventBase(caller),
+      type: "thread.activity-appended",
+      payload: {
+        threadId: caller,
+        activity: {
+          id: EventId.make("compaction"),
+          kind: "context-compaction",
+          summary: "Context compacted",
+          tone: "info",
+          turnId: null,
+          createdAt: timestamp,
+          payload: { state: "compacted" },
+        },
+      },
+    });
+    assert.include(yield* nextWake, briefing);
+    assert.notInclude(yield* nextWake, briefing);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 it.effect("an idle provider session stopping does not disable the persistent assistant", () =>
   Effect.gen(function* () {
     const h = harness();
