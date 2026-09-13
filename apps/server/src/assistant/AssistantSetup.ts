@@ -165,7 +165,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
         projectId: input.projectId,
         title: `Assistant setup · ${root.value.title}`,
         modelSelection: value.preferences.modelSelection,
-        runtimeMode: "approval-required",
+        runtimeMode: value.preferences.setupRuntimeMode,
         interactionMode: "default",
         branch: null,
         worktreePath: null,
@@ -190,7 +190,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
         text: "Help me set up the developer assistant for this project. Read the saved setup brief using your assistant setup tools, then inspect the repository and its staging deployment. Ask me for missing details and propose a setup I can review and save. This is an inspection and discussion; do not change files, deploy, or start issues.",
       },
       modelSelection: value.preferences.modelSelection,
-      runtimeMode: "approval-required",
+      runtimeMode: value.preferences.setupRuntimeMode,
       interactionMode: "default",
       createdAt: yield* now,
     });
@@ -203,7 +203,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
   ) {
     const row = yield* get(caller);
     const preferences = yield* decodePreferences(row.preferences);
-    const { context: _context, ...selected } = preferences;
+    const { context: _context, setupRuntimeMode: _setupRuntimeMode, ...selected } = preferences;
     const proposal: AssistantProjectConfig = { ...plan, ...selected };
     const error = validateDeploymentConfig(proposal);
     if (error) return yield* error;

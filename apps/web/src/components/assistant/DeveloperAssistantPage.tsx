@@ -1,5 +1,6 @@
 import {
   DEFAULT_CLIENT_SETTINGS,
+  DEFAULT_RUNTIME_MODE,
   DEFAULT_SERVER_SETTINGS,
   ProjectId,
   type AssistantBoard,
@@ -7,6 +8,7 @@ import {
   type AssistantTask,
   type EnvironmentId,
   type ModelSelection,
+  type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -573,6 +575,7 @@ function AssistantSetup({
   );
   const [assignedToMe, setAssignedToMe] = useState(initial?.assignedToMe ?? true);
   const [runtimeMode, setRuntimeMode] = useState(initial?.runtimeMode ?? "approval-required");
+  const [setupRuntimeMode, setSetupRuntimeMode] = useState<RuntimeMode>(DEFAULT_RUNTIME_MODE);
   const [context, setContext] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -621,6 +624,7 @@ function AssistantSetup({
               modelSelection: model,
               workerModelSelection: workerModel,
               runtimeMode,
+              setupRuntimeMode,
               context,
             },
           });
@@ -705,6 +709,17 @@ function AssistantSetup({
             <option value="full-access">Run unattended with full access</option>
           </select>
         </label>
+        <label className="grid gap-1 text-sm">
+          Permissions during setup
+          <select
+            className={selectClass}
+            value={setupRuntimeMode}
+            onChange={(e) => setSetupRuntimeMode(e.target.value as RuntimeMode)}
+          >
+            <option value="full-access">Full access</option>
+            <option value="approval-required">Ask for command approvals</option>
+          </select>
+        </label>
         <label className="grid gap-1 text-sm sm:col-span-2">
           Anything your assistant should know? (optional)
           <textarea
@@ -717,8 +732,8 @@ function AssistantSetup({
         </label>
       </fieldset>
       <p className="mt-3 text-xs text-muted-foreground">
-        Setup inspects your project with command approvals enabled. Issue processing begins only
-        after you save the setup and choose Start.
+        Setup only inspects your project and does not change files or deploy. Issue processing
+        begins only after you save the setup and choose Start.
       </p>
       {(error || workspace.error) && (
         <p role="alert" className="mt-3 text-sm text-destructive">

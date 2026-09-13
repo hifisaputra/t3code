@@ -67,7 +67,11 @@ it.effect("enables setup after the first snapshot while the board subscription r
       ...emptyBoard,
       setups: [
         {
-          preferences: { ...preferences, context: "Inspect staging" },
+          preferences: {
+            ...preferences,
+            setupRuntimeMode: "approval-required",
+            context: "Inspect staging",
+          },
           threadId: ThreadId.make("assistant-setup-app"),
           proposal: null,
           summary: "",

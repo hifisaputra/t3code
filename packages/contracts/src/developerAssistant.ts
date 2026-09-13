@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { IsoDateTime, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -57,6 +58,11 @@ export const AssistantSetupInput = Schema.Struct({
   modelSelection: ModelSelection,
   workerModelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
+  // Permissions for the setup conversation itself; setups begun before this
+  // choice existed ran supervised.
+  setupRuntimeMode: RuntimeMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed("approval-required" as const)),
+  ),
   context: Schema.String.check(Schema.isMaxLength(20000)),
 });
 export type AssistantSetupInput = typeof AssistantSetupInput.Type;

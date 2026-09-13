@@ -19,9 +19,10 @@ models. “Assigned to me” means the account connected to Linear on that T3 se
 
 Choose **Start setup conversation**. The assistant inspects the repository's instructions,
 deployment workflows, staging services, databases, and verification requirements. It uses existing
-provider access on the server and asks you for missing details in the thread. Setup uses command
-approvals and does not authorize repository changes or deployments. Do not paste credentials into
-chat; configure access through the provider's normal login or secret settings.
+provider access on the server and asks you for missing details in the thread. **Permissions during
+setup** chooses whether the setup conversation runs with full access (the default) or asks before
+each command. Either way, setup does not authorize repository changes or deployments. Do not paste
+credentials into chat; configure access through the provider's normal login or secret settings.
 
 Review the proposed setup above the conversation or under **Setups in progress** on the assistant
 board. Discuss corrections in the thread; the assistant can revise its proposal. **Save setup**

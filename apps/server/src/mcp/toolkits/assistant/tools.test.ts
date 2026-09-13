@@ -30,6 +30,7 @@ it.effect(
           modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "model" },
           workerModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "model" },
           runtimeMode: "approval-required",
+          setupRuntimeMode: "approval-required",
           context: "Existing staging",
         },
       };

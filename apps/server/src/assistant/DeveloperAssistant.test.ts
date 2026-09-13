@@ -41,6 +41,7 @@ import * as Assistant from "./DeveloperAssistant.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 
 const decodeThread = Schema.decodeUnknownSync(OrchestrationThreadShell);
+const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const timestamp = "2026-09-12T00:00:00.000Z";
 const config: AssistantProjectConfig = {
   projectId: ProjectId.make("project"),
@@ -320,6 +321,7 @@ const setupInput = {
   modelSelection: config.modelSelection,
   workerModelSelection: config.workerModelSelection,
   runtimeMode: "full-access" as const,
+  setupRuntimeMode: "approval-required" as const,
   context: "Inspect the existing staging deployment.",
 };
 const setupPlan = {
@@ -389,6 +391,34 @@ it.effect("setup is a durable conversation and saving never starts the issue que
       1,
     );
     assert.equal(h.threads.get(draft.threadId)?.archivedAt, timestamp);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("setup runs with its own permissions, separate from issue work", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    const draft = yield* service.beginSetup({
+      ...setupInput,
+      runtimeMode: "approval-required",
+      setupRuntimeMode: "full-access",
+    });
+    assert.equal(h.threads.get(draft.threadId)?.runtimeMode, "full-access");
+    const start = h.commands.find((c) => c.type === "thread.turn.start");
+    assert.equal(start?.type === "thread.turn.start" ? start.runtimeMode : null, "full-access");
+    const proposed = yield* service.proposeSetup(draft.threadId, setupPlan, "Plan");
+    assert.equal(proposed.proposal?.runtimeMode, "approval-required");
+    assert.notProperty(proposed.proposal, "setupRuntimeMode");
+
+    // Setups saved before the choice existed keep running supervised.
+    const sql = yield* SqlClient.SqlClient;
+    const { setupRuntimeMode: _mode, ...legacy } = draft.preferences;
+    const encoded = yield* encodeJson(legacy);
+    yield* sql`UPDATE assistant_setups SET preferences = ${encoded} WHERE thread_id = ${draft.threadId}`;
+    assert.equal(
+      (yield* service.getSetup(draft.threadId)).setup.preferences.setupRuntimeMode,
+      "approval-required",
+    );
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
