@@ -23,6 +23,7 @@ import {
   type LinearIssueDetail,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  type OrchestrationMessage,
 } from "@t3tools/contracts";
 import { LinearApi } from "../linear/LinearApi.ts";
 import { LinearThreadService } from "../linear/LinearThreadService.ts";
@@ -100,6 +101,7 @@ function harness() {
   const seen = new Set<string>();
   const rejected = new Map<string, string>();
   const threads = new Map<ThreadId, OrchestrationThreadShell>();
+  const messages = new Map<ThreadId, OrchestrationMessage[]>();
   // Like the real projection, lookups hide archived threads unless asked.
   const visibleThread = (id: ThreadId, options?: { readonly includeArchived?: boolean }) =>
     Option.fromNullishOr(threads.get(id)).pipe(
@@ -303,7 +305,7 @@ function harness() {
             Option.map((thread) => ({
               ...thread,
               deletedAt: null,
-              messages: [],
+              messages: messages.get(thread.id) ?? [],
               activities: [],
               checkpoints: [],
               proposedPlans: [],
@@ -341,6 +343,7 @@ function harness() {
     commands,
     issues,
     threads,
+    messages,
     transitions,
     comments,
     setCommentsHealthy: (value: boolean) => {
@@ -819,6 +822,108 @@ it.effect("answers a decision exactly once in its worker and prevents unattended
     );
     assert.lengthOf(replies, 1);
     assert.equal((yield* service.board(null)).decisions[0]?.answer, "Keep existing access.");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the assistant passes on an answer the person gave in its chat, and only then", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    const first = yield* service.startIssue(caller, "APP-1", "Fix it");
+    yield* service.deliver();
+    h.finish(first.threadId);
+    const decision = yield* service.askDecision(first.threadId, "Fix the XSS here or separately?");
+    const at = (offset: number) => new Date(Date.parse(decision.createdAt) + offset).toISOString();
+    const message = (id: string, createdAt: string): OrchestrationMessage => ({
+      id: MessageId.make(id),
+      role: "user",
+      text: "Go with your recommendation.",
+      turnId: null,
+      streaming: false,
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const relay = service.relayAnswer(caller, decision.id, "Fix it in this PR.");
+
+    // An earlier message, or one T3 sent itself, is not the person answering.
+    yield* service.deliver();
+    const wake = h.commands.findLast(
+      (c) => c.type === "thread.turn.start" && c.threadId === caller,
+    );
+    h.messages.set(caller, [
+      message("before-the-question", at(-1000)),
+      message(wake?.type === "thread.turn.start" ? wake.message.messageId : "missing", at(1000)),
+    ]);
+    assert.isTrue(yield* relay.pipe(Effect.isFailure));
+    assert.isTrue(
+      yield* service.relayAnswer(first.threadId, decision.id, "Anything").pipe(Effect.isFailure),
+    );
+
+    h.messages.set(caller, [message("person", at(1000))]);
+    const relayed = yield* relay;
+    assert.equal(relayed.answer, "Fix it in this PR.");
+    const board = yield* service.board(null);
+    assert.equal(board.tasks[0]?.status, "working");
+    assert.isTrue(yield* relay.pipe(Effect.isFailure));
+    yield* service.deliver();
+    const reply = h.commands.findLast(
+      (c) => c.type === "thread.turn.start" && c.threadId === first.threadId,
+    );
+    assert.include(
+      reply?.type === "thread.turn.start" ? reply.message.text : "",
+      "through the developer assistant.\nQuestion: Fix the XSS here or separately?\nAnswer: Fix it in this PR.",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a waiting thread's idle session being released does not block its issue", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    const first = yield* service.startIssue(caller, "APP-1", "Fix it");
+    yield* service.deliver();
+    yield* service.askDecision(first.threadId, "Which copy?");
+    yield* endTurn(h, service, first.threadId);
+    const stop = (state: "completed" | "running") =>
+      Effect.gen(function* () {
+        const thread = h.threads.get(first.threadId)!;
+        h.threads.set(first.threadId, {
+          ...thread,
+          latestTurn: {
+            turnId: TurnId.make("turn-1"),
+            state,
+            requestedAt: timestamp,
+            startedAt: timestamp,
+            completedAt: state === "completed" ? timestamp : null,
+            assistantMessageId: null,
+          },
+        });
+        yield* service.observe({
+          ...eventBase(first.threadId),
+          type: "thread.session-set",
+          payload: {
+            threadId: first.threadId,
+            session: {
+              threadId: first.threadId,
+              status: "stopped",
+              providerName: "test",
+              activeTurnId: null,
+              runtimeMode: "approval-required",
+              lastError: null,
+              updatedAt: timestamp,
+            },
+          },
+        });
+        return (yield* service.board(null)).tasks[0]!;
+      });
+
+    const released = yield* stop("completed");
+    assert.equal(released.status, "waiting");
+    assert.isNull(released.error);
+    // Stopped mid-turn is still a failure the assistant hears about.
+    const cut = yield* stop("running");
+    assert.equal(cut.status, "blocked");
+    assert.equal(cut.stage, "coordinator");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 

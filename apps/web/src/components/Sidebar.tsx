@@ -198,6 +198,7 @@ import {
   type SnoozePreset,
 } from "./Sidebar.snooze";
 import { ProjectFavicon } from "./ProjectFavicon";
+import { AssistantThreadTag, useAssistantThreadAsksYou } from "./assistant/AssistantThreadTag";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import {
@@ -1096,7 +1097,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  const status = resolveSidebarThreadStatus(thread);
+  // A developer assistant thread's question to you waits on its board, not in the thread.
+  const assistantAsksYou = useAssistantThreadAsksYou({
+    environmentId: thread.environmentId,
+    threadId: thread.id,
+    live: leaseLiveStatus,
+  });
+  const threadStatus = resolveSidebarThreadStatus(thread);
+  const assistantQuestion =
+    assistantAsksYou && (threadStatus === "ready" || threadStatus === "failed");
+  const status = assistantQuestion ? "input" : threadStatus;
   const isInFlight =
     status === "working" || status === "monitoring" || status === "approval" || status === "input";
   // A woken thread reappears at its original position (the sort is
@@ -1153,7 +1163,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             }
           : status === "input"
             ? {
-                label: "Input",
+                label: assistantQuestion ? "Question" : "Input",
                 icon: null,
                 className: "text-indigo-600 dark:text-indigo-300",
               }
@@ -1599,6 +1609,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               />
             </span>
             {draftIndicator}
+            <AssistantThreadTag threadId={thread.id} iconOnly />
             {title}
             {pinIndicator}
             {terminalStatusIcon}
@@ -1753,15 +1764,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               {props.projectDisplayName ? (
                 <span
                   className={cn(
-                    "min-w-0 flex-1 truncate text-secondary-label text-xs",
+                    "min-w-0 truncate text-secondary-label text-xs",
                     shouldRecede ? "font-normal" : "font-medium",
                   )}
                 >
                   {props.projectDisplayName}
                 </span>
-              ) : (
-                <span className="flex-1" />
-              )}
+              ) : null}
+              <AssistantThreadTag
+                threadId={thread.id}
+                className={cn(shouldRecede && "opacity-75")}
+              />
+              <span className="flex-1" />
               {pinIndicator}
               {/* The visible state owns this slot's width: status at rest,
                   actions on hover/keyboard focus or while the popover is open. Keeping

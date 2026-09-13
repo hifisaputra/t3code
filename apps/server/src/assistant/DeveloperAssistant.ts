@@ -196,6 +196,24 @@ export const make = Effect.gen(function* () {
       yield* sql`SELECT id FROM assistant_messages WHERE delivered = 0 AND thread_id IN (${ids[0]}, ${ids[1]}, ${ids[2]})`;
     return rows.length > 0;
   });
+  /**
+   * A provider releases an idle session: the inactivity reaper, or settling a
+   * thread after its PR merged. Nothing was in flight; the turn it ran already
+   * ended and was handled when the session went ready.
+   */
+  const releasedWhileIdle = Effect.fn("Assistant.releasedWhileIdle")(function* (
+    threadId: ThreadId,
+  ) {
+    const shell = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
+    if (Option.isNone(shell)) return false;
+    const turn = shell.value.latestTurn;
+    const askedAt = shell.value.latestUserMessageAt;
+    return (
+      turn?.state === "completed" &&
+      (askedAt === null || Date.parse(askedAt) <= Date.parse(turn.requestedAt)) &&
+      Option.isNone(yield* turns.getPendingTurnStartByThreadId({ threadId }))
+    );
+  });
   const taskDecisionsPending = Effect.fn("Assistant.taskDecisionsPending")(function* (
     t: AssistantTask,
   ) {
@@ -769,7 +787,7 @@ export const make = Effect.gen(function* () {
         );
       if (yield* taskDecisionsPending(t))
         return yield* fail(
-          "The issue has an unanswered decision or permission request. Wait for the person's answer.",
+          "The issue has an unanswered decision or permission request. If the person answered a decision in your chat, pass it on with assistant_answer_decision; otherwise wait for their answer.",
         );
       if (yield* taskBusy(t))
         return yield* fail(
@@ -838,45 +856,93 @@ export const make = Effect.gen(function* () {
     Effect.mapError(wrap),
   );
 
+  /** An open decision, or null once someone answered it. */
+  const openDecision = Effect.fn("Assistant.openDecision")(function* (id: string) {
+    const rows = yield* sql<{
+      data: string;
+      resolved: number;
+    }>`SELECT * FROM assistant_decisions WHERE id = ${id}`;
+    if (!rows[0]) return yield* fail("This decision no longer exists.");
+    if (rows[0].resolved) return null;
+    const d = yield* decodeDecision(rows[0].data);
+    if (d.kind !== "decision")
+      return yield* fail(
+        "Answer this provider question or permission request in its original thread.",
+      );
+    return d;
+  });
+  /** Record the person's answer and send it to the thread that asked. */
+  const resolveDecision = Effect.fn("Assistant.resolveDecision")(function* (
+    d: AssistantDecision,
+    text: string,
+    via: "inbox" | "assistant",
+  ) {
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql`UPDATE assistant_decisions SET resolved = 1, data = ${encodeDecision({ ...d, answer: text })} WHERE id = ${d.id}`;
+        if (d.taskId) {
+          const t = yield* task(d.taskId);
+          const asker = yield* threadTask(d.threadId);
+          yield* queueMessage(
+            d.projectId,
+            d.threadId,
+            `decision:${d.id}`,
+            `The person answered your question${via === "assistant" ? " through the developer assistant" : ""}.\nQuestion: ${d.question}\nAnswer: ${text}\nContinue within the agreed scope.`,
+          );
+          yield* saveTask({
+            ...t,
+            status: "working",
+            error: null,
+            ...(t.stage && asker ? { stage: asker.role } : {}),
+          });
+        }
+        // The coordinator relaying an answer already knows it.
+        if (via === "inbox")
+          yield* wake(d.projectId, `The person answered a decision: ${d.question}\n${text}`);
+      }),
+    );
+    yield* changed;
+  });
+
   const answer = Effect.fn("Assistant.answer")(
     function* (input: typeof AssistantAnswerInput.Type) {
-      const rows = yield* sql<{
-        data: string;
-        resolved: number;
-      }>`SELECT * FROM assistant_decisions WHERE id = ${input.decisionId}`;
-      if (!rows[0]) return yield* fail("This decision no longer exists.");
-      if (rows[0].resolved) return yield* board(null);
-      const d = yield* decodeDecision(rows[0].data);
-      if (d.kind !== "decision")
-        return yield* fail(
-          "Answer this provider question or permission request in its original thread.",
-        );
-      yield* sql.withTransaction(
-        Effect.gen(function* () {
-          yield* sql`UPDATE assistant_decisions SET resolved = 1, data = ${encodeDecision({ ...d, answer: input.answer })} WHERE id = ${d.id}`;
-          if (d.taskId) {
-            const t = yield* task(d.taskId);
-            const asker = yield* threadTask(d.threadId);
-            yield* queueMessage(
-              d.projectId,
-              d.threadId,
-              `decision:${d.id}`,
-              `The person answered your question.\nQuestion: ${d.question}\nAnswer: ${input.answer}\nContinue within the agreed scope.`,
-            );
-            yield* saveTask({
-              ...t,
-              status: "working",
-              ...(t.stage && asker ? { stage: asker.role } : {}),
-            });
-          }
-          yield* wake(
-            d.projectId,
-            `The person answered a decision: ${d.question}\n${input.answer}`,
-          );
-        }),
-      );
-      yield* changed;
+      const d = yield* openDecision(input.decisionId);
+      if (d) yield* resolveDecision(d, input.answer, "inbox");
       return yield* board(null);
+    },
+    lock.withPermits(1),
+    Effect.mapError(wrap),
+  );
+
+  /**
+   * The coordinator passes on an answer the person gave in its chat. The
+   * person still decides: the coordinator may only relay once they have
+   * written to it since the question was asked.
+   */
+  const relayAnswer = Effect.fn("Assistant.relayAnswer")(
+    function* (caller: ThreadId, decisionId: string, text: string) {
+      const p = yield* authorize(caller);
+      const d = yield* openDecision(decisionId);
+      if (!d) return yield* fail("This decision was already answered.");
+      if (d.projectId !== p.config.projectId)
+        return yield* fail("This decision belongs to another project.");
+      const detail = yield* snapshots.getThreadDetailById(caller);
+      const since = Option.isSome(detail)
+        ? detail.value.messages.filter(
+            (m) => m.role === "user" && Date.parse(m.createdAt) > Date.parse(d.createdAt),
+          )
+        : [];
+      let personSpoke = false;
+      for (const m of since) {
+        const automated = yield* sql`SELECT id FROM assistant_messages WHERE id = ${m.id}`;
+        if (!automated.length) personSpoke = true;
+      }
+      if (!personSpoke)
+        return yield* fail(
+          "The person has not written to you since this question was asked. Only pass on an answer they gave you; do not answer from your own judgment.",
+        );
+      yield* resolveDecision(d, text, "assistant");
+      return { ...d, answer: text };
     },
     lock.withPermits(1),
     Effect.mapError(wrap),
@@ -1013,8 +1079,9 @@ export const make = Effect.gen(function* () {
       if (t.merge?.commit === head) return t;
       const merge = { commit: head, summary, at: yield* now };
       const pullRequest = worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null;
+      // An earlier problem the issue has since moved past must not follow it to review.
       const posted = yield* postLinear(
-        { ...t, merge },
+        { ...t, merge, error: null },
         mergedComment({ merge, review, pullRequest, baseBranch: p.config.baseBranch }),
       );
       // The coordinator is woken when this thread's turn ends.
@@ -1062,7 +1129,10 @@ export const make = Effect.gen(function* () {
         ...(targetIds ? { targetIds } : {}),
       });
       yield* terminals.close({ threadId: t.threadId });
-      const posted = yield* postLinear({ ...t, deployment }, deployedComment({ deployment }));
+      const posted = yield* postLinear(
+        { ...t, deployment, error: null },
+        deployedComment({ deployment }),
+      );
       yield* sql`UPDATE assistant_projects SET external_waits = 0 WHERE project_id = ${p.project_id}`;
       return yield* saveTask(posted);
     },
@@ -1085,7 +1155,7 @@ export const make = Effect.gen(function* () {
         return yield* fail("Wait for the issue's threads to finish before starting e2e.");
       const directory = yield* evidence.directory(t.id);
       const run = e2eBrief(t, brief);
-      const updated = yield* saveTask({ ...t, stage: "e2e", status: "working" });
+      const updated = yield* saveTask({ ...t, stage: "e2e", status: "working", error: null });
       yield* queueRoleTurn(
         p,
         updated,
@@ -1140,7 +1210,7 @@ export const make = Effect.gen(function* () {
         ? (worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null)
         : null;
       let updated = yield* postLinear(
-        { ...t, e2e },
+        { ...t, e2e, error: null },
         e2eComment({
           e2e,
           merge: t.merge ?? null,
@@ -1412,6 +1482,7 @@ export const make = Effect.gen(function* () {
           yield* saveTask({
             ...t,
             status: "working",
+            error: null,
             ...(t.stage && owner ? { stage: owner.role } : {}),
           });
         yield* wake(
@@ -1465,8 +1536,10 @@ export const make = Effect.gen(function* () {
         status === "error" ||
         status === "interrupted" ||
         status === "stopped";
-      // A delivered issue's tester may stop instead of settling; either way its work is done.
-      if (
+      if (t && status === "stopped" && (yield* releasedWhileIdle(threadId))) {
+        // Nothing to do: the thread's turn ended normally before its session was released.
+      } else if (
+        // A delivered issue's tester may stop instead of settling; either way its work is done.
         t &&
         owner &&
         t.stage !== undefined &&
@@ -1636,9 +1709,19 @@ export const make = Effect.gen(function* () {
   const stream = Stream.unwrap(
     Effect.gen(function* () {
       const subscription = yield* PubSub.subscribe(changes);
+      // Most changes are thread heartbeats that leave the board as it was; send
+      // a board only when it differs from the last one.
+      let last = "";
       return Stream.concat(
         Stream.fromEffect(board(null)),
         Stream.fromSubscription(subscription).pipe(Stream.mapEffect(() => board(null))),
+      ).pipe(
+        Stream.filter((value) => {
+          const encoded = JSON.stringify(value);
+          if (encoded === last) return false;
+          last = encoded;
+          return true;
+        }),
       );
     }),
   );
@@ -1658,6 +1741,7 @@ export const make = Effect.gen(function* () {
     readThread,
     messageWorker,
     askDecision,
+    relayAnswer,
     requestReview,
     submitReview,
     reportMerged,

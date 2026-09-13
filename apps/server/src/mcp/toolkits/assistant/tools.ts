@@ -95,6 +95,19 @@ export const AssistantToolkit = Toolkit.make(
     failure,
     dependencies,
   }),
+  Tool.make("assistant_answer_decision", {
+    description:
+      "Coordinator only: pass on the person's answer to an open decision (yours or one of an issue's threads) when they gave it to you in this chat. T3 records it and sends it to the thread that asked, which then continues. Relay what the person said, with any context the asker needs; never answer from your own judgment. Refuses unless the person has written to you since the question was asked. Get the decision id from assistant_get_board.",
+    parameters: Schema.Struct({
+      decisionId: text,
+      answer: text.annotate({
+        description: "The person's answer, in their words, for the thread that asked.",
+      }),
+    }),
+    success: AssistantDecision,
+    failure,
+    dependencies,
+  }),
   Tool.make("assistant_request_review", {
     description:
       "Implementation thread only: hand your committed, pushed work to the issue's code reviewer. Say what changed, how you verified it, the PR, and what deserves a close look. The reviewer works in this worktree, so end your turn and do not edit files until its verdict arrives here.",
@@ -237,6 +250,11 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.askDecision(caller, input.question.trim());
+    }),
+  assistant_answer_decision: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.relayAnswer(caller, input.decisionId.trim(), input.answer.trim());
     }),
   assistant_request_review: (input) =>
     Effect.gen(function* () {

@@ -201,6 +201,19 @@ export const assistantTaskThreadId = (
 ): ThreadId =>
   role === "implement" ? task.threadId : ThreadId.make(`assistant-${role}-${task.id}`);
 
+/** What an assistant thread does: the project's coordinator, a setup conversation, or one of an issue's threads. */
+export type AssistantThreadKind = "coordinator" | "setup" | AssistantThreadRole;
+
+const ISSUE_THREAD_ID = /^assistant-(work|review|e2e|setup)-/;
+const COORDINATOR_THREAD_ID = /^assistant-[0-9a-f]{8}-[0-9a-f]{4}-/;
+
+/** Read from the thread id the server assigns, so a thread list needs no board to label its rows. */
+export const assistantThreadKind = (threadId: string): AssistantThreadKind | null => {
+  const match = ISSUE_THREAD_ID.exec(threadId);
+  if (match) return match[1] === "work" ? "implement" : (match[1] as "review" | "e2e" | "setup");
+  return COORDINATOR_THREAD_ID.test(threadId) ? "coordinator" : null;
+};
+
 export const AssistantDecision = Schema.Struct({
   id: TrimmedNonEmptyString,
   projectId: ProjectId,

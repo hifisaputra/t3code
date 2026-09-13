@@ -119,9 +119,14 @@ initial move to In Progress. Avoid starting manual or separately delegated work 
 assistant already owns; the assistant checks existing threads when claiming an issue.
 
 Product questions appear under **Needs you** and remain linked to the asking thread. You
-can answer in the inbox. When a thread has one pending product question, a reply in that original
+can answer in the inbox, or tell the assistant in its conversation and it passes your answer to
+the thread that asked. When a thread has one pending product question, a reply in that original
 thread also resolves it. Answer native provider questions and permission requests in their thread.
 The assistant does not approve those requests for you.
+
+In the sidebar, each assistant thread is labeled with what it does (Assistant, Worker, Code review,
+E2E test), and a thread waiting on your answer shows **Question**. The count on the sidebar's
+Developer assistant button is the number of items holding a project until you act.
 
 **Pause** stops the coordinator and prevents further automatic turns; a coding turn already running
 can finish. **Interrupt all work**, in the project menu, also requests interruption of the coding

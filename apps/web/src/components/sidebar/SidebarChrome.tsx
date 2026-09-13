@@ -35,6 +35,7 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { readIssueListPreferences } from "../issues/issueListPreferences";
 import { readPullRequestListPreferences } from "../pullRequest/pullRequestListPreferences";
+import { useAssistantBlockingCount } from "../assistant/AssistantThreadTag";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
 
@@ -114,22 +115,40 @@ function SidebarUtilityItem({
   icon,
   label,
   onClick,
+  count = 0,
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
+  /** Things waiting on the user there, shown on the icon. */
+  count?: number;
 }) {
   return (
     <SidebarMenuItem className="shrink-0">
       <Tooltip>
         <TooltipTrigger
           render={
-            <SidebarMenuButton aria-label={label} onClick={onClick} size="icon">
+            <SidebarMenuButton
+              aria-label={count > 0 ? `${label}, ${count} waiting on you` : label}
+              onClick={onClick}
+              size="icon"
+              className="relative"
+            >
               {icon}
+              {count > 0 ? (
+                <span
+                  aria-hidden
+                  className="-top-0.5 -right-0.5 absolute flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-info px-1 font-medium text-[10px] text-white tabular-nums leading-none"
+                >
+                  {count > 9 ? "9+" : count}
+                </span>
+              ) : null}
             </SidebarMenuButton>
           }
         />
-        <TooltipPopup side="top">{label}</TooltipPopup>
+        <TooltipPopup side="top">
+          {count > 0 ? `${label} · ${count} waiting on you` : label}
+        </TooltipPopup>
       </Tooltip>
     </SidebarMenuItem>
   );
@@ -160,6 +179,10 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
   );
   const issuesSupported = useAnyEnvironmentHasLinearKey();
+  // The server the assistant page opens by default.
+  const assistantCount = useAssistantBlockingCount(
+    environments.find((e) => e.serverConfig?.settings.linear.apiKey)?.environmentId ?? null,
+  );
   const closeMobileSidebar = useCallback(() => {
     if (isMobile) {
       setOpenMobile(false);
@@ -227,6 +250,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             <SidebarUtilityItem
               icon={<BotIcon />}
               label="Developer assistant"
+              count={assistantCount}
               onClick={() => {
                 closeMobileSidebar();
                 void navigate({ to: "/assistant" });

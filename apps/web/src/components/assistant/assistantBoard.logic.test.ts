@@ -2,6 +2,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  assistantThreadKind,
   type AssistantBoard,
   type AssistantDecision,
   type AssistantProject,
@@ -15,8 +16,10 @@ import {
   describeProjectActivity,
   describeTaskPhase,
   historyTasks,
+  previewLine,
   projectFailure,
   projectWaitingReason,
+  taskPipeline,
 } from "./assistantBoard.logic";
 
 const projectId = ProjectId.make("project-1");
@@ -172,6 +175,13 @@ describe("describeTaskPhase", () => {
     );
   });
 
+  it("puts an open question ahead of the state the issue was left in", () => {
+    const blocked = task({ status: "blocked", error: "The worker stopped before delivery." });
+    expect(describeTaskPhase({ ...base, task: blocked, hasOpenDecision: true }).label).toBe(
+      "Waiting for your answer",
+    );
+  });
+
   it("carries the blocker's reason", () => {
     expect(
       describeTaskPhase({ ...base, task: task({ status: "blocked", error: "Worker stopped." }) }),
@@ -231,6 +241,85 @@ describe("buildInbox", () => {
     expect(
       buildInbox(board({ setups: [{ ...setup, proposal: project().config, revision: 1 }] })),
     ).toMatchObject([{ kind: "setup" }]);
+  });
+});
+
+describe("taskPipeline", () => {
+  const commit = "a".repeat(40);
+  const at = "2026-09-13T00:00:00.000Z";
+  const states = (t: AssistantTask) =>
+    taskPipeline(t)
+      ?.map((step) => `${step.key}:${step.state}`)
+      .join(" ");
+  const approved = {
+    codeReview: { verdict: "approved", findings: "", summary: "", commit, at },
+  } as const;
+  const merged = { ...approved, merge: { commit, summary: "Fixed", at } };
+  const deployed = {
+    ...merged,
+    deployment: { revision: commit, url: "https://staging.example.com", verifiedAt: at },
+  };
+
+  it("follows the issue from code to e2e", () => {
+    expect(states(task({ stage: "implement" }))).toBe(
+      "code:current review:todo merge:todo staging:todo e2e:todo",
+    );
+    expect(states(task({ stage: "review" }))).toBe(
+      "code:done review:current merge:todo staging:todo e2e:todo",
+    );
+    expect(states(task({ stage: "implement", ...approved }))).toBe(
+      "code:done review:done merge:current staging:todo e2e:todo",
+    );
+    expect(states(task({ stage: "coordinator", ...merged }))).toBe(
+      "code:done review:done merge:done staging:current e2e:todo",
+    );
+    expect(states(task({ stage: "e2e", ...deployed }))).toBe(
+      "code:done review:done merge:done staging:done e2e:current",
+    );
+  });
+
+  it("marks review findings and a failed e2e run where they send the work", () => {
+    const findings = task({
+      stage: "implement",
+      codeReview: { ...approved.codeReview, verdict: "changes-requested" },
+    });
+    expect(taskPipeline(findings)?.[1]).toMatchObject({ state: "todo", note: "Changes requested" });
+    const e2e = { verdict: "failed", report: "", humanChecks: [], screenshots: [], at } as const;
+    expect(taskPipeline(task({ stage: "coordinator", ...deployed, e2e }))?.[4]).toMatchObject({
+      state: "failed",
+      note: "Failed on staging",
+    });
+    // The fix goes back to the worker while the old merge and deployment stay on record.
+    const fixing = task({ stage: "implement", ...deployed, e2e });
+    expect(states(fixing)).toBe("code:current review:todo merge:todo staging:todo e2e:todo");
+    expect(taskPipeline(fixing)?.[0]?.note).toBe("Fixing the e2e failure");
+  });
+
+  it("has none for work started before issues had review and e2e threads", () => {
+    expect(taskPipeline(task())).toBeNull();
+  });
+});
+
+describe("previewLine", () => {
+  it("takes the first line as plain text", () => {
+    expect(previewLine("\n**SPI-134:** the fix is [done](https://x.test) in `a.ts`.\nMore")).toBe(
+      "SPI-134: the fix is done in a.ts.",
+    );
+    expect(previewLine("Options:\n1. **Recommended:** fix it here")).toBe(
+      "Recommended: fix it here",
+    );
+  });
+});
+
+describe("assistantThreadKind", () => {
+  it("tells the coordinator, setup and each issue thread apart by id", () => {
+    const id = "8d0c8385-df68-422e-b90a-db197f3c0263";
+    expect(assistantThreadKind(`assistant-${id}`)).toBe("coordinator");
+    expect(assistantThreadKind(`assistant-work-${id}`)).toBe("implement");
+    expect(assistantThreadKind(`assistant-review-${id}`)).toBe("review");
+    expect(assistantThreadKind(`assistant-e2e-${id}`)).toBe("e2e");
+    expect(assistantThreadKind(`assistant-setup-${id}`)).toBe("setup");
+    expect(assistantThreadKind(id)).toBeNull();
   });
 });
 

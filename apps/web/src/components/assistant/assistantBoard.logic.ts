@@ -5,6 +5,7 @@ import {
   type AssistantProject,
   type AssistantSetup,
   type AssistantTask,
+  type AssistantThreadKind,
   type ProjectId,
 } from "@t3tools/contracts";
 
@@ -111,19 +112,20 @@ export function describeTaskPhase(input: {
 }): TaskPhase {
   const { task, workerBusy, workerNeedsInput, step, hasOpenDecision } = input;
   const holder = STAGE_THREAD[task.stage ?? "implement"] ?? "worker";
+  // A question outranks whatever state the issue was left in while it waits.
+  if (hasOpenDecision && task.status !== "preparing")
+    return { tone: "waiting", label: "Waiting for your answer", detail: null };
   switch (task.status) {
     case "preparing":
       return { tone: "active", label: "Preparing a worktree", detail: null };
     case "blocked":
       return { tone: "blocked", label: "Blocked", detail: task.error };
     case "waiting":
-      return hasOpenDecision
-        ? { tone: "waiting", label: "Waiting for your answer", detail: null }
-        : {
-            tone: "waiting",
-            label: "Waiting for input",
-            detail: `The ${holder} asked something in its thread.`,
-          };
+      return {
+        tone: "waiting",
+        label: "Waiting for input",
+        detail: `The ${holder} asked something in its thread.`,
+      };
     default:
       if (workerNeedsInput)
         return {
@@ -175,6 +177,107 @@ export function describeTaskPhase(input: {
 }
 
 export const taskRoundsExhausted = (task: AssistantTask) => task.turns >= task.turnLimit;
+
+export type PipelineStepKey = "code" | "review" | "merge" | "staging" | "e2e";
+export type PipelineStepState = "done" | "current" | "failed" | "todo";
+
+export interface PipelineStep {
+  readonly key: PipelineStepKey;
+  readonly label: string;
+  /** The thread that does this step. */
+  readonly kind: AssistantThreadKind;
+  readonly state: PipelineStepState;
+  readonly note: string | null;
+}
+
+const PIPELINE: ReadonlyArray<{
+  key: PipelineStepKey;
+  label: string;
+  kind: AssistantThreadKind;
+}> = [
+  { key: "code", label: "Code", kind: "implement" },
+  { key: "review", label: "Code review", kind: "review" },
+  { key: "merge", label: "Merge", kind: "implement" },
+  { key: "staging", label: "Staging", kind: "coordinator" },
+  { key: "e2e", label: "E2E test", kind: "e2e" },
+];
+
+/**
+ * Where an issue is on its way to staging, from what the server recorded.
+ * Work started before issues had review and e2e threads has no pipeline.
+ */
+export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> | null {
+  if (task.stage === undefined) return null;
+  const approved = task.codeReview?.verdict === "approved";
+  const e2eFailed = task.e2e?.verdict === "failed";
+  const at = (() => {
+    if (task.status === "review" || task.status === "accepted") return PIPELINE.length;
+    switch (task.stage) {
+      case "review":
+        return 1;
+      case "e2e":
+        return 4;
+      // Back with the worker after a failed e2e run, the earlier approval,
+      // merge and deployment are still on record; it is coding again.
+      case "implement":
+        return approved && !task.merge ? 2 : 0;
+      case "coordinator":
+        return task.deployment ? 4 : task.merge ? 3 : approved ? 2 : 0;
+    }
+  })();
+  const changesRequested = task.codeReview?.verdict === "changes-requested";
+  const notes: Partial<Record<PipelineStepKey, string>> = {
+    ...(changesRequested && at === 0
+      ? { code: "Fixing review findings", review: "Changes requested" }
+      : {}),
+    ...(e2eFailed && at === 0 ? { code: "Fixing the e2e failure" } : {}),
+    ...(task.deployment && at > 3
+      ? { staging: `${task.deployment.revision.slice(0, 7)} deployed` }
+      : {}),
+    ...(task.e2e && at >= 4 && task.stage !== "e2e"
+      ? {
+          e2e: e2eFailed
+            ? "Failed on staging"
+            : task.e2e.verdict === "partial"
+              ? "Passed, with checks for you"
+              : "Passed",
+        }
+      : {}),
+  };
+  return PIPELINE.map((step, index) => ({
+    ...step,
+    state:
+      index < at
+        ? "done"
+        : index > at
+          ? "todo"
+          : step.key === "e2e" && e2eFailed && task.stage === "coordinator"
+            ? "failed"
+            : "current",
+    note: notes[step.key] ?? null,
+  }));
+}
+
+/** The first line of an agent's message as plain text, for a one-line preview. */
+export function previewLine(text: string): string {
+  const line =
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l && !/^(#+\s*)?(\*\*)?(options|choices)(\*\*)?:?$/i.test(l)) ?? "";
+  return line
+    .replace(/^#+\s*|^[-*]\s+|^\d+[.)]\s+/, "")
+    .replace(/\*\*|__|`/g, "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+}
+
+/** How many things hold a project still until the person acts; reviews never do. */
+export const blockingCount = (inbox: ReadonlyArray<InboxItem>) =>
+  inbox.filter((item) => item.kind !== "review").length;
+
+/** Whether this thread asked the person something that is still open. */
+export const threadHasOpenQuestion = (board: AssistantBoard | null, threadId: string) =>
+  board?.decisions.some((d) => d.threadId === threadId && d.answer === null) ?? false;
 
 export type InboxItem =
   | {

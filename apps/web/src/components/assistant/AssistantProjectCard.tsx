@@ -29,6 +29,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { describeProjectActivity } from "./assistantBoard.logic";
 import {
   confirmDestructive,
@@ -40,6 +41,7 @@ import {
   useAssistantAction,
   type StatusTone,
 } from "./assistantUi";
+import { THREAD_KIND, ThreadKindIcon } from "./threadKinds";
 
 function CardShell({ children, tone }: { children: ReactNode; tone?: StatusTone }) {
   return (
@@ -115,7 +117,10 @@ export function AssistantProjectCard({
 
   return (
     <CardShell tone={activity.tone}>
-      <div className="flex items-start gap-2">
+      <div className="flex items-start gap-2.5">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-violet-500/10">
+          <ThreadKindIcon kind="coordinator" className="size-4" />
+        </span>
         <div className="min-w-0 flex-1">
           <h3 className="truncate font-semibold text-sm">{title}</h3>
           <p className="mt-0.5 truncate text-muted-foreground text-xs">
@@ -199,10 +204,17 @@ export function AssistantProjectCard({
           )}
           {running ? "Pause" : "Start"}
         </Button>
-        <Button size="sm" variant="outline" onClick={() => onOpenThread(project.threadId)}>
-          <MessageSquareIcon />
-          Chat
-        </Button>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button size="sm" variant="outline" onClick={() => onOpenThread(project.threadId)} />
+            }
+          >
+            <MessageSquareIcon />
+            Chat
+          </TooltipTrigger>
+          <TooltipPopup className="max-w-64">{THREAD_KIND.coordinator.does}</TooltipPopup>
+        </Tooltip>
         <Menu>
           <MenuTrigger
             render={

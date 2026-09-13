@@ -1,5 +1,6 @@
 import {
   assistantTaskThreadId,
+  assistantThreadKind,
   type AssistantDecision,
   type AssistantProject,
   type AssistantTask,
@@ -10,7 +11,9 @@ import {
   ArrowUpRightIcon,
   ChevronRightIcon,
   CircleCheckIcon,
+  CircleIcon,
   CircleSlashIcon,
+  CircleXIcon,
   EllipsisIcon,
   GitPullRequestIcon,
   RotateCcwIcon,
@@ -30,7 +33,13 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collaps
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { describeTaskPhase, type TaskPhaseTone } from "./assistantBoard.logic";
+import {
+  describeTaskPhase,
+  previewLine,
+  taskPipeline,
+  type PipelineStep,
+  type TaskPhaseTone,
+} from "./assistantBoard.logic";
 import {
   confirmDestructive,
   ExpandableMarkdown,
@@ -40,6 +49,7 @@ import {
   useAssistantAction,
   type StatusTone,
 } from "./assistantUi";
+import { THREAD_KIND } from "./threadKinds";
 
 const PHASE_STYLE: Record<TaskPhaseTone, string> = {
   active: "bg-success/8 text-success-foreground",
@@ -88,6 +98,80 @@ function RoundsMeter({ used, limit }: { used: number; limit: number }) {
   );
 }
 
+/** One step on the issue's way to staging, opening the thread that does it. */
+function PipelineStepButton({
+  step,
+  thread,
+  busy,
+  needsYou,
+  onOpen,
+}: {
+  step: PipelineStep;
+  thread: ThreadId | null;
+  busy: boolean;
+  needsYou: boolean;
+  onOpen: (threadId: ThreadId) => void;
+}) {
+  const kind = THREAD_KIND[step.kind];
+  const current = step.state === "current";
+  const note = needsYou ? "Waiting for you" : busy && current ? "Working now" : step.note;
+  return (
+    <li className="flex min-w-0 flex-1 basis-24 items-stretch">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              // Not `disabled`: the tooltip still explains a step no thread has reached.
+              aria-disabled={thread === null}
+              onClick={() => thread && onOpen(thread)}
+              className={cn(
+                "flex w-full min-w-0 flex-col gap-0.5 rounded-lg border px-2 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                thread === null ? "cursor-default" : "hover:bg-accent/60",
+                step.state === "failed"
+                  ? "border-destructive/40 bg-destructive/6"
+                  : needsYou
+                    ? "border-info/50 bg-info/8"
+                    : current
+                      ? "border-foreground/25 bg-accent/40"
+                      : "border-border/50",
+                step.state === "todo" && "opacity-55",
+              )}
+            />
+          }
+        >
+          <span className="flex min-w-0 items-center gap-1.5 text-xs">
+            {step.state === "done" ? (
+              <CircleCheckIcon aria-hidden className="size-3.5 shrink-0 text-success-foreground" />
+            ) : step.state === "failed" ? (
+              <CircleXIcon aria-hidden className="size-3.5 shrink-0 text-destructive-foreground" />
+            ) : current ? (
+              <StatusDot
+                tone={needsYou ? "waiting" : busy ? "active" : "paused"}
+                pulse={busy && !needsYou}
+                className="mx-0.5"
+              />
+            ) : (
+              <CircleIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground/50" />
+            )}
+            <span className={cn("truncate", current ? "font-medium" : "text-muted-foreground")}>
+              {step.label}
+            </span>
+          </span>
+          <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+            <kind.icon aria-hidden className={cn("size-3 shrink-0", kind.className)} />
+            <span className="truncate">{note ?? kind.label}</span>
+          </span>
+        </TooltipTrigger>
+        <TooltipPopup className="max-w-64">
+          <span className="font-medium">{kind.label}.</span> {kind.does}
+          {thread === null ? " Starts when the issue gets here." : null}
+        </TooltipPopup>
+      </Tooltip>
+    </li>
+  );
+}
+
 export function ActiveTaskCard({
   environmentId,
   task,
@@ -95,6 +179,7 @@ export function ActiveTaskCard({
   projectLabel,
   decisions,
   onOpenThread,
+  onShowDecision,
 }: {
   environmentId: EnvironmentId;
   task: AssistantTask;
@@ -102,6 +187,7 @@ export function ActiveTaskCard({
   projectLabel: string | null;
   decisions: ReadonlyArray<AssistantDecision>;
   onOpenThread: (threadId: ThreadId) => void;
+  onShowDecision: (decision: AssistantDecision) => void;
 }) {
   const review = useAtomCommand(developerAssistant.review);
   const { pending, run } = useAssistantAction();
@@ -111,18 +197,27 @@ export function ActiveTaskCard({
     threadId: assistantTaskThreadId(task, "review"),
   });
   const tester = useThreadShell({ environmentId, threadId: assistantTaskThreadId(task, "e2e") });
+  const coordinator = project?.threadId ?? null;
+  const shells = { implement: worker, review: reviewer, e2e: tester } as const;
   // The phase follows whichever of the issue's threads holds it.
   const holder = task.stage === "review" ? reviewer : task.stage === "e2e" ? tester : worker;
   const holderBusy = threadIsBusy(holder);
+  const openDecision = decisions.find((d) => d.answer === null && d.taskId === task.id) ?? null;
   const phase = describeTaskPhase({
     task,
     workerBusy: holderBusy,
     workerNeedsInput: Boolean(holder?.hasPendingApprovals || holder?.hasPendingUserInput),
     step: holder?.planProgress?.step ?? null,
-    hasOpenDecision: decisions.some((d) => d.answer === null && d.taskId === task.id),
+    hasOpenDecision: openDecision !== null,
   });
+  const pipeline = taskPipeline(task);
+  const asking = openDecision ? assistantThreadKind(openDecision.threadId) : null;
   const pullRequest = worker?.linkedPullRequest ?? worker?.branchPullRequest ?? null;
   const moreRounds = project?.config.maxWorkerTurns ?? 6;
+  const phaseDetail =
+    openDecision !== null
+      ? `The ${THREAD_KIND[asking ?? "implement"].label.toLowerCase()} asked: ${previewLine(openDecision.question)}`
+      : phase.detail;
 
   return (
     <article className="flex flex-col gap-3 rounded-xl border border-border/70 bg-card p-4 shadow-xs/5">
@@ -134,82 +229,12 @@ export function ActiveTaskCard({
         <span className="ml-auto shrink-0 text-muted-foreground/80">
           Started {formatElapsedDurationLabel(task.createdAt)} ago
         </span>
-      </div>
-      <button
-        type="button"
-        onClick={() => onOpenThread(task.threadId)}
-        className="-mt-1 text-left font-semibold text-sm leading-snug hover:underline focus-visible:underline focus-visible:outline-none"
-      >
-        {task.issue.title}
-      </button>
-
-      <div className={cn("flex items-start gap-2 rounded-lg px-3 py-2", PHASE_STYLE[phase.tone])}>
-        <StatusDot tone={PHASE_DOT[phase.tone]} pulse={holderBusy} className="mt-1.5" />
-        <div className="min-w-0">
-          <p className="font-medium text-sm">{phase.label}</p>
-          {phase.detail ? (
-            <p className="mt-0.5 line-clamp-3 text-xs opacity-90">{phase.detail}</p>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-muted-foreground text-xs">
-        <RoundsMeter used={task.turns} limit={task.turnLimit} />
-        {pullRequest ? (
-          <a
-            href={pullRequest.url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
-          >
-            <GitPullRequestIcon aria-hidden className="size-3.5" />
-            PR #{pullRequest.number}
-          </a>
-        ) : null}
-        {worker?.branch ? (
-          <span className="min-w-0 truncate font-mono text-[11px]">{worker.branch}</span>
-        ) : null}
-      </div>
-
-      {task.brief.trim() ? (
-        <Collapsible>
-          <CollapsibleTrigger className="group inline-flex items-center gap-1 font-medium text-muted-foreground text-xs hover:text-foreground">
-            <ChevronRightIcon
-              aria-hidden
-              className="size-3.5 transition-transform group-data-panel-open:rotate-90"
-            />
-            What the worker was asked to do
-          </CollapsibleTrigger>
-          <CollapsiblePanel>
-            <div className="mt-2 rounded-lg border border-border/60 p-3">
-              <ExpandableMarkdown text={task.brief} environmentId={environmentId} />
-            </div>
-          </CollapsiblePanel>
-        </Collapsible>
-      ) : null}
-
-      <div className="flex items-center gap-1.5">
-        <Button size="sm" variant="outline" onClick={() => onOpenThread(task.threadId)}>
-          <ArrowUpRightIcon />
-          Worker
-        </Button>
-        {reviewer ? (
-          <Button size="sm" variant="ghost" onClick={() => onOpenThread(reviewer.id)}>
-            Code review
-          </Button>
-        ) : null}
-        {tester ? (
-          <Button size="sm" variant="ghost" onClick={() => onOpenThread(tester.id)}>
-            E2E
-          </Button>
-        ) : null}
         <Menu>
           <MenuTrigger
             render={
               <Button
-                size="icon-sm"
+                size="icon-xs"
                 variant="ghost"
-                className="ml-auto"
                 aria-label={`More actions for ${task.issue.identifier}`}
               />
             }
@@ -274,6 +299,99 @@ export function ActiveTaskCard({
           </MenuPopup>
         </Menu>
       </div>
+      <h3 className="-mt-1 font-semibold text-sm leading-snug">{task.issue.title}</h3>
+
+      <div className={cn("flex items-start gap-2 rounded-lg px-3 py-2", PHASE_STYLE[phase.tone])}>
+        <StatusDot tone={PHASE_DOT[phase.tone]} pulse={holderBusy} className="mt-1.5" />
+        <div className="min-w-0 flex-1">
+          <p className="font-medium text-sm">{phase.label}</p>
+          {phaseDetail ? (
+            <p className="mt-0.5 line-clamp-2 text-xs opacity-90">{phaseDetail}</p>
+          ) : null}
+        </div>
+        {openDecision ? (
+          <Button size="xs" className="shrink-0" onClick={() => onShowDecision(openDecision)}>
+            Answer
+          </Button>
+        ) : null}
+      </div>
+
+      {pipeline ? (
+        <ol aria-label="Progress" className="flex flex-wrap gap-1.5">
+          {pipeline.map((step) => {
+            const thread =
+              step.kind === "coordinator"
+                ? coordinator
+                : step.kind === "implement" || step.kind === "review" || step.kind === "e2e"
+                  ? (shells[step.kind]?.id ?? null)
+                  : null;
+            const shell =
+              step.kind === "implement" || step.kind === "review" || step.kind === "e2e"
+                ? shells[step.kind]
+                : null;
+            const current = step.state === "current";
+            return (
+              <PipelineStepButton
+                key={step.key}
+                step={step}
+                thread={thread}
+                busy={current && threadIsBusy(shell)}
+                needsYou={
+                  current &&
+                  (asking === step.kind ||
+                    Boolean(shell?.hasPendingApprovals || shell?.hasPendingUserInput))
+                }
+                onOpen={onOpenThread}
+              />
+            );
+          })}
+        </ol>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-muted-foreground text-xs">
+        <RoundsMeter used={task.turns} limit={task.turnLimit} />
+        {pullRequest ? (
+          <a
+            href={pullRequest.url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
+          >
+            <GitPullRequestIcon aria-hidden className="size-3.5" />
+            PR #{pullRequest.number}
+          </a>
+        ) : null}
+        {worker?.branch ? (
+          <span className="min-w-0 truncate font-mono text-[11px]">{worker.branch}</span>
+        ) : null}
+        {!pipeline ? (
+          <button
+            type="button"
+            onClick={() => onOpenThread(task.threadId)}
+            className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
+          >
+            Worker thread
+            <ArrowUpRightIcon aria-hidden className="size-3" />
+          </button>
+        ) : null}
+      </div>
+
+      {task.brief.trim() ? (
+        <Collapsible>
+          <CollapsibleTrigger className="group inline-flex items-center gap-1 font-medium text-muted-foreground text-xs hover:text-foreground">
+            <ChevronRightIcon
+              aria-hidden
+              className="size-3.5 transition-transform group-data-panel-open:rotate-90"
+            />
+            What the assistant asked for
+          </CollapsibleTrigger>
+          <CollapsiblePanel>
+            <div className="mt-2 rounded-lg border border-border/60 p-3">
+              <ExpandableMarkdown text={task.brief} environmentId={environmentId} />
+            </div>
+          </CollapsiblePanel>
+        </Collapsible>
+      ) : null}
     </article>
   );
 }

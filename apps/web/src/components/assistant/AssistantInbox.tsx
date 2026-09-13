@@ -1,18 +1,21 @@
-import type {
-  AssistantDecision,
-  AssistantProject,
-  AssistantSetup,
-  AssistantTask,
-  EnvironmentId,
-  ThreadId,
+import {
+  assistantThreadKind,
+  type AssistantDecision,
+  type AssistantProject,
+  type AssistantSetup,
+  type AssistantTask,
+  type EnvironmentId,
+  type ThreadId,
 } from "@t3tools/contracts";
 import {
   ArrowUpRightIcon,
   CheckIcon,
+  ChevronDownIcon,
   CopyIcon,
   ExternalLinkIcon,
   GitCommitHorizontalIcon,
   MessageCircleQuestionIcon,
+  MessageSquareIcon,
   OctagonAlertIcon,
   PauseCircleIcon,
   PlayIcon,
@@ -36,13 +39,14 @@ import { Kbd } from "../ui/kbd";
 import { Spinner } from "../ui/spinner";
 import { Textarea } from "../ui/textarea";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { decisionOptions, type InboxItem } from "./assistantBoard.logic";
+import { decisionOptions, previewLine, type InboxItem } from "./assistantBoard.logic";
 import {
   confirmDestructive,
   ExpandableMarkdown,
   IssueLink,
   useAssistantAction,
 } from "./assistantUi";
+import { THREAD_KIND } from "./threadKinds";
 
 type Accent = "question" | "review" | "blocked" | "paused" | "setup";
 
@@ -54,62 +58,130 @@ const ACCENT: Record<Accent, { icon: typeof CheckIcon; tint: string }> = {
   setup: { icon: SparklesIcon, tint: "bg-info/10 text-info-foreground" },
 };
 
-function InboxCard({
+/**
+ * One thing waiting on the person, as a two-line row that opens in place.
+ * Agent text is long; the row says what it is and who is asking, and the
+ * detail and the controls to act on it are one click away.
+ */
+function InboxRow({
+  id,
   accent,
   kind,
   context,
+  summary,
   at,
-  onOpenThread,
-  openThreadLabel = "Open thread",
+  expanded,
+  onToggle,
+  links,
   children,
 }: {
+  id: string;
   accent: Accent;
-  kind: string;
-  context: ReactNode;
+  kind: ReactNode;
+  context?: ReactNode;
+  summary: ReactNode;
   at?: string | null;
-  onOpenThread?: () => void;
-  openThreadLabel?: string;
+  expanded: boolean;
+  onToggle: () => void;
+  links?: ReactNode;
   children: ReactNode;
 }) {
   const { icon: Icon, tint } = ACCENT[accent];
   return (
-    <article className="rounded-xl border border-border/70 bg-card shadow-xs/5">
-      <header className="flex min-w-0 items-center gap-2 px-4 pt-3 text-xs">
-        <span className={cn("flex size-5 shrink-0 items-center justify-center rounded-md", tint)}>
+    <article
+      id={id}
+      className={cn(
+        "scroll-mt-4 rounded-xl border bg-card shadow-xs/5 transition-colors",
+        expanded ? "border-border" : "border-border/70",
+      )}
+    >
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={onToggle}
+        className="flex w-full min-w-0 items-start gap-3 rounded-xl px-4 py-3 text-left hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <span
+          className={cn("mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md", tint)}
+        >
           <Icon aria-hidden className="size-3.5" />
         </span>
-        <span className="shrink-0 font-medium text-foreground">{kind}</span>
-        <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">{context}</span>
-        {at ? (
-          <span className="ml-auto shrink-0 text-muted-foreground/80 tabular-nums">
-            {formatRelativeTimeLabel(at)}
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 items-center gap-1.5 text-xs">
+            <span className="flex shrink-0 items-center gap-1 font-medium text-foreground">
+              {kind}
+            </span>
+            {context ? (
+              <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+                <span aria-hidden>·</span>
+                {context}
+              </span>
+            ) : null}
+            {at ? (
+              <span className="ml-auto shrink-0 pl-2 text-muted-foreground/80 tabular-nums">
+                {formatRelativeTimeLabel(at)}
+              </span>
+            ) : null}
           </span>
-        ) : null}
-        {onOpenThread ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  className={at ? undefined : "ml-auto"}
-                  aria-label={openThreadLabel}
-                  onClick={onOpenThread}
-                />
-              }
-            >
-              <ArrowUpRightIcon />
-            </TooltipTrigger>
-            <TooltipPopup>{openThreadLabel}</TooltipPopup>
-          </Tooltip>
-        ) : null}
-      </header>
-      <div className="flex flex-col gap-3 px-4 pt-2 pb-4">{children}</div>
+          <span
+            className={cn(
+              "mt-0.5 block text-sm leading-snug",
+              expanded ? "font-medium" : "line-clamp-2",
+            )}
+          >
+            {summary}
+          </span>
+        </span>
+        <ChevronDownIcon
+          aria-hidden
+          className={cn(
+            "mt-1 size-4 shrink-0 text-muted-foreground transition-transform",
+            expanded && "rotate-180",
+          )}
+        />
+      </button>
+      {expanded ? (
+        <div className="flex flex-col gap-3 border-border/60 border-t px-4 pt-3 pb-4">
+          {links ? (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">{links}</div>
+          ) : null}
+          {children}
+        </div>
+      ) : null}
     </article>
   );
 }
 
-function Context({
+/** Where the detail lives: the issue in Linear, and the thread it came from. */
+function RowLinks({
+  issue,
+  thread,
+  threadLabel,
+  onOpenThread,
+}: {
+  issue?: AssistantTask["issue"] | undefined;
+  thread?: ThreadId;
+  threadLabel?: string;
+  onOpenThread: (threadId: ThreadId) => void;
+}) {
+  return (
+    <>
+      {issue ? <IssueLink issue={issue} /> : null}
+      {thread ? (
+        <button
+          type="button"
+          onClick={() => onOpenThread(thread)}
+          className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground hover:underline"
+        >
+          {threadLabel ?? "Open thread"}
+          <ArrowUpRightIcon aria-hidden className="size-3" />
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+function IssueContext({
   project,
   issue,
 }: {
@@ -118,13 +190,13 @@ function Context({
 }) {
   return (
     <>
-      {project ? <span className="truncate">· {project}</span> : null}
       {issue ? (
         <>
-          <span aria-hidden>·</span>
-          <IssueLink issue={issue} />
+          <span className="shrink-0 font-mono">{issue.identifier}</span>
+          <span className="min-w-0 truncate">{issue.title}</span>
         </>
       ) : null}
+      {project ? <span className="min-w-0 truncate">{project}</span> : null}
     </>
   );
 }
@@ -138,36 +210,68 @@ export interface InboxContext {
   projects: ReadonlyArray<AssistantProject>;
   onOpenThread: (threadId: ThreadId) => void;
   onReviewSetup: (setup: AssistantSetup) => void;
+  isExpanded: (key: string) => boolean;
+  onToggle: (key: string) => void;
 }
 
+export const inboxElementId = (key: string) => `assistant-inbox-${key.replace(/[^\w-]/g, "-")}`;
+
 export function InboxItemCard({ item, context }: { item: InboxItem; context: InboxContext }) {
+  const row = {
+    id: inboxElementId(item.key),
+    expanded: context.isExpanded(item.key),
+    onToggle: () => context.onToggle(item.key),
+  };
   switch (item.kind) {
     case "decision":
-      return <DecisionCard decision={item.decision} context={context} />;
+      return <DecisionCard decision={item.decision} context={context} row={row} />;
     case "review":
-      return <ReviewCard task={item.task} context={context} />;
+      return <ReviewCard task={item.task} context={context} row={row} />;
     case "stuck":
-      return <StuckTaskCard task={item.task} reason={item.reason} context={context} />;
+      return <StuckTaskCard task={item.task} reason={item.reason} context={context} row={row} />;
     case "paused":
-      return <PausedProjectCard project={item.project} reason={item.reason} context={context} />;
+      return (
+        <PausedProjectCard
+          project={item.project}
+          reason={item.reason}
+          context={context}
+          row={row}
+        />
+      );
     case "setup":
-      return <SetupReadyCard setup={item.setup} context={context} />;
+      return <SetupReadyCard setup={item.setup} context={context} row={row} />;
   }
 }
+
+type RowState = { id: string; expanded: boolean; onToggle: () => void };
 
 function DecisionCard({
   decision,
   context,
+  row,
 }: {
   decision: AssistantDecision;
   context: InboxContext;
+  row: RowState;
 }) {
   const answer = useAtomCommand(developerAssistant.answer);
   const { pending, run } = useAssistantAction();
   const [draft, setDraft] = useState("");
   const task = decision.taskId ? context.tasks.find((t) => t.id === decision.taskId) : undefined;
   const options = decision.kind === "decision" ? decisionOptions(decision.question) : [];
-  const fromWorker = task !== undefined;
+  const asker = THREAD_KIND[assistantThreadKind(decision.threadId) ?? "implement"];
+  const coordinator = context.projects.find(
+    (p) => p.config.projectId === decision.projectId,
+  )?.threadId;
+  const askedBy = (
+    <>
+      <asker.icon aria-hidden className={cn("size-3.5", asker.className)} />
+      {asker.label}
+    </>
+  );
+  const issueContext = (
+    <IssueContext project={context.projectLabel(decision.projectId)} issue={task?.issue} />
+  );
   const send = () => {
     const text = draft.trim();
     if (!text || pending) return;
@@ -187,10 +291,17 @@ function DecisionCard({
   if (decision.kind !== "decision") {
     const approval = decision.kind === "approval";
     return (
-      <InboxCard
+      <InboxRow
+        {...row}
         accent="question"
-        kind={approval ? "Permission request" : "Question in thread"}
-        context={<Context project={context.projectLabel(decision.projectId)} issue={task?.issue} />}
+        kind={
+          <>
+            {askedBy}
+            {approval ? " needs permission" : " asks in its thread"}
+          </>
+        }
+        context={issueContext}
+        summary={decision.question}
         at={decision.createdAt}
       >
         <p className="flex items-start gap-2 text-sm">
@@ -209,18 +320,26 @@ function DecisionCard({
             The assistant never answers these for you.
           </span>
         </div>
-      </InboxCard>
+      </InboxRow>
     );
   }
 
   return (
-    <InboxCard
+    <InboxRow
+      {...row}
       accent="question"
-      kind={fromWorker ? "Worker question" : "Decision needed"}
-      context={<Context project={context.projectLabel(decision.projectId)} issue={task?.issue} />}
+      kind={<>{askedBy} asks</>}
+      context={issueContext}
+      summary={previewLine(decision.question)}
       at={decision.createdAt}
-      onOpenThread={() => context.onOpenThread(decision.threadId)}
-      openThreadLabel={fromWorker ? "Open worker thread" : "Open assistant chat"}
+      links={
+        <RowLinks
+          issue={task?.issue}
+          thread={decision.threadId}
+          threadLabel={`Open ${asker.label.toLowerCase()} thread`}
+          onOpenThread={context.onOpenThread}
+        />
+      }
     >
       <ExpandableMarkdown text={decision.question} environmentId={context.environmentId} />
       <form
@@ -268,10 +387,23 @@ function DecisionCard({
           }}
           className="[&_textarea]:max-h-48 [&_textarea]:min-h-14"
         />
-        <div className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 text-muted-foreground text-xs">
-            Replying in the thread works too.
-          </span>
+        <div className="flex flex-wrap items-center gap-2">
+          {coordinator && coordinator !== decision.threadId ? (
+            <button
+              type="button"
+              onClick={() => context.onOpenThread(coordinator)}
+              className="inline-flex min-w-0 flex-1 items-center gap-1 text-left text-muted-foreground text-xs hover:text-foreground"
+            >
+              <MessageSquareIcon aria-hidden className="size-3.5 shrink-0" />
+              <span className="min-w-0">
+                Or tell the assistant in its chat. It passes your answer on.
+              </span>
+            </button>
+          ) : (
+            <span className="min-w-0 flex-1 text-muted-foreground text-xs">
+              Replying in the thread works too.
+            </span>
+          )}
           <Button type="submit" size="sm" disabled={!draft.trim() || pending !== null}>
             {pending ? <Spinner className="size-3.5" /> : <SendHorizontalIcon />}
             Send answer
@@ -281,7 +413,7 @@ function DecisionCard({
           </Button>
         </div>
       </form>
-    </InboxCard>
+    </InboxRow>
   );
 }
 
@@ -315,11 +447,33 @@ function CommitChip({ revision }: { revision: string }) {
   );
 }
 
-function ReviewCard({ task, context }: { task: AssistantTask; context: InboxContext }) {
+function reviewHeadline(task: AssistantTask): { kind: string; outcome: string } {
+  const checks = task.e2e?.humanChecks.length ?? 0;
+  const shots = task.e2e?.screenshots.length ?? 0;
+  const outcome = [
+    task.e2e ? "Passed e2e on staging" : "Verified on staging",
+    checks ? `${checks} check${checks === 1 ? "" : "s"} for you` : null,
+    shots ? `${shots} screenshot${shots === 1 ? "" : "s"}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return { kind: checks ? "Check and accept" : "Ready to accept", outcome };
+}
+
+function ReviewCard({
+  task,
+  context,
+  row,
+}: {
+  task: AssistantTask;
+  context: InboxContext;
+  row: RowState;
+}) {
   const review = useAtomCommand(developerAssistant.review);
   const { pending, run } = useAssistantAction();
   const [requesting, setRequesting] = useState(false);
   const [feedback, setFeedback] = useState("");
+  const headline = reviewHeadline(task);
   const submit = (action: "accept" | "request-changes") =>
     run(
       action,
@@ -338,21 +492,39 @@ function ReviewCard({ task, context }: { task: AssistantTask; context: InboxCont
     );
 
   return (
-    <InboxCard
+    <InboxRow
+      {...row}
       accent="review"
-      kind={
-        task.e2e?.verdict === "passed"
-          ? "Passed e2e · ready to accept"
-          : task.e2e?.verdict === "partial"
-            ? "Passed e2e · check on staging"
-            : "Ready for review"
+      kind={headline.kind}
+      context={
+        <>
+          <span className="shrink-0 font-mono">{task.issue.identifier}</span>
+          {context.projectLabel(task.projectId) ? (
+            <span className="min-w-0 truncate">{context.projectLabel(task.projectId)}</span>
+          ) : null}
+        </>
       }
-      context={<Context project={context.projectLabel(task.projectId)} issue={task.issue} />}
+      summary={
+        <>
+          <span className="font-medium">{task.issue.title}</span>
+          {!row.expanded ? (
+            <span className="text-muted-foreground"> · {headline.outcome}</span>
+          ) : null}
+        </>
+      }
       at={task.deployment?.verifiedAt ?? task.updatedAt}
-      onOpenThread={() => context.onOpenThread(task.threadId)}
-      openThreadLabel="Open worker thread"
+      links={
+        <>
+          <RowLinks
+            issue={task.issue}
+            thread={task.threadId}
+            threadLabel="Open worker thread"
+            onOpenThread={context.onOpenThread}
+          />
+          <span className="text-muted-foreground">{headline.outcome}</span>
+        </>
+      }
     >
-      <h3 className="font-semibold text-sm leading-snug">{task.issue.title}</h3>
       {task.summary.trim() ? (
         <ExpandableMarkdown text={task.summary} environmentId={context.environmentId} />
       ) : null}
@@ -391,8 +563,7 @@ function ReviewCard({ task, context }: { task: AssistantTask; context: InboxCont
               rel="noreferrer"
               className="text-[11px] text-muted-foreground hover:text-foreground hover:underline"
             >
-              {task.e2e.screenshots.length} screenshot
-              {task.e2e.screenshots.length === 1 ? "" : "s"} on Linear
+              Screenshots on Linear
             </a>
           ) : null}
           {task.deployment.evidence?.map((entry) => (
@@ -456,7 +627,7 @@ function ReviewCard({ task, context }: { task: AssistantTask; context: InboxCont
           </Button>
         </div>
       )}
-    </InboxCard>
+    </InboxRow>
   );
 }
 
@@ -464,10 +635,12 @@ function StuckTaskCard({
   task,
   reason,
   context,
+  row,
 }: {
   task: AssistantTask;
   reason: "rounds" | "stopped";
   context: InboxContext;
+  row: RowState;
 }) {
   const review = useAtomCommand(developerAssistant.review);
   const control = useAtomCommand(developerAssistant.control);
@@ -490,19 +663,30 @@ function StuckTaskCard({
     );
   };
   return (
-    <InboxCard
+    <InboxRow
+      {...row}
       accent="blocked"
       kind={reason === "rounds" ? "Out of work rounds" : "Stuck while paused"}
-      context={<Context project={context.projectLabel(task.projectId)} issue={task.issue} />}
+      context={<IssueContext project={context.projectLabel(task.projectId)} issue={task.issue} />}
+      summary={
+        reason === "rounds"
+          ? `The worker used all ${task.turnLimit} rounds without finishing.`
+          : "The assistant is paused with this issue unfinished."
+      }
       at={task.updatedAt}
-      onOpenThread={() => context.onOpenThread(task.threadId)}
-      openThreadLabel="Open worker thread"
+      links={
+        <RowLinks
+          issue={task.issue}
+          thread={task.threadId}
+          threadLabel="Open worker thread"
+          onOpenThread={context.onOpenThread}
+        />
+      }
     >
-      <h3 className="font-semibold text-sm leading-snug">{task.issue.title}</h3>
       <p className="text-muted-foreground text-sm">
         {reason === "rounds"
-          ? `The worker used all ${task.turnLimit} rounds without finishing. Give it more, or skip the issue.`
-          : "The assistant is paused with this issue unfinished. Start it again to let it recover, or skip the issue."}
+          ? "Give it more rounds, or skip the issue."
+          : "Start it again to let it recover, or skip the issue."}
         {task.error ? (
           <span className="mt-1 block text-destructive-foreground">{task.error}</span>
         ) : null}
@@ -564,7 +748,7 @@ function StuckTaskCard({
           Skip issue
         </Button>
       </div>
-    </InboxCard>
+    </InboxRow>
   );
 }
 
@@ -572,23 +756,24 @@ function PausedProjectCard({
   project,
   reason,
   context,
+  row,
 }: {
   project: AssistantProject;
   reason: string;
   context: InboxContext;
+  row: RowState;
 }) {
   const control = useAtomCommand(developerAssistant.control);
   const { pending, run } = useAssistantAction();
   const title = context.projectTitle(project.config.projectId);
   return (
-    <InboxCard
+    <InboxRow
+      {...row}
       accent="paused"
       kind="Assistant stopped"
-      context={<Context project={title} />}
-      onOpenThread={() => context.onOpenThread(project.threadId)}
-      openThreadLabel="Open assistant chat"
+      context={<span className="truncate">{title}</span>}
+      summary={reason}
     >
-      <p className="text-sm">{reason}</p>
       <div className="flex flex-wrap items-center gap-2">
         <Button
           size="sm"
@@ -612,18 +797,38 @@ function PausedProjectCard({
           Ask what happened
         </Button>
       </div>
-    </InboxCard>
+    </InboxRow>
   );
 }
 
-function SetupReadyCard({ setup, context }: { setup: AssistantSetup; context: InboxContext }) {
+function SetupReadyCard({
+  setup,
+  context,
+  row,
+}: {
+  setup: AssistantSetup;
+  context: InboxContext;
+  row: RowState;
+}) {
   return (
-    <InboxCard
+    <InboxRow
+      {...row}
       accent="setup"
       kind="Setup ready to save"
-      context={<Context project={context.projectTitle(setup.preferences.projectId)} />}
-      onOpenThread={() => context.onOpenThread(setup.threadId)}
-      openThreadLabel="Open setup chat"
+      context={
+        <span className="truncate">{context.projectTitle(setup.preferences.projectId)}</span>
+      }
+      summary={
+        previewLine(setup.summary) ||
+        "The assistant finished inspecting the project and proposed a setup."
+      }
+      links={
+        <RowLinks
+          thread={setup.threadId}
+          threadLabel="Open setup chat"
+          onOpenThread={context.onOpenThread}
+        />
+      }
     >
       {setup.summary.trim() ? (
         <ExpandableMarkdown
@@ -631,11 +836,7 @@ function SetupReadyCard({ setup, context }: { setup: AssistantSetup; context: In
           environmentId={context.environmentId}
           collapsedClassName="max-h-32"
         />
-      ) : (
-        <p className="text-muted-foreground text-sm">
-          The assistant finished inspecting the project and proposed a setup.
-        </p>
-      )}
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" onClick={() => context.onReviewSetup(setup)}>
           Review and save
@@ -644,6 +845,6 @@ function SetupReadyCard({ setup, context }: { setup: AssistantSetup; context: In
           Discuss changes
         </Button>
       </div>
-    </InboxCard>
+    </InboxRow>
   );
 }

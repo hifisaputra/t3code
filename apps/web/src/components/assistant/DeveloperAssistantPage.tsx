@@ -1,6 +1,7 @@
 import {
   assistantTaskHoldsProject,
   type AssistantBoard,
+  type AssistantDecision,
   type AssistantSetup,
   type EnvironmentId,
   type ProjectId,
@@ -36,7 +37,7 @@ import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { AssistantProjectCard, AssistantSetupCard } from "./AssistantProjectCard";
 import { AssistantSetupDialog } from "./AssistantSetupDialog";
 import { AssistantSetupSheet } from "./AssistantSetupReview";
-import { InboxItemCard, type InboxContext } from "./AssistantInbox";
+import { inboxElementId, InboxItemCard, type InboxContext } from "./AssistantInbox";
 import { ActiveTaskCard, AssistantHistory } from "./AssistantWork";
 import { activeTaskFor, buildInbox, historyTasks } from "./assistantBoard.logic";
 import { SectionHeading } from "./assistantUi";
@@ -120,6 +121,23 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
   );
   const [dialog, setDialog] = useState<SetupDialogState>(null);
   const [reviewing, setReviewing] = useState<ThreadId | null>(null);
+  // Several rows may be open at once, so a half-written answer survives opening another.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (key: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+  const showDecision = (decision: AssistantDecision) => {
+    const key = `decision:${decision.id}`;
+    setExpanded((current) => new Set(current).add(key));
+    requestAnimationFrame(() =>
+      document
+        .getElementById(inboxElementId(key))
+        ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    );
+  };
 
   const openThread = (threadId: ThreadId) =>
     void navigate({
@@ -160,6 +178,8 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
     projects: data.projects,
     onOpenThread: openThread,
     onReviewSetup: (setup: AssistantSetup) => setReviewing(setup.threadId),
+    isExpanded: (key) => expanded.has(key),
+    onToggle: toggle,
   };
   const empty = !hasProjects && (data.setups?.length ?? 0) === 0;
   const canAdd = setupState.unavailableReason === null;
@@ -184,7 +204,9 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
       ) : (
         <div className="mx-auto grid w-full max-w-6xl gap-6 px-4 py-5 sm:px-6 lg:grid-cols-[minmax(0,1fr)_19rem] lg:gap-8 lg:py-6">
           <aside className="flex flex-col gap-3 lg:sticky lg:top-6 lg:order-last lg:self-start">
-            <SectionHeading action={addButton}>Projects</SectionHeading>
+            <SectionHeading action={addButton}>
+              {multiple ? "Assistants" : "Assistant"}
+            </SectionHeading>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
               {data.setups?.map((setup) => (
                 <AssistantSetupCard
@@ -236,6 +258,7 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
                     projectLabel={projectLabel(task.projectId)}
                     decisions={data.decisions}
                     onOpenThread={openThread}
+                    onShowDecision={showDecision}
                   />
                 ))
               ) : (
