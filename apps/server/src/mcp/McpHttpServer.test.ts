@@ -7,12 +7,15 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { McpProtocol, McpSchema, McpServer } from "effect/unstable/ai";
+import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/unstable/http";
 
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { AssistantToolkit } from "./toolkits/assistant/tools.ts";
+import { LinearToolkit } from "./toolkits/linear/tools.ts";
+import { PreviewSnapshotToolkit, PreviewStandardToolkit } from "./toolkits/preview/tools.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -416,3 +419,21 @@ it.effect("registers annotated tools and preserves authenticated request context
     }),
   ).pipe(Effect.provide(TestLayer)),
 );
+
+// MCP clients validate `tools/list` as a whole: one tool whose input schema is
+// not an object makes them drop every `t3-code` tool, not just that one.
+it("advertises an object input schema for every served tool", () => {
+  for (const toolkit of [
+    AssistantToolkit,
+    LinearToolkit,
+    PreviewStandardToolkit,
+    PreviewSnapshotToolkit,
+  ]) {
+    for (const tool of Object.values(toolkit.tools)) {
+      expect({ name: tool.name, type: Tool.getJsonSchema(tool).type }).toEqual({
+        name: tool.name,
+        type: "object",
+      });
+    }
+  }
+});

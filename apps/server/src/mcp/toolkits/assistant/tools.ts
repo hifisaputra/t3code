@@ -23,7 +23,6 @@ export const AssistantToolkit = Toolkit.make(
   Tool.make("assistant_get_setup", {
     description:
       "Read the saved setup brief, selected preferences, existing proposal, and inspection instructions. Call this first when helping the person set up their developer assistant. Only active setup conversations may read it. Setup is read-only inspection and discussion; do not start issues, mutate the repository or deploy.",
-    parameters: Schema.Struct({}),
     success: Schema.Struct({ setup: AssistantSetup, instructions: Schema.String }),
     failure,
     dependencies,
@@ -39,7 +38,6 @@ export const AssistantToolkit = Toolkit.make(
   Tool.make("assistant_pause", {
     description:
       "Pause this project's assistant queue when the person asks you to stop. Existing worker work is preserved. The person can resume from the assistant board.",
-    parameters: Schema.Struct({}),
     success: Schema.Void,
     failure,
     dependencies,
@@ -47,7 +45,6 @@ export const AssistantToolkit = Toolkit.make(
   Tool.make("assistant_get_board", {
     description:
       "Read your developer assistant's project setup, eligible Linear issues, managed work, decisions, and staging reviews. Only the coordinator can read this board. Human reviews do not block selecting the next issue after verified staging deployment.",
-    parameters: Schema.Struct({}),
     success: Schema.Struct({
       ...AssistantBoard.fields,
       candidates: Schema.Array(LinearIssueSummary),
