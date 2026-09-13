@@ -140,6 +140,11 @@ fresh linked worker from the current integration branch, leaving the original th
 history intact. It does not roll back later work. Archived worker threads retain their branches and
 worktrees; remove those through the normal thread and worktree cleanup when you no longer need them.
 
+When staging is verified, T3 also comments on the Linear issue as the connected account: the
+assistant's summary of what changed, how it was checked and what remains open, followed by the
+staging link, pull request and verified commit. People following the issue in Linear see the result
+without opening T3.
+
 The Linear review and acceptance state names must exist on the issue's team. Leave a name empty to
 keep its current state. A Linear update failure is shown on the task without discarding successful
 delivery. Check your Linear Git integration's PR automations if they would mark issues Done before

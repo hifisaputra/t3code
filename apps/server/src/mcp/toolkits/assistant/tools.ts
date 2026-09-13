@@ -91,11 +91,15 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_verify_staging", {
     description:
-      "Verify delivery using the saved deployment targets or custom check, then archive the worker and release the project. Supply relevant targetIds for this issue, or omit to check all targets. First exercise issue-specific staging acceptance checks and include evidence in summary. Requires an idle worker, committed worktree and resolved decisions. Every selected deployment must contain the worker commit and belong to origin's integration branch. Review code, merge with a merge commit or fast-forward, and stop local servers first. On success start the next issue without waiting for human review.",
+      "Verify delivery using the saved deployment targets or custom check, then archive the worker and release the project. Supply relevant targetIds for this issue, or omit to check all targets. First exercise issue-specific staging acceptance checks and include evidence in summary. Requires an idle worker, committed worktree and resolved decisions. Every selected deployment must contain the worker commit and belong to origin's integration branch. Review code, merge with a merge commit or fast-forward, and stop local servers first. On success T3 posts linearComment on the Linear issue, followed by the staging link, pull request and verified commit it checked, then applies the review state; do not post your own completion comment. On success start the next issue without waiting for human review.",
     parameters: Schema.Struct({
       taskId,
       summary: text,
       reviewInstructions: text,
+      linearComment: text.annotate({
+        description:
+          "The completion update for the Linear issue, in Markdown, for people who read the issue but not T3: what changed and why it matters, how it was verified on staging, what is not covered or still open, and how to check it. It posts as the connected Linear account, so lead with outcomes: no first person and no 'you'. Omit the staging URL, PR and commit; T3 appends them.",
+      }),
       targetIds: Schema.optionalKey(Schema.Array(text)),
     }),
     success: AssistantTask,
@@ -166,6 +170,7 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         input.summary.trim(),
         input.reviewInstructions.trim(),
         input.targetIds,
+        input.linearComment.trim(),
       );
     }),
   assistant_wait: (input) =>

@@ -43,6 +43,7 @@ import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurn
 import { ServerSettingsService } from "../serverSettings.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { forkParked } from "../serverActivation.ts";
+import { deliveryComment, linearFailureDetail } from "./deliveryComment.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 import { assistantInstructions, workerInstructions } from "./prompts.ts";
 import { makeSetup, validateDeploymentConfig } from "./AssistantSetup.ts";
@@ -706,6 +707,8 @@ export const make = Effect.gen(function* () {
       summary: string,
       reviewInstructions: string,
       targetIds?: ReadonlyArray<string>,
+      /** Posted on the Linear issue once staging verifies, above T3's own facts. */
+      linearComment?: string,
     ) {
       const p = yield* authorize(caller);
       if (p.status !== "running") return yield* fail("The assistant is stopped.");
@@ -768,17 +771,33 @@ export const make = Effect.gen(function* () {
         deployment,
         error: null,
       });
+      // Delivery already happened, so a Linear failure is reported on the task
+      // for the person to fix by hand rather than undoing the release.
+      const linearProblems: string[] = [];
+      const pullRequest = worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null;
+      yield* linear
+        .createComment({
+          issueId: t.issue.id,
+          body: deliveryComment({ comment: linearComment, deployment, pullRequest }),
+        })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.sync(() => {
+              linearProblems.push(
+                `Could not post the delivery comment on Linear: ${linearFailureDetail(error)}`,
+              );
+            }),
+          ),
+        );
       yield* changeLinearState(updated, p.config.reviewState).pipe(
         Effect.catch((error) =>
-          saveTask({ ...updated, error: wrap(error).detail }).pipe(
-            Effect.tap((value) =>
-              Effect.sync(() => {
-                updated = value;
-              }),
-            ),
-          ),
+          Effect.sync(() => {
+            linearProblems.push(wrap(error).detail);
+          }),
         ),
       );
+      if (linearProblems.length)
+        updated = yield* saveTask({ ...updated, error: linearProblems.join(" ") });
       yield* sql`UPDATE assistant_projects SET external_waits = 0 WHERE project_id = ${p.project_id}`;
       yield* wake(
         p.project_id,

@@ -104,6 +104,8 @@ function harness() {
     );
   const issues = [makeIssue(1), makeIssue(2), makeIssue(3)];
   const transitions: string[] = [];
+  const comments: Array<{ issueId: string; body: string }> = [];
+  let commentsHealthy = true;
   const pendingStarts = new Set<ThreadId>();
   let stagingHealthy = true;
   let setupHealthy = true;
@@ -156,6 +158,18 @@ function harness() {
         Effect.sync(() => {
           transitions.push(stateId);
         }),
+      createComment: (input) =>
+        commentsHealthy
+          ? Effect.sync(() => {
+              comments.push(input);
+              return { id: `comment-${comments.length}`, url: "https://linear.app/c" };
+            })
+          : Effect.fail(
+              new LinearOperationError({
+                operation: "createComment",
+                detail: "Linear refused to add the comment.",
+              }),
+            ),
     }),
     Layer.mock(LinearThreadService)({
       prepareIssueThread: (input) =>
@@ -299,6 +313,10 @@ function harness() {
     issues,
     threads,
     transitions,
+    comments,
+    setCommentsHealthy: (value: boolean) => {
+      commentsHealthy = value;
+    },
     pendingStarts,
     setStagingHealthy: (value: boolean) => {
       stagingHealthy = value;
@@ -564,12 +582,67 @@ it.effect("claims an issue once and prevents a second worker until staging succe
         .pipe(Effect.isFailure),
     );
     assert.isTrue(yield* service.startIssue(caller, "APP-2", "Next").pipe(Effect.isFailure));
+    assert.lengthOf(h.comments, 0);
     h.setStagingHealthy(true);
     const delivered = yield* service.verifyStaging(caller, first.id, "Done", "Check the page");
     assert.equal(delivered.status, "review");
     assert.equal(h.threads.get(first.threadId)?.archivedAt, timestamp);
     const next = yield* service.startIssue(caller, "APP-2", "Next");
     assert.notEqual(first.id, next.id);
+    assert.deepEqual(h.transitions, ["review"]);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("posts one completion comment on the Linear issue once staging verifies", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    const first = yield* service.startIssue(caller, "APP-1", "Fix it");
+    yield* service.deliver();
+    h.finish(first.threadId);
+    h.setStagingHealthy(false);
+    yield* service
+      .verifyStaging(caller, first.id, "Done", "Check", undefined, "The page loads again.")
+      .pipe(Effect.ignore);
+    assert.lengthOf(h.comments, 0);
+    h.setStagingHealthy(true);
+    yield* service.verifyStaging(
+      caller,
+      first.id,
+      "Done",
+      "Check",
+      undefined,
+      "The page loads again.",
+    );
+    // A repeated call returns the recorded delivery without posting twice.
+    yield* service.verifyStaging(caller, first.id, "Done", "Check", undefined, "Again");
+    assert.lengthOf(h.comments, 1);
+    assert.equal(h.comments[0]!.issueId, first.issue.id);
+    assert.match(h.comments[0]!.body, /^The page loads again\./);
+    assert.include(h.comments[0]!.body, "[staging.example.com](https://staging.example.com)");
+    assert.include(h.comments[0]!.body, "`aaaaaaa`");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("keeps a delivery whose Linear comment fails, and says so on the task", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    const first = yield* service.startIssue(caller, "APP-1", "Fix it");
+    yield* service.deliver();
+    h.finish(first.threadId);
+    h.setCommentsHealthy(false);
+    const delivered = yield* service.verifyStaging(
+      caller,
+      first.id,
+      "Done",
+      "Check",
+      undefined,
+      "Fixed.",
+    );
+    assert.equal(delivered.status, "review");
+    assert.include(delivered.error ?? "", "Could not post the delivery comment on Linear");
+    assert.include(delivered.error ?? "", "Linear refused to add the comment.");
     assert.deepEqual(h.transitions, ["review"]);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
