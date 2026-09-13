@@ -1,53 +1,45 @@
 import {
-  DEFAULT_CLIENT_SETTINGS,
-  DEFAULT_RUNTIME_MODE,
-  DEFAULT_SERVER_SETTINGS,
-  ProjectId,
+  assistantTaskHoldsProject,
   type AssistantBoard,
-  type AssistantProjectConfig,
-  type AssistantTask,
+  type AssistantSetup,
   type EnvironmentId,
-  type ModelSelection,
-  type RuntimeMode,
+  type ProjectId,
   type ThreadId,
 } from "@t3tools/contracts";
-import {
-  squashAtomCommandFailure,
-  type AtomCommandResult,
-} from "@t3tools/client-runtime/state/runtime";
 import { getAssistantSetupState } from "@t3tools/client-runtime/state/developerAssistant";
-import { createModelSelection } from "@t3tools/shared/model";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   BotIcon,
-  CheckIcon,
-  MessageCircleQuestionIcon,
-  PlayIcon,
+  CircleCheckIcon,
+  CircleDashedIcon,
+  CircleIcon,
   PlusIcon,
-  SquareIcon,
+  ServerIcon,
 } from "lucide-react";
-import { useState } from "react";
-import { getCustomModelOptionsByInstance } from "../../modelSelection";
-import {
-  deriveProviderInstanceEntries,
-  resolveDefaultProviderModelSelection,
-} from "../../providerInstances";
-import { useProjects } from "../../state/entities";
-import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
-import { developerAssistant } from "../../state/developerAssistant";
-import { linearEnvironment } from "../../state/linear";
-import { useEnvironmentQuery } from "../../state/query";
-import { useAtomCommand } from "../../state/use-atom-command";
-import { buildThreadRouteParams } from "../../threadRoutes";
-import { ProviderModelPicker } from "../chat/ProviderModelPicker";
-import { Button } from "../ui/button";
-import { Input } from "../ui/input";
-import { AssistantSetupReview } from "./AssistantSetupReview";
-import { SidebarInset, SidebarTrigger } from "../ui/sidebar";
-import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { useMemo, useState, type ReactNode } from "react";
 
-const selectClass = "h-9 rounded-md border border-input bg-background px-3 text-sm";
-const textareaClass = "min-h-24 w-full rounded-md border border-input bg-background p-3 text-sm";
+import { isElectron } from "~/env";
+import { cn } from "~/lib/utils";
+import { developerAssistant } from "~/state/developerAssistant";
+import { useProjects } from "~/state/entities";
+import { useEnvironments, type EnvironmentPresentation } from "~/state/environments";
+import { linearEnvironment } from "~/state/linear";
+import { useEnvironmentQuery } from "~/state/query";
+import { buildThreadRouteParams } from "~/threadRoutes";
+
+import { Button } from "../ui/button";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { SidebarInset, SidebarTrigger } from "../ui/sidebar";
+import { Skeleton } from "../ui/skeleton";
+import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { AssistantProjectCard, AssistantSetupCard } from "./AssistantProjectCard";
+import { AssistantSetupDialog } from "./AssistantSetupDialog";
+import { AssistantSetupSheet } from "./AssistantSetupReview";
+import { InboxItemCard, type InboxContext } from "./AssistantInbox";
+import { ActiveTaskCard, AssistantHistory } from "./AssistantWork";
+import { activeTaskFor, buildInbox, historyTasks } from "./assistantBoard.logic";
+import { SectionHeading } from "./assistantUi";
 
 export function DeveloperAssistantPage() {
   const { environments } = useEnvironments();
@@ -58,699 +50,350 @@ export function DeveloperAssistantPage() {
     environments.find((e) => e.serverConfig?.settings.linear.apiKey) ??
     environments[0];
   return (
-    <SidebarInset className="flex h-full min-h-0 flex-col">
-      <WorkspacePageHeader className="border-b">
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+      <WorkspacePageHeader electron={isElectron} className="border-border border-b">
         <SidebarTrigger className="md:hidden" />
-        <BotIcon className="size-4" />
-        <h1 className="font-medium">Developer assistant</h1>
-        <select
-          aria-label="Environment"
-          className={`${selectClass} ml-auto max-w-56`}
-          value={environment?.environmentId ?? ""}
-          onChange={(e) =>
-            void navigate({
-              to: "/assistant",
-              search: { environment: e.target.value as EnvironmentId },
-            })
-          }
-        >
-          {environments.map((e) => (
-            <option key={e.environmentId} value={e.environmentId}>
-              {e.label}
-            </option>
-          ))}
-        </select>
+        <BotIcon aria-hidden className="size-4 text-muted-foreground" />
+        <h1 className="truncate font-medium text-sm">Developer assistant</h1>
+        {environments.length > 1 && environment ? (
+          <Select
+            value={environment.environmentId}
+            onValueChange={(next) =>
+              void navigate({ to: "/assistant", search: { environment: next as EnvironmentId } })
+            }
+          >
+            <SelectTrigger
+              size="xs"
+              variant="ghost"
+              className="w-auto max-w-48"
+              aria-label="Environment"
+            >
+              <SelectValue>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <ServerIcon className="size-3.5" />
+                  <span className="truncate">{environment.label}</span>
+                </span>
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="start" alignItemWithTrigger={false}>
+              {environments.map((e) => (
+                <SelectItem key={e.environmentId} value={e.environmentId}>
+                  {e.label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        ) : null}
       </WorkspacePageHeader>
       {environment ? (
         <AssistantEnvironment key={environment.environmentId} environment={environment} />
       ) : (
-        <p className="p-6 text-muted-foreground">Connect an environment to manage development.</p>
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>No environment</EmptyTitle>
+            <EmptyDescription>Connect a T3 server to use the developer assistant.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       )}
     </SidebarInset>
   );
 }
 
+type SetupDialogState = { key: number; projectId: ProjectId | null } | null;
+
 function AssistantEnvironment({ environment }: { environment: EnvironmentPresentation }) {
   const environmentId = environment.environmentId;
+  const navigate = useNavigate();
   const allProjects = useProjects();
-  const projects = allProjects.filter((p) => p.environmentId === environmentId);
+  const projects = useMemo(
+    () => allProjects.filter((p) => p.environmentId === environmentId),
+    [allProjects, environmentId],
+  );
   const board = useEnvironmentQuery(developerAssistant.board({ environmentId, input: {} }));
-  const setup = getAssistantSetupState(
+  const setupState = getAssistantSetupState(
     projects.map((project) => project.id),
     board,
   );
-  const setupMessage =
-    setup.unavailableReason === "loading"
-      ? "Loading your assistant projects…"
-      : setup.unavailableReason === "connection"
-        ? "Reconnect to this environment to set up a project."
-        : setup.unavailableReason === "no-projects"
-          ? "Add your repository as a T3 project from the sidebar, then return here to set up its assistant."
-          : setup.unavailableReason === "all-configured"
-            ? "All projects have an assistant or a setup in progress. Continue a setup below, or use Setup to change an existing assistant."
-            : null;
-  const control = useAtomCommand(developerAssistant.control);
-  const answer = useAtomCommand(developerAssistant.answer);
-  const review = useAtomCommand(developerAssistant.review);
-  const navigate = useNavigate();
-  const [editing, setEditing] = useState<ProjectId | "new" | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const hasProjects = (board.data?.projects.length ?? 0) > 0;
+  const workspace = useEnvironmentQuery(
+    hasProjects ? linearEnvironment.workspace({ environmentId, input: {} }) : null,
+  );
+  const [dialog, setDialog] = useState<SetupDialogState>(null);
+  const [reviewing, setReviewing] = useState<ThreadId | null>(null);
+
   const openThread = (threadId: ThreadId) =>
     void navigate({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams({ environmentId, threadId }),
     });
-  const act = async (action: () => Promise<AtomCommandResult<AssistantBoard, unknown>>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await action();
-      if (result._tag === "Failure") setError(String(squashAtomCommandFailure(result)));
-    } finally {
-      setBusy(false);
-    }
+  const openSetup = (projectId: ProjectId | null) => setDialog({ key: Date.now(), projectId });
+
+  if (board.data === null) {
+    return board.error ? (
+      <Empty>
+        <EmptyHeader>
+          <EmptyTitle>Could not reach the assistant</EmptyTitle>
+          <EmptyDescription>{board.error}</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    ) : (
+      <BoardGhost />
+    );
+  }
+
+  const data = board.data;
+  const projectTitle = (id: ProjectId) => projects.find((p) => p.id === id)?.title ?? "Project";
+  const multiple = data.projects.length + (data.setups?.length ?? 0) > 1;
+  const projectLabel = (id: ProjectId) => (multiple ? projectTitle(id) : null);
+  const inbox = buildInbox(data);
+  const stuck = new Set(inbox.flatMap((item) => (item.kind === "stuck" ? [item.task.id] : [])));
+  const active = data.tasks.filter((t) => assistantTaskHoldsProject(t.status) && !stuck.has(t.id));
+  const history = historyTasks(data);
+  const linearProjectName = (id: string) =>
+    workspace.data?.teams.flatMap((t) => t.projects).find((p) => p.id === id)?.name ?? null;
+  const reviewingSetup = data.setups?.find((s) => s.threadId === reviewing) ?? null;
+  const inboxContext: InboxContext = {
+    environmentId,
+    projectLabel,
+    projectTitle,
+    tasks: data.tasks,
+    projects: data.projects,
+    onOpenThread: openThread,
+    onReviewSetup: (setup: AssistantSetup) => setReviewing(setup.threadId),
   };
-  const pending = board.data?.decisions.filter((d) => d.answer === null) ?? [];
-  const reviews = board.data?.tasks.filter((t) => t.status === "review") ?? [];
-  const active =
-    board.data?.tasks.filter((t) =>
-      ["preparing", "working", "waiting", "blocked"].includes(t.status),
-    ) ?? [];
+  const empty = !hasProjects && (data.setups?.length ?? 0) === 0;
+  const canAdd = setupState.unavailableReason === null;
+  // Hidden rather than disabled when every repository already has one: there
+  // is nothing to add, and a dead button would only raise the question.
+  const addButton = canAdd ? (
+    <Button size="xs" variant="ghost" onClick={() => openSetup(null)}>
+      <PlusIcon />
+      Add project
+    </Button>
+  ) : null;
+
   return (
     <main className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto flex max-w-5xl flex-col gap-8 p-5 sm:p-8">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-semibold">Decisions and reviews, in one place</h2>
-            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-              Your assistant manages issue threads and delivery. Each project works on one issue at
-              a time and continues after staging is verified.
-            </p>
-          </div>
-          <Button
-            onClick={() => setEditing("new")}
-            disabled={setup.unavailableReason !== null}
-            aria-describedby={setupMessage ? "assistant-setup-status" : undefined}
-          >
-            <PlusIcon className="size-4" />
-            Set up project
-          </Button>
-        </div>
-        {setupMessage && (
-          <p id="assistant-setup-status" role="status" className="text-sm text-muted-foreground">
-            {setupMessage}
-          </p>
-        )}
-        {(error || board.error) && (
-          <p
-            role="alert"
-            className="rounded-lg border border-destructive/40 p-3 text-sm text-destructive"
-          >
-            {error ?? board.error}
-          </p>
-        )}
-        {editing && (
-          <AssistantSetup
-            key={editing}
-            environment={environment}
-            projectIds={editing === "new" ? setup.availableProjectIds : [editing]}
-            initial={
-              board.data?.projects.find((p) => p.config.projectId === editing)?.config ?? null
-            }
-            onClose={() => setEditing(null)}
-            onStarted={openThread}
-          />
-        )}
-        {(board.data?.setups?.length ?? 0) > 0 && (
-          <section aria-label="Setups in progress" className="space-y-3">
-            <h2 className="font-medium">Setups in progress</h2>
-            {board.data?.setups?.map((draft) => (
-              <article key={draft.threadId} className="rounded-xl border p-4">
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                  <h3 className="font-medium">
-                    {projects.find((p) => p.id === draft.preferences.projectId)?.title ??
-                      "Project setup"}
-                  </h3>
-                  <Button size="sm" variant="outline" onClick={() => openThread(draft.threadId)}>
-                    Continue conversation
-                  </Button>
-                </div>
-                <AssistantSetupReview setup={draft} environmentId={environmentId} />
-              </article>
-            ))}
-          </section>
-        )}
-        <section aria-label="Projects" className="grid gap-3 sm:grid-cols-2">
-          {board.data?.projects.map((p) => (
-            <article key={p.config.projectId} className="rounded-xl border p-4">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="font-medium">
-                  {projects.find((x) => x.id === p.config.projectId)?.title ?? p.config.projectId}
-                </h3>
-                <span className="text-xs text-muted-foreground">
-                  {p.status === "running" ? "Running" : "Stopped"}
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {p.config.assignedToMe
-                  ? "Assigned to the connected Linear account"
-                  : "All assignees"}{" "}
-                · {p.config.baseBranch}
-              </p>
-              {p.error && (
-                <p role="status" className="mt-2 text-sm text-amber-600 dark:text-amber-400">
-                  {p.error}
+      {empty ? (
+        <Onboarding
+          environment={environment}
+          hasRepository={projects.length > 0}
+          onAdd={() => openSetup(null)}
+          canAdd={canAdd}
+        />
+      ) : (
+        <div className="mx-auto grid w-full max-w-6xl gap-6 px-4 py-5 sm:px-6 lg:grid-cols-[minmax(0,1fr)_19rem] lg:gap-8 lg:py-6">
+          <aside className="flex flex-col gap-3 lg:sticky lg:top-6 lg:order-last lg:self-start">
+            <SectionHeading action={addButton}>Projects</SectionHeading>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+              {data.setups?.map((setup) => (
+                <AssistantSetupCard
+                  key={setup.threadId}
+                  environmentId={environmentId}
+                  setup={setup}
+                  title={projectTitle(setup.preferences.projectId)}
+                  onOpenThread={openThread}
+                  onReview={() => setReviewing(setup.threadId)}
+                />
+              ))}
+              {data.projects.map((project) => (
+                <AssistantProjectCard
+                  key={project.config.projectId}
+                  environmentId={environmentId}
+                  project={project}
+                  title={projectTitle(project.config.projectId)}
+                  activeTask={activeTaskFor(data, project.config.projectId)}
+                  linearProjectName={linearProjectName(project.config.linearProjectId)}
+                  providers={environment.serverConfig?.providers ?? []}
+                  onOpenThread={openThread}
+                  onEditSetup={() => openSetup(project.config.projectId)}
+                />
+              ))}
+            </div>
+          </aside>
+
+          <div className="flex min-w-0 flex-col gap-8">
+            <section aria-label="Needs you" className="flex flex-col gap-3">
+              <SectionHeading count={inbox.length}>Needs you</SectionHeading>
+              {inbox.length > 0 ? (
+                inbox.map((item) => (
+                  <InboxItemCard key={item.key} item={item} context={inboxContext} />
+                ))
+              ) : (
+                <CaughtUp board={data} />
+              )}
+            </section>
+
+            <section aria-label="In progress" className="flex flex-col gap-3">
+              <SectionHeading count={active.length}>In progress</SectionHeading>
+              {active.length > 0 ? (
+                active.map((task) => (
+                  <ActiveTaskCard
+                    key={task.id}
+                    environmentId={environmentId}
+                    task={task}
+                    project={data.projects.find((p) => p.config.projectId === task.projectId)}
+                    projectLabel={projectLabel(task.projectId)}
+                    decisions={data.decisions}
+                    onOpenThread={openThread}
+                  />
+                ))
+              ) : (
+                <p className="text-muted-foreground text-sm">
+                  No issue is being worked on right now.
                 </p>
               )}
-              <div className="mt-4 flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" onClick={() => openThread(p.threadId)}>
-                  Conversation
-                </Button>
-                <Button
-                  size="sm"
-                  disabled={
-                    busy ||
-                    Boolean(
-                      board.data?.setups?.some(
-                        (s) => s.preferences.projectId === p.config.projectId,
-                      ),
-                    )
-                  }
-                  onClick={() =>
-                    void act(() =>
-                      control({
-                        environmentId,
-                        input: {
-                          projectId: p.config.projectId,
-                          action: p.status === "running" ? "stop" : "start",
-                        },
-                      }),
-                    )
-                  }
-                >
-                  {p.status === "running" ? (
-                    <SquareIcon className="size-3" />
-                  ) : (
-                    <PlayIcon className="size-3" />
-                  )}
-                  {p.status === "running" ? "Stop queue" : "Start"}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() =>
-                    void act(() =>
-                      control({
-                        environmentId,
-                        input: { projectId: p.config.projectId, action: "interrupt" },
-                      }),
-                    )
-                  }
-                >
-                  Interrupt work
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={p.status === "running"}
-                  onClick={() => {
-                    const draft = board.data?.setups?.find(
-                      (s) => s.preferences.projectId === p.config.projectId,
-                    );
-                    if (draft) openThread(draft.threadId);
-                    else setEditing(p.config.projectId);
-                  }}
-                >
-                  Setup
-                </Button>
-                {p.status === "running" && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() =>
-                      void act(() =>
-                        control({
-                          environmentId,
-                          input: { projectId: p.config.projectId, action: "wake" },
-                        }),
-                      )
-                    }
-                  >
-                    Check now
-                  </Button>
-                )}
-              </div>
-            </article>
-          ))}
-          {board.data !== null &&
-            !board.data.projects.length &&
-            setup.unavailableReason === null && (
-              <p className="col-span-full rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-                Set up a project, choose the models, and tell your assistant what to focus on.
-              </p>
-            )}
-        </section>
-        <section aria-label="Decisions">
-          <h2 className="mb-3 flex items-center gap-2 font-medium">
-            <MessageCircleQuestionIcon className="size-4" />
-            Needs your decision <span className="text-muted-foreground">{pending.length}</span>
-          </h2>
-          <div className="space-y-3">
-            {pending.map((d) => (
-              <article key={d.id} className="rounded-xl border p-4">
-                <p className="whitespace-pre-wrap text-sm">{d.question}</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" onClick={() => openThread(d.threadId)}>
-                    Open thread
-                  </Button>
-                </div>
-                {d.kind === "decision" ? (
-                  <form
-                    className="mt-3 flex gap-2"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void act(() =>
-                        answer({
-                          environmentId,
-                          input: { decisionId: d.id, answer: answers[d.id] ?? "" },
-                        }),
-                      );
-                    }}
-                  >
-                    <Input
-                      aria-label="Your decision"
-                      placeholder="Your answer…"
-                      value={answers[d.id] ?? ""}
-                      onChange={(e) => setAnswers({ ...answers, [d.id]: e.target.value })}
-                    />
-                    <Button type="submit" size="sm" disabled={busy || !answers[d.id]?.trim()}>
-                      Send answer
-                    </Button>
-                  </form>
-                ) : (
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    Respond to this {d.kind === "approval" ? "permission request" : "question"} in
-                    its thread.
-                  </p>
-                )}
-              </article>
-            ))}
-            {!pending.length && (
-              <p className="text-sm text-muted-foreground">No decisions waiting.</p>
-            )}
+            </section>
+
+            {history.length > 0 ? (
+              <section aria-label="History" className="flex flex-col gap-2">
+                <SectionHeading>History</SectionHeading>
+                <AssistantHistory
+                  tasks={history}
+                  projectLabel={(task) => projectLabel(task.projectId)}
+                  onOpenThread={openThread}
+                />
+              </section>
+            ) : null}
           </div>
-        </section>
-        <section aria-label="Staging reviews">
-          <h2 className="mb-3 flex items-center gap-2 font-medium">
-            <CheckIcon className="size-4" />
-            Ready for review <span className="text-muted-foreground">{reviews.length}</span>
-          </h2>
-          <div className="space-y-3">
-            {reviews.map((t) => (
-              <ReviewCard
-                key={t.id}
-                task={t}
-                busy={busy}
-                openThread={openThread}
-                onReview={(action, feedback) =>
-                  void act(() =>
-                    review({ environmentId, input: { taskId: t.id, action, feedback } }),
-                  )
-                }
-              />
-            ))}
-            {!reviews.length && (
-              <p className="text-sm text-muted-foreground">
-                Verified staging deployments will appear here. Your review does not hold up the next
-                issue.
-              </p>
-            )}
-          </div>
-        </section>
-        <section aria-label="Work in progress">
-          <h2 className="mb-3 font-medium">Work in progress</h2>
-          <div className="space-y-3">
-            {active.map((t) => (
-              <article key={t.id} className="rounded-xl border p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <button
-                    className="text-left text-sm font-medium hover:underline"
-                    onClick={() => openThread(t.threadId)}
-                  >
-                    {t.issue.identifier} · {t.issue.title}
-                  </button>
-                  <span className="text-xs text-muted-foreground">
-                    {t.status} · {t.turns} turns
-                  </span>
-                </div>
-                {t.error && (
-                  <p className="mt-2 text-sm text-amber-600 dark:text-amber-400">{t.error}</p>
-                )}
-                <div className="mt-3 flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() =>
-                      void act(() =>
-                        review({
-                          environmentId,
-                          input: {
-                            taskId: t.id,
-                            action: "retry",
-                            feedback: "Please inspect the blocker and continue.",
-                          },
-                        }),
-                      )
-                    }
-                  >
-                    Retry
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() =>
-                      void act(() =>
-                        review({
-                          environmentId,
-                          input: {
-                            taskId: t.id,
-                            action: "skip",
-                            feedback: "Skipped from the assistant board.",
-                          },
-                        }),
-                      )
-                    }
-                  >
-                    Skip issue
-                  </Button>
-                </div>
-              </article>
-            ))}
-            {!active.length && (
-              <p className="text-sm text-muted-foreground">No issue is executing.</p>
-            )}
-          </div>
-        </section>
-        <details className="text-sm">
-          <summary className="cursor-pointer text-muted-foreground">
-            Completed and skipped work
-          </summary>
-          <ul className="mt-3 space-y-2">
-            {board.data?.tasks
-              .filter((t) => ["accepted", "skipped", "changes-requested"].includes(t.status))
-              .map((t) => (
-                <li key={t.id}>
-                  <button className="hover:underline" onClick={() => openThread(t.threadId)}>
-                    {t.issue.identifier} · {t.issue.title}
-                  </button>
-                  <span className="ml-2 text-muted-foreground">{t.status}</span>
-                  {t.error && <p className="text-destructive">{t.error}</p>}
-                </li>
-              ))}
-          </ul>
-        </details>
-      </div>
+        </div>
+      )}
+
+      {dialog ? (
+        <AssistantSetupDialog
+          key={dialog.key}
+          open
+          onOpenChange={(open) => {
+            if (!open) setDialog(null);
+          }}
+          environment={environment}
+          projectIds={dialog.projectId ? [dialog.projectId] : setupState.availableProjectIds}
+          initial={
+            dialog.projectId
+              ? (data.projects.find((p) => p.config.projectId === dialog.projectId)?.config ?? null)
+              : null
+          }
+          onStarted={openThread}
+        />
+      ) : null}
+      <AssistantSetupSheet
+        setup={reviewingSetup}
+        environmentId={environmentId}
+        open={reviewingSetup !== null}
+        onOpenChange={(open) => {
+          if (!open) setReviewing(null);
+        }}
+        onOpenThread={openThread}
+      />
     </main>
   );
 }
 
-function ReviewCard({
-  task,
-  busy,
-  openThread,
-  onReview,
-}: {
-  task: AssistantTask;
-  busy: boolean;
-  openThread: (id: ThreadId) => void;
-  onReview: (action: "accept" | "request-changes", feedback: string) => void;
-}) {
-  const [feedback, setFeedback] = useState("");
+function CaughtUp({ board }: { board: AssistantBoard }) {
+  const running = board.projects.some((p) => p.status === "running");
   return (
-    <article className="rounded-xl border p-4">
-      <h3 className="font-medium">
-        {task.issue.identifier} · {task.issue.title}
-      </h3>
-      <p className="mt-2 whitespace-pre-wrap text-sm">{task.summary}</p>
-      <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">
-        {task.reviewInstructions}
-      </p>
-      {task.error && <p className="mt-2 text-sm text-destructive">{task.error}</p>}
-      <div className="mt-3 flex flex-wrap items-center gap-3">
-        {task.deployment && (
-          <a
-            href={task.deployment.url}
-            target="_blank"
-            rel="noreferrer"
-            className="text-sm underline"
-          >
-            Open staging
-          </a>
-        )}
-        <button className="text-sm underline" onClick={() => openThread(task.threadId)}>
-          Worker thread
-        </button>
-        <span className="text-xs text-muted-foreground">
-          Verified {task.deployment?.revision.slice(0, 8)} · staging may include later changes
-        </span>
+    <div className="flex items-start gap-3 rounded-xl border border-border/70 border-dashed px-4 py-4">
+      <CircleCheckIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-success-foreground" />
+      <div className="min-w-0">
+        <p className="font-medium text-sm">Nothing needs you right now</p>
+        <p className="mt-0.5 text-muted-foreground text-sm">
+          {running
+            ? "Questions and finished work show up here. You can leave this page; the assistant keeps going on the server."
+            : board.projects.length > 0
+              ? "Every project is paused. Press Start on one to let it take issues."
+              : "Finish a setup to start taking issues."}
+        </p>
       </div>
-      <textarea
-        aria-label={`Review feedback for ${task.issue.identifier}`}
-        className={`${textareaClass} mt-3 min-h-16`}
-        placeholder="Feedback or changes you'd like…"
-        value={feedback}
-        onChange={(e) => setFeedback(e.target.value)}
-      />
-      <div className="mt-2 flex gap-2">
-        <Button size="sm" disabled={busy} onClick={() => onReview("accept", feedback)}>
-          Accept
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={busy || !feedback.trim()}
-          onClick={() => onReview("request-changes", feedback)}
-        >
-          Request changes
-        </Button>
-      </div>
-    </article>
+    </div>
   );
 }
 
-function AssistantSetup({
+function Step({ done, children }: { done: boolean; children: ReactNode }) {
+  return (
+    <li className="flex items-start gap-2.5">
+      {done ? (
+        <CircleCheckIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-success-foreground" />
+      ) : (
+        <CircleIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground/60" />
+      )}
+      <span className={cn("text-sm", done && "text-muted-foreground")}>{children}</span>
+    </li>
+  );
+}
+
+/** First visit: what the assistant does, and what has to be true before it can. */
+function Onboarding({
   environment,
-  projectIds,
-  initial,
-  onClose,
-  onStarted,
+  hasRepository,
+  canAdd,
+  onAdd,
 }: {
   environment: EnvironmentPresentation;
-  projectIds: ReadonlyArray<ProjectId>;
-  initial: AssistantProjectConfig | null;
-  onClose: () => void;
-  onStarted: (threadId: ThreadId) => void;
+  hasRepository: boolean;
+  canAdd: boolean;
+  onAdd: () => void;
 }) {
-  const allProjects = useProjects();
-  const projects = allProjects.filter(
-    (p) => p.environmentId === environment.environmentId && projectIds.includes(p.id),
-  );
-  const workspace = useEnvironmentQuery(
-    linearEnvironment.workspace({ environmentId: environment.environmentId, input: {} }),
-  );
-  const beginSetup = useAtomCommand(developerAssistant.beginSetup);
-  const providers = environment.serverConfig?.providers ?? [];
-  const defaultModel = resolveDefaultProviderModelSelection(providers, initial?.modelSelection);
-  const [projectId, setProjectId] = useState(initial?.projectId ?? projects[0]?.id ?? "");
-  const [linearProjectId, setLinearProjectId] = useState(initial?.linearProjectId ?? "");
-  const [model, setModel] = useState<ModelSelection | null>(defaultModel);
-  const [workerModel, setWorkerModel] = useState<ModelSelection | null>(
-    initial?.workerModelSelection ?? defaultModel,
-  );
-  const [assignedToMe, setAssignedToMe] = useState(initial?.assignedToMe ?? true);
-  const [runtimeMode, setRuntimeMode] = useState(initial?.runtimeMode ?? "approval-required");
-  const [setupRuntimeMode, setSetupRuntimeMode] = useState<RuntimeMode>(DEFAULT_RUNTIME_MODE);
-  const [context, setContext] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const linearProjects = [
-    ...new Map(
-      workspace.data?.teams.flatMap((t) => t.projects).map((p) => [p.id, p]) ?? [],
-    ).values(),
-  ];
-  const picker = (selection: ModelSelection | null, set: (value: ModelSelection) => void) =>
-    selection ? (
-      <ProviderModelPicker
-        activeInstanceId={selection.instanceId}
-        model={selection.model}
-        lockedProvider={null}
-        instanceEntries={deriveProviderInstanceEntries(providers)}
-        modelOptionsByInstance={getCustomModelOptionsByInstance(
-          {
-            ...DEFAULT_SERVER_SETTINGS,
-            ...DEFAULT_CLIENT_SETTINGS,
-            ...environment.serverConfig?.settings,
-          },
-          providers,
-          selection.instanceId,
-          selection.model,
-        )}
-        onInstanceModelChange={(instanceId, model) => set(createModelSelection(instanceId, model))}
-      />
-    ) : (
-      <p className="text-sm text-muted-foreground">Configure a provider first.</p>
-    );
+  const linear = environment.serverConfig?.settings.linear;
+  const linearConnected = Boolean(linear?.apiKey);
+  const agentAccess = Boolean(linear?.agentAccess);
   return (
-    <form
-      className="rounded-xl border bg-muted/20 p-5"
-      onSubmit={async (e) => {
-        e.preventDefault();
-        if (!model || !workerModel || !projectId || !linearProjectId) return;
-        setBusy(true);
-        setError(null);
-        try {
-          const result = await beginSetup({
-            environmentId: environment.environmentId,
-            input: {
-              projectId: ProjectId.make(projectId),
-              linearProjectId,
-              assignedToMe,
-              modelSelection: model,
-              workerModelSelection: workerModel,
-              runtimeMode,
-              setupRuntimeMode,
-              context,
-            },
-          });
-          if (result._tag === "Success") {
-            onClose();
-            onStarted(result.value.threadId);
-          } else if (result._tag === "Failure") setError(String(squashAtomCommandFailure(result)));
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      <h2 className="font-medium">Set up with your assistant</h2>
-      <p className="mt-1 mb-5 max-w-2xl text-sm text-muted-foreground">
-        Choose the project and models. Your assistant will inspect the repository and staging
-        deployment, ask for missing details, and propose a setup for you to review.
-      </p>
-      <fieldset disabled={busy} className="grid gap-4 sm:grid-cols-2">
-        <label className="grid gap-1 text-sm">
-          T3 project
-          <select
-            required
-            disabled={initial !== null}
-            className={selectClass}
-            value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-          >
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.title}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-1 text-sm">
-          Linear project
-          <select
-            required
-            className={selectClass}
-            value={linearProjectId}
-            onChange={(e) => setLinearProjectId(e.target.value)}
-          >
-            <option value="">
-              {workspace.data ? "Choose project" : "Loading Linear projects…"}
-            </option>
-            {linearProjects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="grid gap-1 text-sm">
-          <span>Assistant model</span>
-          {picker(model, setModel)}
-        </div>
-        <div className="grid gap-1 text-sm">
-          <span>Coding model</span>
-          {picker(workerModel, setWorkerModel)}
-        </div>
-        <label className="grid gap-1 text-sm">
-          Issue scope
-          <select
-            className={selectClass}
-            value={assignedToMe ? "me" : "all"}
-            onChange={(e) => setAssignedToMe(e.target.value === "me")}
-          >
-            <option value="me">Assigned to your Linear account</option>
-            <option value="all">All issues in the project</option>
-          </select>
-        </label>
-        <label className="grid gap-1 text-sm">
-          Permissions when working on issues
-          <select
-            className={selectClass}
-            value={runtimeMode}
-            onChange={(e) =>
-              setRuntimeMode(e.target.value as AssistantProjectConfig["runtimeMode"])
-            }
-          >
-            <option value="approval-required">Ask for command approvals</option>
-            <option value="full-access">Run unattended with full access</option>
-          </select>
-        </label>
-        <label className="grid gap-1 text-sm">
-          Permissions during setup
-          <select
-            className={selectClass}
-            value={setupRuntimeMode}
-            onChange={(e) => setSetupRuntimeMode(e.target.value as RuntimeMode)}
-          >
-            <option value="full-access">Full access</option>
-            <option value="approval-required">Ask for command approvals</option>
-          </select>
-        </label>
-        <label className="grid gap-1 text-sm sm:col-span-2">
-          Anything your assistant should know? (optional)
-          <textarea
-            className={textareaClass}
-            maxLength={20000}
-            value={context}
-            onChange={(e) => setContext(e.target.value)}
-            placeholder="For example: staging is called test in Railway. Use the existing test account for browser checks."
-          />
-        </label>
-      </fieldset>
-      <p className="mt-3 text-xs text-muted-foreground">
-        Setup only inspects your project and does not change files or deploy. Issue processing
-        begins only after you save the setup and choose Start.
-      </p>
-      {(error || workspace.error) && (
-        <p role="alert" className="mt-3 text-sm text-destructive">
-          {error ?? workspace.error}
-        </p>
-      )}
-      <div className="mt-4 flex gap-2">
-        <Button
-          type="submit"
-          disabled={busy || !model || !workerModel || !projectId || !linearProjectId}
-        >
-          {busy ? "Opening conversation…" : "Start setup conversation"}
-        </Button>
-        <Button variant="ghost" disabled={busy} onClick={onClose}>
-          Cancel
+    <div className="mx-auto flex w-full max-w-xl flex-col gap-6 px-4 py-12 sm:py-16">
+      <Empty className="flex-none p-0 md:p-0">
+        <EmptyMedia variant="icon">
+          <BotIcon />
+        </EmptyMedia>
+        <EmptyHeader className="max-w-md">
+          <EmptyTitle>Hand your Linear issues to an assistant</EmptyTitle>
+          <EmptyDescription>
+            It picks the next issue, runs a coding worker in its own worktree, reviews and merges
+            the work, and checks it on staging. You answer its questions and review what lands.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+      <div className="rounded-xl border border-border/70 bg-card p-5">
+        <p className="mb-3 font-medium text-sm">Before you start</p>
+        <ul className="flex flex-col gap-2.5">
+          <Step done={linearConnected}>
+            Connect Linear in{" "}
+            <Link to="/settings/integrations" className="underline underline-offset-2">
+              Settings → Integrations
+            </Link>
+            .
+          </Step>
+          <Step done={agentAccess}>Turn on Linear agent access in the same place.</Step>
+          <Step done={hasRepository}>Add your repository as a project from the sidebar.</Step>
+          <li className="flex items-start gap-2.5">
+            <CircleDashedIcon
+              aria-hidden
+              className="mt-0.5 size-4 shrink-0 text-muted-foreground/60"
+            />
+            <span className="text-muted-foreground text-sm">
+              An integration branch that deploys to staging on every push. The assistant checks the
+              rest during setup.
+            </span>
+          </li>
+        </ul>
+        <Button className="mt-5 w-full sm:w-auto" disabled={!canAdd} onClick={onAdd}>
+          <PlusIcon />
+          Add a project
         </Button>
       </div>
-    </form>
+    </div>
+  );
+}
+
+function BoardGhost() {
+  return (
+    <div className="mx-auto grid w-full max-w-6xl gap-6 px-4 py-5 sm:px-6 lg:grid-cols-[minmax(0,1fr)_19rem] lg:gap-8 lg:py-6">
+      <div className="flex flex-col gap-3 lg:order-last">
+        <Skeleton className="h-4 w-20" />
+        <Skeleton className="h-52 rounded-xl" />
+      </div>
+      <div className="flex flex-col gap-3">
+        <Skeleton className="h-4 w-24" />
+        <Skeleton className="h-40 rounded-xl" />
+        <Skeleton className="h-28 rounded-xl" />
+      </div>
+    </div>
   );
 }

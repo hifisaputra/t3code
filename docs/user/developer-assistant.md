@@ -14,22 +14,23 @@ Connect Linear and enable **Agent access** in **Settings → Integrations → Li
 application's repository as a T3 project on the environment that will run the agents.
 
 On the web, open **Developer assistant** from the sidebar or command palette and choose
-**Set up project**. Select the T3 project, Linear project, issue scope, and the assistant and coding
+**Add project**. Select the repository, Linear project, issue scope, and the assistant and coding
 models. “Assigned to me” means the account connected to Linear on that T3 server.
 
 Choose **Start setup conversation**. The assistant inspects the repository's instructions,
 deployment workflows, staging services, databases, and verification requirements. It uses existing
-provider access on the server and asks you for missing details in the thread. **Permissions during
-setup** chooses whether the setup conversation runs with full access (the default) or asks before
+provider access on the server and asks you for missing details in the thread. The **During setup**
+permission chooses whether the setup conversation runs with full access (the default) or asks before
 each command. Either way, setup does not authorize repository changes or deployments. Do not paste
 credentials into chat; configure access through the provider's normal login or secret settings.
 
-Review the proposed setup above the conversation or under **Setups in progress** on the assistant
-board. Discuss corrections in the thread; the assistant can revise its proposal. **Save setup**
-configures the project and leaves its queue stopped. Choose **Start** when you want it to process
-issues. You can leave and resume a setup conversation across reloads. **Cancel setup** keeps the
-conversation in history without applying its proposal. To revise an existing assistant, stop it,
-finish or skip its active issue, and choose **Setup**.
+When the proposal is ready, choose **Review and save** in the bar above the setup conversation, or
+from **Needs you** on the assistant board. Discuss corrections in the thread; the assistant can
+revise its proposal. **Save setup** configures the project and leaves its queue stopped. Choose
+**Start** when you want it to process issues. You can leave and resume a setup conversation across
+reloads. **Cancel setup** keeps the conversation in history without applying its proposal. To revise
+an existing assistant, pause it, finish or skip its active issue, and choose **Revise setup** from
+its project menu.
 
 The integration branch usually is `develop`. It takes priority over Linear repository mappings.
 This version expects an `origin` remote and merge commits or fast-forward merges; squash and rebase
@@ -51,9 +52,10 @@ Before starting, prepare the application:
 - The saved staging targets identify the actual deployment workflows/services, and the assistant
   has the access needed to exercise the affected staging behavior.
 
-The saved approval mode applies to both the coordinator and coding workers after setup. With approvals required, permission
-requests wait for you in their original threads. Full access allows unattended commands within the
-provider's configured permissions. Use models and providers with working T3 MCP tool access.
+The saved approval mode applies to both the coordinator and coding workers after setup. With
+approvals required, permission requests wait for you in their original threads. Full access allows
+unattended commands within the provider's configured permissions. Use models and providers with
+working T3 MCP tool access.
 
 Mobile provides queue controls, the assistant conversation, decisions, and reviews for projects
 configured on web or desktop. All clients use the same server-owned state; closing a client does
@@ -90,8 +92,8 @@ or a trusted version endpoint in that deployment. `url` is the HTTP or HTTPS add
 Do not return the latest local Git commit merely because it exists. Send diagnostics to stderr.
 
 The command receives `T3_ASSISTANT_WORKER_REVISION` and `T3_ASSISTANT_BASE_BRANCH` as environment
-variables. For custom checks, your script translates the hosting platform's successful deployment into this
-common result. T3 does not provision hosting or databases.
+variables. For custom checks, your script translates the hosting platform's successful deployment
+into this common result. T3 does not provision hosting or databases.
 
 T3 then fetches `origin` and verifies both that the deployed commit contains the worker's HEAD and
 that the deployed commit belongs to the configured integration branch. Uncommitted work, unresolved
@@ -106,21 +108,21 @@ the configured coding model and preserves the issue link. Existing Linear settin
 initial move to In Progress. Avoid starting manual or separately delegated work on issues the
 assistant already owns; the assistant checks existing threads when claiming an issue.
 
-Product questions appear in **Needs your decision** and remain linked to the asking thread. You
+Product questions appear under **Needs you** and remain linked to the asking thread. You
 can answer in the inbox. When a thread has one pending product question, a reply in that original
 thread also resolves it. Answer native provider questions and permission requests in their thread.
 The assistant does not approve those requests for you.
 
-**Stop queue** stops the coordinator and prevents further automatic turns; a coding turn already
-running can finish. **Interrupt work** also requests interruption of the coding worker and closes
-its tracked T3 terminals. Work and queued follow-ups are preserved for a later Start. A provider's
-background processes may need cleanup through that project's normal procedure.
+**Pause** stops the coordinator and prevents further automatic turns; a coding turn already running
+can finish. **Interrupt all work**, in the project menu, also requests interruption of the coding
+worker and closes its tracked T3 terminals. Work and queued follow-ups are preserved for a later
+Start. A provider's background processes may need cleanup through that project's normal procedure.
 
-Failures retain ownership of the issue. The assistant can direct fixes within the configured
-worker turn limit. **Retry** grants more worker turns; **Skip issue** cancels queued work and releases
-the repository while preserving the thread and branch for inspection. Skipping does not revert a
-merge, deployment, database migration, or Linear state. After 15 external progress checks without
-completion, the assistant pauses so you can inspect the blocker and Start again.
+Failures retain ownership of the issue. The assistant can direct fixes within the configured worker
+turn limit. **Allow more rounds** grants more worker turns; **Skip issue** cancels queued work and
+releases the repository while preserving the thread and branch for inspection. Skipping does not
+revert a merge, deployment, database migration, or Linear state. After 15 external progress checks
+without completion, the assistant pauses so you can inspect the blocker and Start again.
 
 State and queued messages survive a server restart. The assistant rechecks retained work before
 continuing. If the provider was interrupted or failed, the project may be stopped; Start resumes
