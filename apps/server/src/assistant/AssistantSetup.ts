@@ -7,6 +7,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   AssistantProjectConfig,
   AssistantSetupInput,
+  AssistantTask,
   CommandId,
   DeveloperAssistantError,
   MessageId,
@@ -34,6 +35,7 @@ type SetupRow = {
 };
 const decodePreferences = Schema.decodeUnknownEffect(Schema.fromJsonString(AssistantSetupInput));
 const decodeConfig = Schema.decodeUnknownEffect(Schema.fromJsonString(AssistantProjectConfig));
+const decodeTask = Schema.decodeUnknownEffect(Schema.fromJsonString(AssistantTask));
 const encodePreferences = Schema.encodeSync(Schema.fromJsonString(AssistantSetupInput));
 const encodeConfig = Schema.encodeSync(Schema.fromJsonString(AssistantProjectConfig));
 const fail = (detail: string) => new DeveloperAssistantError({ detail });
@@ -93,11 +95,15 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const configured = yield* sql<{
       config: string;
     }>`SELECT config FROM assistant_projects WHERE project_id = ${setup.preferences.projectId}`;
+    const active = yield* sql<{
+      data: string;
+    }>`SELECT data FROM assistant_tasks WHERE project_id = ${setup.preferences.projectId} AND status IN ('preparing','working','waiting','blocked')`;
     return {
       setup,
       instructions: setupInstructions(
         setup.preferences,
         configured[0] ? yield* decodeConfig(configured[0].config) : null,
+        active[0] ? (yield* decodeTask(active[0].data)).issue.identifier : null,
       ),
     };
   });
@@ -116,12 +122,9 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
       status: string;
       thread_id: string;
     }>`SELECT config, status, thread_id FROM assistant_projects WHERE project_id = ${input.projectId}`;
-    const active =
-      yield* sql`SELECT id FROM assistant_tasks WHERE project_id = ${input.projectId} AND status IN ('preparing','working','waiting','blocked')`;
-    if (configured[0]?.status === "running" || active.length)
-      return yield* fail(
-        "Stop the assistant and finish or skip its active issue before changing setup.",
-      );
+    // An issue in progress may stay: saving keeps what it depends on unchanged.
+    if (configured[0]?.status === "running")
+      return yield* fail("Pause the assistant before changing its setup.");
     if (configured[0]) {
       const coordinator = yield* snapshots.getThreadShellById(
         ThreadId.make(configured[0].thread_id),

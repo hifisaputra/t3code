@@ -112,7 +112,8 @@ export function AssistantProjectCard({
             : `Could not pause ${title}`,
     });
 
-  const canEdit = !running && activeTask === null;
+  // An issue in progress may stay; the server keeps its base branch and scope.
+  const canEdit = !running;
   const stagingHost = urlHost(config.stagingUrl);
 
   return (
@@ -235,11 +236,7 @@ export function AssistantProjectCard({
             </MenuItem>
             <MenuItem disabled={!canEdit} onClick={onEditSetup}>
               <Settings2Icon />
-              {canEdit
-                ? "Revise setup"
-                : running
-                  ? "Revise setup (pause first)"
-                  : "Revise setup (finish the issue first)"}
+              {canEdit ? "Revise setup" : "Revise setup (pause first)"}
             </MenuItem>
             <MenuSeparator />
             <MenuItem

@@ -669,29 +669,44 @@ it.effect("cancelling setup interrupts its turn, retains history and permits a n
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-it.effect("blocks setup during managed work and blocks starting while setup is in progress", () =>
+it.effect("a paused assistant can be revised with an issue in progress, keeping its branch", () =>
   Effect.gen(function* () {
     const h = harness();
     const { service } = yield* h.setup;
     assert.isTrue(yield* service.beginSetup(setupInput).pipe(Effect.isFailure));
     const task = yield* activeTask(service);
     yield* service.control({ projectId: config.projectId, action: "stop" });
-    assert.isTrue(yield* service.beginSetup(setupInput).pipe(Effect.isFailure));
-    yield* service.review({ taskId: task.id, action: "skip", feedback: "Set up first" });
     const draft = yield* service.beginSetup(setupInput);
+    assert.include(
+      (yield* service.getSetup(draft.threadId)).instructions,
+      "APP-1 is still in progress on develop",
+    );
     assert.isTrue(
       yield* service
         .control({ projectId: config.projectId, action: "start" })
         .pipe(Effect.isFailure),
     );
     assert.isTrue(yield* service.configure(config).pipe(Effect.isFailure));
-    const cancelled = yield* service.resolveSetup({
+    h.finish(draft.threadId);
+    // The issue in progress stays on the branch it started from.
+    const moved = yield* service.proposeSetup(
+      draft.threadId,
+      { ...setupPlan, baseBranch: "main" },
+      "Deliver to main",
+    );
+    const refused = yield* service
+      .resolveSetup({ threadId: draft.threadId, action: "save", revision: moved.revision })
+      .pipe(Effect.flip);
+    assert.include(refused.detail, "APP-1 is still in progress on develop");
+    const kept = yield* service.proposeSetup(draft.threadId, setupPlan, "New instructions");
+    const saved = yield* service.resolveSetup({
       threadId: draft.threadId,
-      action: "cancel",
-      revision: 0,
+      action: "save",
+      revision: kept.revision,
     });
-    assert.equal(cancelled.projects[0]?.config.stagingCheckCommand, "check-staging");
-    assert.equal(cancelled.projects[0]?.status, "stopped");
+    assert.equal(saved.projects[0]?.config.instructions, setupPlan.instructions);
+    assert.equal(saved.projects[0]?.status, "stopped");
+    assert.equal(saved.tasks.find((t) => t.id === task.id)?.status, "working");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 

@@ -40,8 +40,9 @@ from **Needs you** on the assistant board. Discuss corrections in the thread; th
 revise its proposal. **Save setup** configures the project and leaves its queue stopped. Choose
 **Start** when you want it to process issues. You can leave and resume a setup conversation across
 reloads. **Cancel setup** keeps the conversation in history without applying its proposal. To revise
-an existing assistant, pause it, finish or skip its active issue, and choose **Revise setup** from
-its project menu.
+an existing assistant, pause it and choose **Revise setup** from its project menu. An issue in
+progress can stay; while it does, the base branch and Linear project cannot change, and the new
+setup applies to the threads started after you save.
 
 The integration branch usually is `develop`. It takes priority over Linear repository mappings.
 This version expects an `origin` remote and merge commits or fast-forward merges; squash and rebase

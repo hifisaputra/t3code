@@ -490,11 +490,18 @@ export const make = Effect.gen(function* () {
       yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE project_id = ${config.projectId}`;
     if (existing[0]?.status === "running")
       return yield* fail("Stop the assistant before changing its project setup.");
-    const active =
-      yield* sql`SELECT id FROM assistant_tasks WHERE project_id = ${config.projectId} AND status IN ('preparing','working','waiting','blocked')`;
-    if (active.length)
+    // An issue in progress stays on the branch and Linear project it started
+    // from. Everything else applies to the threads started after the save.
+    const current = existing[0] ? yield* decodeConfig(existing[0].config) : null;
+    const inProgress = yield* activeTask(config.projectId);
+    if (
+      inProgress &&
+      current &&
+      (current.baseBranch !== config.baseBranch ||
+        current.linearProjectId !== config.linearProjectId)
+    )
       return yield* fail(
-        "Finish or skip the active issue before changing the project's environment or scope.",
+        `${inProgress.issue.identifier} is still in progress on ${current.baseBranch}. Keep the base branch and Linear project until it is finished or skipped.`,
       );
     const repositoryKey = yield* verifier.repositoryKey(shell.value.workspaceRoot);
     const sameRepo =
