@@ -1,5 +1,12 @@
 import type { AssistantThreadKind } from "@t3tools/contracts";
-import { BotIcon, CodeXmlIcon, MonitorCheckIcon, ScanEyeIcon, Settings2Icon } from "lucide-react";
+import {
+  BotIcon,
+  CodeXmlIcon,
+  FlagIcon,
+  MonitorCheckIcon,
+  ScanEyeIcon,
+  Settings2Icon,
+} from "lucide-react";
 
 import { cn } from "~/lib/utils";
 
@@ -20,7 +27,13 @@ export const THREAD_KIND: Record<
     label: "Assistant",
     icon: BotIcon,
     className: "text-violet-600 dark:text-violet-300",
-    does: "The developer assistant. Picks issues, starts and routes the threads below, and talks to you. Answer any question here.",
+    does: "The developer assistant. Tells you what the issue loop is doing, changes what it does next, and releases to production when you ask. Answer any question here.",
+  },
+  lead: {
+    label: "Team leader",
+    icon: FlagIcon,
+    className: "text-rose-600 dark:text-rose-300",
+    does: "Leads one issue: decides whether the team takes it, briefs the worker, checks staging, starts the e2e test, and decides what happens when something fails.",
   },
   implement: {
     label: "Worker",

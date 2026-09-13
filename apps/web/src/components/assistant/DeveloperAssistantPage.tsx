@@ -38,8 +38,8 @@ import { AssistantProjectCard, AssistantSetupCard } from "./AssistantProjectCard
 import { AssistantSetupDialog } from "./AssistantSetupDialog";
 import { AssistantSetupSheet } from "./AssistantSetupReview";
 import { inboxElementId, InboxItemCard, type InboxContext } from "./AssistantInbox";
-import { ActiveTaskCard, AssistantHistory } from "./AssistantWork";
-import { activeTaskFor, buildInbox, historyTasks } from "./assistantBoard.logic";
+import { ActiveTaskCard, AssistantHistory, AssistantQueue } from "./AssistantWork";
+import { activeTaskFor, buildInbox, historyTasks, queuedTasks } from "./assistantBoard.logic";
 import { SectionHeading } from "./assistantUi";
 
 export function DeveloperAssistantPage() {
@@ -167,6 +167,7 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
   const stuck = new Set(inbox.flatMap((item) => (item.kind === "stuck" ? [item.task.id] : [])));
   const active = data.tasks.filter((t) => assistantTaskHoldsProject(t.status) && !stuck.has(t.id));
   const history = historyTasks(data);
+  const queued = queuedTasks(data);
   const linearProjectName = (id: string) =>
     workspace.data?.teams.flatMap((t) => t.projects).find((p) => p.id === id)?.name ?? null;
   const reviewingSetup = data.setups?.find((s) => s.threadId === reviewing) ?? null;
@@ -267,6 +268,17 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
                 </p>
               )}
             </section>
+
+            {queued.length > 0 ? (
+              <section aria-label="Up next" className="flex flex-col gap-2">
+                <SectionHeading count={queued.length}>Up next</SectionHeading>
+                <AssistantQueue
+                  environmentId={environmentId}
+                  tasks={queued}
+                  projectLabel={(task) => projectLabel(task.projectId)}
+                />
+              </section>
+            ) : null}
 
             {history.length > 0 ? (
               <section aria-label="History" className="flex flex-col gap-2">

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { e2eComment, linearFailureDetail, linearFeedback } from "./linearUpdates.ts";
+import type { LinearIssueDetail } from "@t3tools/contracts";
+
+import {
+  e2eComment,
+  issueFingerprint,
+  linearFailureDetail,
+  linearFeedback,
+} from "./linearUpdates.ts";
 
 const deployment = {
   revision: "641c0f8be4aa833cfd414168ef4389458243bbc2",
@@ -66,5 +73,58 @@ describe("linearFailureDetail", () => {
     );
     expect(linearFailureDetail({ reason: "unconfigured" })).toBe("Linear is not connected.");
     expect(linearFailureDetail(new Error("boom"))).toBe("Linear did not accept the request.");
+  });
+});
+
+describe("issueFingerprint", () => {
+  const issue: LinearIssueDetail = {
+    id: "issue-1",
+    identifier: "SPI-1",
+    title: "Blog images",
+    url: "https://linear.app/spi/issue/SPI-1",
+    branchName: "spi-1",
+    priority: 2,
+    updatedAt: "2026-09-13T00:00:00.000Z",
+    state: { id: "todo", name: "Todo", type: "unstarted", position: 0, color: "#fff" },
+    team: { id: "team", key: "SPI", name: "Spiceworks" },
+    assignee: null,
+    project: null,
+    cycle: null,
+    description: "Images break.",
+    comments: [],
+    labels: [],
+    children: [],
+    parent: null,
+  };
+  const comment = (id: string, body: string) => ({
+    id,
+    body,
+    url: "",
+    createdAt: "2026-09-13T00:01:00.000Z",
+    // T3 posts as the connected account, so authorship cannot tell its comments apart.
+    author: { id: "me", name: "Me", displayName: "Me" },
+  });
+
+  it("ignores the comments T3 posted and the time Linear last touched the issue", () => {
+    const before = issueFingerprint(issue, []);
+    const withOwnComment = {
+      ...issue,
+      updatedAt: "2026-09-13T00:05:00.000Z",
+      comments: [comment("t3", "Not taken by the developer assistant")],
+    };
+    expect(issueFingerprint(withOwnComment, ["t3"])).toBe(before);
+  });
+
+  it("changes when a person edits the issue or comments on it", () => {
+    const before = issueFingerprint(issue, []);
+    expect(issueFingerprint({ ...issue, description: "Images break on save." }, [])).not.toBe(
+      before,
+    );
+    expect(
+      issueFingerprint({ ...issue, labels: [{ id: "bug", name: "Bug", color: "#f00" }] }, []),
+    ).not.toBe(before);
+    expect(
+      issueFingerprint({ ...issue, comments: [comment("person", "Blocked by SPI-2")] }, []),
+    ).not.toBe(before);
   });
 });

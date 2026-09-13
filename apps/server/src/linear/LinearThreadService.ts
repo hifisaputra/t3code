@@ -111,6 +111,13 @@ export class LinearThreadService extends Context.Service<
       | LinearOperationError
       | GitManagerServiceError
     >;
+    /** Move an issue to the team's In Progress, best effort; for threads prepared with `moveToStarted: false`. */
+    readonly moveToStarted: (issue: {
+      readonly id: string;
+      readonly identifier: string;
+      readonly state: LinearWorkflowState;
+      readonly team: { readonly id: string };
+    }) => Effect.Effect<LinearWorkflowState | null>;
   }
 >()("t3/linear/LinearThreadService") {}
 
@@ -243,7 +250,8 @@ export const make = Effect.gen(function* () {
       ...(input.threadId ? { threadId: input.threadId } : {}),
     });
 
-    const movedToState = yield* moveIssueToStartedIfPossible(issue);
+    const movedToState =
+      input.moveToStarted === false ? null : yield* moveIssueToStartedIfPossible(issue);
 
     return {
       issue,
@@ -255,7 +263,10 @@ export const make = Effect.gen(function* () {
     } satisfies LinearPrepareIssueThreadResult;
   });
 
-  return LinearThreadService.of({ prepareIssueThread });
+  return LinearThreadService.of({
+    prepareIssueThread,
+    moveToStarted: moveIssueToStartedIfPossible,
+  });
 });
 
 export const layer = Layer.effect(LinearThreadService, make);

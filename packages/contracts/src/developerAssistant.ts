@@ -94,7 +94,12 @@ export const AssistantSetupResolveInput = Schema.Struct({
   revision: Schema.Int,
 });
 
+/**
+ * `queued`: the person picked the issue to go next. `declined`: its team leader
+ * did not take it; the loop leaves it until someone changes the issue.
+ */
 export const AssistantTaskStatus = Schema.Literals([
+  "queued",
   "preparing",
   "working",
   "waiting",
@@ -103,6 +108,7 @@ export const AssistantTaskStatus = Schema.Literals([
   "accepted",
   "changes-requested",
   "skipped",
+  "declined",
 ]);
 export type AssistantTaskStatus = typeof AssistantTaskStatus.Type;
 
@@ -123,16 +129,37 @@ export const AssistantDeployment = Schema.Struct({
 export type AssistantDeployment = typeof AssistantDeployment.Type;
 
 /**
- * Each issue runs in up to three threads on one worktree: the implementation
- * worker, a code reviewer that trades rounds with it directly, and an e2e
- * tester that exercises staging once the reviewed commit is deployed.
+ * Each issue runs as a team on one worktree: a team leader that decides whether
+ * to take it and makes the calls, the implementation worker, a code reviewer
+ * that trades rounds with it directly, and an e2e tester that exercises staging
+ * once the reviewed commit is deployed.
  */
-export const AssistantThreadRole = Schema.Literals(["implement", "review", "e2e"]);
+export const AssistantThreadRole = Schema.Literals(["lead", "implement", "review", "e2e"]);
 export type AssistantThreadRole = typeof AssistantThreadRole.Type;
 
-/** Who holds the issue right now: one of its threads, or the coordinator. */
-export const AssistantTaskStage = Schema.Literals(["implement", "review", "coordinator", "e2e"]);
+/**
+ * Who holds the issue right now: one of its threads. `coordinator` is work
+ * started before issues had team leaders, held by the developer assistant.
+ */
+export const AssistantTaskStage = Schema.Literals([
+  "lead",
+  "implement",
+  "review",
+  "coordinator",
+  "e2e",
+]);
 export type AssistantTaskStage = typeof AssistantTaskStage.Type;
+
+/** Why a team leader did not take an issue, and the issue as it stood then. */
+export const AssistantDecline = Schema.Struct({
+  reason: Schema.String,
+  /** The issue's content without T3's own comments; the issue is eligible again once it differs. */
+  fingerprint: Schema.String,
+  /** Linear's updatedAt when last compared, so an unchanged issue is not re-read. */
+  issueUpdatedAt: Schema.String,
+  at: IsoDateTime,
+});
+export type AssistantDecline = typeof AssistantDecline.Type;
 
 const CommitSha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40,64}$/));
 
@@ -192,6 +219,9 @@ export const AssistantTask = Schema.Struct({
   linearCommentIds: Schema.optionalKey(Schema.Array(Schema.String)),
   /** The Linear state the issue was left in on delivery; moving it elsewhere is a decision. */
   deliveredState: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** Run by a team leader. Earlier work reports to the developer assistant instead. */
+  leader: Schema.optionalKey(Schema.Boolean),
+  declined: Schema.optionalKey(AssistantDecline),
 });
 export type AssistantTask = typeof AssistantTask.Type;
 
@@ -201,16 +231,17 @@ export const assistantTaskThreadId = (
 ): ThreadId =>
   role === "implement" ? task.threadId : ThreadId.make(`assistant-${role}-${task.id}`);
 
-/** What an assistant thread does: the project's coordinator, a setup conversation, or one of an issue's threads. */
+/** What an assistant thread does: the project's developer assistant, a setup conversation, or one of an issue's threads. */
 export type AssistantThreadKind = "coordinator" | "setup" | AssistantThreadRole;
 
-const ISSUE_THREAD_ID = /^assistant-(work|review|e2e|setup)-/;
+const ISSUE_THREAD_ID = /^assistant-(work|review|e2e|lead|setup)-/;
 const COORDINATOR_THREAD_ID = /^assistant-[0-9a-f]{8}-[0-9a-f]{4}-/;
 
 /** Read from the thread id the server assigns, so a thread list needs no board to label its rows. */
 export const assistantThreadKind = (threadId: string): AssistantThreadKind | null => {
   const match = ISSUE_THREAD_ID.exec(threadId);
-  if (match) return match[1] === "work" ? "implement" : (match[1] as "review" | "e2e" | "setup");
+  if (match)
+    return match[1] === "work" ? "implement" : (match[1] as "review" | "e2e" | "lead" | "setup");
   return COORDINATOR_THREAD_ID.test(threadId) ? "coordinator" : null;
 };
 

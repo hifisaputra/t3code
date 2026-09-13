@@ -16,9 +16,11 @@ import {
   CircleXIcon,
   EllipsisIcon,
   GitPullRequestIcon,
+  HandIcon,
   RotateCcwIcon,
   SkipForwardIcon,
   UndoIcon,
+  XIcon,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -197,10 +199,18 @@ export function ActiveTaskCard({
     threadId: assistantTaskThreadId(task, "review"),
   });
   const tester = useThreadShell({ environmentId, threadId: assistantTaskThreadId(task, "e2e") });
+  const leader = useThreadShell({ environmentId, threadId: assistantTaskThreadId(task, "lead") });
   const coordinator = project?.threadId ?? null;
-  const shells = { implement: worker, review: reviewer, e2e: tester } as const;
+  const shells = { lead: leader, implement: worker, review: reviewer, e2e: tester } as const;
   // The phase follows whichever of the issue's threads holds it.
-  const holder = task.stage === "review" ? reviewer : task.stage === "e2e" ? tester : worker;
+  const holder =
+    task.stage === "review"
+      ? reviewer
+      : task.stage === "e2e"
+        ? tester
+        : task.stage === "lead"
+          ? leader
+          : worker;
   const holderBusy = threadIsBusy(holder);
   const openDecision = decisions.find((d) => d.answer === null && d.taskId === task.id) ?? null;
   const phase = describeTaskPhase({
@@ -319,16 +329,9 @@ export function ActiveTaskCard({
       {pipeline ? (
         <ol aria-label="Progress" className="flex flex-wrap gap-1.5">
           {pipeline.map((step) => {
-            const thread =
-              step.kind === "coordinator"
-                ? coordinator
-                : step.kind === "implement" || step.kind === "review" || step.kind === "e2e"
-                  ? (shells[step.kind]?.id ?? null)
-                  : null;
             const shell =
-              step.kind === "implement" || step.kind === "review" || step.kind === "e2e"
-                ? shells[step.kind]
-                : null;
+              step.kind === "coordinator" || step.kind === "setup" ? null : shells[step.kind];
+            const thread = step.kind === "coordinator" ? coordinator : (shell?.id ?? null);
             const current = step.state === "current";
             return (
               <PipelineStepButton
@@ -383,7 +386,7 @@ export function ActiveTaskCard({
               aria-hidden
               className="size-3.5 transition-transform group-data-panel-open:rotate-90"
             />
-            What the assistant asked for
+            {task.leader ? "The team leader's brief" : "What the assistant asked for"}
           </CollapsibleTrigger>
           <CollapsiblePanel>
             <div className="mt-2 rounded-lg border border-border/60 p-3">
@@ -400,7 +403,67 @@ const HISTORY_STATUS = {
   accepted: { icon: CircleCheckIcon, label: "Accepted", className: "text-success-foreground" },
   "changes-requested": { icon: UndoIcon, label: "Sent back", className: "text-warning-foreground" },
   skipped: { icon: CircleSlashIcon, label: "Skipped", className: "text-muted-foreground" },
+  declined: { icon: HandIcon, label: "Declined", className: "text-muted-foreground" },
 } as const;
+
+/** Issues the person put next. The loop gives each to a new team in turn. */
+export function AssistantQueue({
+  environmentId,
+  tasks,
+  projectLabel,
+}: {
+  environmentId: EnvironmentId;
+  tasks: ReadonlyArray<AssistantTask>;
+  projectLabel: (task: AssistantTask) => string | null;
+}) {
+  const review = useAtomCommand(developerAssistant.review);
+  const { pending, run } = useAssistantAction();
+  return (
+    <ul className="-mx-2 flex flex-col">
+      {tasks.map((task) => {
+        const label = projectLabel(task);
+        return (
+          <li
+            key={task.id}
+            className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg px-2 py-1 text-sm"
+          >
+            <IssueLink issue={task.issue} />
+            <span className="min-w-0 truncate">
+              {task.issue.title}
+              {label ? <span className="text-muted-foreground"> · {label}</span> : null}
+            </span>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label={`Take ${task.issue.identifier} out of the queue`}
+              disabled={pending !== null}
+              onClick={() =>
+                void run(
+                  task.id,
+                  () =>
+                    review({
+                      environmentId,
+                      input: {
+                        taskId: task.id,
+                        action: "skip",
+                        feedback: "Taken out of the queue.",
+                      },
+                    }),
+                  {
+                    failure: "Could not take the issue out of the queue",
+                    success: `${task.issue.identifier} taken out of the queue`,
+                  },
+                )
+              }
+            >
+              {pending === task.id ? <Spinner className="size-3.5" /> : <XIcon />}
+            </Button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
 const HISTORY_PREVIEW = 6;
 
@@ -426,7 +489,14 @@ export function AssistantHistory({
             <li key={task.id}>
               <button
                 type="button"
-                onClick={() => onOpenThread(task.threadId)}
+                // A declined issue never had a worker; its leader's thread says why.
+                onClick={() =>
+                  onOpenThread(
+                    task.status === "declined"
+                      ? assistantTaskThreadId(task, "lead")
+                      : task.threadId,
+                  )
+                }
                 className="grid w-full grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 <status.icon aria-hidden className={cn("size-3.5", status.className)} />
@@ -441,6 +511,11 @@ export function AssistantHistory({
                   {status.label} · {formatRelativeTimeLabel(task.updatedAt)}
                 </span>
               </button>
+              {task.status === "declined" && task.declined ? (
+                <p className="line-clamp-2 px-2 pb-1 pl-8 text-muted-foreground text-xs">
+                  {previewLine(task.declined.reason)}
+                </p>
+              ) : null}
               {task.error ? (
                 <p className="px-2 pb-1 pl-8 text-destructive-foreground text-xs">{task.error}</p>
               ) : null}

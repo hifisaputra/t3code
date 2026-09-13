@@ -97,6 +97,7 @@ export interface TaskPhase {
 }
 
 const STAGE_THREAD: Record<string, string> = {
+  lead: "team leader",
   implement: "worker",
   review: "code reviewer",
   e2e: "e2e tester",
@@ -118,6 +119,8 @@ export function describeTaskPhase(input: {
   switch (task.status) {
     case "preparing":
       return { tone: "active", label: "Preparing a worktree", detail: null };
+    case "queued":
+      return { tone: "idle", label: "Up next", detail: null };
     case "blocked":
       return { tone: "blocked", label: "Blocked", detail: task.error };
     case "waiting":
@@ -161,6 +164,25 @@ export function describeTaskPhase(input: {
           return workerBusy
             ? { tone: "active", label: "Testing on staging", detail: step }
             : { tone: "idle", label: "E2E check is next", detail: null };
+        case "lead":
+          if (workerBusy)
+            return {
+              tone: "active",
+              label: task.turns === 0 ? "Reading the issue" : "Team leader is deciding",
+              detail: step,
+            };
+          return {
+            tone: "idle",
+            label: "With the team leader",
+            detail:
+              task.turns === 0
+                ? "It decides whether the team takes the issue."
+                : task.e2e?.verdict === "failed"
+                  ? "It failed on staging. The team leader is deciding on a fix."
+                  : task.merge && !task.deployment
+                    ? "Merged after code review. The team leader is checking the staging deploy."
+                    : "The team leader is deciding the next step.",
+          };
         case "coordinator":
           return {
             tone: "idle",
@@ -178,7 +200,7 @@ export function describeTaskPhase(input: {
 
 export const taskRoundsExhausted = (task: AssistantTask) => task.turns >= task.turnLimit;
 
-export type PipelineStepKey = "code" | "review" | "merge" | "staging" | "e2e";
+export type PipelineStepKey = "take" | "code" | "review" | "merge" | "staging" | "e2e";
 export type PipelineStepState = "done" | "current" | "failed" | "todo";
 
 export interface PipelineStep {
@@ -190,17 +212,23 @@ export interface PipelineStep {
   readonly note: string | null;
 }
 
-const PIPELINE: ReadonlyArray<{
-  key: PipelineStepKey;
-  label: string;
-  kind: AssistantThreadKind;
-}> = [
+type PipelineStepDef = { key: PipelineStepKey; label: string; kind: AssistantThreadKind };
+
+const TO_STAGING: ReadonlyArray<PipelineStepDef> = [
   { key: "code", label: "Code", kind: "implement" },
   { key: "review", label: "Code review", kind: "review" },
   { key: "merge", label: "Merge", kind: "implement" },
-  { key: "staging", label: "Staging", kind: "coordinator" },
+  { key: "staging", label: "Staging", kind: "lead" },
   { key: "e2e", label: "E2E test", kind: "e2e" },
 ];
+const LED_PIPELINE: ReadonlyArray<PipelineStepDef> = [
+  { key: "take", label: "Take on", kind: "lead" },
+  ...TO_STAGING,
+];
+// Work from before team leaders: the assistant checked staging itself.
+const ASSISTANT_PIPELINE = TO_STAGING.map((step) =>
+  step.kind === "lead" ? { ...step, kind: "coordinator" as const } : step,
+);
 
 /**
  * Where an issue is on its way to staging, from what the server recorded.
@@ -208,33 +236,37 @@ const PIPELINE: ReadonlyArray<{
  */
 export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> | null {
   if (task.stage === undefined) return null;
+  const steps = task.leader ? LED_PIPELINE : ASSISTANT_PIPELINE;
+  const offset = task.leader ? 1 : 0;
   const approved = task.codeReview?.verdict === "approved";
   const e2eFailed = task.e2e?.verdict === "failed";
   const at = (() => {
-    if (task.status === "review" || task.status === "accepted") return PIPELINE.length;
+    if (task.status === "review" || task.status === "accepted") return steps.length;
+    if (task.stage === "lead" && task.turns === 0) return 0;
     switch (task.stage) {
       case "review":
-        return 1;
+        return offset + 1;
       case "e2e":
-        return 4;
+        return offset + 4;
       // Back with the worker after a failed e2e run, the earlier approval,
       // merge and deployment are still on record; it is coding again.
       case "implement":
-        return approved && !task.merge ? 2 : 0;
+        return offset + (approved && !task.merge ? 2 : 0);
+      case "lead":
       case "coordinator":
-        return task.deployment ? 4 : task.merge ? 3 : approved ? 2 : 0;
+        return offset + (task.deployment ? 4 : task.merge ? 3 : approved ? 2 : 0);
     }
   })();
   const changesRequested = task.codeReview?.verdict === "changes-requested";
   const notes: Partial<Record<PipelineStepKey, string>> = {
-    ...(changesRequested && at === 0
+    ...(changesRequested && at === offset
       ? { code: "Fixing review findings", review: "Changes requested" }
       : {}),
-    ...(e2eFailed && at === 0 ? { code: "Fixing the e2e failure" } : {}),
-    ...(task.deployment && at > 3
+    ...(e2eFailed && at === offset ? { code: "Fixing the e2e failure" } : {}),
+    ...(task.deployment && at > offset + 3
       ? { staging: `${task.deployment.revision.slice(0, 7)} deployed` }
       : {}),
-    ...(task.e2e && at >= 4 && task.stage !== "e2e"
+    ...(task.e2e && at >= offset + 4 && task.stage !== "e2e"
       ? {
           e2e: e2eFailed
             ? "Failed on staging"
@@ -244,14 +276,16 @@ export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> |
         }
       : {}),
   };
-  return PIPELINE.map((step, index) => ({
+  return steps.map((step, index) => ({
     ...step,
     state:
       index < at
         ? "done"
         : index > at
           ? "todo"
-          : step.key === "e2e" && e2eFailed && task.stage === "coordinator"
+          : step.key === "e2e" &&
+              e2eFailed &&
+              (task.stage === "coordinator" || task.stage === "lead")
             ? "failed"
             : "current",
     note: notes[step.key] ?? null,
@@ -392,12 +426,20 @@ const HISTORY_STATUSES = new Set<AssistantTask["status"]>([
   "accepted",
   "changes-requested",
   "skipped",
+  "declined",
 ]);
 
 export function historyTasks(board: AssistantBoard): ReadonlyArray<AssistantTask> {
   return board.tasks
     .filter((t) => HISTORY_STATUSES.has(t.status))
     .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/** Issues the person put next, in the order the loop takes them. */
+export function queuedTasks(board: AssistantBoard): ReadonlyArray<AssistantTask> {
+  return board.tasks
+    .filter((t) => t.status === "queued")
+    .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 export interface DecisionOption {

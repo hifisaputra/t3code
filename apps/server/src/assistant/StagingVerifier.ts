@@ -46,6 +46,11 @@ export class StagingVerifier extends Context.Service<
       targets?: ReadonlyArray<AssistantDeploymentTarget>;
       targetIds?: ReadonlyArray<string>;
     }) => Effect.Effect<AssistantDeployment, DeveloperAssistantError>;
+    /** Remove a finished issue's worktree. Git refuses one with uncommitted changes; so does this. */
+    readonly removeWorktree: (input: {
+      cwd: string;
+      worktreePath: string;
+    }) => Effect.Effect<void, DeveloperAssistantError>;
   }
 >()("t3/assistant/StagingVerifier") {}
 
@@ -55,12 +60,16 @@ export const layer = Layer.effect(
     const runner = yield* ProcessRunner;
     const platform = yield* HostProcessPlatform;
     const git = Effect.fn("Assistant.git")(
-      function* (cwd: string, args: ReadonlyArray<string>) {
+      function* (
+        cwd: string,
+        args: ReadonlyArray<string>,
+        timeout: "30 seconds" | "5 minutes" = "30 seconds",
+      ) {
         const result = yield* runner.run({
           command: "git",
           args,
           cwd,
-          timeout: "30 seconds",
+          timeout,
           maxOutputBytes: 16000,
         });
         if (result.code !== 0)
@@ -204,6 +213,9 @@ export const layer = Layer.effect(
               }),
         ),
       ),
+      // Deleting installed dependencies can outlast the usual git timeout.
+      removeWorktree: (input) =>
+        git(input.cwd, ["worktree", "remove", input.worktreePath], "5 minutes").pipe(Effect.asVoid),
     };
   }),
 );

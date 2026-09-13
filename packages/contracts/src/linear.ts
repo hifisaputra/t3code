@@ -272,6 +272,8 @@ export const LinearPrepareIssueThreadInput = Schema.Struct({
   /** Defaults to `issue`. Under `current`, `branch` is ignored and git is left alone. */
   branchMode: Schema.optional(LinearIssueThreadBranchMode),
   threadId: Schema.optional(ThreadId),
+  /** Defaults to true. The developer assistant moves an issue only once a team takes it. */
+  moveToStarted: Schema.optional(Schema.Boolean),
 });
 export type LinearPrepareIssueThreadInput = typeof LinearPrepareIssueThreadInput.Type;
 

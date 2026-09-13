@@ -1,21 +1,23 @@
 # Developer assistant
 
-The developer assistant manages Linear issue threads while you make decisions and review work.
-Each configured repository has a persistent assistant conversation and at most one active issue.
-Each issue runs in three threads on one worktree:
+The developer assistant works through a repository's Linear issues while you make decisions and
+review work. Each configured repository runs an issue loop with at most one active issue. The loop
+gives the next eligible issue to a team of threads that share one worktree, fresh from the
+integration branch:
 
+- **Team leader** reads the issue and decides whether the team takes it, asks you first, or
+  declines it. Once taken, it writes the worker's brief, checks the staging deployment, starts the
+  e2e run, and decides what happens when something fails.
 - **Worker** implements the issue, opens the pull request and merges it once review approves.
 - **Code review** reviews the worker's commits. The two trade rounds directly until the reviewer
   approves a commit.
 - **E2E** tests the merged change on staging with a browser and takes screenshots.
 
-The assistant picks issues, writes each worker's brief, checks the staging deployment and starts
-the e2e run. It hears from the threads only when the change is merged, when someone needs you,
-when a thread stops without handing off, and when e2e reports. Different repositories can run at
-the same time.
+An issue that passes e2e closes its team and the loop starts the next issue immediately. Your review
+can happen later, from Linear or T3. Different repositories can run at the same time.
 
-An issue that passes e2e releases the repository for its next issue immediately. Your review can
-happen later, from Linear or T3. Production releases remain outside this workflow.
+The **assistant conversation** is yours. It does not run issues; ask it what the loop is doing, to
+put an issue next, to redirect the active issue, or to release to production.
 
 ## Set up a project
 
@@ -61,7 +63,7 @@ Before starting, prepare the application:
 - The saved staging targets identify the actual deployment workflows/services, and the assistant
   has the access needed to exercise the affected staging behavior.
 
-The saved approval mode applies to both the coordinator and coding workers after setup. With
+The saved approval mode applies to the assistant and every team thread after setup. With
 approvals required, permission requests wait for you in their original threads. Full access allows
 unattended commands within the provider's configured permissions. Use models and providers with
 working T3 MCP tool access.
@@ -112,11 +114,19 @@ archives its three threads.
 
 ## Work with your assistant
 
-Start the queue and open its conversation to give priorities or discuss a blocker. The assistant
-reads eligible issues and their comments before starting a worker in a separate worktree. All three
-threads use the configured coding model and keep the issue link. Existing Linear settings control the
-initial move to In Progress. Avoid starting manual or separately delegated work on issues the
-assistant already owns; the assistant checks existing threads when claiming an issue.
+**Start** runs the loop. It takes, in order: issues you put next through the assistant, issues you
+sent back for changes, then eligible issues by Linear priority. The team leader and the assistant use
+the assistant model; the worker, code review and e2e threads use the coding model. All of them keep
+the issue link. Existing Linear settings control the move to In Progress, which happens when the team
+leader takes the issue. The loop skips issues that another thread is already working on.
+
+When a team leader declines an issue, T3 posts its reason on the issue, and the loop leaves it until
+someone changes it: an edit to the description, labels, priority or state, or a new comment. T3's own
+comments do not count. If team leaders decline three issues in a row, the loop pauses so you can look
+at them; **Start** continues. Declined issues appear in the board's history with their reasons.
+
+Ask the assistant in its conversation to put a specific issue next, with a note for its team leader.
+Queued issues appear under **Up next**, where you can take them out again.
 
 Product questions appear under **Needs you** and remain linked to the asking thread. You
 can answer in the inbox, or tell the assistant in its conversation and it passes your answer to
@@ -124,25 +134,32 @@ the thread that asked. When a thread has one pending product question, a reply i
 thread also resolves it. Answer native provider questions and permission requests in their thread.
 The assistant does not approve those requests for you.
 
-In the sidebar, each assistant thread is labeled with what it does (Assistant, Worker, Code review,
-E2E test), and a thread waiting on your answer shows **Question**. The count on the sidebar's
+In the sidebar, each assistant thread is labeled with what it does (Assistant, Team leader, Worker,
+Code review, E2E test), and a thread waiting on your answer shows **Question**. The count on the sidebar's
 Developer assistant button is the number of items holding a project until you act.
 
-**Pause** stops the coordinator and prevents further automatic turns; a coding turn already running
-can finish. **Interrupt all work**, in the project menu, also requests interruption of the coding
+**Pause** stops the loop and prevents further automatic turns; a turn already running can finish. **Interrupt all work**, in the project menu, also requests interruption of the coding
 worker and closes its tracked T3 terminals. Work and queued follow-ups are preserved for a later
 Start. A provider's background processes may need cleanup through that project's normal procedure.
 
 Failures retain ownership of the issue. Each round of review changes counts as a worker turn, and
-so does each fix the assistant sends. When review still asks for changes at the limit, or an e2e
-run fails, the issue goes back to the assistant. **Allow more rounds** grants more worker turns; **Skip issue** cancels queued work and
+so does each fix the team leader sends. When review still asks for changes at the limit, or an e2e
+run fails, the issue goes back to its team leader. A team leader that twice ends its turn without a
+next step blocks the issue for you. **Allow more rounds** grants more worker turns; **Skip issue** cancels queued work and
 releases the repository while preserving the thread and branch for inspection. Skipping does not
 revert a merge, deployment, database migration, or Linear state. After 15 external progress checks
-without completion, the assistant pauses so you can inspect the blocker and Start again.
+without completion, the loop pauses so you can inspect the blocker and Start again.
 
-State and queued messages survive a server restart. The assistant rechecks retained work before
-continuing. If the provider was interrupted or failed, the project may be stopped; Start resumes
-its coordinator without creating a second worker for the same active issue.
+State and queued messages survive a server restart. If a provider was interrupted or failed, the
+issue may be blocked; Start tells its team leader to pick the work back up, without creating a second
+team for the same issue.
+
+## Release to production
+
+Production releases happen only when you ask the assistant in its conversation. It lists what would
+ship, including any issue you have not accepted yet, and asks before going ahead. It then follows the
+release process in your project instructions and repository docs and reports what shipped. Describe
+that process during setup; until the instructions allow it, the assistant does not release.
 
 ## Review delivered work
 
@@ -151,10 +168,10 @@ URL, and the verified commit. Staging can contain later issues by the time you r
 what was verified for that delivery.
 
 **Accept** records your review and applies the configured Linear acceptance state. **Request changes**
-records feedback for the assistant to schedule after the current worker finishes. It creates a
-fresh linked worker from the current integration branch, leaving the original thread and deployment
-history intact. It does not roll back later work. Archived worker threads retain their branches and
-worktrees; remove those through the normal thread and worktree cleanup when you no longer need them.
+records feedback, and the loop gives the issue to a new team once the current issue finishes. The new
+team starts from the current integration branch, leaving the original threads and deployment history
+intact. It does not roll back later work. When a team finishes or declines, T3 archives its threads and
+removes its worktree unless it holds uncommitted changes; the branch stays.
 
 T3 comments on the Linear issue as the connected account at each phase: when the reviewed change
 is merged, when staging is deployed, and with the e2e result. The e2e comment is the one to decide

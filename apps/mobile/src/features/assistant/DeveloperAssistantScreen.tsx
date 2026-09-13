@@ -3,7 +3,12 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import type { AssistantBoard, AssistantTask, ThreadId } from "@t3tools/contracts";
+import {
+  assistantTaskThreadId,
+  type AssistantBoard,
+  type AssistantTask,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { useState } from "react";
 import { Linking, Pressable, ScrollView, View } from "react-native";
 import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
@@ -199,7 +204,16 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
               {t.error ? `: ${t.error}` : ""}
             </Text>
             <View className="flex-row flex-wrap gap-2">
-              <Action title="Open worker" onPress={() => openThread(t.threadId)} />
+              {t.leader ? (
+                <Action
+                  title="Team leader"
+                  onPress={() => openThread(assistantTaskThreadId(t, "lead"))}
+                />
+              ) : null}
+              {/* A team leader deciding on the issue has not started a worker yet. */}
+              {!t.leader || t.turns > 0 ? (
+                <Action title="Open worker" onPress={() => openThread(t.threadId)} />
+              ) : null}
               <Action
                 title="Retry"
                 disabled={busy}

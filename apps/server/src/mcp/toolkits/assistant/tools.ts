@@ -18,10 +18,16 @@ import { McpInvocationContext, requireMcpCapability } from "../../McpInvocationC
 const dependencies = [DeveloperAssistant, McpInvocationContext];
 const failure = Schema.Union([DeveloperAssistantError, PreviewAutomationUnavailableError]);
 const text = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(20000));
-const taskId = Schema.String.check(Schema.isNonEmpty());
+const taskId = Schema.optionalKey(
+  Schema.String.check(Schema.isNonEmpty()).annotate({
+    description:
+      "The issue's taskId from assistant_get_board. A team leader leaves it out: its own issue is implied.",
+  }),
+);
 const thread = Schema.optionalKey(
   AssistantThreadRole.annotate({
-    description: 'Which of the issue\'s threads: "implement" (default), "review" or "e2e".',
+    description:
+      'Which of the issue\'s threads: "implement" (default), "review", "e2e", or "lead" for its team leader.',
   }),
 );
 
@@ -43,14 +49,15 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_pause", {
     description:
-      "Pause this project's assistant queue when the person asks you to stop. Existing worker work is preserved. The person can resume from the assistant board.",
-    success: Schema.Void,
+      "Developer assistant only: pause this project's issue loop when the person asks you to stop. The active issue's work is kept. The person resumes from the assistant board.",
+    // MCP returns text; an empty result fails to encode and reads as a server error.
+    success: Schema.String,
     failure,
     dependencies,
   }),
   Tool.make("assistant_get_board", {
     description:
-      "Read your developer assistant's project setup, eligible Linear issues, managed work, decisions, and staging reviews. Only the coordinator can read this board. Human reviews do not block selecting the next issue after verified staging deployment.",
+      "Developer assistant only: read the project's setup, the issues the loop would take next (candidates), queued, active, declined and delivered work, and open decisions.",
     success: Schema.Struct({
       ...AssistantBoard.fields,
       candidates: Schema.Array(LinearIssueSummary),
@@ -58,17 +65,49 @@ export const AssistantToolkit = Toolkit.make(
     failure,
     dependencies,
   }).annotate(Tool.Readonly, true),
-  Tool.make("assistant_start_issue", {
+  Tool.make("assistant_queue_issue", {
     description:
-      "Start an issue's implementation thread in a fresh worktree with the project's selected worker model. Enforces project scope, readiness, ownership and one active issue. A changes-requested issue gets a new worker with its previous review feedback. Read the full issue first and provide a concrete brief with the acceptance criteria. The implementer and the code review thread then work together on their own. End your turn after starting; the server wakes you when the issue needs you.",
-    parameters: Schema.Struct({ reference: text, brief: text }),
+      "Developer assistant only: put a Linear issue next in the loop when the person asks for it. A free project gives it to a new team right away; otherwise it waits for the active issue to finish. Its team leader still decides whether to take it. Skipping it from the board removes it from the queue.",
+    parameters: Schema.Struct({
+      reference: text,
+      note: Schema.String.check(Schema.isMaxLength(20000)).annotate({
+        description:
+          "What the person wants from this issue, for its team leader. Empty when they said nothing more.",
+      }),
+    }),
+    success: AssistantTask,
+    failure,
+    dependencies,
+  }),
+  Tool.make("assistant_accept_issue", {
+    description:
+      "Team leader only: take your issue. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own. End your turn afterward; T3 messages you when the issue needs you.",
+    parameters: Schema.Struct({
+      brief: text.annotate({
+        description:
+          "For the worker: the scope, the acceptance criteria, and what the issue leaves implicit.",
+      }),
+    }),
+    success: AssistantTask,
+    failure,
+    dependencies,
+  }),
+  Tool.make("assistant_decline_issue", {
+    description:
+      "Team leader only, before taking the issue: do not work on it. T3 posts your reason on the Linear issue, closes this team, and leaves the issue until someone changes it. Use it when the issue cannot be worked as it stands; ask with assistant_ask_decision when one answer from the person would settle it.",
+    parameters: Schema.Struct({
+      reason: text.annotate({
+        description:
+          "For the people on the issue: what stops the work and what would change that (missing details, a blocker, an issue to finish first). No first person.",
+      }),
+    }),
     success: AssistantTask,
     failure,
     dependencies,
   }),
   Tool.make("assistant_read_thread", {
     description:
-      "Read one of a managed issue's threads (implement, review or e2e): its recent conversation, session status, the shared worktree path and the issue's recorded review, merge, deployment and e2e results.",
+      "Read one of a managed issue's threads (lead, implement, review or e2e): the end of its conversation, its session status, the shared worktree path and the issue's recorded review, merge, deployment and e2e results.",
     parameters: Schema.Struct({ taskId, thread }),
     success: Schema.Struct({
       task: AssistantTask,
@@ -81,7 +120,7 @@ export const AssistantToolkit = Toolkit.make(
   }).annotate(Tool.Readonly, true),
   Tool.make("assistant_message_worker", {
     description:
-      "Send follow-up work to one of an issue's idle threads: the implementer (default), the code reviewer, or the e2e tester after assistant_start_e2e. Use it when a thread stalls, an e2e failure needs a fix, or the person redirected the work; the implementer and reviewer hand work to each other without you. Refuses while any of the issue's threads runs, with unanswered decisions, or past the worker turn limit. The server queues delivery durably; end your turn afterward.",
+      "Send follow-up work to one of the active issue's threads: the implementer (default), the code reviewer, the e2e tester after assistant_start_e2e, or (from the developer assistant) the team leader. Use it when a thread stalls, an e2e failure needs a fix, or the person redirected the work; the implementer and reviewer hand work to each other on their own. Waits while another of the issue's threads runs; refuses with unanswered decisions or past the worker turn limit. End your turn afterward.",
     parameters: Schema.Struct({ taskId, message: text, thread }),
     success: AssistantTask,
     failure,
@@ -89,7 +128,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_ask_decision", {
     description:
-      "Ask the person a product question in the decision inbox, preserving the issue/thread link. Include context and a recommendation. Available to the coordinator and every thread of a managed issue. After asking, end your turn and wait; the answer will arrive in the thread.",
+      "Ask the person a product question in the decision inbox, preserving the issue/thread link. Include context and a recommendation. Available to the developer assistant and every thread of a managed issue. After asking, end your turn and wait; the answer arrives in the thread that asked.",
     parameters: Schema.Struct({ question: text }),
     success: AssistantDecision,
     failure,
@@ -97,7 +136,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_answer_decision", {
     description:
-      "Coordinator only: pass on the person's answer to an open decision (yours or one of an issue's threads) when they gave it to you in this chat. T3 records it and sends it to the thread that asked, which then continues. Relay what the person said, with any context the asker needs; never answer from your own judgment. Refuses unless the person has written to you since the question was asked. Get the decision id from assistant_get_board.",
+      "Developer assistant only: pass on the person's answer to an open decision (yours or one of an issue's threads) when they gave it to you in this chat. T3 records it and sends it to the thread that asked, which then continues. Relay what the person said, with any context the asker needs; never answer from your own judgment. Refuses unless the person has written to you since the question was asked. Get the decision id from assistant_get_board.",
     parameters: Schema.Struct({
       decisionId: text,
       answer: text.annotate({
@@ -136,7 +175,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_report_merged", {
     description:
-      "Implementation thread only: report that the approved commit is merged into the integration branch. T3 checks that the worktree still sits on the approved commit and that origin's integration branch contains it, posts the merge update on the Linear issue, and hands the issue to the assistant for staging. End your turn afterward.",
+      "Implementation thread only: report that the approved commit is merged into the integration branch. T3 checks that the worktree still sits on the approved commit and that origin's integration branch contains it, posts the merge update on the Linear issue, and hands the issue to the team leader for staging. End your turn afterward.",
     parameters: Schema.Struct({
       summary: text.annotate({
         description:
@@ -149,7 +188,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_verify_staging", {
     description:
-      "Coordinator only, after the implementer reports the merge: check the saved deployment targets or custom check. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts a deployed update on the Linear issue; then call assistant_start_e2e. If staging is still deploying, use assistant_wait.",
+      "Team leader, after the implementer reports the merge: check the saved deployment targets or custom check. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts a deployed update on the Linear issue; then call assistant_start_e2e. If staging is still deploying, use assistant_wait.",
     parameters: Schema.Struct({
       taskId,
       targetIds: Schema.optionalKey(Schema.Array(text)),
@@ -160,7 +199,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_start_e2e", {
     description:
-      "Coordinator only, after assistant_verify_staging succeeds: start (or rerun) the issue's e2e tester on staging. The brief lists each acceptance criterion as a check a person could follow on staging, the affected pages or endpoints, the data it needs and what to clean up. The tester reports passed, partial or failed with screenshots; T3 posts that on the Linear issue. End your turn afterward.",
+      "Team leader, after assistant_verify_staging succeeds: start (or rerun) the issue's e2e tester on staging. The brief lists each acceptance criterion as a check a person could follow on staging, the affected pages or endpoints, the data it needs and what to clean up. The tester reports passed, partial or failed with screenshots; T3 posts that on the Linear issue. End your turn afterward.",
     parameters: Schema.Struct({ taskId, brief: text }),
     success: AssistantTask,
     failure,
@@ -168,7 +207,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_submit_e2e", {
     description:
-      "E2E thread only: report the staging test. T3 uploads the screenshots, posts the result on the Linear issue, and on passed or partial puts the issue in review and frees the project; on failed the assistant schedules a fix. End your turn after submitting.",
+      "E2E thread only: report the staging test. T3 uploads the screenshots, posts the result on the Linear issue, and on passed or partial puts the issue in review and frees the project; on failed the team leader decides the fix. End your turn after submitting.",
     parameters: Schema.Struct({
       verdict: Schema.Literals(["passed", "partial", "failed"]).annotate({
         description:
@@ -200,7 +239,7 @@ export const AssistantToolkit = Toolkit.make(
     description:
       "Wait for external progress, such as CI or a staging deployment, without polling in the agent. Supply a concrete reason and end your turn. T3 wakes you in about a minute. Use assistant_ask_decision instead for a lasting blocker requiring a person.",
     parameters: Schema.Struct({ reason: text }),
-    success: Schema.Void,
+    success: Schema.String,
     failure,
     dependencies,
   }),
@@ -224,17 +263,28 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_pause: () =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.pause(caller);
+      yield* service.pause(caller);
+      return "Paused. Work in progress is kept; the person resumes the loop from the assistant board.";
     }),
   assistant_get_board: () =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.getAgentBoard(caller);
     }),
-  assistant_start_issue: (input) =>
+  assistant_queue_issue: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.startIssue(caller, input.reference.trim(), input.brief.trim());
+      return yield* service.queueIssue(caller, input.reference.trim(), input.note.trim());
+    }),
+  assistant_accept_issue: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.acceptIssue(caller, input.brief.trim());
+    }),
+  assistant_decline_issue: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.declineIssue(caller, input.reason.trim());
     }),
   assistant_read_thread: (input) =>
     Effect.gen(function* () {
@@ -302,6 +352,7 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_wait: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.waitForExternal(caller, input.reason.trim());
+      yield* service.waitForExternal(caller, input.reason.trim());
+      return "T3 checks back in about a minute. End your turn now.";
     }),
 });

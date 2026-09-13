@@ -1,14 +1,17 @@
+import * as NodeCrypto from "node:crypto";
 import type {
   AssistantCodeReview,
   AssistantDeployment,
   AssistantE2eResult,
   AssistantMerge,
+  LinearIssueDetail,
 } from "@t3tools/contracts";
 
 /**
  * The comments T3 posts on a managed Linear issue as it moves through its
  * phases: merged after code review, deployed to staging, and the e2e result.
- * The last one is the card a person decides from, so it stands alone.
+ * The last one is the card a person decides from, so it stands alone. An issue
+ * its team leader did not take gets one comment saying why.
  */
 
 type PullRequest = { readonly number: number; readonly url: string } | null;
@@ -75,8 +78,41 @@ export function deployedComment(input: { readonly deployment: AssistantDeploymen
 const HEADLINES: Record<AssistantE2eResult["verdict"], string> = {
   passed: "**✅ Verified on staging: ready to accept**",
   partial: "**👀 Verified on staging, with checks for a person**",
-  failed: "**❌ Failed on staging: back with the assistant for a fix**",
+  failed: "**❌ Failed on staging: back with the team for a fix**",
 };
+
+/** Why the issue's team leader did not take it, and what brings it back. */
+export function declinedComment(reason: string): string {
+  return sections(
+    "**Not taken by the developer assistant**",
+    reason,
+    "The assistant picks this issue up again once it changes: an edit to the description, labels, priority or state, or a new comment.",
+  );
+}
+
+/**
+ * What the issue says, as a person would change it. T3's own comments are left
+ * out, so posting one never makes a declined issue look edited.
+ */
+export function issueFingerprint(
+  issue: LinearIssueDetail,
+  postedIds: ReadonlyArray<string>,
+): string {
+  const posted = new Set(postedIds);
+  const content = {
+    title: issue.title,
+    description: issue.description ?? "",
+    priority: issue.priority,
+    state: issue.state.id,
+    assignee: issue.assignee?.id ?? null,
+    milestone: issue.milestone?.id ?? null,
+    labels: issue.labels.map((label) => label.id).toSorted(),
+    parent: issue.parent?.id ?? null,
+    children: issue.children.map((child) => `${child.id}:${child.stateName}`).toSorted(),
+    comments: issue.comments.filter((c) => !posted.has(c.id)).map((c) => `${c.id}:${c.body}`),
+  };
+  return NodeCrypto.createHash("sha256").update(JSON.stringify(content)).digest("hex");
+}
 
 export function e2eComment(input: {
   readonly e2e: AssistantE2eResult;

@@ -295,6 +295,23 @@ describe("taskPipeline", () => {
     expect(taskPipeline(fixing)?.[0]?.note).toBe("Fixing the e2e failure");
   });
 
+  it("starts with the team leader taking the issue, and gives it staging", () => {
+    const led = (overrides: Partial<AssistantTask>) => task({ leader: true, ...overrides });
+    expect(states(led({ stage: "lead", turns: 0 }))).toBe(
+      "take:current code:todo review:todo merge:todo staging:todo e2e:todo",
+    );
+    expect(states(led({ stage: "implement", turns: 1 }))).toBe(
+      "take:done code:current review:todo merge:todo staging:todo e2e:todo",
+    );
+    const staging = taskPipeline(led({ stage: "lead", turns: 1, ...merged }))?.[4];
+    expect(staging).toMatchObject({ key: "staging", state: "current", kind: "lead" });
+    const e2e = { verdict: "failed", report: "", humanChecks: [], screenshots: [], at } as const;
+    expect(taskPipeline(led({ stage: "lead", turns: 1, ...deployed, e2e }))?.[5]).toMatchObject({
+      state: "failed",
+      note: "Failed on staging",
+    });
+  });
+
   it("has none for work started before issues had review and e2e threads", () => {
     expect(taskPipeline(task())).toBeNull();
   });

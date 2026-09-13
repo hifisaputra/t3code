@@ -124,6 +124,52 @@ it.effect(
     }).pipe(Effect.scoped),
 );
 
+it.effect("pausing and waiting answer the agent with text instead of an internal error", () =>
+  Effect.gen(function* () {
+    const calls: string[] = [];
+    const layer = McpServer.toolkit(AssistantToolkit).pipe(
+      Layer.provide(AssistantToolkitHandlers),
+      Layer.provideMerge(
+        Layer.mock(DeveloperAssistant)({
+          pause: () => Effect.sync(() => void calls.push("pause")),
+          waitForExternal: () => Effect.sync(() => void calls.push("wait")),
+        }),
+      ),
+      Layer.provideMerge(McpServer.McpServer.layer),
+    );
+    yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (input: { name: string; arguments: Record<string, unknown> }) =>
+        server.callTool(input).pipe(Effect.provideService(McpInvocationContext, invocation));
+      const paused = yield* call({ name: "assistant_pause", arguments: {} });
+      assert.isFalse(paused.isError);
+      const text = paused.content[0];
+      assert.include(text?.type === "text" ? text.text : "", "Paused");
+      const waiting = yield* call({
+        name: "assistant_wait",
+        arguments: { reason: "Staging deploy is running" },
+      });
+      assert.isFalse(waiting.isError);
+      assert.deepEqual(calls, ["pause", "wait"]);
+    }).pipe(
+      Effect.provide(layer),
+      Effect.provideService(
+        McpSchema.McpServerClient,
+        McpSchema.McpServerClient.of({
+          clientId: 1,
+          protocolVersion: "2025-06-18",
+          initializePayload: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "assistant-test", version: "1" },
+          },
+          getClient: Effect.die("unused"),
+        }),
+      ),
+    );
+  }).pipe(Effect.scoped),
+);
+
 const invocation = {
   environmentId: EnvironmentId.make("environment"),
   threadId: ThreadId.make("assistant-setup-test"),
