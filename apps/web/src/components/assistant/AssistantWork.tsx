@@ -1,9 +1,10 @@
-import type {
-  AssistantDecision,
-  AssistantProject,
-  AssistantTask,
-  EnvironmentId,
-  ThreadId,
+import {
+  assistantTaskThreadId,
+  type AssistantDecision,
+  type AssistantProject,
+  type AssistantTask,
+  type EnvironmentId,
+  type ThreadId,
 } from "@t3tools/contracts";
 import {
   ArrowUpRightIcon,
@@ -105,15 +106,20 @@ export function ActiveTaskCard({
   const review = useAtomCommand(developerAssistant.review);
   const { pending, run } = useAssistantAction();
   const worker = useThreadShell({ environmentId, threadId: task.threadId });
-  const workerBusy = threadIsBusy(worker);
+  const reviewer = useThreadShell({
+    environmentId,
+    threadId: assistantTaskThreadId(task, "review"),
+  });
+  const tester = useThreadShell({ environmentId, threadId: assistantTaskThreadId(task, "e2e") });
+  // The phase follows whichever of the issue's threads holds it.
+  const holder = task.stage === "review" ? reviewer : task.stage === "e2e" ? tester : worker;
+  const holderBusy = threadIsBusy(holder);
   const phase = describeTaskPhase({
     task,
-    workerBusy,
-    workerNeedsInput: Boolean(worker?.hasPendingApprovals || worker?.hasPendingUserInput),
-    step: worker?.planProgress?.step ?? null,
-    hasOpenDecision: decisions.some(
-      (d) => d.answer === null && (d.taskId === task.id || d.threadId === task.threadId),
-    ),
+    workerBusy: holderBusy,
+    workerNeedsInput: Boolean(holder?.hasPendingApprovals || holder?.hasPendingUserInput),
+    step: holder?.planProgress?.step ?? null,
+    hasOpenDecision: decisions.some((d) => d.answer === null && d.taskId === task.id),
   });
   const pullRequest = worker?.linkedPullRequest ?? worker?.branchPullRequest ?? null;
   const moreRounds = project?.config.maxWorkerTurns ?? 6;
@@ -138,7 +144,7 @@ export function ActiveTaskCard({
       </button>
 
       <div className={cn("flex items-start gap-2 rounded-lg px-3 py-2", PHASE_STYLE[phase.tone])}>
-        <StatusDot tone={PHASE_DOT[phase.tone]} pulse={workerBusy} className="mt-1.5" />
+        <StatusDot tone={PHASE_DOT[phase.tone]} pulse={holderBusy} className="mt-1.5" />
         <div className="min-w-0">
           <p className="font-medium text-sm">{phase.label}</p>
           {phase.detail ? (
@@ -185,8 +191,18 @@ export function ActiveTaskCard({
       <div className="flex items-center gap-1.5">
         <Button size="sm" variant="outline" onClick={() => onOpenThread(task.threadId)}>
           <ArrowUpRightIcon />
-          Open worker
+          Worker
         </Button>
+        {reviewer ? (
+          <Button size="sm" variant="ghost" onClick={() => onOpenThread(reviewer.id)}>
+            Code review
+          </Button>
+        ) : null}
+        {tester ? (
+          <Button size="sm" variant="ghost" onClick={() => onOpenThread(tester.id)}>
+            E2E
+          </Button>
+        ) : null}
         <Menu>
           <MenuTrigger
             render={

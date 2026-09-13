@@ -95,6 +95,13 @@ export interface TaskPhase {
   readonly detail: string | null;
 }
 
+const STAGE_THREAD: Record<string, string> = {
+  implement: "worker",
+  review: "code reviewer",
+  e2e: "e2e tester",
+};
+
+/** The phase of the issue's thread that holds it; `worker*` fields describe that thread. */
 export function describeTaskPhase(input: {
   task: AssistantTask;
   workerBusy: boolean;
@@ -103,6 +110,7 @@ export function describeTaskPhase(input: {
   hasOpenDecision: boolean;
 }): TaskPhase {
   const { task, workerBusy, workerNeedsInput, step, hasOpenDecision } = input;
+  const holder = STAGE_THREAD[task.stage ?? "implement"] ?? "worker";
   switch (task.status) {
     case "preparing":
       return { tone: "active", label: "Preparing a worktree", detail: null };
@@ -114,22 +122,55 @@ export function describeTaskPhase(input: {
         : {
             tone: "waiting",
             label: "Waiting for input",
-            detail: "The worker asked something in its thread.",
+            detail: `The ${holder} asked something in its thread.`,
           };
     default:
       if (workerNeedsInput)
         return {
           tone: "waiting",
           label: "Waiting for input",
-          detail: "The worker asked something in its thread.",
+          detail: `The ${holder} asked something in its thread.`,
         };
-      return workerBusy
-        ? { tone: "active", label: "Coding", detail: step }
-        : {
+      switch (task.stage) {
+        default:
+          // Work started before issues had review and e2e threads.
+          return workerBusy
+            ? { tone: "active", label: "Coding", detail: step }
+            : {
+                tone: "idle",
+                label: "With the assistant",
+                detail: "The worker finished a round. The assistant is reviewing it.",
+              };
+        case "implement":
+          if (workerBusy)
+            return task.codeReview?.verdict === "approved"
+              ? { tone: "active", label: "Merging", detail: "Code review approved the change." }
+              : { tone: "active", label: "Coding", detail: step };
+          return { tone: "idle", label: "Worker is next", detail: null };
+        case "review":
+          return workerBusy
+            ? { tone: "active", label: "In code review", detail: step }
+            : {
+                tone: "idle",
+                label: "Code review is next",
+                detail: "The reviewer starts when the worker's turn ends.",
+              };
+        case "e2e":
+          return workerBusy
+            ? { tone: "active", label: "Testing on staging", detail: step }
+            : { tone: "idle", label: "E2E check is next", detail: null };
+        case "coordinator":
+          return {
             tone: "idle",
             label: "With the assistant",
-            detail: "The worker finished a round. The assistant is reviewing it.",
+            detail:
+              task.e2e?.verdict === "failed"
+                ? "It failed on staging. The assistant is deciding on a fix."
+                : task.merge && !task.deployment
+                  ? "Merged after code review. The assistant is checking the staging deploy."
+                  : "The assistant is deciding the next step.",
           };
+      }
   }
 }
 

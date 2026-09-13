@@ -122,10 +122,55 @@ export const AssistantDeployment = Schema.Struct({
 });
 export type AssistantDeployment = typeof AssistantDeployment.Type;
 
+/**
+ * Each issue runs in up to three threads on one worktree: the implementation
+ * worker, a code reviewer that trades rounds with it directly, and an e2e
+ * tester that exercises staging once the reviewed commit is deployed.
+ */
+export const AssistantThreadRole = Schema.Literals(["implement", "review", "e2e"]);
+export type AssistantThreadRole = typeof AssistantThreadRole.Type;
+
+/** Who holds the issue right now: one of its threads, or the coordinator. */
+export const AssistantTaskStage = Schema.Literals(["implement", "review", "coordinator", "e2e"]);
+export type AssistantTaskStage = typeof AssistantTaskStage.Type;
+
+const CommitSha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40,64}$/));
+
+export const AssistantCodeReview = Schema.Struct({
+  verdict: Schema.Literals(["approved", "changes-requested"]),
+  /** The findings as sent to the implementer. */
+  findings: Schema.String,
+  /** A short account for the Linear update: what was checked, non-blocking notes. */
+  summary: Schema.String,
+  /** The worktree HEAD the verdict covers; any later commit needs another review. */
+  commit: CommitSha,
+  at: IsoDateTime,
+});
+export type AssistantCodeReview = typeof AssistantCodeReview.Type;
+
+export const AssistantMerge = Schema.Struct({
+  commit: CommitSha,
+  /** What changed, written by the implementer for people who read the issue. */
+  summary: Schema.String,
+  at: IsoDateTime,
+});
+export type AssistantMerge = typeof AssistantMerge.Type;
+
+export const AssistantE2eResult = Schema.Struct({
+  verdict: Schema.Literals(["passed", "partial", "failed"]),
+  report: Schema.String,
+  /** What a person should still check on staging before accepting. */
+  humanChecks: Schema.Array(Schema.String),
+  screenshots: Schema.Array(Schema.Struct({ url: Schema.String, caption: Schema.String })),
+  at: IsoDateTime,
+});
+export type AssistantE2eResult = typeof AssistantE2eResult.Type;
+
 export const AssistantTask = Schema.Struct({
   id: TrimmedNonEmptyString,
   projectId: ProjectId,
   issue: LinearIssueSummary,
+  /** The implementation thread; see assistantTaskThreadId for the others. */
   threadId: ThreadId,
   status: AssistantTaskStatus,
   brief: Schema.String,
@@ -138,8 +183,23 @@ export const AssistantTask = Schema.Struct({
   error: Schema.NullOr(Schema.String),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  // Absent on work started before issues had review and e2e threads.
+  stage: Schema.optionalKey(AssistantTaskStage),
+  codeReview: Schema.optionalKey(Schema.NullOr(AssistantCodeReview)),
+  merge: Schema.optionalKey(Schema.NullOr(AssistantMerge)),
+  e2e: Schema.optionalKey(Schema.NullOr(AssistantE2eResult)),
+  /** Comments T3 posted on the issue, so a person's later reply is told apart from them. */
+  linearCommentIds: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** The Linear state the issue was left in on delivery; moving it elsewhere is a decision. */
+  deliveredState: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type AssistantTask = typeof AssistantTask.Type;
+
+export const assistantTaskThreadId = (
+  task: Pick<AssistantTask, "id" | "threadId">,
+  role: AssistantThreadRole,
+): ThreadId =>
+  role === "implement" ? task.threadId : ThreadId.make(`assistant-${role}-${task.id}`);
 
 export const AssistantDecision = Schema.Struct({
   id: TrimmedNonEmptyString,

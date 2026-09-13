@@ -340,7 +340,13 @@ function ReviewCard({ task, context }: { task: AssistantTask; context: InboxCont
   return (
     <InboxCard
       accent="review"
-      kind="Ready for review"
+      kind={
+        task.e2e?.verdict === "passed"
+          ? "Passed e2e · ready to accept"
+          : task.e2e?.verdict === "partial"
+            ? "Passed e2e · check on staging"
+            : "Ready for review"
+      }
       context={<Context project={context.projectLabel(task.projectId)} issue={task.issue} />}
       at={task.deployment?.verifiedAt ?? task.updatedAt}
       onOpenThread={() => context.onOpenThread(task.threadId)}
@@ -353,7 +359,7 @@ function ReviewCard({ task, context }: { task: AssistantTask; context: InboxCont
       {task.reviewInstructions.trim() ? (
         <div className="rounded-lg bg-muted/50 px-3 py-2.5">
           <p className="mb-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-            How to check it
+            {task.e2e ? "Staging check" : "How to check it"}
           </p>
           <ExpandableMarkdown
             text={task.reviewInstructions}
@@ -378,6 +384,17 @@ function ReviewCard({ task, context }: { task: AssistantTask; context: InboxCont
             Open staging
           </Button>
           <CommitChip revision={task.deployment.revision} />
+          {task.e2e?.screenshots.length ? (
+            <a
+              href={task.issue.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+            >
+              {task.e2e.screenshots.length} screenshot
+              {task.e2e.screenshots.length === 1 ? "" : "s"} on Linear
+            </a>
+          ) : null}
           {task.deployment.evidence?.map((entry) => (
             <span
               key={entry.targetId}

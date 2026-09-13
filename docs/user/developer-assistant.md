@@ -1,12 +1,21 @@
 # Developer assistant
 
 The developer assistant manages Linear issue threads while you make decisions and review work.
-Each configured repository has a persistent assistant conversation and at most one active coding
-worker. The assistant selects issues, reads worker results, reviews changes, requests fixes, and
-manages delivery to your integration branch. Different repositories can run at the same time.
+Each configured repository has a persistent assistant conversation and at most one active issue.
+Each issue runs in three threads on one worktree:
 
-A verified staging deployment releases the repository for its next issue immediately. Your
-review can happen later. Production releases remain outside this workflow.
+- **Worker** implements the issue, opens the pull request and merges it once review approves.
+- **Code review** reviews the worker's commits. The two trade rounds directly until the reviewer
+  approves a commit.
+- **E2E** tests the merged change on staging with a browser and takes screenshots.
+
+The assistant picks issues, writes each worker's brief, checks the staging deployment and starts
+the e2e run. It hears from the threads only when the change is merged, when someone needs you,
+when a thread stops without handing off, and when e2e reports. Different repositories can run at
+the same time.
+
+An issue that passes e2e releases the repository for its next issue immediately. Your review can
+happen later, from Linear or T3. Production releases remain outside this workflow.
 
 ## Set up a project
 
@@ -69,10 +78,10 @@ latest workflow run or active service deployment and verifies that its commit co
 changes on the integration branch. The assistant selects the targets affected by each issue; when
 it does not select targets, all configured targets must pass.
 
-Deployment success alone does not prove a feature works. The assistant also follows the saved
-project instructions to choose and run issue-specific staging checks, including migration,
-background worker, and browser checks where relevant. The review summary should include their
-evidence and any coverage limits. Staging access, test accounts, different staging/production data
+Deployment success alone does not prove a feature works. The e2e thread follows the saved project
+instructions to check each acceptance criterion on staging, including migration, background worker,
+and browser checks where relevant. It reports passed, partial (with the checks it left for you), or
+failed, along with its evidence and any coverage limits. Staging access, test accounts, different staging/production data
 providers, and components without staging coverage should be discussed during setup. A workflow
 that skips deployment for some paths needs a documented delivery procedure for those changes.
 
@@ -95,16 +104,17 @@ The command receives `T3_ASSISTANT_WORKER_REVISION` and `T3_ASSISTANT_BASE_BRANC
 variables. For custom checks, your script translates the hosting platform's successful deployment
 into this common result. T3 does not provision hosting or databases.
 
-T3 then fetches `origin` and verifies both that the deployed commit contains the worker's HEAD and
-that the deployed commit belongs to the configured integration branch. Uncommitted work, unresolved
-questions, active worker turns, failed checks, and stale deployments keep the issue active. Only a
-successful check moves it to staging review and archives its worker thread.
+T3 then fetches `origin` and verifies both that the deployed commit contains the commit code review
+approved and that the deployed commit belongs to the configured integration branch. Uncommitted
+work, commits made after the approval, unresolved questions, active turns, failed checks, and stale
+deployments keep the issue active. A passing or partial e2e result moves it to staging review and
+archives its three threads.
 
 ## Work with your assistant
 
 Start the queue and open its conversation to give priorities or discuss a blocker. The assistant
-reads eligible issues and their comments before starting a worker in a separate worktree. It uses
-the configured coding model and preserves the issue link. Existing Linear settings control the
+reads eligible issues and their comments before starting a worker in a separate worktree. All three
+threads use the configured coding model and keep the issue link. Existing Linear settings control the
 initial move to In Progress. Avoid starting manual or separately delegated work on issues the
 assistant already owns; the assistant checks existing threads when claiming an issue.
 
@@ -118,8 +128,9 @@ can finish. **Interrupt all work**, in the project menu, also requests interrupt
 worker and closes its tracked T3 terminals. Work and queued follow-ups are preserved for a later
 Start. A provider's background processes may need cleanup through that project's normal procedure.
 
-Failures retain ownership of the issue. The assistant can direct fixes within the configured worker
-turn limit. **Allow more rounds** grants more worker turns; **Skip issue** cancels queued work and
+Failures retain ownership of the issue. Each round of review changes counts as a worker turn, and
+so does each fix the assistant sends. When review still asks for changes at the limit, or an e2e
+run fails, the issue goes back to the assistant. **Allow more rounds** grants more worker turns; **Skip issue** cancels queued work and
 releases the repository while preserving the thread and branch for inspection. Skipping does not
 revert a merge, deployment, database migration, or Linear state. After 15 external progress checks
 without completion, the assistant pauses so you can inspect the blocker and Start again.
@@ -130,8 +141,8 @@ its coordinator without creating a second worker for the same active issue.
 
 ## Review delivered work
 
-The review card contains the change summary, verification instructions, staging URL, and verified
-commit. Staging can contain later issues by the time you review; the recorded commit identifies
+The review card contains the change summary, the e2e report and any checks left for you, the staging
+URL, and the verified commit. Staging can contain later issues by the time you review; the recorded commit identifies
 what was verified for that delivery.
 
 **Accept** records your review and applies the configured Linear acceptance state. **Request changes**
@@ -140,10 +151,15 @@ fresh linked worker from the current integration branch, leaving the original th
 history intact. It does not roll back later work. Archived worker threads retain their branches and
 worktrees; remove those through the normal thread and worktree cleanup when you no longer need them.
 
-When staging is verified, T3 also comments on the Linear issue as the connected account: the
-assistant's summary of what changed, how it was checked and what remains open, followed by the
-staging link, pull request and verified commit. People following the issue in Linear see the result
-without opening T3.
+T3 comments on the Linear issue as the connected account at each phase: when the reviewed change
+is merged, when staging is deployed, and with the e2e result. The e2e comment is the one to decide
+from. It opens with a verdict (ready to accept, or which checks to do yourself on staging), then
+covers what changed, each acceptance check with its result, the screenshots, and links to staging,
+the pull request, and the verified commit.
+
+You can decide in Linear. Moving the issue to a completed state accepts it. Moving it anywhere other
+than the review state asks for changes, and your comments since the e2e result become the feedback.
+T3 picks the move up within a minute. Canceling the issue skips it.
 
 The Linear review and acceptance state names must exist on the issue's team. Leave a name empty to
 keep its current state. A Linear update failure is shown on the task without discarding successful

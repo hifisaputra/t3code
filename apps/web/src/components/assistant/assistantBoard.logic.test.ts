@@ -153,6 +153,25 @@ describe("describeTaskPhase", () => {
     expect(describeTaskPhase({ ...base, task: waiting }).label).toBe("Waiting for input");
   });
 
+  it("names the thread that holds the issue", () => {
+    expect(
+      describeTaskPhase({ ...base, task: task({ stage: "review" }), workerBusy: true }).label,
+    ).toBe("In code review");
+    expect(describeTaskPhase({ ...base, task: task({ stage: "e2e" }) }).label).toBe(
+      "E2E check is next",
+    );
+    expect(
+      describeTaskPhase({ ...base, task: task({ stage: "e2e" }), workerNeedsInput: true }).detail,
+    ).toBe("The e2e tester asked something in its thread.");
+    const merged = task({
+      stage: "coordinator",
+      merge: { commit: "a".repeat(40), summary: "Fixed", at: "2026-09-13T00:00:00.000Z" },
+    });
+    expect(describeTaskPhase({ ...base, task: merged }).detail).toBe(
+      "Merged after code review. The assistant is checking the staging deploy.",
+    );
+  });
+
   it("carries the blocker's reason", () => {
     expect(
       describeTaskPhase({ ...base, task: task({ status: "blocked", error: "Worker stopped." }) }),

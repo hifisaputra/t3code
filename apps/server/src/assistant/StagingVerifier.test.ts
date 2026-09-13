@@ -118,6 +118,32 @@ it.effect("requires the worker commit to be deployed on origin's integration bra
   }).pipe(Effect.provide(dependencies), Effect.scoped),
 );
 
+it.effect("reads the reviewed commit and whether origin's integration branch has it", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture;
+    assert.equal(yield* h.verifier.revision(h.worktreePath), h.workerRevision);
+    const merged = { cwd: h.cwd, revision: h.workerRevision, baseBranch: "develop" };
+    assert.isFalse(yield* h.verifier.isMerged(merged));
+    yield* h.git(["merge", "--no-ff", "--no-edit", "assistant/APP-1"]);
+    // A local merge that was never pushed is not merged.
+    assert.isFalse(yield* h.verifier.isMerged(merged));
+    yield* h.git(["push", "origin", "develop"]);
+    assert.isTrue(yield* h.verifier.isMerged(merged));
+    const deployed = yield* h.git(["rev-parse", "HEAD"]);
+    h.setReceipt({
+      code: 0,
+      stdout: encodeJson({ revision: deployed, url: "https://staging.example.test" }),
+    });
+    assert.isTrue(
+      yield* h.verifier.verify({ ...h.input, expectedRevision: h.initial }).pipe(Effect.isFailure),
+    );
+    assert.lengthOf(h.checks, 0);
+    yield* h.verifier.verify({ ...h.input, expectedRevision: h.workerRevision });
+    yield* h.fs.writeFileString(h.path.join(h.worktreePath, "unfinished.txt"), "not committed");
+    assert.isTrue(yield* h.verifier.revision(h.worktreePath).pipe(Effect.isFailure));
+  }).pipe(Effect.provide(dependencies), Effect.scoped),
+);
+
 it.effect("rejects dirty work, failed checks and malformed deployment receipts", () =>
   Effect.gen(function* () {
     const h = yield* fixture;

@@ -4,6 +4,7 @@ import * as LinearDelegation from "./linear/LinearDelegation.ts";
 import { ProjectionTurnRepositoryLive } from "./persistence/Layers/ProjectionTurns.ts";
 import * as DeveloperAssistant from "./assistant/DeveloperAssistant.ts";
 import * as StagingVerifier from "./assistant/StagingVerifier.ts";
+import * as AssistantEvidence from "./assistant/AssistantEvidence.ts";
 import * as LinearThreadService from "./linear/LinearThreadService.ts";
 import { linearRoutes } from "./linear/http.ts";
 import * as GoogleCalendar from "./googleCalendar/GoogleCalendar.ts";
@@ -302,6 +303,7 @@ const ReactorLayerLive = Layer.empty.pipe(
     DeveloperAssistant.layer.pipe(
       Layer.provide(ProjectionTurnRepositoryLive),
       Layer.provide(StagingVerifier.layer.pipe(Layer.provide(ProcessRunner.layer))),
+      Layer.provide(AssistantEvidence.layer),
       Layer.provide(LinearThreadService.layer),
       Layer.provide(LinearApi.layer),
       Layer.provide(T3ProjectFileLoader.layer),

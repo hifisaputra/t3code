@@ -7,6 +7,7 @@ import {
   AssistantTask,
   AssistantSetup,
   AssistantSetupPlan,
+  AssistantThreadRole,
   DeveloperAssistantError,
   LinearIssueSummary,
   PreviewAutomationUnavailableError,
@@ -18,6 +19,11 @@ const dependencies = [DeveloperAssistant, McpInvocationContext];
 const failure = Schema.Union([DeveloperAssistantError, PreviewAutomationUnavailableError]);
 const text = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(20000));
 const taskId = Schema.String.check(Schema.isNonEmpty());
+const thread = Schema.optionalKey(
+  AssistantThreadRole.annotate({
+    description: 'Which of the issue\'s threads: "implement" (default), "review" or "e2e".',
+  }),
+);
 
 export const AssistantToolkit = Toolkit.make(
   Tool.make("assistant_get_setup", {
@@ -54,7 +60,7 @@ export const AssistantToolkit = Toolkit.make(
   }).annotate(Tool.Readonly, true),
   Tool.make("assistant_start_issue", {
     description:
-      "Start a coding thread in a fresh worktree with the project's selected worker model. Enforces project scope, readiness, ownership and one active issue. A changes-requested issue gets a new worker with its previous review feedback. Read the full issue first and provide a concrete brief. End your turn after starting; the server wakes you when the worker needs attention.",
+      "Start an issue's implementation thread in a fresh worktree with the project's selected worker model. Enforces project scope, readiness, ownership and one active issue. A changes-requested issue gets a new worker with its previous review feedback. Read the full issue first and provide a concrete brief with the acceptance criteria. The implementer and the code review thread then work together on their own. End your turn after starting; the server wakes you when the issue needs you.",
     parameters: Schema.Struct({ reference: text, brief: text }),
     success: AssistantTask,
     failure,
@@ -62,8 +68,8 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_read_thread", {
     description:
-      "Read a managed worker's recent conversation, worktree path, session status and stored result. Use the worktree to review its committed diff and verification evidence.",
-    parameters: Schema.Struct({ taskId }),
+      "Read one of a managed issue's threads (implement, review or e2e): its recent conversation, session status, the shared worktree path and the issue's recorded review, merge, deployment and e2e results.",
+    parameters: Schema.Struct({ taskId, thread }),
     success: Schema.Struct({
       task: AssistantTask,
       transcript: Schema.Array(Schema.Struct({ role: Schema.String, text: Schema.String })),
@@ -75,32 +81,103 @@ export const AssistantToolkit = Toolkit.make(
   }).annotate(Tool.Readonly, true),
   Tool.make("assistant_message_worker", {
     description:
-      "Send follow-up work or code review feedback to an idle worker. Refuses parallel work, unanswered decisions and the worker turn limit. The server queues delivery durably; end your turn afterward.",
-    parameters: Schema.Struct({ taskId, message: text }),
+      "Send follow-up work to one of an issue's idle threads: the implementer (default), the code reviewer, or the e2e tester after assistant_start_e2e. Use it when a thread stalls, an e2e failure needs a fix, or the person redirected the work; the implementer and reviewer hand work to each other without you. Refuses while any of the issue's threads runs, with unanswered decisions, or past the worker turn limit. The server queues delivery durably; end your turn afterward.",
+    parameters: Schema.Struct({ taskId, message: text, thread }),
     success: AssistantTask,
     failure,
     dependencies,
   }),
   Tool.make("assistant_ask_decision", {
     description:
-      "Ask the person a product question in the decision inbox, preserving the issue/thread link. Include context and a recommendation. Available to the coordinator and its coding workers. After asking, end your turn and wait; the answer will arrive in the thread.",
+      "Ask the person a product question in the decision inbox, preserving the issue/thread link. Include context and a recommendation. Available to the coordinator and every thread of a managed issue. After asking, end your turn and wait; the answer will arrive in the thread.",
     parameters: Schema.Struct({ question: text }),
     success: AssistantDecision,
     failure,
     dependencies,
   }),
+  Tool.make("assistant_request_review", {
+    description:
+      "Implementation thread only: hand your committed, pushed work to the issue's code reviewer. Say what changed, how you verified it, the PR, and what deserves a close look. The reviewer works in this worktree, so end your turn and do not edit files until its verdict arrives here.",
+    parameters: Schema.Struct({ message: text }),
+    success: AssistantTask,
+    failure,
+    dependencies,
+  }),
+  Tool.make("assistant_submit_review", {
+    description:
+      "Code review thread only: record your verdict on the worktree's current commit. changes-requested sends your findings to the implementer as its next round. approved tells the implementer to merge exactly that commit; any later commit needs another review. End your turn after submitting.",
+    parameters: Schema.Struct({
+      verdict: Schema.Literals(["approved", "changes-requested"]),
+      findings: text.annotate({
+        description:
+          "For the implementer: each finding with file and line, the problem and what to do. On approval, anything to watch while merging.",
+      }),
+      summary: Schema.String.check(Schema.isMaxLength(4000)).annotate({
+        description:
+          "On approval, one or two sentences for the Linear update: what the review covered and any non-blocking notes. No first person.",
+      }),
+    }),
+    success: AssistantTask,
+    failure,
+    dependencies,
+  }),
+  Tool.make("assistant_report_merged", {
+    description:
+      "Implementation thread only: report that the approved commit is merged into the integration branch. T3 checks that the worktree still sits on the approved commit and that origin's integration branch contains it, posts the merge update on the Linear issue, and hands the issue to the assistant for staging. End your turn afterward.",
+    parameters: Schema.Struct({
+      summary: text.annotate({
+        description:
+          "What changed and why it matters, in plain Markdown for people who read the Linear issue but not the code. No first person, no PR or commit; T3 adds them.",
+      }),
+    }),
+    success: AssistantTask,
+    failure,
+    dependencies,
+  }),
   Tool.make("assistant_verify_staging", {
     description:
-      "Verify delivery using the saved deployment targets or custom check, then archive the worker and release the project. Supply relevant targetIds for this issue, or omit to check all targets. First exercise issue-specific staging acceptance checks and include evidence in summary. Requires an idle worker, committed worktree and resolved decisions. Every selected deployment must contain the worker commit and belong to origin's integration branch. Review code, merge with a merge commit or fast-forward, and stop local servers first. On success T3 posts linearComment on the Linear issue, followed by the staging link, pull request and verified commit it checked, then applies the review state; do not post your own completion comment. On success start the next issue without waiting for human review.",
+      "Coordinator only, after the implementer reports the merge: check the saved deployment targets or custom check. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts a deployed update on the Linear issue; then call assistant_start_e2e. If staging is still deploying, use assistant_wait.",
     parameters: Schema.Struct({
       taskId,
-      summary: text,
-      reviewInstructions: text,
-      linearComment: text.annotate({
-        description:
-          "The completion update for the Linear issue, in Markdown, for people who read the issue but not T3: what changed and why it matters, how it was verified on staging, what is not covered or still open, and how to check it. It posts as the connected Linear account, so lead with outcomes: no first person and no 'you'. Omit the staging URL, PR and commit; T3 appends them.",
-      }),
       targetIds: Schema.optionalKey(Schema.Array(text)),
+    }),
+    success: AssistantTask,
+    failure,
+    dependencies,
+  }),
+  Tool.make("assistant_start_e2e", {
+    description:
+      "Coordinator only, after assistant_verify_staging succeeds: start (or rerun) the issue's e2e tester on staging. The brief lists each acceptance criterion as a check a person could follow on staging, the affected pages or endpoints, the data it needs and what to clean up. The tester reports passed, partial or failed with screenshots; T3 posts that on the Linear issue. End your turn afterward.",
+    parameters: Schema.Struct({ taskId, brief: text }),
+    success: AssistantTask,
+    failure,
+    dependencies,
+  }),
+  Tool.make("assistant_submit_e2e", {
+    description:
+      "E2E thread only: report the staging test. T3 uploads the screenshots, posts the result on the Linear issue, and on passed or partial puts the issue in review and frees the project; on failed the assistant schedules a fix. End your turn after submitting.",
+    parameters: Schema.Struct({
+      verdict: Schema.Literals(["passed", "partial", "failed"]).annotate({
+        description:
+          "passed: every criterion verified on staging. partial: what could be checked passed, and humanChecks lists what a person must check. failed: a criterion does not hold on staging.",
+      }),
+      report: text.annotate({
+        description:
+          "Markdown for the Linear issue: one line per acceptance criterion marked passed, failed or not checked, with its evidence; then anything not covered and why. For a failure, expected versus actual and steps to reproduce. No first person or 'you'.",
+      }),
+      humanChecks: Schema.Array(text).annotate({
+        description:
+          "Checks a person should still do on staging before accepting, each with exact steps. Empty when passed.",
+      }),
+      screenshots: Schema.Array(
+        Schema.Struct({
+          path: text.annotate({
+            description:
+              "Absolute path of a PNG, JPEG or WebP file in the evidence folder T3 named.",
+          }),
+          caption: text.annotate({ description: "One line: what the screenshot shows." }),
+        }),
+      ),
     }),
     success: AssistantTask,
     failure,
@@ -149,29 +226,60 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_read_thread: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.readThread(caller, input.taskId);
+      return yield* service.readThread(caller, input.taskId, input.thread);
     }),
   assistant_message_worker: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.messageWorker(caller, input.taskId, input.message.trim());
+      return yield* service.messageWorker(caller, input.taskId, input.message.trim(), input.thread);
     }),
   assistant_ask_decision: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.askDecision(caller, input.question.trim());
     }),
+  assistant_request_review: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.requestReview(caller, input.message.trim());
+    }),
+  assistant_submit_review: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.submitReview(
+        caller,
+        input.verdict,
+        input.findings.trim(),
+        input.summary.trim(),
+      );
+    }),
+  assistant_report_merged: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.reportMerged(caller, input.summary.trim());
+    }),
   assistant_verify_staging: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.verifyStaging(
-        caller,
-        input.taskId,
-        input.summary.trim(),
-        input.reviewInstructions.trim(),
-        input.targetIds,
-        input.linearComment.trim(),
-      );
+      return yield* service.verifyStaging(caller, input.taskId, input.targetIds);
+    }),
+  assistant_start_e2e: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.startE2e(caller, input.taskId, input.brief.trim());
+    }),
+  assistant_submit_e2e: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.submitE2e(caller, {
+        verdict: input.verdict,
+        report: input.report.trim(),
+        humanChecks: input.humanChecks.map((check) => check.trim()).filter(Boolean),
+        screenshots: input.screenshots.map((shot) => ({
+          path: shot.path.trim(),
+          caption: shot.caption.trim(),
+        })),
+      });
     }),
   assistant_wait: (input) =>
     Effect.gen(function* () {

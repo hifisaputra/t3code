@@ -24,10 +24,23 @@ export class StagingVerifier extends Context.Service<
   StagingVerifier,
   {
     readonly repositoryKey: (cwd: string) => Effect.Effect<string, DeveloperAssistantError>;
+    /** The worktree's HEAD. Uncommitted changes fail unless allowed, since an approval could not cover them. */
+    readonly revision: (
+      worktreePath: string,
+      options?: { readonly allowUncommitted?: boolean },
+    ) => Effect.Effect<string, DeveloperAssistantError>;
+    /** Whether a commit is on origin's integration branch, after fetching it. */
+    readonly isMerged: (input: {
+      cwd: string;
+      revision: string;
+      baseBranch: string;
+    }) => Effect.Effect<boolean, DeveloperAssistantError>;
     readonly verify: (input: {
       cwd: string;
       worktreePath: string;
       baseBranch: string;
+      /** The reviewed commit; a worktree that moved past it is refused. */
+      expectedRevision?: string;
       command: string;
       stagingUrl?: string;
       targets?: ReadonlyArray<AssistantDeploymentTarget>;
@@ -63,16 +76,42 @@ export const layer = Layer.effect(
           : new DeveloperAssistantError({ detail: "Could not run Git verification." }),
       ),
     );
+    const revision = Effect.fn("Assistant.revision")(function* (
+      worktreePath: string,
+      options?: { readonly allowUncommitted?: boolean },
+    ) {
+      if (!options?.allowUncommitted && (yield* git(worktreePath, ["status", "--porcelain"]))) {
+        return yield* new DeveloperAssistantError({
+          detail: "The worktree has uncommitted changes. Commit the work first.",
+        });
+      }
+      return yield* git(worktreePath, ["rev-parse", "HEAD"]);
+    });
     return {
       repositoryKey: (cwd) => git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+      revision,
+      isMerged: Effect.fn("Assistant.isMerged")(function* (input) {
+        yield* git(input.cwd, ["fetch", "origin", input.baseBranch]);
+        // merge-base exits 1 for "not an ancestor", which git() reports as a failure.
+        return yield* git(input.cwd, [
+          "merge-base",
+          "--is-ancestor",
+          input.revision,
+          `refs/remotes/origin/${input.baseBranch}`,
+        ]).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+      }),
       verify: Effect.fn("Assistant.verifyStaging")(
         function* (input) {
-          if (yield* git(input.worktreePath, ["status", "--porcelain"])) {
+          const workerRevision = yield* revision(input.worktreePath);
+          if (input.expectedRevision && workerRevision !== input.expectedRevision) {
             return yield* new DeveloperAssistantError({
-              detail: "Commit the worker's changes before verifying staging.",
+              detail:
+                "The worktree has commits the code review has not approved. Request another review before verifying staging.",
             });
           }
-          const workerRevision = yield* git(input.worktreePath, ["rev-parse", "HEAD"]);
           if (!input.command.trim()) {
             const configured = input.targets ?? [];
             const targets =
