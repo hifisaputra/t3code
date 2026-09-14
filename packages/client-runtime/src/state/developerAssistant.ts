@@ -60,5 +60,9 @@ export function createDeveloperAssistantAtoms<R, E>(
       label: "assistant:review",
       tag: WS_METHODS.assistantReview,
     }),
+    dispatch: createEnvironmentRpcCommand(runtime, {
+      label: "assistant:dispatch",
+      tag: WS_METHODS.assistantDispatch,
+    }),
   };
 }

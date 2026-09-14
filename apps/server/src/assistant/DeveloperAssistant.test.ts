@@ -550,7 +550,9 @@ it.effect("setup is a durable conversation and saving never starts the issue que
     );
     assert.equal(h.threads.get(draft.threadId)?.runtimeMode, "approval-required");
     assert.lengthOf((yield* service.board(null)).projects, 0);
-    assert.isTrue(yield* service.queueIssue(draft.threadId, "APP-1", "").pipe(Effect.isFailure));
+    assert.isTrue(
+      yield* service.dispatchFromAssistant(draft.threadId, "APP-1", "").pipe(Effect.isFailure),
+    );
     assert.isTrue(
       yield* service
         .proposeSetup(ThreadId.make("unrelated"), setupPlan, "Not authorized")
@@ -675,7 +677,7 @@ it.effect("a paused assistant can be revised with an issue in progress, keeping 
     const { service } = yield* h.setup;
     assert.isTrue(yield* service.beginSetup(setupInput).pipe(Effect.isFailure));
     const task = yield* activeTask(service);
-    yield* service.control({ projectId: config.projectId, action: "stop" });
+    yield* service.control({ projectId: config.projectId, action: "pause" });
     const draft = yield* service.beginSetup(setupInput);
     assert.include(
       (yield* service.getSetup(draft.threadId)).instructions,
@@ -705,7 +707,7 @@ it.effect("a paused assistant can be revised with an issue in progress, keeping 
       revision: kept.revision,
     });
     assert.equal(saved.projects[0]?.config.instructions, setupPlan.instructions);
-    assert.equal(saved.projects[0]?.status, "stopped");
+    assert.equal(saved.projects[0]?.status, "paused");
     assert.equal(saved.tasks.find((t) => t.id === task.id)?.status, "working");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
@@ -946,44 +948,116 @@ it.effect("three declines in a row pause the loop until the person starts it aga
       yield* service.scan();
     }
     const paused = (yield* service.board(null)).projects[0]!;
-    assert.equal(paused.status, "stopped");
+    assert.equal(paused.status, "paused");
     assert.include(paused.error!, "APP-1, APP-2, APP-3");
     const resumed = yield* service.control({ projectId: config.projectId, action: "start" });
     assert.equal(resumed.projects[0]?.status, "running");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-it.effect("the person's queued pick goes next, and can be taken out again", () =>
+it.effect(
+  "a dispatched issue goes next, its leader cannot decline it, and it can be taken out",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      const { service, caller } = yield* h.setup;
+      const first = yield* activeTask(service);
+      const board = yield* service.dispatch({
+        projectId: config.projectId,
+        reference: "APP-3",
+        note: "Do the header first.",
+      });
+      const picked = board.tasks.find((t) => t.issue.identifier === "APP-3")!;
+      assert.equal(picked.status, "queued");
+      assert.isTrue(picked.dispatched);
+      assert.equal((yield* service.dispatchFromAssistant(caller, "APP-3", "Again")).id, picked.id);
+      // A team leader does not dispatch, and nothing outside the project's scope is dispatched.
+      assert.isTrue(
+        yield* service.dispatchFromAssistant(leadOf(first), "APP-2", "").pipe(Effect.isFailure),
+      );
+      h.issues[1] = { ...h.issues[1]!, project: null };
+      assert.isTrue(
+        yield* service.dispatchFromAssistant(caller, "APP-2", "").pipe(Effect.isFailure),
+      );
+      h.issues[1] = {
+        ...makeIssue(2),
+        state: { id: "done", name: "Done", type: "completed", position: 2, color: "#fff" },
+      };
+      assert.isTrue(
+        yield* service.dispatchFromAssistant(caller, "APP-2", "").pipe(Effect.isFailure),
+      );
+      h.issues[1] = makeIssue(2);
+
+      yield* service.review({ taskId: first.id, action: "skip", feedback: "Later" });
+      yield* service.scan();
+      const next = yield* activeTask(service);
+      assert.equal(next.id, picked.id);
+      yield* service.deliver();
+      const brief = turnsOf(h, leadOf(next))[0];
+      assert.include(brief, "The person dispatched it to your team");
+      assert.include(brief, "Do the header first.");
+      assert.notInclude(brief, "assistant_decline_issue");
+      const refused = yield* service.declineIssue(leadOf(next), "Not clear").pipe(Effect.flip);
+      assert.include(refused.detail, "cannot be declined");
+      assert.lengthOf(h.comments, 0);
+
+      // Someone else's issue can be dispatched: the person chose it.
+      h.issues[1] = { ...makeIssue(2), assignee: null };
+      const later = yield* service.dispatchFromAssistant(caller, "APP-2", "");
+      yield* service.review({ taskId: later.id, action: "skip", feedback: "Taken out" });
+      assert.equal((yield* taskById(service, later.id)).status, "skipped");
+    }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a paused loop takes no new issue, while its team and dispatched issues run", () =>
   Effect.gen(function* () {
     const h = harness();
     const { service, caller } = yield* h.setup;
-    const first = yield* activeTask(service);
-    const picked = yield* service.queueIssue(caller, "APP-3", "Do the header first.");
-    assert.equal(picked.status, "queued");
-    assert.equal((yield* service.queueIssue(caller, "APP-3", "Again")).id, picked.id);
-    // Only the assistant queues work, and only in its own scope.
-    assert.isTrue(yield* service.queueIssue(leadOf(first), "APP-2", "").pipe(Effect.isFailure));
-    h.issues[1] = { ...h.issues[1]!, project: null };
-    assert.isTrue(yield* service.queueIssue(caller, "APP-2", "").pipe(Effect.isFailure));
-    h.issues[1] = { ...makeIssue(2), assignee: null };
-    assert.isTrue(yield* service.queueIssue(caller, "APP-2", "").pipe(Effect.isFailure));
-    h.issues[1] = {
-      ...makeIssue(2),
-      state: { id: "done", name: "Done", type: "completed", position: 2, color: "#fff" },
-    };
-    assert.isTrue(yield* service.queueIssue(caller, "APP-2", "").pipe(Effect.isFailure));
-    h.issues[1] = makeIssue(2);
-
-    yield* service.review({ taskId: first.id, action: "skip", feedback: "Later" });
-    yield* service.scan();
-    const next = yield* activeTask(service);
-    assert.equal(next.id, picked.id);
+    const team = yield* activeTask(service);
     yield* service.deliver();
-    assert.include(turnsOf(h, leadOf(next))[0], "Do the header first.");
+    assert.lengthOf(turnsOf(h, caller), 1);
+    const paused = yield* service.control({ projectId: config.projectId, action: "pause" });
+    assert.equal(paused.projects[0]?.status, "paused");
+    // The team at work carries on.
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, leadOf(team)), 1);
+    yield* service.acceptIssue(leadOf(team), "Fix it");
+    yield* endTurn(h, service, leadOf(team));
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, team.threadId), 1);
+    // Once it is gone, the loop takes nothing from Linear.
+    yield* service.review({ taskId: team.id, action: "skip", feedback: "Later" });
+    yield* service.scan();
+    assert.isUndefined(yield* activeTask(service));
+    // An issue the person dispatches starts right away.
+    yield* service.dispatch({ projectId: config.projectId, reference: "APP-3", note: "" });
+    const dispatched = yield* activeTask(service);
+    assert.equal(dispatched.issue.identifier, "APP-3");
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, leadOf(dispatched)), 1);
+    // Starting the loop again does not wake an assistant that has its instructions.
+    const started = yield* service.control({ projectId: config.projectId, action: "start" });
+    assert.equal(started.projects[0]?.status, "running");
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, caller), 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
 
-    const later = yield* service.queueIssue(caller, "APP-2", "");
-    yield* service.review({ taskId: later.id, action: "skip", feedback: "Taken out" });
-    assert.equal((yield* taskById(service, later.id)).status, "skipped");
+it.effect("with the loop never started, dispatching is the only way in", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    yield* service.configure(config);
+    // Stopped: a dispatched issue waits until the person resumes the teams.
+    yield* service.dispatch({ projectId: config.projectId, reference: "APP-2", note: "" });
+    assert.isUndefined(yield* activeTask(service));
+    const resumed = yield* service.control({ projectId: config.projectId, action: "pause" });
+    assert.equal(resumed.projects[0]?.status, "paused");
+    const team = yield* activeTask(service);
+    assert.equal(team.issue.identifier, "APP-2");
+    yield* service.review({ taskId: team.id, action: "skip", feedback: "Later" });
+    yield* service.scan();
+    assert.isUndefined(yield* activeTask(service));
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -1193,12 +1267,12 @@ it.effect("a waiting thread's idle session being released does not block its iss
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-it.effect("stopping prevents new dispatches and resuming preserves the team", () =>
+it.effect("interrupting holds every team until the person resumes it", () =>
   Effect.gen(function* () {
     const h = harness();
     const { service } = yield* h.setup;
     const team = yield* activeTask(service);
-    yield* service.control({ projectId: config.projectId, action: "stop" });
+    yield* service.control({ projectId: config.projectId, action: "interrupt" });
     yield* service.deliver();
     assert.lengthOf(
       h.commands.filter((c) => c.type === "thread.turn.start"),
@@ -1206,7 +1280,9 @@ it.effect("stopping prevents new dispatches and resuming preserves the team", ()
     );
     yield* service.scan();
     assert.lengthOf((yield* service.board(null)).tasks, 1);
-    yield* service.control({ projectId: config.projectId, action: "start" });
+    assert.equal((yield* taskById(service, team.id)).status, "blocked");
+    // Resuming the teams without the loop picks the issue back up.
+    yield* service.control({ projectId: config.projectId, action: "pause" });
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, leadOf(team)), 1);
   }).pipe(Effect.provide(database()), Effect.scoped),
@@ -1372,7 +1448,7 @@ it.effect("replaces a deleted assistant thread without losing its active issue",
     const h = harness();
     const { service, caller } = yield* h.setup;
     const first = yield* activeTask(service);
-    yield* service.control({ projectId: config.projectId, action: "stop" });
+    yield* service.control({ projectId: config.projectId, action: "pause" });
     h.threads.delete(caller);
     const restarted = yield* service.control({ projectId: config.projectId, action: "start" });
     assert.notEqual(restarted.projects[0]?.threadId, caller);
@@ -1715,7 +1791,7 @@ it.effect("an idle provider session stopping does not disable the persistent ass
       },
     });
     assert.equal((yield* service.board(null)).projects[0]?.status, "running");
-    yield* service.queueIssue(caller, "APP-2", "");
+    yield* service.dispatchFromAssistant(caller, "APP-2", "");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 

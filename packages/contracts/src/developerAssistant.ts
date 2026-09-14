@@ -221,6 +221,8 @@ export const AssistantTask = Schema.Struct({
   deliveredState: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /** Run by a team leader. Earlier work reports to the developer assistant instead. */
   leader: Schema.optionalKey(Schema.Boolean),
+  /** Picked by the person rather than the loop: its team leader takes it or asks, never declines. */
+  dispatched: Schema.optionalKey(Schema.Boolean),
   declined: Schema.optionalKey(AssistantDecline),
 });
 export type AssistantTask = typeof AssistantTask.Type;
@@ -258,10 +260,18 @@ export const AssistantDecision = Schema.Struct({
 });
 export type AssistantDecision = typeof AssistantDecision.Type;
 
+/**
+ * running: the loop gives issues to teams. paused: the loop takes nothing new,
+ * but teams at work and issues the person dispatches still run. stopped:
+ * nothing runs until the person resumes.
+ */
+export const AssistantProjectStatus = Schema.Literals(["running", "paused", "stopped"]);
+export type AssistantProjectStatus = typeof AssistantProjectStatus.Type;
+
 export const AssistantProject = Schema.Struct({
   config: AssistantProjectConfig,
   threadId: ThreadId,
-  status: Schema.Literals(["running", "stopped"]),
+  status: AssistantProjectStatus,
   error: Schema.NullOr(Schema.String),
 });
 export type AssistantProject = typeof AssistantProject.Type;
@@ -276,7 +286,14 @@ export type AssistantBoard = typeof AssistantBoard.Type;
 
 export const AssistantControlInput = Schema.Struct({
   projectId: ProjectId,
-  action: Schema.Literals(["start", "stop", "interrupt", "wake"]),
+  // "stop" is what earlier clients send for "pause".
+  action: Schema.Literals(["start", "pause", "stop", "interrupt", "wake"]),
+});
+/** The person gives one issue to the next team, ahead of the loop's own picks. */
+export const AssistantDispatchInput = Schema.Struct({
+  projectId: ProjectId,
+  reference: TrimmedNonEmptyString,
+  note: Schema.String,
 });
 export const AssistantAnswerInput = Schema.Struct({
   decisionId: TrimmedNonEmptyString,

@@ -14,6 +14,7 @@ import { useEnvironmentQuery } from "~/state/query";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 
 import ChatMarkdown from "../ChatMarkdown";
+import { AssistantDispatchButton } from "../assistant/AssistantDispatchDialog";
 import { useOpenIssueLink } from "../ThreadStatusIndicators";
 import { Button } from "../ui/button";
 import { RefreshIcon } from "../ui/refresh-icon";
@@ -101,10 +102,17 @@ export function IssueDetailPanel({
               Open thread
             </Button>
           ) : (
-            <Button type="button" size="sm" onClick={() => onStartThread(issue.identifier)}>
-              <PlayIcon aria-hidden />
-              Start thread
-            </Button>
+            <>
+              <AssistantDispatchButton
+                environmentId={environmentId}
+                identifier={issue.identifier}
+                linearProjectId={issue.project?.id ?? null}
+              />
+              <Button type="button" size="sm" onClick={() => onStartThread(issue.identifier)}>
+                <PlayIcon aria-hidden />
+                Start thread
+              </Button>
+            </>
           )}
           <Tooltip>
             <TooltipTrigger

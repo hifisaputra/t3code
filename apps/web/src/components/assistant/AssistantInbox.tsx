@@ -666,12 +666,12 @@ function StuckTaskCard({
     <InboxRow
       {...row}
       accent="blocked"
-      kind={reason === "rounds" ? "Out of work rounds" : "Stuck while paused"}
+      kind={reason === "rounds" ? "Out of work rounds" : "Stuck while stopped"}
       context={<IssueContext project={context.projectLabel(task.projectId)} issue={task.issue} />}
       summary={
         reason === "rounds"
           ? `The worker used all ${task.turnLimit} rounds without finishing.`
-          : "The assistant is paused with this issue unfinished."
+          : "The assistant is stopped with this issue unfinished."
       }
       at={task.updatedAt}
       links={
@@ -770,7 +770,7 @@ function PausedProjectCard({
     <InboxRow
       {...row}
       accent="paused"
-      kind="Assistant stopped"
+      kind={project.status === "paused" ? "Loop paused" : "Assistant stopped"}
       context={<span className="truncate">{title}</span>}
       summary={reason}
     >

@@ -325,7 +325,7 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
 }
 
 function CaughtUp({ board }: { board: AssistantBoard }) {
-  const running = board.projects.some((p) => p.status === "running");
+  const running = board.projects.some((p) => p.status !== "stopped");
   return (
     <div className="flex items-start gap-3 rounded-xl border border-border/70 border-dashed px-4 py-4">
       <CircleCheckIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-success-foreground" />
@@ -335,7 +335,7 @@ function CaughtUp({ board }: { board: AssistantBoard }) {
           {running
             ? "Questions and finished work show up here. You can leave this page; the assistant keeps going on the server."
             : board.projects.length > 0
-              ? "Every project is paused. Press Start on one to let it take issues."
+              ? "Every project is stopped. Press Start on one to let it take issues."
               : "Finish a setup to start taking issues."}
         </p>
       </div>

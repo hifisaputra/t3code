@@ -11,14 +11,14 @@ import {
 
 /**
  * The server keeps one free-text slot per project and uses it for two things:
- * a real failure that stopped the queue, and the coordinator's own note while
- * it waits on something outside T3 ("Waiting: staging deploy is running").
- * Only the first is worth an alarm.
+ * a real failure that paused or stopped it, and a team leader's note while it
+ * waits on something outside T3 ("Waiting: staging deploy is running"). Only
+ * the first is worth an alarm.
  */
 const WAITING_PREFIX = "Waiting: ";
 
 export function projectWaitingReason(project: AssistantProject): string | null {
-  return project.status === "running" && project.error?.startsWith(WAITING_PREFIX)
+  return project.status !== "stopped" && project.error?.startsWith(WAITING_PREFIX)
     ? project.error.slice(WAITING_PREFIX.length).trim() || null
     : null;
 }
@@ -32,7 +32,7 @@ export type ProjectActivityTone = "active" | "idle" | "waiting" | "paused" | "at
 
 export interface ProjectActivity {
   readonly tone: ProjectActivityTone;
-  /** The status pill: Running, Paused, Needs you. */
+  /** The status pill: Running, Paused, Stopped. */
   readonly status: string;
   /** One line of what is happening right now. */
   readonly headline: string;
@@ -45,44 +45,54 @@ export function describeProjectActivity(input: {
   coordinatorBusy: boolean;
 }): ProjectActivity {
   const { project, activeTask, coordinatorBusy } = input;
-  if (project.status === "stopped") {
-    const failure = projectFailure(project);
+  // A running loop clears its failures itself; a paused or stopped one waits for the person.
+  const failure = project.status === "running" ? null : projectFailure(project);
+  if (project.status === "stopped")
     return failure
-      ? { tone: "attention", status: "Paused", headline: "Stopped by a problem", detail: failure }
+      ? { tone: "attention", status: "Stopped", headline: "Stopped by a problem", detail: failure }
       : {
           tone: "paused",
-          status: "Paused",
-          headline: activeTask ? `Holding ${activeTask.issue.identifier}` : "Not taking issues",
+          status: "Stopped",
+          headline: activeTask ? `Holding ${activeTask.issue.identifier}` : "Stopped",
           detail: activeTask
-            ? "The issue stays assigned. Start to let the assistant continue it."
-            : "Start to let the assistant pick up issues.",
+            ? "Its team is stopped. Start, or resume the teams from the menu, to continue it."
+            : "Start to take issues from Linear, or resume the teams and dispatch issues yourself.",
         };
-  }
+  const status = project.status === "paused" ? "Paused" : "Running";
+  if (failure)
+    return { tone: "attention", status, headline: "Loop paused by a problem", detail: failure };
   const waiting = projectWaitingReason(project);
   if (coordinatorBusy)
     return {
       tone: "active",
-      status: "Running",
+      status,
       headline: "Assistant is thinking",
       detail: activeTask ? `${activeTask.issue.identifier} · ${activeTask.issue.title}` : null,
     };
   if (waiting)
     return {
       tone: "waiting",
-      status: "Running",
+      status,
       headline: "Waiting on something",
       detail: waiting,
     };
   if (activeTask)
     return {
       tone: "active",
-      status: "Running",
+      status,
       headline: `Working on ${activeTask.issue.identifier}`,
       detail: activeTask.issue.title,
     };
+  if (project.status === "paused")
+    return {
+      tone: "paused",
+      status,
+      headline: "Taking only issues you dispatch",
+      detail: "Start to let it pick issues from Linear again.",
+    };
   return {
     tone: "idle",
-    status: "Running",
+    status,
     headline: "Watching for issues",
     detail: "Nothing is ready to pick up. The assistant starts on the next issue that is.",
   };
@@ -365,7 +375,7 @@ export function buildInbox(board: AssistantBoard): ReadonlyArray<InboxItem> {
       blocking.push({ kind: "setup", key: `setup:${setup.threadId}`, at: "", setup });
   }
   for (const project of board.projects) {
-    const reason = project.status === "stopped" ? projectFailure(project) : null;
+    const reason = project.status === "running" ? null : projectFailure(project);
     if (reason)
       blocking.push({
         kind: "paused",

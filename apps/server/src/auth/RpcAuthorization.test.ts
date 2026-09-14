@@ -41,6 +41,7 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.assistantControl,
       WS_METHODS.assistantAnswer,
       WS_METHODS.assistantReview,
+      WS_METHODS.assistantDispatch,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
     }

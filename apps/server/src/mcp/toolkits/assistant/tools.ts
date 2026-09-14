@@ -49,7 +49,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_pause", {
     description:
-      "Developer assistant only: pause this project's issue loop when the person asks you to stop. The active issue's work is kept. The person resumes from the assistant board.",
+      "Developer assistant only: pause this project's issue loop when the person asks you to. The loop takes no new issues from Linear; the team at work finishes its issue, and issues the person dispatches still run. The person resumes the loop from the assistant board.",
     // MCP returns text; an empty result fails to encode and reads as a server error.
     success: Schema.String,
     failure,
@@ -65,9 +65,9 @@ export const AssistantToolkit = Toolkit.make(
     failure,
     dependencies,
   }).annotate(Tool.Readonly, true),
-  Tool.make("assistant_queue_issue", {
+  Tool.make("assistant_dispatch_issue", {
     description:
-      "Developer assistant only: put a Linear issue next in the loop when the person asks for it. A free project gives it to a new team right away; otherwise it waits for the active issue to finish. Its team leader still decides whether to take it. Skipping it from the board removes it from the queue.",
+      "Developer assistant only: dispatch a Linear issue to a team when the person asks for it. It goes ahead of the loop's own picks and runs even while the loop is paused: a free project gives it to a new team right away; otherwise it waits for the active issue to finish. Its team leader takes it or asks the person, and cannot decline it. Skipping it from the board removes it from the queue.",
     parameters: Schema.Struct({
       reference: text,
       note: Schema.String.check(Schema.isMaxLength(20000)).annotate({
@@ -264,17 +264,21 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       yield* service.pause(caller);
-      return "Paused. Work in progress is kept; the person resumes the loop from the assistant board.";
+      return "Paused. The loop takes no new issues; the team at work finishes its issue, and issues the person dispatches still run. The person resumes the loop from the assistant board.";
     }),
   assistant_get_board: () =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.getAgentBoard(caller);
     }),
-  assistant_queue_issue: (input) =>
+  assistant_dispatch_issue: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.queueIssue(caller, input.reference.trim(), input.note.trim());
+      return yield* service.dispatchFromAssistant(
+        caller,
+        input.reference.trim(),
+        input.note.trim(),
+      );
     }),
   assistant_accept_issue: (input) =>
     Effect.gen(function* () {

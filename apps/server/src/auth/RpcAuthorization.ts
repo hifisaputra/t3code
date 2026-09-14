@@ -30,6 +30,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.assistantControl]: AuthOrchestrationOperateScope,
   [WS_METHODS.assistantAnswer]: AuthOrchestrationOperateScope,
   [WS_METHODS.assistantReview]: AuthOrchestrationOperateScope,
+  [WS_METHODS.assistantDispatch]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,

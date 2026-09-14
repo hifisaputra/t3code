@@ -69,7 +69,7 @@ approvals required, permission requests wait for you in their original threads. 
 unattended commands within the provider's configured permissions. Use models and providers with
 working T3 MCP tool access.
 
-Mobile provides queue controls, the assistant conversation, decisions, and reviews for projects
+Mobile provides loop controls, dispatch, the assistant conversation, decisions, and reviews for projects
 configured on web or desktop. All clients use the same server-owned state; closing a client does
 not stop the assistant. The T3 server and its provider runtimes must remain running.
 
@@ -115,8 +115,8 @@ archives its three threads.
 
 ## Work with your assistant
 
-**Start** runs the loop. It takes, in order: issues you put next through the assistant, issues you
-sent back for changes, then eligible issues by Linear priority. The team leader and the assistant use
+**Start** runs the loop. It takes, in order: issues you dispatched, issues you sent back for
+changes, then eligible issues by Linear priority. The team leader and the assistant use
 the assistant model; the worker, code review and e2e threads use the coding model. All of them keep
 the issue link. Existing Linear settings control the move to In Progress, which happens when the team
 leader takes the issue. The loop skips issues that another thread is already working on.
@@ -126,8 +126,11 @@ someone changes it: an edit to the description, labels, priority or state, or a 
 comments do not count. If team leaders decline three issues in a row, the loop pauses so you can look
 at them; **Start** continues. Declined issues appear in the board's history with their reasons.
 
-Ask the assistant in its conversation to put a specific issue next, with a note for its team leader.
-Queued issues appear under **Up next**, where you can take them out again.
+To give a specific issue to a team, choose **Dispatch** on the project card, **Dispatch team** on the
+issue's page under Issues, or ask the assistant in its conversation. Add a note for the team leader
+if you like. A dispatched issue goes next, ahead of the loop's own picks, and its team leader takes it
+or asks you rather than declining it. Assignment does not matter: you chose it. Dispatched issues
+wait under **Up next** while another issue is in progress, and you can take them out again.
 
 Product questions appear under **Needs you** and remain linked to the asking thread. You
 can answer in the inbox, or tell the assistant in its conversation and it passes your answer to
@@ -139,9 +142,12 @@ In the sidebar, each assistant thread is labeled with what it does (Assistant, T
 Code review, E2E test), and a thread waiting on your answer shows **Question**. The count on the sidebar's
 Developer assistant button is the number of items holding a project until you act.
 
-**Pause** stops the loop and prevents further automatic turns; a turn already running can finish. **Interrupt all work**, in the project menu, also requests interruption of the coding
-worker and closes its tracked T3 terminals. Work and queued follow-ups are preserved for a later
-Start. A provider's background processes may need cleanup through that project's normal procedure.
+**Pause** stops the loop from taking issues from Linear. The team at work finishes its issue, and
+issues you dispatch still run, so a paused project is also how you hand out issues yourself.
+**Interrupt all work**, in the project menu, stops everything: it interrupts the team mid-turn and
+closes its tracked T3 terminals. Work and queued follow-ups are kept; **Start**, or **Resume teams,
+loop paused** from the same menu, picks them back up. A provider's background processes may need
+cleanup through that project's normal procedure.
 
 Failures retain ownership of the issue. Each round of review changes counts as a worker turn, and
 so does each fix the team leader sends. When review still asks for changes at the limit, or an e2e
@@ -149,7 +155,7 @@ run fails, the issue goes back to its team leader. A team leader that twice ends
 next step blocks the issue for you. **Allow more rounds** grants more worker turns; **Skip issue** cancels queued work and
 releases the repository while preserving the thread and branch for inspection. Skipping does not
 revert a merge, deployment, database migration, or Linear state. After 15 external progress checks
-without completion, the loop pauses so you can inspect the blocker and Start again.
+without completion, the assistant stops so you can inspect the blocker and Start again.
 
 State and queued messages survive a server restart. If a provider was interrupted or failed, the
 issue may be blocked; Start tells its team leader to pick the work back up, without creating a second

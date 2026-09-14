@@ -5,6 +5,7 @@ import {
   AssistantControlInput,
   AssistantProjectConfig,
   AssistantReviewInput,
+  AssistantDispatchInput,
   AssistantSetup,
   AssistantSetupInput,
   AssistantSetupResolveInput,
@@ -437,6 +438,7 @@ export const WS_METHODS = {
   assistantControl: "assistant.control",
   assistantAnswer: "assistant.answer",
   assistantReview: "assistant.review",
+  assistantDispatch: "assistant.dispatch",
   assistantSubscribe: "assistant.subscribe",
 
   // Streaming subscriptions
@@ -1410,6 +1412,11 @@ export const WsRpcGroup = RpcGroup.make(
   }),
   Rpc.make(WS_METHODS.assistantReview, {
     payload: AssistantReviewInput,
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantDispatch, {
+    payload: AssistantDispatchInput,
     success: AssistantBoard,
     error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
   }),

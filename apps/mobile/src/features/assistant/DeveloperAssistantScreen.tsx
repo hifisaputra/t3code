@@ -49,8 +49,8 @@ export function DeveloperAssistantScreen() {
       contentInsetAdjustmentBehavior="automatic"
     >
       <Text className="text-foreground-muted">
-        Your assistant manages issue threads. Projects continue after staging deploys; decisions and
-        reviews wait here for you.
+        Each issue goes to a team that takes it to staging. The loop picks issues from Linear, or
+        you dispatch one; decisions and reviews wait here for you.
       </Text>
       {environments.map((environment) => (
         <EnvironmentBoard key={environment.environmentId} environment={environment} />
@@ -70,7 +70,9 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
   const control = useAtomCommand(developerAssistant.control);
   const answer = useAtomCommand(developerAssistant.answer);
   const review = useAtomCommand(developerAssistant.review);
+  const dispatch = useAtomCommand(developerAssistant.dispatch);
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [dispatches, setDispatches] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const openThread = (threadId: ThreadId) =>
@@ -113,7 +115,7 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
           <View className="flex-row flex-wrap gap-2">
             <Action title="Conversation" onPress={() => openThread(p.threadId)} />
             <Action
-              title={p.status === "running" ? "Stop queue" : "Start"}
+              title={p.status === "running" ? "Pause loop" : "Start loop"}
               disabled={busy}
               onPress={() =>
                 void act(() =>
@@ -121,12 +123,26 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
                     environmentId,
                     input: {
                       projectId: p.config.projectId,
-                      action: p.status === "running" ? "stop" : "start",
+                      action: p.status === "running" ? "pause" : "start",
                     },
                   }),
                 )
               }
             />
+            {p.status === "stopped" && (
+              <Action
+                title="Resume teams"
+                disabled={busy}
+                onPress={() =>
+                  void act(() =>
+                    control({
+                      environmentId,
+                      input: { projectId: p.config.projectId, action: "pause" },
+                    }),
+                  )
+                }
+              />
+            )}
             <Action
               title="Interrupt work"
               disabled={busy}
@@ -137,6 +153,38 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
                     input: { projectId: p.config.projectId, action: "interrupt" },
                   }),
                 )
+              }
+            />
+          </View>
+          <View className="flex-row gap-2">
+            <TextInput
+              accessibilityLabel="Issue to dispatch"
+              autoCapitalize="characters"
+              autoCorrect={false}
+              className="flex-1 rounded-lg border border-border px-3 py-2 text-foreground"
+              placeholder="Dispatch an issue, e.g. SPI-123"
+              value={dispatches[p.config.projectId] ?? ""}
+              onChangeText={(value) =>
+                setDispatches({ ...dispatches, [p.config.projectId]: value })
+              }
+            />
+            <Action
+              title="Dispatch"
+              disabled={busy || !dispatches[p.config.projectId]?.trim()}
+              onPress={() =>
+                void act(async () => {
+                  const result = await dispatch({
+                    environmentId,
+                    input: {
+                      projectId: p.config.projectId,
+                      reference: (dispatches[p.config.projectId] ?? "").trim(),
+                      note: "",
+                    },
+                  });
+                  if (result._tag === "Success")
+                    setDispatches({ ...dispatches, [p.config.projectId]: "" });
+                  return result;
+                })
               }
             />
           </View>

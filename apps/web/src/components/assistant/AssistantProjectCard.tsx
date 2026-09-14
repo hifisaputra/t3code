@@ -16,10 +16,11 @@ import {
   PauseIcon,
   PlayIcon,
   RefreshCwIcon,
+  SendIcon,
   Settings2Icon,
   XIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 import { developerAssistant } from "~/state/developerAssistant";
@@ -30,6 +31,7 @@ import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { AssistantDispatchDialog } from "./AssistantDispatchDialog";
 import { describeProjectActivity } from "./assistantBoard.logic";
 import {
   confirmDestructive,
@@ -98,18 +100,22 @@ export function AssistantProjectCard({
   const coordinator = useThreadShell({ environmentId, threadId: project.threadId });
   const coordinatorBusy = threadIsBusy(coordinator);
   const activity = describeProjectActivity({ project, activeTask, coordinatorBusy });
+  const [dispatching, setDispatching] = useState(false);
   const { config } = project;
   const running = project.status === "running";
+  const stopped = project.status === "stopped";
   const projectId = config.projectId;
 
-  const act = (action: "start" | "stop" | "interrupt" | "wake") =>
+  const act = (action: "start" | "pause" | "interrupt" | "wake") =>
     run(action, () => control({ environmentId, input: { projectId, action } }), {
       failure:
         action === "start"
           ? `Could not start ${title}`
           : action === "wake"
             ? "Could not wake the assistant"
-            : `Could not pause ${title}`,
+            : action === "pause" && stopped
+              ? `Could not resume ${title}`
+              : `Could not pause ${title}`,
     });
 
   // An issue in progress may stay; the server keeps its base branch and scope.
@@ -189,22 +195,44 @@ export function AssistantProjectCard({
         <Fact label="Permissions">{runtimeModeLabel(config.runtimeMode)}</Fact>
       </dl>
 
-      <div className="flex items-center gap-1.5">
-        <Button
-          size="sm"
-          variant={running ? "outline" : "default"}
-          disabled={pending !== null}
-          onClick={() => void act(running ? "stop" : "start")}
-        >
-          {pending === "start" || pending === "stop" ? (
-            <Spinner className="size-3.5" />
-          ) : running ? (
-            <PauseIcon />
-          ) : (
-            <PlayIcon />
-          )}
-          {running ? "Pause" : "Start"}
-        </Button>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="sm"
+                variant={running ? "outline" : "default"}
+                disabled={pending !== null}
+                onClick={() => void act(running ? "pause" : "start")}
+              />
+            }
+          >
+            {pending === "start" || (pending === "pause" && running) ? (
+              <Spinner className="size-3.5" />
+            ) : running ? (
+              <PauseIcon />
+            ) : (
+              <PlayIcon />
+            )}
+            {running ? "Pause" : "Start"}
+          </TooltipTrigger>
+          <TooltipPopup className="max-w-64">
+            {running
+              ? "Stop taking issues from Linear. The team at work finishes its issue, and issues you dispatch still run."
+              : "Take issues from Linear, one at a time."}
+          </TooltipPopup>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={<Button size="sm" variant="outline" onClick={() => setDispatching(true)} />}
+          >
+            <SendIcon />
+            Dispatch
+          </TooltipTrigger>
+          <TooltipPopup className="max-w-64">
+            Give one issue to the next team, ahead of the loop&apos;s own picks.
+          </TooltipPopup>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger
             render={
@@ -230,10 +258,17 @@ export function AssistantProjectCard({
             <EllipsisIcon />
           </MenuTrigger>
           <MenuPopup align="end" className="min-w-52">
-            <MenuItem disabled={!running || pending !== null} onClick={() => void act("wake")}>
-              <RefreshCwIcon />
-              Check for work now
-            </MenuItem>
+            {stopped ? (
+              <MenuItem disabled={pending !== null} onClick={() => void act("pause")}>
+                <PlayIcon />
+                Resume teams, loop paused
+              </MenuItem>
+            ) : (
+              <MenuItem disabled={pending !== null} onClick={() => void act("wake")}>
+                <RefreshCwIcon />
+                Check for work now
+              </MenuItem>
+            )}
             <MenuItem disabled={!canEdit} onClick={onEditSetup}>
               <Settings2Icon />
               {canEdit ? "Revise setup" : "Revise setup (pause first)"}
@@ -241,10 +276,10 @@ export function AssistantProjectCard({
             <MenuSeparator />
             <MenuItem
               variant="destructive"
-              disabled={pending !== null || (!running && activeTask === null)}
+              disabled={pending !== null || (stopped && activeTask === null)}
               onClick={async () => {
                 const confirmed = await confirmDestructive(
-                  `Interrupt ${title}?\nThis pauses the assistant, stops the coding worker mid-turn and closes its terminals. The issue and its branch stay as they are, so you can start again later.`,
+                  `Interrupt ${title}?\nThis stops the loop and the team mid-turn and closes its terminals. The issue and its branch stay as they are: start again or resume the teams later.`,
                 );
                 if (confirmed) void act("interrupt");
               }}
@@ -255,6 +290,16 @@ export function AssistantProjectCard({
           </MenuPopup>
         </Menu>
       </div>
+      {dispatching ? (
+        <AssistantDispatchDialog
+          environmentId={environmentId}
+          project={project}
+          activeTask={activeTask}
+          title={title}
+          open
+          onOpenChange={setDispatching}
+        />
+      ) : null}
     </CardShell>
   );
 }

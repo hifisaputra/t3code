@@ -110,7 +110,28 @@ describe("project status text", () => {
     expect(projectFailure(failed)).toBe("The assistant thread was deleted.");
     expect(
       describeProjectActivity({ project: failed, activeTask: null, coordinatorBusy: false }),
+    ).toMatchObject({ tone: "attention", status: "Stopped" });
+    // Three declines in a row pause the loop with a reason, and the pill says so.
+    const paused = project({ status: "paused", error: "Team leaders declined 3 issues in a row" });
+    expect(
+      describeProjectActivity({ project: paused, activeTask: null, coordinatorBusy: false }),
     ).toMatchObject({ tone: "attention", status: "Paused" });
+    expect(buildInbox(board({ projects: [paused] }))).toMatchObject([{ kind: "paused" }]);
+  });
+
+  it("a paused loop still shows its team at work", () => {
+    const active = task();
+    const paused = project({ status: "paused" });
+    expect(
+      describeProjectActivity({ project: paused, activeTask: active, coordinatorBusy: false }),
+    ).toMatchObject({
+      tone: "active",
+      status: "Paused",
+      headline: `Working on ${active.issue.identifier}`,
+    });
+    expect(
+      describeProjectActivity({ project: paused, activeTask: null, coordinatorBusy: false }),
+    ).toMatchObject({ tone: "paused", headline: "Taking only issues you dispatch" });
   });
 
   it("ignores a stale waiting note once the queue is stopped", () => {
