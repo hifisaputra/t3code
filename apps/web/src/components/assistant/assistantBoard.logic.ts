@@ -31,6 +31,23 @@ export function projectFailure(project: AssistantProject): string | null {
   return project.error;
 }
 
+/**
+ * When a provider's usage limit stopped one of the project's threads, the time
+ * the server waits for before it tells them to continue. The server clears the
+ * stamp on its next scan after it passes, so until then a time in the past is
+ * not a hold; a stopped project is not waiting on anything either.
+ */
+export function projectLimitHold(
+  project: AssistantProject,
+  nowMs: number = Date.now(),
+): string | null {
+  if (project.status === "stopped") return null;
+  const until = project.limitedUntil ?? null;
+  if (!until) return null;
+  const at = new Date(until).getTime();
+  return Number.isNaN(at) || at <= nowMs ? null : until;
+}
+
 export type ProjectActivityTone = "active" | "idle" | "waiting" | "paused" | "attention";
 
 export interface ProjectActivity {
@@ -72,8 +89,15 @@ export function describeProjectActivity(input: {
   /** Every issue the project holds right now, in the order the board lists them. */
   activeTasks: ReadonlyArray<AssistantTask>;
   coordinatorBusy: boolean;
+  /**
+   * The usage-limit reset already in the person's own clock format. The caller
+   * formats it because the preference lives in the settings store, which this
+   * module stays out of; without it the line simply names no time.
+   */
+  limitResumesAt?: string | null;
+  nowMs?: number;
 }): ProjectActivity {
-  const { project, activeTasks, coordinatorBusy } = input;
+  const { project, activeTasks, coordinatorBusy, limitResumesAt, nowMs = Date.now() } = input;
   const [firstTask] = activeTasks;
   // A running loop records a failure too, when its scan cannot advance (a
   // revoked Linear key, a state name that no longer exists). It clears only on
@@ -102,6 +126,18 @@ export function describeProjectActivity(input: {
       detail: failure,
     };
   const waiting = projectWaitingReason(project);
+  // A usage limit leaves every thread idle, so without this line the card would
+  // report the project as thinking or working when nothing can run at all.
+  const limitHold = projectLimitHold(project, nowMs);
+  if (limitHold)
+    return {
+      tone: "waiting",
+      status,
+      headline: "Waiting for Claude's usage limit to reset",
+      detail: limitResumesAt
+        ? `Work continues by itself once it resets at ${limitResumesAt}. Start now to try sooner.`
+        : "Work continues by itself once it resets. Start now to try sooner.",
+    };
   if (coordinatorBusy)
     return {
       tone: "active",

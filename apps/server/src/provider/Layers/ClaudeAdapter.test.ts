@@ -2357,9 +2357,112 @@ describe("ClaudeAdapterLive", () => {
 
       const payload = completedTurn(Array.from(yield* Fiber.join(runtimeEventsFiber)));
       assert.equal(payload.state, "failed");
+      // The assistant schedules its resume off the trailing wait, so the
+      // window and the countdown both have to survive into the failure. The
+      // minutes are tolerant because the clock moves between emit and result.
+      assert.match(
+        payload.errorMessage ?? "",
+        /^Claude usage limit reached\. Send the message again once the 5-hour limit resets in 2h( \d{1,2}m)?\.$/,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  // The CLI reports the same park two ways: a success-tagged api_error, and a
+  // blocking_limit terminal reason. Both have to carry the reset time, since
+  // the assistant cannot tell which one it will get.
+  it.effect("fails a blocking_limit turn with the reset time it parked on", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+
+      const nowMs = yield* Clock.currentTimeMillis;
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "five_hour",
+          resetsAt: Math.floor(nowMs / 1000) + 2 * 60 * 60,
+        },
+        session_id: "sdk-session-limit",
+        uuid: "rate-limit-rejected",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        terminal_reason: "blocking_limit",
+        errors: [],
+        session_id: "sdk-session-limit",
+        uuid: "result-blocking-limit",
+      } as unknown as SDKMessage);
+
+      const payload = completedTurn(Array.from(yield* Fiber.join(runtimeEventsFiber)));
+      assert.equal(payload.state, "failed");
+      assert.match(
+        payload.errorMessage ?? "",
+        /^Claude usage limit reached\. Send the message again once the 5-hour limit resets in 2h( \d{1,2}m)?\.$/,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("names the limit without a wait when the event carries no reset time", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", rateLimitType: "five_hour" },
+        session_id: "sdk-session-limit",
+        uuid: "rate-limit-rejected-no-reset",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        terminal_reason: "api_error",
+        errors: [],
+        session_id: "sdk-session-limit",
+        uuid: "result-limit-no-reset",
+      } as unknown as SDKMessage);
+
+      const payload = completedTurn(Array.from(yield* Fiber.join(runtimeEventsFiber)));
+      assert.equal(payload.state, "failed");
       assert.equal(
         payload.errorMessage,
-        "Claude usage limit reached. Send the message again once the limit resets.",
+        "Claude usage limit reached. Send the message again once the 5-hour limit resets.",
       );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

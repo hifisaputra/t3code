@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Stream from "effect/Stream";
 import * as Effect from "effect/Effect";
@@ -7,6 +8,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { TestClock } from "effect/testing";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
   DeveloperAssistantError,
@@ -45,6 +47,7 @@ import { ServerActivation } from "../serverActivation.ts";
 import Migration from "../persistence/Migrations/052_DeveloperAssistant.ts";
 import SetupMigration from "../persistence/Migrations/053_AssistantSetup.ts";
 import ParallelMigration from "../persistence/Migrations/055_AssistantParallelIssues.ts";
+import UsageLimitMigration from "../persistence/Migrations/056_AssistantUsageLimit.ts";
 import * as Assistant from "./DeveloperAssistant.ts";
 import { AssistantEvidence } from "./AssistantEvidence.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
@@ -415,6 +418,7 @@ function harness() {
     yield* Migration;
     yield* SetupMigration;
     yield* ParallelMigration;
+    yield* UsageLimitMigration;
     return yield* make;
   });
   /** A configured, running project; overrides change the setup it runs with. */
@@ -3027,5 +3031,146 @@ it.effect("a failed worktree e2e run goes to the team leader with nothing posted
     yield* service.deliver();
     assert.include(turnsOf(h, lead).at(-1), "failed its e2e check in the worktree");
     assert.isFalse(turnsOf(h, first.threadId).some((text) => text.includes("Merge the PR")));
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+/** A thread's turn failed the way the provider reports it. */
+const sessionError = (threadId: ThreadId, lastError: string) =>
+  ({
+    ...eventBase(threadId),
+    type: "thread.session-set",
+    payload: {
+      threadId,
+      session: {
+        threadId,
+        status: "error",
+        providerName: "test",
+        activeTurnId: null,
+        runtimeMode: "approval-required",
+        lastError,
+        updatedAt: timestamp,
+      },
+    },
+  }) satisfies OrchestrationEvent;
+const LIMIT_ERROR =
+  "Claude usage limit reached. Send the message again once the 5-hour limit resets in 2h 10m.";
+
+it.effect(
+  "a usage limit holds the project until it resets, then the stopped thread continues",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      const { service } = yield* h.setupWith({ parallelIssues: 2 });
+      // Two teams start at once; the second leader is idle when the limit hits the first.
+      const [first, second] = yield* heldTasks(service);
+      const lead = leadOf(first!);
+      yield* service.deliver();
+      assert.lengthOf(turnsOf(h, lead), 1);
+      assert.lengthOf(turnsOf(h, leadOf(second!)), 1);
+      h.finish(lead);
+      yield* service.observe(sessionError(lead, LIMIT_ERROR));
+      // The issue is not blocked and its leader is not told about a failure.
+      const held = yield* taskById(service, first!.id);
+      assert.equal(held.status, "working");
+      assert.isNull(held.error);
+      const board = yield* service.board(null);
+      assert.equal(board.projects[0]?.status, "running");
+      assert.isNull(board.projects[0]?.error);
+      // The wait is read from the message, plus a minute of slack past the rounded reset.
+      assert.equal(board.projects[0]?.limitedUntil, "1970-01-01T02:11:00.000Z");
+      // Nothing reaches the threads meanwhile: not the resume, and no new team.
+      yield* service.deliver();
+      assert.lengthOf(turnsOf(h, lead), 1);
+      yield* TestClock.adjust(Duration.hours(1));
+      yield* service.scan();
+      assert.lengthOf(turnsOf(h, lead), 1);
+      assert.equal(
+        (yield* service.board(null)).projects[0]?.limitedUntil,
+        "1970-01-01T02:11:00.000Z",
+      );
+      // Once the limit resets the scan lifts the hold and the leader is told to continue.
+      yield* TestClock.adjust(Duration.hours(2));
+      yield* service.scan();
+      assert.isNull((yield* service.board(null)).projects[0]?.limitedUntil);
+      assert.lengthOf(turnsOf(h, lead), 2);
+      assert.include(turnsOf(h, lead).at(-1), "usage limit stopped your previous turn");
+      // The idle leader was not sent anything: only the stopped thread continues.
+      assert.lengthOf(turnsOf(h, leadOf(second!)), 1);
+    }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the assistant's own turn stopped by a usage limit keeps the loop running", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, caller), 1);
+    h.finish(caller);
+    yield* service.observe(sessionError(caller, LIMIT_ERROR));
+    const board = yield* service.board(null);
+    assert.equal(board.projects[0]?.status, "running");
+    assert.isNull(board.projects[0]?.error);
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, caller), 1);
+    yield* TestClock.adjust(Duration.hours(3));
+    yield* service.scan();
+    const resumed = turnsOf(h, caller).at(-1);
+    assert.lengthOf(turnsOf(h, caller), 2);
+    assert.include(resumed, "usage limit stopped your previous turn");
+    // The wake it was answering is repeated, so nothing it was told is lost.
+    assert.include(resumed, "The person started the issue loop");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a limit failure with no reset time is tried again after a while", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    yield* service.deliver();
+    h.finish(leadOf(team));
+    yield* service.observe(
+      sessionError(leadOf(team), "Claude stopped: a usage limit blocked the request."),
+    );
+    assert.equal(
+      (yield* service.board(null)).projects[0]?.limitedUntil,
+      "1970-01-01T00:21:00.000Z",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("starting the assistant lifts a usage-limit hold and sends what waited", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    yield* service.deliver();
+    h.finish(lead);
+    yield* service.observe(sessionError(lead, LIMIT_ERROR));
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, lead), 1);
+    yield* service.control({ projectId: config.projectId, action: "start" });
+    assert.isNull((yield* service.board(null)).projects[0]?.limitedUntil);
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, lead), 2);
+    assert.include(turnsOf(h, lead).at(-1), "usage limit stopped your previous turn");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a worker failing for any other reason still blocks its issue", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    yield* service.deliver();
+    h.finish(first.threadId);
+    yield* service.observe(
+      sessionError(first.threadId, "Claude gave up after repeated API errors."),
+    );
+    const blocked = yield* taskById(service, first.id);
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.error, "Claude gave up after repeated API errors.");
+    assert.isNull((yield* service.board(null)).projects[0]?.limitedUntil);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );

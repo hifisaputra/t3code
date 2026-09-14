@@ -162,6 +162,20 @@ interface ClaudeTurnState {
   nextSyntheticAssistantBlockIndex: number;
   authenticationFailureMessage: string | undefined;
   rejectedRateLimitTypes: Set<string>;
+  /**
+   * The most recent window that blocked this turn, kept so the failure message
+   * can say when it reopens: the assistant schedules its own resume off that
+   * wait, and the turn's result carries no reset time of its own. The latest
+   * block wins because a turn parked on several windows reopens on the one it
+   * was last refused by.
+   */
+  rejectedRateLimit: ClaudeRejectedRateLimit | undefined;
+}
+
+/** A blocked usage window as the turn remembers it, ready to be rendered later. */
+interface ClaudeRejectedRateLimit {
+  readonly label: string | undefined;
+  readonly resetsAtMs: number | undefined;
 }
 
 interface AssistantTextBlockState {
@@ -441,6 +455,7 @@ function resultErrorsText(result: SDKResultMessage): string {
 function terminalResultError(
   reason: SDKResultMessage["terminal_reason"],
   failureHint?: string,
+  usageLimitHint?: string,
 ): string | undefined {
   switch (reason) {
     case "api_error":
@@ -456,7 +471,10 @@ function terminalResultError(
     case "turn_setup_failed":
       return "Claude could not start the turn.";
     case "blocking_limit":
-      return "Claude stopped: a usage limit blocked the request.";
+      // The usage hint is passed separately from failureHint so an expired
+      // login, which outranks the limit for api_error, cannot be mistaken for
+      // the reset time the assistant schedules against.
+      return usageLimitHint ?? "Claude stopped: a usage limit blocked the request.";
     case "rapid_refill_breaker":
       return "Claude stopped: the context refilled too quickly after compaction.";
     case "prompt_too_long":
@@ -513,27 +531,57 @@ const CLAUDE_USAGE_LIMIT_MAX_WAIT_MS = 30 * 24 * 60 * 60 * 1000;
  * that may sit in another timezone and locale, and that carry their own
  * timestamp preference. A wait reads the same everywhere.
  */
+function claudeRejectedRateLimit(
+  info: SDKRateLimitInfo,
+  names: ClaudeScopedLimitNames,
+): ClaudeRejectedRateLimit {
+  return {
+    label:
+      info.rateLimitType === "seven_day_overage_included" && names.overageIncluded
+        ? `7-day ${names.overageIncluded}`
+        : info.rateLimitType
+          ? CLAUDE_USAGE_LIMIT_WINDOWS[info.rateLimitType]
+          : undefined,
+    resetsAtMs: info.resetsAt === undefined ? undefined : info.resetsAt * 1000,
+  };
+}
+
+/**
+ * The clause both usage-limit lines end on, so the parked-turn warning and the
+ * turn failure always name the same window and the same remaining wait.
+ */
+function claudeUsageLimitResetClause(limit: ClaudeRejectedRateLimit, nowMs: number): string {
+  const waitMs =
+    limit.resetsAtMs === undefined || !Number.isFinite(nowMs)
+      ? undefined
+      : limit.resetsAtMs - nowMs;
+  const wait =
+    waitMs !== undefined && waitMs > 0 && waitMs <= CLAUDE_USAGE_LIMIT_MAX_WAIT_MS
+      ? formatClaudeUsageLimitWait(waitMs)
+      : undefined;
+  return `${limit.label ? `${limit.label} ` : ""}limit resets${wait ? ` in ${wait}` : ""}`;
+}
+
 function describeClaudeUsageLimit(
   info: SDKRateLimitInfo,
   nowMs: number,
   names: ClaudeScopedLimitNames,
 ): string {
-  const label =
-    info.rateLimitType === "seven_day_overage_included" && names.overageIncluded
-      ? `7-day ${names.overageIncluded}`
-      : info.rateLimitType
-        ? CLAUDE_USAGE_LIMIT_WINDOWS[info.rateLimitType]
-        : undefined;
-  const resetsAtMs = info.resetsAt === undefined ? undefined : info.resetsAt * 1000;
-  const waitMs =
-    resetsAtMs === undefined || !Number.isFinite(nowMs) ? undefined : resetsAtMs - nowMs;
-  const wait =
-    waitMs !== undefined && waitMs > 0 && waitMs <= CLAUDE_USAGE_LIMIT_MAX_WAIT_MS
-      ? formatClaudeUsageLimitWait(waitMs)
-      : undefined;
-  return `Claude usage limit reached. This turn is paused until the ${
-    label ? `${label} ` : ""
-  }limit resets${wait ? ` in ${wait}` : ""}.`;
+  return `Claude usage limit reached. This turn is paused until the ${claudeUsageLimitResetClause(
+    claudeRejectedRateLimit(info, names),
+    nowMs,
+  )}.`;
+}
+
+/**
+ * The failure a usage-limited turn ends on. The developer assistant reads the
+ * trailing wait to schedule its own retry, so the clause stays verbatim.
+ */
+function claudeUsageLimitFailureHint(limit: ClaudeRejectedRateLimit, nowMs: number): string {
+  return `Claude usage limit reached. Send the message again once the ${claudeUsageLimitResetClause(
+    limit,
+    nowMs,
+  )}.`;
 }
 
 function formatClaudeUsageLimitWait(waitMs: number): string {
@@ -1561,6 +1609,7 @@ function isOverloadedResult(result: SDKResultMessage): boolean {
 function resultOutcome(
   result: SDKResultMessage,
   failureHint?: string,
+  usageLimitHint?: string,
 ): {
   status: ProviderRuntimeTurnStatus;
   errorMessage: string | undefined;
@@ -1570,7 +1619,7 @@ function resultOutcome(
   const successTaggedFailure = result.subtype === "success" && result.is_error === true;
   const structuredError = isOverloadedResult(result)
     ? "Claude API is overloaded (529). Try again shortly."
-    : (terminalResultError(result.terminal_reason, failureHint) ??
+    : (terminalResultError(result.terminal_reason, failureHint, usageLimitHint) ??
       (successTaggedFailure ? failureHint : undefined));
   // CLI diagnostic entries must not become the error banner. Success results
   // carry no typed error list, but a success-tagged failure may still list one.
@@ -3169,6 +3218,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         nextSyntheticAssistantBlockIndex: -1,
         authenticationFailureMessage: undefined,
         rejectedRateLimitTypes: new Set(),
+        rejectedRateLimit: undefined,
       };
       context.session = {
         ...context.session,
@@ -3262,12 +3312,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const turn = context.turnState;
-    const failureHint =
-      turn?.authenticationFailureMessage ??
-      (turn && turn.rejectedRateLimitTypes.size > 0
-        ? "Claude usage limit reached. Send the message again once the limit resets."
-        : undefined);
-    const { status, errorMessage } = resultOutcome(message, failureHint);
+    // Rendered here rather than when the window was refused: the wait has to
+    // count down from the moment the turn actually fails, which can be well
+    // after the block arrived.
+    const usageLimitHint =
+      turn && turn.rejectedRateLimitTypes.size > 0
+        ? claudeUsageLimitFailureHint(
+            turn.rejectedRateLimit ?? { label: undefined, resetsAtMs: undefined },
+            Date.parse(yield* nowIso),
+          )
+        : undefined;
+    const failureHint = turn?.authenticationFailureMessage ?? usageLimitHint;
+    const { status, errorMessage } = resultOutcome(message, failureHint, usageLimitHint);
 
     if (status === "failed") {
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
@@ -3882,13 +3938,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Current blocking evidence is independent of whether its warning has
         // already been shown. A recovery can omit or advance the reset time;
         // its window type remains stable without clearing another window.
-        if (blocked) context.turnState.rejectedRateLimitTypes.add(limitType);
-        else if (
+        if (blocked) {
+          context.turnState.rejectedRateLimitTypes.add(limitType);
+          context.turnState.rejectedRateLimit = claudeRejectedRateLimit(rateLimitInfo, names);
+        } else if (
           rateLimitInfo.status === "allowed" ||
           rateLimitInfo.status === "allowed_warning" ||
           overageAllowed
         ) {
           context.turnState.rejectedRateLimitTypes.delete(limitType);
+          // Only once nothing blocks the turn any more: a turn parked on two
+          // windows still has to name the one that is left.
+          if (context.turnState.rejectedRateLimitTypes.size === 0) {
+            context.turnState.rejectedRateLimit = undefined;
+          }
         }
       }
       if (blocked && context.turnState !== undefined) {
@@ -4955,6 +5018,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         nextSyntheticAssistantBlockIndex: -1,
         authenticationFailureMessage: undefined,
         rejectedRateLimitTypes: new Set(),
+        rejectedRateLimit: undefined,
       };
 
       const updatedAt = yield* nowIso;

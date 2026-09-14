@@ -26,10 +26,12 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import { usePrimarySettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { developerAssistant } from "~/state/developerAssistant";
 import { useThreadShell } from "~/state/entities";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { formatUpcomingTimestamp } from "~/timestampFormat";
 
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
@@ -40,7 +42,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AssistantDispatchDialog } from "./AssistantDispatchDialog";
-import { describeProjectActivity } from "./assistantBoard.logic";
+import { describeProjectActivity, projectLimitHold } from "./assistantBoard.logic";
 import {
   confirmDestructive,
   modelLabel,
@@ -233,7 +235,14 @@ export function AssistantProjectCard({
   const { pending, run } = useAssistantAction();
   const coordinator = useThreadShell({ environmentId, threadId: project.threadId });
   const coordinatorBusy = threadIsBusy(coordinator);
-  const activity = describeProjectActivity({ project, activeTasks, coordinatorBusy });
+  const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
+  const limitHold = projectLimitHold(project);
+  const activity = describeProjectActivity({
+    project,
+    activeTasks,
+    coordinatorBusy,
+    limitResumesAt: limitHold ? formatUpcomingTimestamp(limitHold, timestampFormat) : null,
+  });
   const [dispatching, setDispatching] = useState(false);
   const { config } = project;
   const running = project.status === "running";

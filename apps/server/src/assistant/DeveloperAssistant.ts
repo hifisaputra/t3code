@@ -95,6 +95,7 @@ type ProjectRow = {
   wake_reason: string;
   issue_fingerprint: string | null;
   external_waits: number;
+  limited_until: string | null;
 };
 type TaskRow = { id: string; project_id: string; thread_id: string; data: string };
 const decodeConfig = Schema.decodeUnknownEffect(Schema.fromJsonString(AssistantProjectConfig));
@@ -148,6 +149,21 @@ const ROLE_NAMES = {
 } as const;
 /** A team leader that declines this many issues in a row pauses the loop for the person. */
 const DECLINE_STREAK_LIMIT = 3;
+/**
+ * The Claude adapter fails a turn the account's usage limit stopped with
+ * "Claude usage limit reached. Send the message again once the 5-hour limit
+ * resets in 2h 10m." The wait is read from that clause. Without one the limit
+ * is tried again after a while, which costs one rejected request per thread.
+ */
+const USAGE_LIMIT_RETRY_MS = 20 * 60_000;
+/** The reset time is rounded up to the minute; the slack keeps the first try after it. */
+const USAGE_LIMIT_SLACK_MS = 60_000;
+const usageLimitWaitMs = (error: string | null | undefined): number | null => {
+  if (!error || !/usage limit/i.test(error)) return null;
+  const match = /limit resets in (?:(\d+)h)?\s*(?:(\d+)m)?/.exec(error);
+  const minutes = match ? Number(match[1] ?? 0) * 60 + Number(match[2] ?? 0) : 0;
+  return (minutes > 0 ? minutes * 60_000 : USAGE_LIMIT_RETRY_MS) + USAGE_LIMIT_SLACK_MS;
+};
 /** The thread that decides for an issue: its team leader, or the assistant for earlier work. */
 const leadStage = (t: AssistantTask) => (t.leader ? ("lead" as const) : ("coordinator" as const));
 const withLead = (stage: AssistantTask["stage"]) => stage === "lead" || stage === "coordinator";
@@ -279,6 +295,11 @@ export const make = Effect.gen(function* () {
     const rows =
       yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE project_id = ${projectId} AND status IN ('preparing','working','waiting','blocked') ORDER BY rowid`;
     return yield* Effect.forEach(rows, (row) => decodeTask(row.data));
+  });
+  /** A usage limit is in force for the project: nothing is sent to its threads until it resets. */
+  const limited = Effect.fn("Assistant.limited")(function* (p: Pick<ProjectRow, "limited_until">) {
+    if (p.limited_until === null) return false;
+    return Date.parse(p.limited_until) > (yield* Clock.currentTimeMillis);
   });
   // The threads share one worktree, so only one of them runs at a time. A
   // thread asking about the others leaves itself out: its own turn is running.
@@ -489,6 +510,7 @@ export const make = Effect.gen(function* () {
             threadId: ThreadId.make(p.thread_id),
             status: p.status,
             error: p.error,
+            limitedUntil: p.limited_until,
           })),
         ),
       ),
@@ -733,7 +755,7 @@ export const make = Effect.gen(function* () {
         // Under the board lock: interrupting reads the board and then writes to
         // every held issue, and a turn ending meanwhile writes to the same rows.
         yield* Effect.gen(function* () {
-          yield* sql`UPDATE assistant_projects SET status = 'stopped' WHERE project_id = ${input.projectId}`;
+          yield* sql`UPDATE assistant_projects SET status = 'stopped', limited_until = NULL WHERE project_id = ${input.projectId}`;
           yield* engine
             .dispatch({
               type: "thread.turn.interrupt",
@@ -823,7 +845,9 @@ export const make = Effect.gen(function* () {
           });
         const status =
           action === "pause" || (action === "wake" && p.status === "paused") ? "paused" : "running";
-        yield* sql`UPDATE assistant_projects SET status = ${status}, error = NULL, external_waits = 0 WHERE project_id = ${input.projectId}`;
+        // The person may have switched accounts or seen the limit reset early,
+        // so starting lifts a usage-limit hold and sends what was waiting.
+        yield* sql`UPDATE assistant_projects SET status = ${status}, error = NULL, external_waits = 0, limited_until = NULL WHERE project_id = ${input.projectId}`;
         const held = yield* heldTasks(input.projectId);
         if (action === "start") {
           declineStreak.delete(input.projectId);
@@ -1138,6 +1162,8 @@ export const make = Effect.gen(function* () {
   const advance = Effect.fn("Assistant.advance")(function* (projectId: string) {
     const p = yield* project(projectId);
     if (p.status === "stopped") return;
+    // A new team's first turn would only fail the same way until the limit resets.
+    if (yield* limited(p)) return;
     const limit = assistantParallelIssues(p.config);
     let held = (yield* heldTasks(projectId)).length;
     // Issues this pass already gave a team, so a second look does not pick them again.
@@ -2156,6 +2182,7 @@ export const make = Effect.gen(function* () {
         yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE status != 'stopped'`;
       for (const row of rows) {
         const p = yield* project(row.project_id);
+        if (yield* limited(p)) continue;
         const coordinator = yield* snapshots.getThreadShellById(ThreadId.make(p.thread_id));
         const questions =
           yield* sql`SELECT id FROM assistant_decisions WHERE thread_id = ${p.thread_id} AND resolved = 0`;
@@ -2190,10 +2217,13 @@ export const make = Effect.gen(function* () {
         const threadId = ThreadId.make(m.thread_id);
         const current = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
         if (Option.isNone(current)) continue;
+        const p = yield* project(m.project_id);
+        // A turn sent while the usage limit holds would fail the same way; the
+        // message keeps until the limit resets.
+        if (p.status === "stopped" || (yield* limited(p))) continue;
         // Nothing else delivers this message, so a thread the person archived
         // with work still queued for it comes back rather than wedging its issue.
         if (current.value.archivedAt !== null) {
-          if ((yield* project(m.project_id)).status === "stopped") continue;
           const unarchived = yield* engine
             .dispatch({ type: "thread.unarchive", commandId: CommandId.make(newId()), threadId })
             .pipe(
@@ -2217,8 +2247,6 @@ export const make = Effect.gen(function* () {
           current.value.hasPendingUserInput
         )
           continue;
-        const p = yield* project(m.project_id);
-        if (p.status === "stopped") continue;
         yield* engine.dispatch({
           type: "thread.turn.start",
           commandId: CommandId.make(m.id),
@@ -2330,6 +2358,49 @@ export const make = Effect.gen(function* () {
       );
   });
 
+  /**
+   * The provider's usage limit stops every turn on the account at once, and it
+   * lifts by itself. The project waits for the reset instead of blocking the
+   * issue or stopping the loop: nothing is sent to its threads until then, and
+   * the thread that was stopped is told to continue. Nothing is held for a
+   * stopped project or a thread whose issue is no longer active.
+   */
+  const holdForUsageLimit = Effect.fn("Assistant.holdForUsageLimit")(function* (
+    projectId: string,
+    threadId: ThreadId,
+    t: AssistantTask | null,
+    waitMs: number,
+  ) {
+    const p = yield* project(projectId);
+    if (p.status === "stopped") return false;
+    const coordinator = p.thread_id === threadId;
+    if (!coordinator && !(t && assistantTaskHoldsProject(t.status))) return false;
+    const until = DateTime.formatIso(
+      DateTime.makeUnsafe((yield* Clock.currentTimeMillis) + waitMs),
+    );
+    // Several threads stop at once; the latest reset time is the one to wait for.
+    if (p.limited_until === null || p.limited_until < until)
+      yield* sql`UPDATE assistant_projects SET limited_until = ${until} WHERE project_id = ${projectId}`;
+    if (coordinator)
+      yield* wake(
+        projectId,
+        `A Claude usage limit stopped your previous turn before it finished. The limit has reset: continue where you left off. If that turn was answering a wake from T3, its reason was: ${p.wake_reason.slice(0, 4000)}`,
+      );
+    else
+      yield* queueMessage(
+        projectId,
+        threadId,
+        `${threadId}:limit:${until}`,
+        "A Claude usage limit stopped your previous turn before it finished. The limit has reset: continue where you left off, and hand off as usual when you are done.",
+      );
+    yield* Effect.logInfo("Developer assistant is waiting for a usage limit to reset", {
+      projectId,
+      threadId,
+      until,
+    });
+    return true;
+  });
+
   const observe = Effect.fn("Assistant.observe")(function* (event: OrchestrationEvent) {
     if (!("threadId" in event.payload)) return;
     const threadId = event.payload.threadId;
@@ -2419,7 +2490,12 @@ export const make = Effect.gen(function* () {
         status === "error" ||
         status === "interrupted" ||
         status === "stopped";
-      if (
+      const limitWait =
+        status === "error" ? usageLimitWaitMs(event.payload.session.lastError) : null;
+      if (limitWait !== null && (yield* holdForUsageLimit(projectId, threadId, t, limitWait))) {
+        // The thread continues once the limit resets; its issue is not blocked
+        // and the loop is not stopped.
+      } else if (
         t &&
         status === "stopped" &&
         (releasedAt.delete(threadId) || (yield* releasedWhileIdle(threadId)))
@@ -2565,6 +2641,11 @@ export const make = Effect.gen(function* () {
   });
 
   const scan = Effect.fn("Assistant.scan")(function* () {
+    // A usage limit that has reset no longer holds the project; the board says
+    // so, and the deliveries below send what waited for it.
+    const released =
+      yield* sql`UPDATE assistant_projects SET limited_until = NULL WHERE limited_until IS NOT NULL AND limited_until <= ${yield* now} RETURNING project_id`;
+    if (released.length) yield* changed;
     // Decisions made in Linear first, so an issue sent back goes to the next team.
     yield* syncLinearReviews();
     const rows = yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE status != 'stopped'`;

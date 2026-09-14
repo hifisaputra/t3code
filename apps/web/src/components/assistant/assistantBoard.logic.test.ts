@@ -18,6 +18,7 @@ import {
   historyTasks,
   previewLine,
   projectFailure,
+  projectLimitHold,
   projectWaitingReason,
   taskPipeline,
 } from "./assistantBoard.logic";
@@ -226,6 +227,78 @@ describe("project status text", () => {
       describeProjectActivity({ project: project(), activeTasks: [active], coordinatorBusy: false })
         .headline,
     ).toBe(`Working on ${active.issue.identifier}`);
+  });
+
+  it("says a usage limit holds the project, and names when it resets", () => {
+    const nowMs = Date.parse("2026-09-14T13:00:00.000Z");
+    const limited = project({ limitedUntil: "2026-09-14T15:00:00.000Z" });
+    expect(projectLimitHold(limited, nowMs)).toBe("2026-09-14T15:00:00.000Z");
+    // The threads are idle because of the limit, so the hold outranks both the
+    // assistant's own turn and the issues its teams still hold.
+    expect(
+      describeProjectActivity({
+        project: limited,
+        activeTasks: [task()],
+        coordinatorBusy: true,
+        limitResumesAt: "3:00 PM",
+        nowMs,
+      }),
+    ).toEqual({
+      tone: "waiting",
+      status: "Running",
+      headline: "Waiting for Claude's usage limit to reset",
+      detail: "Work continues by itself once it resets at 3:00 PM. Start now to try sooner.",
+    });
+    // A paused loop keeps its own pill while it waits out the same limit.
+    expect(
+      describeProjectActivity({
+        project: project({ status: "paused", limitedUntil: "2026-09-14T15:00:00.000Z" }),
+        activeTasks: [],
+        coordinatorBusy: false,
+        nowMs,
+      }),
+    ).toMatchObject({
+      tone: "waiting",
+      status: "Paused",
+      detail: "Work continues by itself once it resets. Start now to try sooner.",
+    });
+  });
+
+  it("ignores a usage limit that has passed, or one on a stopped project", () => {
+    const nowMs = Date.parse("2026-09-14T13:00:00.000Z");
+    // The server leaves the stamp in place once it has told the threads to continue.
+    const past = project({ limitedUntil: "2026-09-14T12:00:00.000Z" });
+    expect(projectLimitHold(past, nowMs)).toBeNull();
+    expect(
+      describeProjectActivity({ project: past, activeTasks: [], coordinatorBusy: false, nowMs })
+        .headline,
+    ).toBe("Watching for issues");
+    const stopped = project({ status: "stopped", limitedUntil: "2026-09-14T15:00:00.000Z" });
+    expect(projectLimitHold(stopped, nowMs)).toBeNull();
+    expect(
+      describeProjectActivity({ project: stopped, activeTasks: [], coordinatorBusy: false, nowMs }),
+    ).toMatchObject({ tone: "paused", status: "Stopped", headline: "Stopped" });
+  });
+
+  it("shows a failure ahead of a usage limit", () => {
+    const nowMs = Date.parse("2026-09-14T13:00:00.000Z");
+    const broken = project({
+      error: "Linear rejected the API key",
+      limitedUntil: "2026-09-14T15:00:00.000Z",
+    });
+    expect(
+      describeProjectActivity({
+        project: broken,
+        activeTasks: [],
+        coordinatorBusy: false,
+        limitResumesAt: "3:00 PM",
+        nowMs,
+      }),
+    ).toMatchObject({
+      tone: "attention",
+      headline: "Stuck on a problem",
+      detail: "Linear rejected the API key",
+    });
   });
 });
 

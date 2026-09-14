@@ -344,6 +344,12 @@ export const AssistantProject = Schema.Struct({
   threadId: ThreadId,
   status: AssistantProjectStatus,
   error: Schema.NullOr(Schema.String),
+  /**
+   * The provider's usage limit stopped one of the project's threads. Until this
+   * time nothing is sent to its threads and no team starts; then the stopped
+   * threads are told to continue. Absent or null when no limit is in force.
+   */
+  limitedUntil: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
 });
 export type AssistantProject = typeof AssistantProject.Type;
 
