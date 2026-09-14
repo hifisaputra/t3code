@@ -1,4 +1,5 @@
 import {
+  assistantParallelIssues,
   assistantPicksIssues,
   type AssistantProject,
   type AssistantProjectConfig,
@@ -35,6 +36,7 @@ import { Checkbox } from "../ui/checkbox";
 import { Label } from "../ui/label";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AssistantDispatchDialog } from "./AssistantDispatchDialog";
@@ -111,10 +113,13 @@ function StartOption({
   );
 }
 
+const PARALLEL_CHOICES = [1, 2, 3, 4, 5, 6];
+
 /**
  * Start asks how the loop should run before it runs: whether it picks issues
- * from Linear itself, and whose issues it may take. Both are saved to the
- * project, so the boxes open on what it is set to now.
+ * from Linear itself, whose issues it may take, and how many it works at once.
+ * All three are saved to the project, so the popover opens on what it is set
+ * to now.
  */
 function StartButton({
   title,
@@ -130,6 +135,7 @@ function StartButton({
   const [open, setOpen] = useState(false);
   const [autoPick, setAutoPick] = useState(true);
   const [anyAssignee, setAnyAssignee] = useState(false);
+  const [parallelIssues, setParallelIssues] = useState(1);
   return (
     <Popover
       open={open}
@@ -137,6 +143,7 @@ function StartButton({
         if (next) {
           setAutoPick(assistantPicksIssues(config));
           setAnyAssignee(!config.assignedToMe);
+          setParallelIssues(assistantParallelIssues(config));
         }
         setOpen(next);
       }}
@@ -161,13 +168,37 @@ function StartButton({
             disabled={!autoPick}
             onCheckedChange={setAnyAssignee}
           />
+          <div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="min-w-0 text-sm">Issues at once</span>
+              <Select
+                value={String(parallelIssues)}
+                onValueChange={(next) => setParallelIssues(Number(next))}
+              >
+                <SelectTrigger size="sm" className="w-16 min-w-0" aria-label="Issues at once">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false} matchTriggerWidth={false}>
+                  {PARALLEL_CHOICES.map((count) => (
+                    <SelectItem key={count} value={String(count)}>
+                      {count}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
+            <p className="mt-1 text-muted-foreground text-xs">
+              Each issue gets its own team and worktree. Your project instructions must keep their
+              ports and databases apart.
+            </p>
+          </div>
         </div>
         <Button
           size="sm"
           className="mt-4 w-full"
           disabled={pending !== null}
           onClick={async () => {
-            await onStart({ autoPick, assignedToMe: !anyAssignee });
+            await onStart({ autoPick, assignedToMe: !anyAssignee, parallelIssues });
             setOpen(false);
           }}
         >
@@ -183,7 +214,7 @@ export function AssistantProjectCard({
   environmentId,
   project,
   title,
-  activeTask,
+  activeTasks,
   linearProjectName,
   providers,
   onOpenThread,
@@ -192,7 +223,7 @@ export function AssistantProjectCard({
   environmentId: EnvironmentId;
   project: AssistantProject;
   title: string;
-  activeTask: AssistantTask | null;
+  activeTasks: ReadonlyArray<AssistantTask>;
   linearProjectName: string | null;
   providers: ReadonlyArray<ServerProvider>;
   onOpenThread: (threadId: ThreadId) => void;
@@ -202,7 +233,7 @@ export function AssistantProjectCard({
   const { pending, run } = useAssistantAction();
   const coordinator = useThreadShell({ environmentId, threadId: project.threadId });
   const coordinatorBusy = threadIsBusy(coordinator);
-  const activity = describeProjectActivity({ project, activeTask, coordinatorBusy });
+  const activity = describeProjectActivity({ project, activeTasks, coordinatorBusy });
   const [dispatching, setDispatching] = useState(false);
   const { config } = project;
   const running = project.status === "running";
@@ -232,6 +263,7 @@ export function AssistantProjectCard({
   // An issue in progress may stay; the server keeps its base branch and scope.
   const canEdit = !running;
   const stagingHost = urlHost(config.stagingUrl);
+  const parallelIssues = assistantParallelIssues(config);
 
   return (
     <CardShell tone={activity.tone}>
@@ -308,6 +340,9 @@ export function AssistantProjectCard({
             : ""}
         </Fact>
         <Fact label="Permissions">{runtimeModeLabel(config.runtimeMode)}</Fact>
+        {parallelIssues > 1 ? (
+          <Fact label="At once">{parallelIssues} issues, each in its own worktree</Fact>
+        ) : null}
       </dl>
 
       <div className="flex flex-wrap items-center gap-1.5">
@@ -327,9 +362,12 @@ export function AssistantProjectCard({
               Pause
             </TooltipTrigger>
             <TooltipPopup className="max-w-64">
-              {assistantPicksIssues(config)
-                ? "Stop taking issues from Linear. The team at work finishes its issue, and issues you dispatch still run."
-                : "Stop the loop. The team at work finishes its issue, and issues you dispatch still run."}
+              {(assistantPicksIssues(config)
+                ? "Stop taking issues from Linear. "
+                : "Stop the loop. ") +
+                (parallelIssues > 1
+                  ? "The teams at work finish their issues, and issues you dispatch still run."
+                  : "The team at work finishes its issue, and issues you dispatch still run.")}
             </TooltipPopup>
           </Tooltip>
         ) : (
@@ -394,10 +432,12 @@ export function AssistantProjectCard({
             <MenuSeparator />
             <MenuItem
               variant="destructive"
-              disabled={pending !== null || (stopped && activeTask === null)}
+              disabled={pending !== null || (stopped && activeTasks.length === 0)}
               onClick={async () => {
                 const confirmed = await confirmDestructive(
-                  `Interrupt ${title}?\nThis stops the loop and the team mid-turn and closes its terminals. The issue and its branch stay as they are: start again or resume the teams later.`,
+                  parallelIssues > 1
+                    ? `Interrupt ${title}?\nThis stops the loop and every team mid-turn and closes their terminals. The issues and their branches stay as they are: start again or resume the teams later.`
+                    : `Interrupt ${title}?\nThis stops the loop and the team mid-turn and closes its terminals. The issue and its branch stay as they are: start again or resume the teams later.`,
                 );
                 if (confirmed) void act("interrupt");
               }}
@@ -412,7 +452,7 @@ export function AssistantProjectCard({
         <AssistantDispatchDialog
           environmentId={environmentId}
           project={project}
-          activeTask={activeTask}
+          activeTasks={activeTasks}
           title={title}
           open
           onOpenChange={setDispatching}

@@ -10,6 +10,7 @@ import {
   issueFingerprint,
   linearFailureDetail,
   linearFeedback,
+  mergedComment,
 } from "./linearUpdates.ts";
 
 const deployment = {
@@ -44,7 +45,7 @@ describe("e2eComment", () => {
       [
         "**✅ Verified on staging: ready to accept**",
         "**What changed**\n\nBlog posts show their body.",
-        "**Staging check**\n\n- Blog post shows its body: passed",
+        "**E2E check on staging**\n\n- Blog post shows its body: passed",
         "*The post*\n\n![The post](https://uploads.linear.app/post.png)",
         "---",
         "To accept, move this issue to Done. To ask for changes, move it back to an earlier state and comment what should change.",
@@ -56,6 +57,73 @@ describe("e2eComment", () => {
         ].join("\n"),
       ].join("\n\n"),
     );
+  });
+
+  it("says a worktree run was verified in the development environment and names its commit", () => {
+    const body = e2eComment({
+      e2e: {
+        verdict: "partial",
+        report: "- Blog post shows its body: passed",
+        humanChecks: ["Open the reminder email in the test inbox."],
+        screenshots: [],
+        at: "2026-09-13T03:00:00.000Z",
+        environment: "worktree",
+        commit: deployment.revision,
+      },
+      merge: { commit: deployment.revision, summary: "Blog posts show their body.", at: "" },
+      deployment,
+      pullRequest: null,
+      acceptedState: "Done",
+    });
+    expect(
+      body.startsWith(
+        "**👀 Verified in the development environment and deployed to staging, with checks for a person**",
+      ),
+    ).toBe(true);
+    expect(body).toContain("**E2E check in the worktree (commit `641c0f8`)**");
+    expect(body).not.toContain("**E2E check on staging**");
+  });
+});
+
+describe("mergedComment", () => {
+  const merge = { commit: deployment.revision, summary: "Blog posts show their body.", at: "" };
+  const review = {
+    verdict: "approved" as const,
+    findings: "",
+    summary: "Checked the rendering path.",
+    commit: deployment.revision,
+    at: "2026-09-13T02:00:00.000Z",
+  };
+  const input = { merge, review, pullRequest: null, baseBranch: "main" };
+
+  it("points at the e2e check on staging when the run happens there", () => {
+    const body = mergedComment(input);
+    expect(body.startsWith("**Code review passed · merged into `main`**")).toBe(true);
+    expect(body.endsWith("Next: staging deploy, then an e2e check on staging.")).toBe(true);
+  });
+
+  it("says the e2e check already passed when it ran in the worktree", () => {
+    const body = mergedComment({
+      ...input,
+      e2e: {
+        verdict: "partial",
+        report: "- Blog post shows its body: passed",
+        humanChecks: ["Open the reminder email in the test inbox."],
+        screenshots: [],
+        at: "2026-09-13T03:00:00.000Z",
+        environment: "worktree",
+        commit: deployment.revision,
+      },
+    });
+    expect(
+      body.startsWith(
+        "**Code review passed · e2e passed in the development environment · merged into `main`**",
+      ),
+    ).toBe(true);
+    expect(body).toContain("left some checks for a person");
+    expect(
+      body.endsWith("Next: staging deploy. The issue moves to review once it is verified there."),
+    ).toBe(true);
   });
 });
 

@@ -1,8 +1,9 @@
-import type {
-  AssistantProjectConfig,
-  AssistantSetup,
-  EnvironmentId,
-  ThreadId,
+import {
+  assistantE2eEnvironment,
+  type AssistantProjectConfig,
+  type AssistantSetup,
+  type EnvironmentId,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -167,6 +168,11 @@ function SetupProposal({
           <Fact label="Coding worker">{modelLabel(providers, proposal.workerModelSelection)}</Fact>
           <Fact label="Permissions">{runtimeModeLabel(proposal.runtimeMode)}</Fact>
           <Fact label="Rounds per issue">{proposal.maxWorkerTurns}, then it asks you</Fact>
+          <Fact label="E2E check">
+            {assistantE2eEnvironment(proposal) === "worktree"
+              ? "In the team's worktree, before the merge"
+              : "On staging, after the merge"}
+          </Fact>
           <Fact label="Linear status">
             <span className="inline-flex flex-wrap items-center gap-1">
               Staging verified

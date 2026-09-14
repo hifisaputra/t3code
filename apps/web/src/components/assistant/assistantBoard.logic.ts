@@ -1,5 +1,6 @@
 import {
   assistantPicksIssues,
+  assistantTaskE2eEnvironment,
   assistantTaskHoldsProject,
   type AssistantBoard,
   type AssistantDecision,
@@ -41,12 +42,39 @@ export interface ProjectActivity {
   readonly detail: string | null;
 }
 
+/** The issues themselves when there are few, a count when there are many. */
+function namedIssues(tasks: ReadonlyArray<AssistantTask>): string {
+  const [first, second] = tasks;
+  if (tasks.length === 1 && first) return first.issue.identifier;
+  if (tasks.length === 2 && first && second)
+    return `${first.issue.identifier} and ${second.issue.identifier}`;
+  return `${tasks.length} issues`;
+}
+
+/** "SPI-1, SPI-2 and SPI-3", for a line that has room to name them all. */
+function identifierList(tasks: ReadonlyArray<AssistantTask>): string {
+  const ids = tasks.map((t) => t.issue.identifier);
+  const last = ids.at(-1);
+  return ids.length > 1 && last ? `${ids.slice(0, -1).join(", ")} and ${last}` : ids.join("");
+}
+
+/** One title reads best on its own; several need their identifiers to tell apart. */
+function issuesDetail(tasks: ReadonlyArray<AssistantTask>): string | null {
+  const [first] = tasks;
+  if (tasks.length === 0) return null;
+  if (tasks.length === 1 && first) return first.issue.title;
+  if (tasks.length === 2) return tasks.map((t) => t.issue.title).join(" · ");
+  return identifierList(tasks);
+}
+
 export function describeProjectActivity(input: {
   project: AssistantProject;
-  activeTask: AssistantTask | null;
+  /** Every issue the project holds right now, in the order the board lists them. */
+  activeTasks: ReadonlyArray<AssistantTask>;
   coordinatorBusy: boolean;
 }): ProjectActivity {
-  const { project, activeTask, coordinatorBusy } = input;
+  const { project, activeTasks, coordinatorBusy } = input;
+  const [firstTask] = activeTasks;
   // A running loop records a failure too, when its scan cannot advance (a
   // revoked Linear key, a state name that no longer exists). It clears only on
   // the next scan that works, so the person has to see it meanwhile.
@@ -57,10 +85,13 @@ export function describeProjectActivity(input: {
       : {
           tone: "paused",
           status: "Stopped",
-          headline: activeTask ? `Holding ${activeTask.issue.identifier}` : "Stopped",
-          detail: activeTask
-            ? "Its team is stopped. Start, or resume the teams from the menu, to continue it."
-            : "Start to take issues from Linear, or resume the teams and dispatch issues yourself.",
+          headline: activeTasks.length > 0 ? `Holding ${namedIssues(activeTasks)}` : "Stopped",
+          detail:
+            activeTasks.length === 0
+              ? "Start to take issues from Linear, or resume the teams and dispatch issues yourself."
+              : activeTasks.length === 1
+                ? "Its team is stopped. Start, or resume the teams from the menu, to continue it."
+                : "Their teams are stopped. Start, or resume the teams from the menu, to continue them.",
         };
   const status = project.status === "paused" ? "Paused" : "Running";
   if (failure)
@@ -76,7 +107,12 @@ export function describeProjectActivity(input: {
       tone: "active",
       status,
       headline: "Assistant is thinking",
-      detail: activeTask ? `${activeTask.issue.identifier} · ${activeTask.issue.title}` : null,
+      detail:
+        activeTasks.length === 1 && firstTask
+          ? `${firstTask.issue.identifier} · ${firstTask.issue.title}`
+          : activeTasks.length > 1
+            ? identifierList(activeTasks)
+            : null,
     };
   if (waiting)
     return {
@@ -85,12 +121,12 @@ export function describeProjectActivity(input: {
       headline: "Waiting on something",
       detail: waiting,
     };
-  if (activeTask)
+  if (activeTasks.length > 0)
     return {
       tone: "active",
       status,
-      headline: `Working on ${activeTask.issue.identifier}`,
-      detail: activeTask.issue.title,
+      headline: `Working on ${namedIssues(activeTasks)}`,
+      detail: issuesDetail(activeTasks),
     };
   if (project.status === "paused")
     return {
@@ -124,6 +160,9 @@ export interface TaskPhase {
   readonly label: string;
   readonly detail: string | null;
 }
+
+/** The server gives up on a team leader's wait after this many checks. */
+const WAIT_CHECKS_LIMIT = 15;
 
 const STAGE_THREAD: Record<string, string> = {
   lead: "team leader",
@@ -163,13 +202,25 @@ export function describeTaskPhase(input: {
         label: "Waiting for input",
         detail: `The ${holder} asked something in its thread.`,
       };
-    default:
+    default: {
       if (workerNeedsInput)
         return {
           tone: "waiting",
           label: "Waiting for input",
           detail: `The ${holder} asked something in its thread.`,
         };
+      // A team leader waiting on something outside T3 records it on its issue.
+      // T3 tells it to check again once a minute until it moves or gives up.
+      const wait = task.wait ?? null;
+      if (wait && !workerBusy) {
+        const detail = [
+          wait.reason.trim() || null,
+          wait.checks > 0 ? `check ${wait.checks} of ${WAIT_CHECKS_LIMIT}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        return { tone: "waiting", label: "Waiting on something", detail: detail || null };
+      }
       // The issue's threads share one worktree: a handoff waits for the rest of the team.
       if (!workerBusy && waitingOn && task.stage !== undefined)
         return {
@@ -177,6 +228,8 @@ export function describeTaskPhase(input: {
           label: `Waiting for the ${STAGE_THREAD[waitingOn]}`,
           detail: `The ${holder} starts when the ${STAGE_THREAD[waitingOn]}'s turn and background work end. T3 releases a finished thread's background work by itself.`,
         };
+      const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
+      const e2ePassed = Boolean(task.e2e) && task.e2e?.verdict !== "failed";
       switch (task.stage) {
         default:
           // Work started before issues had review and e2e threads.
@@ -190,7 +243,14 @@ export function describeTaskPhase(input: {
         case "implement":
           if (workerBusy)
             return task.codeReview?.verdict === "approved"
-              ? { tone: "active", label: "Merging", detail: "Code review approved the change." }
+              ? {
+                  tone: "active",
+                  label: "Merging",
+                  detail:
+                    inWorktree && e2ePassed
+                      ? "The e2e check passed in the worktree."
+                      : "Code review approved the change.",
+                }
               : { tone: "active", label: "Coding", detail: step };
           return { tone: "idle", label: "Worker is next", detail: null };
         case "review":
@@ -203,7 +263,11 @@ export function describeTaskPhase(input: {
               };
         case "e2e":
           return workerBusy
-            ? { tone: "active", label: "Testing on staging", detail: step }
+            ? {
+                tone: "active",
+                label: inWorktree ? "Testing in the worktree" : "Testing on staging",
+                detail: step,
+              }
             : { tone: "idle", label: "E2E check is next", detail: null };
         case "lead":
           if (workerBusy)
@@ -219,10 +283,16 @@ export function describeTaskPhase(input: {
               task.turns === 0
                 ? "It decides whether the team takes the issue."
                 : task.e2e?.verdict === "failed"
-                  ? "It failed on staging. The team leader is deciding on a fix."
+                  ? inWorktree
+                    ? "It failed in the worktree. The team leader is deciding on a fix."
+                    : "It failed on staging. The team leader is deciding on a fix."
                   : task.merge && !task.deployment
-                    ? "Merged after code review. The team leader is checking the staging deploy."
-                    : "The team leader is deciding the next step.",
+                    ? inWorktree
+                      ? "Merged after the e2e check passed. The team leader is checking the staging deploy."
+                      : "Merged after code review. The team leader is checking the staging deploy."
+                    : inWorktree && task.codeReview?.verdict === "approved" && !task.e2e
+                      ? "Code review approved the change. The team leader starts the e2e check in the worktree."
+                      : "The team leader is deciding the next step.",
           };
         case "coordinator":
           return {
@@ -236,6 +306,7 @@ export function describeTaskPhase(input: {
                   : "The assistant is deciding the next step.",
           };
       }
+    }
   }
 }
 
@@ -262,10 +333,18 @@ const TO_STAGING: ReadonlyArray<PipelineStepDef> = [
   { key: "staging", label: "Staging", kind: "lead" },
   { key: "e2e", label: "E2E test", kind: "e2e" },
 ];
-const LED_PIPELINE: ReadonlyArray<PipelineStepDef> = [
-  { key: "take", label: "Take on", kind: "lead" },
-  ...TO_STAGING,
+// With the e2e check in the team's worktree it runs on the approved commit,
+// before the merge; staging is then only the deploy to verify.
+const TO_STAGING_WORKTREE_E2E: ReadonlyArray<PipelineStepDef> = [
+  { key: "code", label: "Code", kind: "implement" },
+  { key: "review", label: "Code review", kind: "review" },
+  { key: "e2e", label: "E2E test", kind: "e2e" },
+  { key: "merge", label: "Merge", kind: "implement" },
+  { key: "staging", label: "Staging", kind: "lead" },
 ];
+const TAKE_ON: PipelineStepDef = { key: "take", label: "Take on", kind: "lead" };
+const LED_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING];
+const LED_WORKTREE_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING_WORKTREE_E2E];
 // Work from before team leaders: the assistant checked staging itself.
 const ASSISTANT_PIPELINE = TO_STAGING.map((step) =>
   step.kind === "lead" ? { ...step, kind: "coordinator" as const } : step,
@@ -277,13 +356,38 @@ const ASSISTANT_PIPELINE = TO_STAGING.map((step) =>
  */
 export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> | null {
   if (task.stage === undefined) return null;
-  const steps = task.leader ? LED_PIPELINE : ASSISTANT_PIPELINE;
+  const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
+  const steps = task.leader
+    ? inWorktree
+      ? LED_WORKTREE_PIPELINE
+      : LED_PIPELINE
+    : ASSISTANT_PIPELINE;
   const offset = task.leader ? 1 : 0;
   const approved = task.codeReview?.verdict === "approved";
   const e2eFailed = task.e2e?.verdict === "failed";
+  const e2ePassed = Boolean(task.e2e) && !e2eFailed;
   const at = (() => {
     if (task.status === "review" || task.status === "accepted") return steps.length;
     if (task.stage === "lead" && task.turns === 0) return 0;
+    if (inWorktree)
+      switch (task.stage) {
+        case "review":
+          return offset + 1;
+        case "e2e":
+          return offset + 2;
+        // The worker merges the approved commit once the worktree run passed;
+        // sent back after that, it is coding again.
+        case "implement":
+          return offset + (approved && e2ePassed && !task.merge ? 3 : 0);
+        case "lead":
+        case "coordinator":
+          // A failed run keeps the issue on its step while the leader decides.
+          if (e2eFailed) return offset + 2;
+          if (task.deployment) return steps.length;
+          if (task.merge) return offset + 4;
+          if (e2ePassed) return offset + 3;
+          return offset + (approved ? 2 : 0);
+      }
     switch (task.stage) {
       case "review":
         return offset + 1;
@@ -298,19 +402,25 @@ export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> |
         return offset + (task.deployment ? 4 : task.merge ? 3 : approved ? 2 : 0);
     }
   })();
+  const stepAt = (key: PipelineStepKey) => steps.findIndex((step) => step.key === key);
+  const codeAt = stepAt("code");
+  const e2eAt = stepAt("e2e");
+  const stagingAt = stepAt("staging");
   const changesRequested = task.codeReview?.verdict === "changes-requested";
   const notes: Partial<Record<PipelineStepKey, string>> = {
-    ...(changesRequested && at === offset
+    ...(changesRequested && at === codeAt
       ? { code: "Fixing review findings", review: "Changes requested" }
       : {}),
-    ...(e2eFailed && at === offset ? { code: "Fixing the e2e failure" } : {}),
-    ...(task.deployment && at > offset + 3
+    ...(e2eFailed && at === codeAt ? { code: "Fixing the e2e failure" } : {}),
+    ...(task.deployment && at > stagingAt
       ? { staging: `${task.deployment.revision.slice(0, 7)} deployed` }
       : {}),
-    ...(task.e2e && at >= offset + 4 && task.stage !== "e2e"
+    ...(task.e2e && at >= e2eAt && task.stage !== "e2e"
       ? {
           e2e: e2eFailed
-            ? "Failed on staging"
+            ? inWorktree
+              ? "Failed in the worktree"
+              : "Failed on staging"
             : task.e2e.verdict === "partial"
               ? "Passed, with checks for you"
               : "Passed",
@@ -464,10 +574,13 @@ export function buildInbox(board: AssistantBoard): ReadonlyArray<InboxItem> {
   return [...blocking.toSorted(byAge), ...reviews.toSorted(byAge)];
 }
 
-export function activeTaskFor(board: AssistantBoard, projectId: ProjectId): AssistantTask | null {
-  return (
-    board.tasks.find((t) => t.projectId === projectId && assistantTaskHoldsProject(t.status)) ??
-    null
+/** Every issue a project holds right now, in the order the board lists them. */
+export function activeTasksFor(
+  board: AssistantBoard,
+  projectId: ProjectId,
+): ReadonlyArray<AssistantTask> {
+  return board.tasks.filter(
+    (t) => t.projectId === projectId && assistantTaskHoldsProject(t.status),
   );
 }
 

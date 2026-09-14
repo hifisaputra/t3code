@@ -1,4 +1,5 @@
 import {
+  assistantParallelIssues,
   assistantTaskHoldsProject,
   type AssistantProject,
   type AssistantTask,
@@ -28,12 +29,21 @@ import { Textarea } from "../ui/textarea";
 import { useAssistantAction } from "./assistantUi";
 
 /** When a dispatched issue would start, given what the project is doing now. */
-export function dispatchTiming(project: AssistantProject, activeTask: AssistantTask | null) {
+export function dispatchTiming(
+  project: AssistantProject,
+  activeTasks: ReadonlyArray<AssistantTask>,
+) {
   if (project.status === "stopped")
     return "The assistant is stopped, so the issue waits until you start it or resume the teams.";
-  if (activeTask)
-    return `A team starts on it once ${activeTask.issue.identifier} is done, ahead of the loop's own picks.`;
-  return "A team starts on it right away.";
+  // A project works several issues at once: only a full set of teams makes it wait.
+  if (activeTasks.length < assistantParallelIssues(project.config))
+    return "A team starts on it right away.";
+  const [first] = activeTasks;
+  const held =
+    activeTasks.length === 1 && first
+      ? first.issue.identifier
+      : `one of ${activeTasks.map((t) => t.issue.identifier).join(", ")}`;
+  return `A team starts on it once ${held} is done, ahead of the loop's own picks.`;
 }
 
 /**
@@ -43,7 +53,7 @@ export function dispatchTiming(project: AssistantProject, activeTask: AssistantT
 export function AssistantDispatchDialog({
   environmentId,
   project,
-  activeTask,
+  activeTasks,
   title,
   reference: chosen,
   open,
@@ -51,7 +61,7 @@ export function AssistantDispatchDialog({
 }: {
   environmentId: EnvironmentId;
   project: AssistantProject;
-  activeTask: AssistantTask | null;
+  activeTasks: ReadonlyArray<AssistantTask>;
   title: string;
   reference?: string;
   open: boolean;
@@ -122,7 +132,7 @@ export function AssistantDispatchDialog({
         </DialogPanel>
         <DialogFooter className="items-center">
           <p className="min-w-0 flex-1 text-muted-foreground text-xs">
-            {dispatchTiming(project, activeTask)}
+            {dispatchTiming(project, activeTasks)}
           </p>
           <Button variant="outline" size="sm" disabled={busy} onClick={() => onOpenChange(false)}>
             Cancel
@@ -173,7 +183,7 @@ export function AssistantDispatchButton({
         Waiting for your review. Accept it or request changes to dispatch it again.
       </span>
     );
-  const activeTask = tasks.find((t) => assistantTaskHoldsProject(t.status)) ?? null;
+  const activeTasks = tasks.filter((t) => assistantTaskHoldsProject(t.status));
   return (
     <>
       <Button type="button" size="sm" variant="outline" onClick={() => setOpen(true)}>
@@ -184,7 +194,7 @@ export function AssistantDispatchButton({
         <AssistantDispatchDialog
           environmentId={environmentId}
           project={project}
-          activeTask={activeTask}
+          activeTasks={activeTasks}
           title={
             projects.find((p) => p.environmentId === environmentId && p.id === projectId)?.title ??
             "this project"

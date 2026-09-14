@@ -55,16 +55,26 @@ export function mergedComment(input: {
   readonly review: AssistantCodeReview;
   readonly pullRequest: PullRequest;
   readonly baseBranch: string;
+  /** A worktree e2e run that already passed on the merged commit, when there was one. */
+  readonly e2e?: AssistantE2eResult | null;
 }): string {
+  const tested = input.e2e?.environment === "worktree" && input.e2e.verdict !== "failed";
   return sections(
-    `**Code review passed · merged into \`${input.baseBranch}\`**`,
+    tested
+      ? `**Code review passed · e2e passed in the development environment · merged into \`${input.baseBranch}\`**`
+      : `**Code review passed · merged into \`${input.baseBranch}\`**`,
     input.merge.summary,
     input.review.summary ? `**Code review:** ${input.review.summary}` : null,
+    tested && input.e2e?.humanChecks.length
+      ? "The e2e check passed what it could and left some checks for a person; they come with the result once staging is verified."
+      : null,
     bullets([
       pullRequestLine(input.pullRequest),
       `Reviewed commit: \`${input.merge.commit.slice(0, 7)}\``,
     ]),
-    "Next: staging deploy, then an e2e check on staging.",
+    tested
+      ? "Next: staging deploy. The issue moves to review once it is verified there."
+      : "Next: staging deploy, then an e2e check on staging.",
   );
 }
 
@@ -75,10 +85,19 @@ export function deployedComment(input: { readonly deployment: AssistantDeploymen
   );
 }
 
-const HEADLINES: Record<AssistantE2eResult["verdict"], string> = {
-  passed: "**✅ Verified on staging: ready to accept**",
-  partial: "**👀 Verified on staging, with checks for a person**",
-  failed: "**❌ Failed on staging: back with the team for a fix**",
+const HEADLINES: Record<"staging" | "worktree", Record<AssistantE2eResult["verdict"], string>> = {
+  staging: {
+    passed: "**✅ Verified on staging: ready to accept**",
+    partial: "**👀 Verified on staging, with checks for a person**",
+    failed: "**❌ Failed on staging: back with the team for a fix**",
+  },
+  worktree: {
+    passed:
+      "**✅ Verified in the development environment and deployed to staging: ready to accept**",
+    partial:
+      "**👀 Verified in the development environment and deployed to staging, with checks for a person**",
+    failed: "**❌ Failed in the development environment: back with the team for a fix**",
+  },
 };
 
 /** Why the issue's team leader did not take it, and what brings it back. */
@@ -136,13 +155,17 @@ export function e2eComment(input: {
   const { e2e } = input;
   const delivered = e2e.verdict !== "failed";
   const accept = input.acceptedState.trim() || "a completed state";
+  const worktree = e2e.environment === "worktree";
+  const checkTitle = worktree
+    ? `**E2E check in the worktree${e2e.commit ? ` (commit \`${e2e.commit.slice(0, 7)}\`)` : ""}**`
+    : "**E2E check on staging**";
   return sections(
-    HEADLINES[e2e.verdict],
+    HEADLINES[worktree ? "worktree" : "staging"][e2e.verdict],
     e2e.humanChecks.length
       ? `**Check before accepting**\n\n${e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
       : null,
     delivered && input.merge ? `**What changed**\n\n${input.merge.summary}` : null,
-    `**Staging check**\n\n${e2e.report}`,
+    `${checkTitle}\n\n${e2e.report}`,
     ...e2e.screenshots.map((shot) => `*${shot.caption}*\n\n![${shot.caption}](${shot.url})`),
     "---",
     delivered

@@ -353,7 +353,7 @@ export function AssistantSetupDialog({
               <Field label="Assistant" hint="Picks issues, reviews and merges the work.">
                 {picker(model, setModel, "Assistant model")}
               </Field>
-              <Field label="Coding worker" hint="Writes the code, one issue at a time.">
+              <Field label="Coding worker" hint="Writes the code in each issue's worktree.">
                 {picker(workerModel, setWorkerModel, "Coding model")}
               </Field>
             </div>

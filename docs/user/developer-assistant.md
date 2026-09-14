@@ -1,23 +1,25 @@
 # Developer assistant
 
 The developer assistant works through a repository's Linear issues while you make decisions and
-review work. Each configured repository runs an issue loop with at most one active issue. The loop
-gives the next eligible issue to a team of threads that share one worktree, fresh from the
-integration branch:
+review work. Each configured repository runs an issue loop that works as many issues at once as you
+choose on **Start**: one by default, six at most. Every issue goes to its own team of threads on its
+own worktree, fresh from the integration branch:
 
 - **Team leader** reads the issue and decides whether the team takes it, asks you first, or
   declines it. Once taken, it writes the worker's brief, checks the staging deployment, starts the
   e2e run, and decides what happens when something fails.
-- **Worker** implements the issue, opens the pull request and merges it once review approves.
+- **Worker** implements the issue, opens the pull request and merges it once the change is approved
+  and has passed its checks.
 - **Code review** reviews the worker's commits. The two trade rounds directly until the reviewer
   approves a commit.
-- **E2E** tests the merged change on staging with a browser and takes screenshots.
+- **E2E** tests the change with a browser and takes screenshots, either in the team's worktree
+  before the merge or on staging after it. You choose which during setup.
 
-An issue that passes e2e closes its team and the loop starts the next issue immediately. Your review
+A delivered issue closes its team and frees its place for the next issue immediately. Your review
 can happen later, from Linear or T3. Different repositories can run at the same time.
 
 The **assistant conversation** is yours. It does not run issues; ask it what the loop is doing, to
-put an issue next, to redirect the active issue, or to release to production.
+put an issue next, to redirect an issue in progress, or to release to production.
 
 ## Set up a project
 
@@ -58,9 +60,12 @@ Before starting, prepare the application:
   Postgres or Supabase databases, D1 bindings, queues, or other external resources. Define where
   migrations run and how they reach staging. Avoid migrations that break the version still serving
   traffic during a rollout.
-- Verification commands and cleanup are documented. One worker per project can reuse a project's
-  development port and database, but concurrently running projects still need separate ports and
-  resources. Workers should stop the servers and background processes they start before delivery.
+- Verification commands and cleanup are documented. Teams running at the same time each need their
+  own development ports, databases and other shared resources; the instructions say how to derive
+  them from the team's number, which every thread is told. Workers should stop the servers and
+  background processes they start before delivery.
+- If the e2e check runs in the team's worktree, the instructions say how to run the application from
+  a worktree and how to sign in to it there.
 - The saved staging targets identify the actual deployment workflows/services, and the assistant
   has the access needed to exercise the affected staging behavior.
 
@@ -81,12 +86,16 @@ latest workflow run or active service deployment and verifies that its commit co
 changes on the integration branch. The assistant selects the targets affected by each issue; when
 it does not select targets, all configured targets must pass.
 
-Deployment success alone does not prove a feature works. The e2e thread follows the saved project
-instructions to check each acceptance criterion on staging, including migration, background worker,
-and browser checks where relevant. It reports passed, partial (with the checks it left for you), or
-failed, along with its evidence and any coverage limits. Staging access, test accounts, different staging/production data
-providers, and components without staging coverage should be discussed during setup. A workflow
-that skips deployment for some paths needs a documented delivery procedure for those changes.
+Deployment success alone does not prove a feature works, so an e2e thread exercises the change.
+Setup chooses where it runs. On staging, it runs after the merge and its result delivers the issue.
+In the team's worktree, it runs before the merge, on the commit code review approved, and the issue
+is delivered once that merge reaches staging and staging is verified. Either way the thread follows
+the saved project instructions to check each acceptance criterion, including migration, background
+worker, and browser checks where relevant. It reports passed, partial (with the checks it left for
+you), or failed, along with its evidence and any coverage limits. Staging access, test accounts,
+different staging/production data providers, and components without staging coverage should be
+discussed during setup. A workflow that skips deployment for some paths needs a documented delivery
+procedure for those changes.
 
 For other hosting or an existing project check, setup can propose a custom command such as
 `node scripts/check-staging.mjs`. Review the exact command before saving; saving authorizes T3 to
@@ -110,16 +119,19 @@ into this common result. T3 does not provision hosting or databases.
 T3 then fetches `origin` and verifies both that the deployed commit contains the commit code review
 approved and that the deployed commit belongs to the configured integration branch. Uncommitted
 work, commits made after the approval, unresolved questions, active turns, failed checks, and stale
-deployments keep the issue active. A passing or partial e2e result moves it to staging review and
-archives its three threads.
+deployments keep the issue active. An issue moves to staging review once its e2e result passed, or
+passed with checks for you, and staging carries the change; T3 then archives the team's threads.
 
 ## Work with your assistant
 
-**Start** runs the loop. It takes, in order: issues you dispatched, issues you sent back for
-changes, then eligible issues by Linear priority. The team leader and the assistant use
-the assistant model; the worker, code review and e2e threads use the coding model. All of them keep
-the issue link. Existing Linear settings control the move to In Progress, which happens when the team
-leader takes the issue. The loop skips issues that another thread is already working on.
+**Start** runs the loop, and first asks how it should run: whether it picks issues from Linear
+itself, whose issues it may take, and how many issues to work at once. Each issue at once is another
+team on another worktree, so keep the number to what your project instructions can hold apart. It
+takes, in order: issues you dispatched, issues you sent back for changes, then eligible issues by
+Linear priority. The team leader and the assistant use the assistant model; the worker, code review
+and e2e threads use the coding model. All of them keep the issue link. Existing Linear settings
+control the move to In Progress, which happens when the team leader takes the issue. The loop skips
+issues that another thread is already working on.
 
 When a team leader declines an issue, T3 posts its reason on the issue, and the loop leaves it until
 someone changes it: an edit to the description, labels, priority or state, or a new comment. T3's own
@@ -130,7 +142,7 @@ To give a specific issue to a team, choose **Dispatch** on the project card, **D
 issue's page under Issues, or ask the assistant in its conversation. Add a note for the team leader
 if you like. A dispatched issue goes next, ahead of the loop's own picks, and its team leader takes it
 or asks you rather than declining it. Assignment does not matter: you chose it. Dispatched issues
-wait under **Up next** while another issue is in progress, and you can take them out again.
+wait under **Up next** while every team is busy, and you can take them out again.
 
 Product questions appear under **Needs you** and remain linked to the asking thread. You
 can answer in the inbox, or tell the assistant in its conversation and it passes your answer to
@@ -142,10 +154,10 @@ In the sidebar, each assistant thread is labeled with what it does (Assistant, T
 Code review, E2E test), and a thread waiting on your answer shows **Question**. The count on the sidebar's
 Developer assistant button is the number of items holding a project until you act.
 
-**Pause** stops the loop from taking issues from Linear. The team at work finishes its issue, and
+**Pause** stops the loop from taking issues from Linear. The teams at work finish their issues, and
 issues you dispatch still run, so a paused project is also how you hand out issues yourself.
-**Interrupt all work**, in the project menu, stops everything: it interrupts the team mid-turn and
-closes its tracked T3 terminals. Work and queued follow-ups are kept; **Start**, or **Resume teams,
+**Interrupt all work**, in the project menu, stops everything: it interrupts every team mid-turn and
+closes their tracked T3 terminals. Work and queued follow-ups are kept; **Start**, or **Resume teams,
 loop paused** from the same menu, picks them back up. A provider's background processes may need
 cleanup through that project's normal procedure.
 
@@ -175,13 +187,13 @@ URL, and the verified commit. Staging can contain later issues by the time you r
 what was verified for that delivery.
 
 **Accept** records your review and applies the configured Linear acceptance state. **Request changes**
-records feedback, and the loop gives the issue to a new team once the current issue finishes. The new
+records feedback, and the loop gives the issue to a new team as soon as one is free. The new
 team starts from the current integration branch, leaving the original threads and deployment history
 intact. It does not roll back later work. When a team finishes or declines, T3 archives its threads and
 removes its worktree unless it holds uncommitted changes; the branch stays.
 
 T3 comments on the Linear issue as the connected account at each phase: when the reviewed change
-is merged, when staging is deployed, and with the e2e result. The e2e comment is the one to decide
+is merged, when staging is verified, and with the e2e result. The e2e comment is the one to decide
 from. It opens with a verdict (ready to accept, or which checks to do yourself on staging), then
 covers what changed, each acceptance check with its result, the screenshots, and links to staging,
 the pull request, and the verified commit.

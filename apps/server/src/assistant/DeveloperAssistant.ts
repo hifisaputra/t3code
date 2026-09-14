@@ -25,7 +25,10 @@ import {
   MessageId,
   ProjectId,
   ThreadId,
+  assistantE2eEnvironment,
+  assistantParallelIssues,
   assistantPicksIssues,
+  assistantTaskE2eEnvironment,
   assistantTaskHoldsProject,
   assistantTaskThreadId,
   assistantThreadKind,
@@ -271,10 +274,11 @@ export const make = Effect.gen(function* () {
     return { task: yield* decodeTask(owner[0].data), role: match[1] as AssistantThreadRole };
   });
   const taskThreadIds = (t: AssistantTask) => ROLES.map((role) => assistantTaskThreadId(t, role));
-  const activeTask = Effect.fn("Assistant.activeTask")(function* (projectId: string) {
+  /** The issues the project's teams hold right now, oldest first; one per slot. */
+  const heldTasks = Effect.fn("Assistant.heldTasks")(function* (projectId: string) {
     const rows =
-      yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE project_id = ${projectId} AND status IN ('preparing','working','waiting','blocked')`;
-    return rows[0] ? yield* decodeTask(rows[0].data) : null;
+      yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE project_id = ${projectId} AND status IN ('preparing','working','waiting','blocked') ORDER BY rowid`;
+    return yield* Effect.forEach(rows, (row) => decodeTask(row.data));
   });
   // The threads share one worktree, so only one of them runs at a time. A
   // thread asking about the others leaves itself out: its own turn is running.
@@ -630,16 +634,18 @@ export const make = Effect.gen(function* () {
     // An issue in progress stays on the branch and Linear project it started
     // from. Everything else applies to the threads started after the save.
     const current = existing[0] ? yield* decodeConfig(existing[0].config) : null;
-    const inProgress = yield* activeTask(config.projectId);
+    const inProgress = yield* heldTasks(config.projectId);
     if (
-      inProgress &&
+      inProgress.length &&
       current &&
       (current.baseBranch !== config.baseBranch ||
         current.linearProjectId !== config.linearProjectId)
-    )
+    ) {
+      const names = inProgress.slice(0, 3).map((t) => t.issue.identifier);
       return yield* fail(
-        `${inProgress.issue.identifier} is still in progress on ${current.baseBranch}. Keep the base branch and Linear project until it is finished or skipped.`,
+        `${names.join(", ")} ${names.length > 1 ? "are" : "is"} still in progress on ${current.baseBranch}. Keep the base branch and Linear project until ${names.length > 1 ? "they are" : "it is"} finished or skipped.`,
       );
+    }
     const repositoryKey = yield* verifier.repositoryKey(shell.value.workspaceRoot);
     const sameRepo =
       yield* sql`SELECT project_id FROM assistant_projects WHERE repository_key = ${repositoryKey} AND project_id != ${config.projectId}
@@ -777,7 +783,16 @@ export const make = Effect.gen(function* () {
         // here on. Earlier clients send no options and keep the config as it is.
         if (action === "start" && input.options) {
           const options = input.options;
-          yield* sql`UPDATE assistant_projects SET config = ${encodeConfig({ ...p.config, autoPick: options.autoPick, assignedToMe: options.assignedToMe })} WHERE project_id = ${input.projectId}`;
+          const chosen: AssistantProjectConfig = {
+            ...p.config,
+            autoPick: options.autoPick,
+            assignedToMe: options.assignedToMe,
+            // Earlier clients send no count and keep the one the config has.
+            ...(options.parallelIssues === undefined
+              ? {}
+              : { parallelIssues: options.parallelIssues }),
+          };
+          yield* sql`UPDATE assistant_projects SET config = ${encodeConfig(chosen)} WHERE project_id = ${input.projectId}`;
           p = yield* project(input.projectId);
         }
         // Only a deleted coordinator is replaced; an archived one keeps its decisions.
@@ -809,15 +824,16 @@ export const make = Effect.gen(function* () {
         const status =
           action === "pause" || (action === "wake" && p.status === "paused") ? "paused" : "running";
         yield* sql`UPDATE assistant_projects SET status = ${status}, error = NULL, external_waits = 0 WHERE project_id = ${input.projectId}`;
-        const current = yield* activeTask(input.projectId);
+        const held = yield* heldTasks(input.projectId);
         if (action === "start") {
           declineStreak.delete(input.projectId);
           // Work from before team leaders still needs the assistant to carry it.
           // Otherwise it is woken only to receive instructions it does not have yet.
-          if (current && !current.leader)
+          const legacy = held.find((t) => !t.leader);
+          if (legacy)
             yield* wake(
               input.projectId,
-              `The person started the assistant. ${current.issue.identifier} was started before issues had team leaders, so it is still yours to carry to review: check its threads with assistant_read_thread and take the next step. The issue loop starts once it is done.`,
+              `The person started the assistant. ${legacy.issue.identifier} was started before issues had team leaders, so it is still yours to carry to review: check its threads with assistant_read_thread and take the next step. The issue loop starts once it is done.`,
             );
           else if (
             briefed.get(input.projectId) !== `${p.thread_id}\n${assistantInstructions(p.config)}`
@@ -828,19 +844,20 @@ export const make = Effect.gen(function* () {
             );
         }
         // An interrupted issue waits for someone to pick its threads back up.
-        if (current?.status === "blocked" && (action === "start" || p.status === "stopped"))
-          yield* notifyLead(
-            current,
-            `The person resumed the assistant while this issue was blocked (${current.error ?? "see its threads"}). Check each of its threads with assistant_read_thread and continue where the work stopped.`,
-          );
-        if (!current)
-          yield* advance(input.projectId).pipe(
-            lock.withPermits(1),
-            Effect.catch(
-              (error) =>
-                sql`UPDATE assistant_projects SET error = ${wrap(error).detail} WHERE project_id = ${input.projectId}`,
-            ),
-          );
+        if (action === "start" || p.status === "stopped")
+          for (const blocked of held.filter((t) => t.status === "blocked"))
+            yield* notifyLead(
+              blocked,
+              `The person resumed the assistant while this issue was blocked (${blocked.error ?? "see its threads"}). Check each of its threads with assistant_read_thread and continue where the work stopped.`,
+            );
+        // The loop fills the project up to its limit; advance stops there.
+        yield* advance(input.projectId).pipe(
+          lock.withPermits(1),
+          Effect.catch(
+            (error) =>
+              sql`UPDATE assistant_projects SET error = ${wrap(error).detail} WHERE project_id = ${input.projectId}`,
+          ),
+        );
       }
       yield* changed;
       return yield* board(null);
@@ -986,6 +1003,9 @@ export const make = Effect.gen(function* () {
       e2e: null,
       linearCommentIds: [],
       leader: true,
+      // Fixed when the issue is created, so a setup change mid-issue does not
+      // move the goalposts for the team working it.
+      e2eEnvironment: assistantE2eEnvironment(p.config),
       ...fields,
     };
     return value;
@@ -1047,11 +1067,22 @@ export const make = Effect.gen(function* () {
     );
     return yield* task(t.id);
   });
-  /** Give an issue to a new team. A setup failure leaves the issue blocked for a retry. */
+  /**
+   * Give an issue to a new team. A setup failure leaves the issue blocked for a
+   * retry. The team takes the lowest slot the project's other teams leave free,
+   * which project instructions derive per-team resources from.
+   */
   const startTeam = Effect.fn("Assistant.startTeam")(function* (
     p: AwaitedProject,
     value: AssistantTask,
   ) {
+    const taken = new Set(
+      (yield* heldTasks(p.project_id)).flatMap((other) =>
+        other.id !== value.id && other.slot !== undefined ? [other.slot] : [],
+      ),
+    );
+    let slot = 0;
+    while (taken.has(slot)) slot += 1;
     const t: AssistantTask = {
       ...value,
       status: "preparing",
@@ -1059,6 +1090,8 @@ export const make = Effect.gen(function* () {
       leader: true,
       turns: 0,
       error: null,
+      slot,
+      wait: null,
       updatedAt: yield* now,
     };
     yield* sql`INSERT INTO assistant_tasks (id, project_id, issue_id, thread_id, status, data) VALUES (${t.id}, ${p.project_id}, ${t.issue.id}, ${t.threadId}, ${t.status}, ${encodeTask(t)})
@@ -1096,62 +1129,82 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * The loop. While the project has no active issue, the next issue goes to a
-   * new team: an issue the person dispatched first, then, unless the loop is
-   * paused or set not to pick issues itself, an issue sent back for changes,
+   * The loop. It fills the project up to the issues it works at once, each on
+   * its own team: an issue the person dispatched first, then, unless the loop
+   * is paused or set not to pick issues itself, an issue sent back for changes,
    * then ready issues by priority, including a declined issue someone has
-   * changed since.
+   * changed since. Linear's ready issues are read at most once per pass.
    */
   const advance = Effect.fn("Assistant.advance")(function* (projectId: string) {
     const p = yield* project(projectId);
-    if (p.status === "stopped" || (yield* activeTask(projectId))) return;
-    const dispatched =
-      yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE project_id = ${projectId} AND status = 'queued' ORDER BY rowid LIMIT 1`;
-    if (dispatched[0]) return yield* startTeam(p, yield* decodeTask(dispatched[0].data));
-    const sentBack =
-      yield* sql<TaskRow>`SELECT * FROM assistant_tasks t WHERE project_id = ${projectId} AND status = 'changes-requested'
+    if (p.status === "stopped") return;
+    const limit = assistantParallelIssues(p.config);
+    let held = (yield* heldTasks(projectId)).length;
+    // Issues this pass already gave a team, so a second look does not pick them again.
+    const taken = new Set<string>();
+    let ready: ReadonlyArray<LinearIssueSummary> | null = null;
+    /** The next issue to give a team, or null when the project has nothing left to start. */
+    const next = Effect.fn("Assistant.nextIssue")(function* () {
+      const dispatched =
+        yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE project_id = ${projectId} AND status = 'queued' ORDER BY rowid`;
+      for (const row of dispatched) {
+        const queued = yield* decodeTask(row.data);
+        if (!taken.has(queued.issue.id)) return queued;
+      }
+      const sentBack =
+        yield* sql<TaskRow>`SELECT * FROM assistant_tasks t WHERE project_id = ${projectId} AND status = 'changes-requested'
       AND rowid = (SELECT MAX(rowid) FROM assistant_tasks WHERE issue_id = t.issue_id AND project_id = ${projectId}) ORDER BY rowid`;
-    for (const row of sentBack) {
-      const previous = yield* decodeTask(row.data);
-      // A loop that is paused, or set not to pick issues, takes nothing of its
-      // own; an issue the person dispatched stays theirs, so their change
-      // request goes to a new team all the same.
-      if ((p.status === "paused" || !assistantPicksIssues(p.config)) && !previous.dispatched)
-        continue;
-      // One issue Linear cannot be read for must not hold up the rest of the scan.
-      const read = yield* linear.getIssue({ reference: previous.issue.id }).pipe(
-        Effect.map(Option.some<LinearIssueDetail>),
-        Effect.catch((error) =>
-          Effect.logDebug("Developer assistant could not read a sent-back issue in Linear", {
-            issue: previous.issue.identifier,
-            error,
-          }).pipe(Effect.as(Option.none<LinearIssueDetail>())),
-        ),
-      );
-      if (Option.isNone(read)) continue;
-      const issue = read.value;
-      // Closed or accepted in Linear after it was sent back: nothing is left to redo.
-      if (acceptedInLinear(issue.state, p.config) || issue.state.type === "canceled")
-        return yield* saveTask({
-          ...previous,
-          status: issue.state.type === "canceled" ? "skipped" : "accepted",
-        });
-      return yield* startTeam(
-        p,
-        yield* newTask(p, issue, {
+      for (const row of sentBack) {
+        const previous = yield* decodeTask(row.data);
+        if (taken.has(previous.issue.id)) continue;
+        // A loop that is paused, or set not to pick issues, takes nothing of its
+        // own; an issue the person dispatched stays theirs, so their change
+        // request goes to a new team all the same.
+        if ((p.status === "paused" || !assistantPicksIssues(p.config)) && !previous.dispatched)
+          continue;
+        // One issue Linear cannot be read for must not hold up the rest of the scan.
+        const read = yield* linear.getIssue({ reference: previous.issue.id }).pipe(
+          Effect.map(Option.some<LinearIssueDetail>),
+          Effect.catch((error) =>
+            Effect.logDebug("Developer assistant could not read a sent-back issue in Linear", {
+              issue: previous.issue.identifier,
+              error,
+            }).pipe(Effect.as(Option.none<LinearIssueDetail>())),
+          ),
+        );
+        if (Option.isNone(read)) continue;
+        const issue = read.value;
+        // Closed or accepted in Linear after it was sent back: nothing is left to redo.
+        if (acceptedInLinear(issue.state, p.config) || issue.state.type === "canceled") {
+          yield* saveTask({
+            ...previous,
+            status: issue.state.type === "canceled" ? "skipped" : "accepted",
+          });
+          continue;
+        }
+        return yield* newTask(p, issue, {
           feedback: previous.feedback,
           ...(previous.dispatched ? { dispatched: true } : {}),
-        }),
-      );
+        });
+      }
+      // Nothing is read from Linear while the loop is paused or picks nothing.
+      if (p.status === "paused" || !assistantPicksIssues(p.config)) return null;
+      ready ??= yield* readyIssues(p.config);
+      const pick = [
+        ...(yield* unclaimed(projectId, ready)),
+        ...(yield* changedSinceDeclined(p, ready)),
+      ]
+        .sort(byPriority)
+        .find((issue) => !taken.has(issue.id));
+      return pick ? yield* newTask(p, pick, {}) : null;
+    });
+    while (held < limit) {
+      const value = yield* next();
+      if (!value) return;
+      taken.add(value.issue.id);
+      yield* startTeam(p, value);
+      held += 1;
     }
-    // Nothing is read from Linear while the loop is paused or picks nothing.
-    if (p.status === "paused" || !assistantPicksIssues(p.config)) return;
-    const ready = yield* readyIssues(p.config);
-    const next = [
-      ...(yield* unclaimed(projectId, ready)),
-      ...(yield* changedSinceDeclined(p, ready)),
-    ].sort(byPriority)[0];
-    if (next) return yield* startTeam(p, yield* newTask(p, next, {}));
   });
 
   /**
@@ -1361,9 +1414,14 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           "This issue reached its worker turn limit. Ask the person to review it or explicitly retry from the assistant board.",
         );
+      // In the worktree the tester runs on the approved commit, before any deployment.
+      const testerReady =
+        assistantTaskE2eEnvironment(t) === "worktree"
+          ? t.codeReview?.verdict === "approved"
+          : t.deployment !== null;
       if (
         role === "e2e" &&
-        (!t.deployment ||
+        (!testerReady ||
           Option.isNone(
             yield* snapshots.getThreadShellById(assistantTaskThreadId(t, "e2e"), {
               includeArchived: true,
@@ -1371,7 +1429,9 @@ export const make = Effect.gen(function* () {
           ))
       )
         return yield* fail(
-          "Verify the staging deployment and start the tester with assistant_start_e2e first.",
+          assistantTaskE2eEnvironment(t) === "worktree"
+            ? "Start the tester with assistant_start_e2e once code review approves the commit."
+            : "Verify the staging deployment and start the tester with assistant_start_e2e first.",
         );
       // A tester that never got its run brief would read a follow-up as its
       // whole assignment, so the run is started before it can be messaged.
@@ -1613,6 +1673,16 @@ export const make = Effect.gen(function* () {
         at: yield* now,
       };
       if (verdict === "approved") {
+        // In the worktree the e2e check comes before the merge, so the issue
+        // goes back to its team leader to start it rather than to the worker.
+        if (assistantTaskE2eEnvironment(t) === "worktree") {
+          const tested = yield* saveTask({ ...t, codeReview, stage: leadStage(t) });
+          yield* notifyLead(
+            tested,
+            `Code review approved commit ${head.slice(0, 7)} for ${t.issue.identifier}. Start the e2e check in the worktree with assistant_start_e2e: a brief with each acceptance criterion as a check a person could follow, the pages or endpoints affected, the data it needs and what to clean up. T3 tells the worker to merge once it passes.`,
+          );
+          return tested;
+        }
         const updated = yield* saveTask({ ...t, codeReview, stage: "implement" });
         yield* queueMessage(
           p.project_id,
@@ -1660,6 +1730,12 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           `The branch moved past the approved commit ${review.commit.slice(0, 7)}. Push and request review again before merging.`,
         );
+      // In the worktree the e2e check runs before the merge, on this very commit.
+      const worktreeE2e = assistantTaskE2eEnvironment(t) === "worktree";
+      if (worktreeE2e && (!t.e2e || t.e2e.verdict === "failed" || t.e2e.commit !== head))
+        return yield* fail(
+          "The e2e check has not passed on this commit. Wait for T3 to tell you it passed before merging.",
+        );
       if (
         !(yield* verifier.isMerged({
           cwd: root.value.workspaceRoot,
@@ -1681,13 +1757,74 @@ export const make = Effect.gen(function* () {
       return yield* saveTask(
         yield* postLinear(
           merged,
-          mergedComment({ merge, review, pullRequest, baseBranch: p.config.baseBranch }),
+          mergedComment({
+            merge,
+            review,
+            pullRequest,
+            baseBranch: p.config.baseBranch,
+            e2e: worktreeE2e ? (t.e2e ?? null) : null,
+          }),
         ),
       );
     },
     lock.withPermits(1),
     Effect.mapError(wrap),
   );
+
+  /** The team worktree's HEAD; it fails on uncommitted changes. */
+  const workerRevision = Effect.fn("Assistant.workerRevision")(function* (t: AssistantTask) {
+    const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
+    if (Option.isNone(worker) || !worker.value.worktreePath)
+      return yield* fail("The worker's worktree could not be found.");
+    return yield* verifier.revision(worker.value.worktreePath);
+  });
+  /**
+   * The issue is delivered: the e2e card goes on the issue, its description
+   * says what shipped, and Linear moves it to the review state for the person.
+   * Staging runs reach this from the e2e result, worktree runs from the staging
+   * deploy that follows their merge.
+   */
+  const finishDelivery = Effect.fn("Assistant.finishDelivery")(function* (
+    p: AwaitedProject,
+    value: AssistantTask,
+    e2e: AssistantE2eResult,
+  ) {
+    const deployment = value.deployment;
+    if (!deployment) return value;
+    const worker = yield* snapshots.getThreadShellById(value.threadId, { includeArchived: true });
+    const pullRequest = Option.isSome(worker)
+      ? (worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null)
+      : null;
+    let updated = yield* postLinear(
+      value,
+      e2eComment({
+        e2e,
+        merge: value.merge ?? null,
+        deployment,
+        pullRequest,
+        acceptedState: p.config.acceptedState,
+      }),
+    );
+    updated = yield* updateDescription(updated, p, e2e);
+    const linearError = yield* changeLinearState(updated, p.config.reviewState).pipe(
+      Effect.as(null),
+      Effect.catch((error) => Effect.succeed(wrap(error).detail)),
+    );
+    updated = {
+      ...updated,
+      status: "review",
+      summary: updated.merge?.summary ?? updated.summary,
+      reviewInstructions: [
+        ...e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`),
+        e2e.report,
+      ].join("\n\n"),
+      // Without a successful move there is no delivered state to be moved away from.
+      deliveredState: linearError ? null : p.config.reviewState.trim() || null,
+      error: [updated.error, linearError].filter(Boolean).join(" ") || null,
+    };
+    yield* sql`UPDATE assistant_projects SET external_waits = 0 WHERE project_id = ${p.project_id}`;
+    return yield* saveTask(updated);
+  });
 
   const verifyStaging = Effect.fn("Assistant.verifyStaging")(
     function* (caller: ThreadId, taskId: string | undefined, targetIds?: ReadonlyArray<string>) {
@@ -1724,8 +1861,16 @@ export const make = Effect.gen(function* () {
         ...(targetIds ? { targetIds } : {}),
       });
       yield* terminals.close({ threadId: t.threadId });
+      // A run in the worktree already proved the change; this deploy is the
+      // last gate, so verifying it delivers the issue. The deployment is saved
+      // first: it guards re-entry, so a retry posts no second card.
+      const tested = t.e2e;
+      if (assistantTaskE2eEnvironment(t) === "worktree" && tested && tested.verdict !== "failed") {
+        const verified = yield* saveTask({ ...t, deployment, error: null, wait: null });
+        return yield* finishDelivery(p, verified, tested);
+      }
       const posted = yield* postLinear(
-        { ...t, deployment, error: null },
+        { ...t, deployment, error: null, wait: null },
         deployedComment({ deployment }),
       );
       yield* sql`UPDATE assistant_projects SET external_waits = 0 WHERE project_id = ${p.project_id}`;
@@ -1741,20 +1886,40 @@ export const make = Effect.gen(function* () {
       if (p.status === "stopped") return yield* fail("The assistant is stopped.");
       if (!assistantTaskHoldsProject(t.status))
         return yield* fail("Only the active issue can be tested.");
-      if (!t.deployment)
+      const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
+      const review = t.codeReview;
+      if (inWorktree) {
+        if (review?.verdict !== "approved")
+          return yield* fail("Start e2e after code review approves a commit.");
+      } else if (!t.deployment)
         return yield* fail("Verify the staging deployment with assistant_verify_staging first.");
       if (yield* taskDecisionsPending(t))
         return yield* fail("Resolve the issue's pending decisions first.");
       if ((yield* taskBusy(t, caller)) || (yield* taskQueued(t, caller)))
         return yield* fail("Wait for the issue's threads to finish before starting e2e.");
+      // The tester runs the application from the team's worktree, so the run is
+      // pinned to the commit the reviewer approved.
+      const head = inWorktree ? yield* workerRevision(t) : null;
+      if (inWorktree && head !== review!.commit)
+        return yield* fail(
+          `The worktree moved past the approved commit ${review!.commit.slice(0, 7)}. Commit what changed, push and request review again before the e2e check.`,
+        );
       const directory = yield* evidence.directory(t.id);
       const run = e2eBrief(t, brief);
-      const updated = yield* saveTask({ ...t, stage: "e2e", status: "working", error: null });
+      const updated = yield* saveTask({
+        ...t,
+        stage: "e2e",
+        status: "working",
+        error: null,
+        wait: null,
+      });
       yield* queueRoleTurn(
         p,
         updated,
         "e2e",
-        `New e2e run on the deployment of ${t.deployment.revision.slice(0, 7)}. Save screenshots in ${directory}.\n${run}`,
+        head
+          ? `New e2e run on commit ${head.slice(0, 7)} in the worktree. Save screenshots in ${directory}.\n${run}`
+          : `New e2e run on the deployment of ${t.deployment!.revision.slice(0, 7)}. Save screenshots in ${directory}.\n${run}`,
         () => e2eInstructions(p.config, updated, directory, run),
       );
       return updated;
@@ -1774,12 +1939,19 @@ export const make = Effect.gen(function* () {
       },
     ) {
       const { p, t } = yield* authorizeRole(caller, "e2e");
-      if (t.stage !== "e2e" || !t.deployment)
+      const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
+      if (t.stage !== "e2e" || (!inWorktree && !t.deployment))
         return yield* fail("No e2e run is in progress for this issue.");
       if (input.screenshots.length > 12)
         return yield* fail("Attach at most 12 screenshots; keep the ones that prove each check.");
       if (input.verdict === "partial" && !input.humanChecks.length)
         return yield* fail("A partial result lists what a person should check in humanChecks.");
+      // The result covers the commit the reviewer approved; the merge is of it.
+      const head = inWorktree ? yield* workerRevision(t) : null;
+      if (inWorktree && head !== t.codeReview?.commit)
+        return yield* fail(
+          `The worktree moved past the tested commit ${t.codeReview?.commit.slice(0, 7) ?? ""}. Commit what changed, push and request review again.`,
+        );
       // Every file is read before any upload, so a bad path uploads nothing.
       const images = yield* Effect.forEach(input.screenshots, (shot) =>
         evidence.read(t.id, shot.path).pipe(Effect.map((image) => ({ image, shot }))),
@@ -1798,46 +1970,54 @@ export const make = Effect.gen(function* () {
         humanChecks: input.humanChecks,
         screenshots,
         at: yield* now,
+        environment: inWorktree ? "worktree" : "staging",
+        ...(head ? { commit: head } : {}),
       };
-      const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
-      const pullRequest = Option.isSome(worker)
-        ? (worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null)
-        : null;
+      // A run in the worktree happens before the merge: nothing is on the issue
+      // yet, and a pass tells the worker to merge the commit that was tested.
+      if (inWorktree) {
+        if (input.verdict === "failed")
+          // The team leader hears when this turn ends.
+          return yield* saveTask({ ...t, e2e, stage: leadStage(t) });
+        const passed = yield* saveTask({
+          ...t,
+          e2e,
+          stage: "implement",
+          error: null,
+          wait: null,
+        });
+        yield* queueMessage(
+          p.project_id,
+          t.threadId,
+          `${t.id}:e2e-passed:${newId()}`,
+          `The e2e check ${input.verdict === "partial" ? "passed (with checks left for the person)" : "passed"} on commit ${head!.slice(0, 7)} in the worktree. Merge the PR into ${p.config.baseBranch} with a merge commit once its required checks pass, then call assistant_report_merged. If anything changes before the merge, push and request review again.`,
+        );
+        return passed;
+      }
       // The stage leaving e2e is what stops a second run reporting again, so it
       // is saved before the comment: a retry after a failure here posts no
       // second card on the issue.
-      let updated = yield* saveTask({ ...t, e2e, stage: leadStage(t), error: null });
-      updated = yield* postLinear(
-        updated,
-        e2eComment({
-          e2e,
-          merge: t.merge ?? null,
-          deployment: t.deployment,
-          pullRequest,
-          acceptedState: p.config.acceptedState,
-        }),
-      );
-      if (input.verdict === "failed") return yield* saveTask(updated);
-      updated = yield* updateDescription(updated, p, e2e);
-      const linearError = yield* changeLinearState(updated, p.config.reviewState).pipe(
-        Effect.as(null),
-        Effect.catch((error) => Effect.succeed(wrap(error).detail)),
-      );
-      updated = {
-        ...updated,
-        status: "review",
-        summary: t.merge?.summary ?? t.summary,
-        reviewInstructions: [
-          ...input.humanChecks.map((check, i) => `${i + 1}. ${check}`),
-          input.report,
-        ].join("\n\n"),
-        // Without a successful move there is no delivered state to be moved away from.
-        deliveredState: linearError ? null : p.config.reviewState.trim() || null,
-        error: [updated.error, linearError].filter(Boolean).join(" ") || null,
-      };
-      yield* sql`UPDATE assistant_projects SET external_waits = 0 WHERE project_id = ${p.project_id}`;
+      const updated = yield* saveTask({ ...t, e2e, stage: leadStage(t), error: null });
+      if (input.verdict === "failed") {
+        const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
+        const pullRequest = Option.isSome(worker)
+          ? (worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null)
+          : null;
+        return yield* saveTask(
+          yield* postLinear(
+            updated,
+            e2eComment({
+              e2e,
+              merge: t.merge ?? null,
+              deployment: t.deployment!,
+              pullRequest,
+              acceptedState: p.config.acceptedState,
+            }),
+          ),
+        );
+      }
       // The team is closed when this turn ends, and the loop moves on.
-      return yield* saveTask(updated);
+      return yield* finishDelivery(p, updated, e2e);
     },
     lock.withPermits(1),
     Effect.mapError(wrap),
@@ -1899,6 +2079,7 @@ export const make = Effect.gen(function* () {
           ...t,
           turnLimit: t.turns + p.config.maxWorkerTurns,
           error: null,
+          wait: null,
         });
         yield* notifyLead(
           retried,
@@ -1924,21 +2105,31 @@ export const make = Effect.gen(function* () {
     const p =
       owner?.role === "lead" ? yield* project(owner.task.projectId) : yield* authorize(caller);
     if (p.status === "stopped") return yield* fail("The assistant is stopped.");
-    if (p.external_waits >= 15) {
-      // A team leader's issue is the one that is stuck: it waits for the
-      // person while the loop and the project's other work carry on. Work from
-      // before team leaders has only the assistant to stop.
-      if (owner?.role === "lead") {
+    // A team leader's issue is the one that is stuck: its wait is counted on
+    // the issue, so it waits for the person while the loop and the project's
+    // other teams carry on. Work from before team leaders has only the
+    // assistant to stop, and keeps the project's own wait budget.
+    if (owner?.role === "lead") {
+      const t = yield* task(owner.task.id);
+      if ((t.wait?.checks ?? 0) >= 15) {
         yield* saveTask({
-          ...owner.task,
+          ...t,
           status: "blocked",
+          wait: null,
           error:
             "External progress has not completed after 15 checks. Inspect the blocker, then retry from the board.",
         });
-        yield* sql`UPDATE assistant_projects SET external_waits = 0, error = NULL WHERE project_id = ${p.project_id}`;
         yield* changed;
         return { outcome: "limit" } satisfies AssistantWaitResult;
       }
+      yield* saveTask({
+        ...t,
+        wait: { reason: reason.slice(0, 1000), checks: (t.wait?.checks ?? 0) + 1, notified: false },
+      });
+      yield* changed;
+      return { outcome: "waiting" } satisfies AssistantWaitResult;
+    }
+    if (p.external_waits >= 15) {
       yield* sql`UPDATE assistant_projects SET status = 'stopped', error = 'External progress has not completed after 15 checks. Inspect the blocker, then Start to allow another attempt.' WHERE project_id = ${p.project_id}`;
       yield* changed;
       return { outcome: "stopped" } satisfies AssistantWaitResult;
@@ -2055,8 +2246,9 @@ export const make = Effect.gen(function* () {
    * once, and a second such turn blocks the issue for the person.
    */
   const leadIdle = Effect.fn("Assistant.leadIdle")(function* (t: AssistantTask) {
-    const p = yield* project(t.projectId);
-    if (t.status === "blocked" || p.error?.startsWith("Waiting:")) return;
+    // A leader that called assistant_wait and ended its turn is doing the right
+    // thing; the scan tells it to check again.
+    if (t.status === "blocked" || t.wait) return;
     const lead = assistantTaskThreadId(t, "lead");
     const detail = yield* snapshots.getThreadDetailById(lead);
     const asked = Option.isSome(detail)
@@ -2123,15 +2315,18 @@ export const make = Effect.gen(function* () {
     if (!withLead(t.stage)) return;
     if (t.status === "blocked")
       return yield* notifyLead(t, `${id} is blocked: ${t.error ?? "see its threads"}`);
+    const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
     if (t.e2e?.verdict === "failed" && role === "e2e")
       return yield* notifyLead(
         t,
-        `${id} failed its e2e check on staging:\n${t.e2e.report.slice(0, 4000)}\nDecide whether this goes to the worker, back to the tester, or to the person.`,
+        `${id} failed its e2e check ${inWorktree ? "in the worktree" : "on staging"}:\n${t.e2e.report.slice(0, 4000)}\nDecide whether this goes to the worker, back to the tester, or to the person.`,
       );
     if (t.merge && !t.deployment && role === "implement")
       return yield* notifyLead(
         t,
-        `${id} was approved in code review and merged into its integration branch at ${t.merge.commit.slice(0, 7)}. Verify staging, then start the e2e check.`,
+        inWorktree
+          ? `${id} was approved in code review and merged into its integration branch at ${t.merge.commit.slice(0, 7)} after the e2e check passed. Verify staging with assistant_verify_staging; T3 then puts the issue in review.`
+          : `${id} was approved in code review and merged into its integration branch at ${t.merge.commit.slice(0, 7)}. Verify staging, then start the e2e check.`,
       );
   });
 
@@ -2375,11 +2570,19 @@ export const make = Effect.gen(function* () {
     const rows = yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE status != 'stopped'`;
     for (const row of rows) {
       yield* Effect.gen(function* () {
-        if (row.error?.startsWith("Waiting:")) {
-          const waiting = yield* activeTask(row.project_id);
-          if (waiting) yield* notifyLead(waiting, `${row.error}\nCheck again.`);
-          else yield* wake(row.project_id, row.error);
-        }
+        // The project's own wait is the coordinator's, for work from before team
+        // leaders. Every team leader's wait is counted on its own issue.
+        if (row.error?.startsWith("Waiting:")) yield* wake(row.project_id, row.error);
+        // Under the board lock: a turn ending meanwhile writes the same rows.
+        yield* Effect.gen(function* () {
+          for (const held of yield* heldTasks(row.project_id)) {
+            const wait = held.wait;
+            // One assistant_wait call produces one check-again message.
+            if (!wait || wait.notified) continue;
+            yield* notifyLead(held, `Waiting: ${wait.reason}\nCheck again.`);
+            yield* saveTask({ ...held, wait: { ...wait, notified: true } });
+          }
+        }).pipe(lock.withPermits(1));
         // A paused loop keeps the reason it paused until the person starts it again.
         if (row.error !== null && (row.status === "running" || row.error.startsWith("Waiting:"))) {
           yield* sql`UPDATE assistant_projects SET error = NULL WHERE project_id = ${row.project_id} AND error = ${row.error}`;
@@ -2504,8 +2707,8 @@ export const make = Effect.gen(function* () {
     // Team leaders hear about their threads' own failures; only earlier work,
     // which the assistant ran, needs a look after a restart.
     for (const p of running) {
-      const current = yield* activeTask(p.project_id);
-      if (current && !current.leader)
+      const held = yield* heldTasks(p.project_id);
+      if (held.some((t) => !t.leader))
         yield* wake(
           p.project_id,
           "T3 restarted. Inspect retained workers, queued work, and decisions before continuing.",

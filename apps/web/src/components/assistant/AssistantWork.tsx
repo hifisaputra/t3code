@@ -1,4 +1,5 @@
 import {
+  assistantParallelIssues,
   assistantTaskThreadId,
   assistantThreadKind,
   type AssistantDecision,
@@ -236,6 +237,9 @@ export function ActiveTaskCard({
   const asking = openDecision ? assistantThreadKind(openDecision.threadId) : null;
   const pullRequest = worker?.linkedPullRequest ?? worker?.branchPullRequest ?? null;
   const moreRounds = project?.config.maxWorkerTurns ?? 6;
+  // Only worth saying when the project runs several teams: then the number is
+  // what its instructions key ports and databases off.
+  const slot = project && assistantParallelIssues(project.config) > 1 ? (task.slot ?? null) : null;
   const phaseDetail =
     openDecision !== null
       ? `The ${THREAD_KIND[asking ?? "implement"].label.toLowerCase()} asked: ${previewLine(openDecision.question)}`
@@ -365,6 +369,21 @@ export function ActiveTaskCard({
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-muted-foreground text-xs">
         <RoundsMeter used={task.turns} limit={task.turnLimit} />
+        {slot !== null ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[11px]" />
+              }
+            >
+              Slot {slot}
+            </TooltipTrigger>
+            <TooltipPopup className="max-w-64">
+              Which of the project&apos;s teams this one is. Its instructions give each slot its own
+              development ports and databases.
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         {pullRequest ? (
           <a
             href={pullRequest.url}

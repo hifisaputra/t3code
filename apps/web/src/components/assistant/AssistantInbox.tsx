@@ -451,7 +451,11 @@ function reviewHeadline(task: AssistantTask): { kind: string; outcome: string } 
   const checks = task.e2e?.humanChecks.length ?? 0;
   const shots = task.e2e?.screenshots.length ?? 0;
   const outcome = [
-    task.e2e ? "Passed e2e on staging" : "Verified on staging",
+    task.e2e
+      ? task.e2e.environment === "worktree"
+        ? "Passed e2e in the worktree, deployed to staging"
+        : "Passed e2e on staging"
+      : "Verified on staging",
     checks ? `${checks} check${checks === 1 ? "" : "s"} for you` : null,
     shots ? `${shots} screenshot${shots === 1 ? "" : "s"}` : null,
   ]

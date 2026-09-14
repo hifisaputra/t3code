@@ -32,6 +32,15 @@ export const AssistantDeploymentTarget = Schema.Union([
 ]);
 export type AssistantDeploymentTarget = typeof AssistantDeploymentTarget.Type;
 
+/**
+ * Where the e2e tester exercises a change. `staging`: after the reviewed
+ * commit is merged and deployed, on the staging deployment. `worktree`: in the
+ * team's own worktree before the merge, on the commit code review approved;
+ * staging is then only checked for the deploy once the merge lands.
+ */
+export const AssistantE2eEnvironment = Schema.Literals(["staging", "worktree"]);
+export type AssistantE2eEnvironment = typeof AssistantE2eEnvironment.Type;
+
 export const AssistantProjectConfig = Schema.Struct({
   projectId: ProjectId,
   linearProjectId: TrimmedNonEmptyString,
@@ -55,12 +64,29 @@ export const AssistantProjectConfig = Schema.Struct({
   reviewState: Schema.String,
   acceptedState: Schema.String,
   maxWorkerTurns: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 30 })),
+  /** Absent on setups from before the choice existed, which means staging. */
+  e2eEnvironment: Schema.optionalKey(AssistantE2eEnvironment),
+  /**
+   * How many issues the loop works at once, each with its own team and
+   * worktree. Absent on setups from before it existed, which means one.
+   */
+  parallelIssues: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 6 })),
+  ),
 });
 export type AssistantProjectConfig = typeof AssistantProjectConfig.Type;
 
 /** Whether the loop picks ready issues from Linear itself; see AssistantProjectConfig.autoPick. */
 export const assistantPicksIssues = (config: Pick<AssistantProjectConfig, "autoPick">): boolean =>
   config.autoPick !== false;
+/** Where the e2e check runs; see AssistantProjectConfig.e2eEnvironment. */
+export const assistantE2eEnvironment = (
+  config: Pick<AssistantProjectConfig, "e2eEnvironment">,
+): AssistantE2eEnvironment => config.e2eEnvironment ?? "staging";
+/** How many issues the loop works at once; see AssistantProjectConfig.parallelIssues. */
+export const assistantParallelIssues = (
+  config: Pick<AssistantProjectConfig, "parallelIssues">,
+): number => config.parallelIssues ?? 1;
 
 export const AssistantSetupInput = Schema.Struct({
   projectId: ProjectId,
@@ -88,6 +114,7 @@ export const AssistantSetupPlan = Schema.Struct({
   reviewState: AssistantProjectConfig.fields.reviewState,
   acceptedState: AssistantProjectConfig.fields.acceptedState,
   maxWorkerTurns: AssistantProjectConfig.fields.maxWorkerTurns,
+  e2eEnvironment: AssistantProjectConfig.fields.e2eEnvironment,
 });
 export type AssistantSetupPlan = typeof AssistantSetupPlan.Type;
 
@@ -201,8 +228,23 @@ export const AssistantE2eResult = Schema.Struct({
   humanChecks: Schema.Array(Schema.String),
   screenshots: Schema.Array(Schema.Struct({ url: Schema.String, caption: Schema.String })),
   at: IsoDateTime,
+  /** Where the run happened; absent on results from before the worktree option. */
+  environment: Schema.optionalKey(AssistantE2eEnvironment),
+  /** The worktree commit a run in the worktree tested; the merge must be of this commit. */
+  commit: Schema.optionalKey(CommitSha),
 });
 export type AssistantE2eResult = typeof AssistantE2eResult.Type;
+
+/**
+ * A team leader's assistant_wait: what it waits for, how many checks so far,
+ * and whether T3 has already told it to check again for the latest call.
+ */
+export const AssistantWait = Schema.Struct({
+  reason: Schema.String,
+  checks: Schema.Int,
+  notified: Schema.Boolean,
+});
+export type AssistantWait = typeof AssistantWait.Type;
 
 export const AssistantTask = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -235,8 +277,26 @@ export const AssistantTask = Schema.Struct({
   /** Picked by the person rather than the loop: its team leader takes it or asks, never declines. */
   dispatched: Schema.optionalKey(Schema.Boolean),
   declined: Schema.optionalKey(AssistantDecline),
+  /**
+   * Which of the project's concurrent teams this is: the smallest number, from
+   * 0, that no other active team of the project holds. Project instructions
+   * derive per-team resources such as development server ports from it.
+   */
+  slot: Schema.optionalKey(Schema.Int),
+  /** The team leader's wait on something outside T3 (a deploy, CI), while it lasts. */
+  wait: Schema.optionalKey(Schema.NullOr(AssistantWait)),
+  /**
+   * Where this issue's e2e check runs, fixed when its team starts so a setup
+   * change mid-issue does not move the goalposts. Absent means staging.
+   */
+  e2eEnvironment: Schema.optionalKey(AssistantE2eEnvironment),
 });
 export type AssistantTask = typeof AssistantTask.Type;
+
+/** Where a managed issue's e2e check runs; see AssistantTask.e2eEnvironment. */
+export const assistantTaskE2eEnvironment = (
+  task: Pick<AssistantTask, "e2eEnvironment">,
+): AssistantE2eEnvironment => task.e2eEnvironment ?? "staging";
 
 export const assistantTaskThreadId = (
   task: Pick<AssistantTask, "id" | "threadId">,
@@ -301,6 +361,8 @@ export const AssistantStartOptions = Schema.Struct({
   autoPick: Schema.Boolean,
   /** Only issues assigned to the connected user; off takes the project's other issues too. */
   assignedToMe: Schema.Boolean,
+  /** How many issues to work at once; earlier clients send none and keep the config as it is. */
+  parallelIssues: Schema.optionalKey(AssistantProjectConfig.fields.parallelIssues),
 });
 export type AssistantStartOptions = typeof AssistantStartOptions.Type;
 

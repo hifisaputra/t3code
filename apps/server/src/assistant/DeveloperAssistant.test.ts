@@ -44,6 +44,7 @@ import { TerminalManager } from "../terminal/Manager.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import Migration from "../persistence/Migrations/052_DeveloperAssistant.ts";
 import SetupMigration from "../persistence/Migrations/053_AssistantSetup.ts";
+import ParallelMigration from "../persistence/Migrations/055_AssistantParallelIssues.ts";
 import * as Assistant from "./DeveloperAssistant.ts";
 import { AssistantEvidence } from "./AssistantEvidence.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
@@ -413,17 +414,21 @@ function harness() {
     yield* sql`CREATE TABLE orchestration_events (sequence INTEGER)`;
     yield* Migration;
     yield* SetupMigration;
+    yield* ParallelMigration;
     return yield* make;
   });
-  const setup = Effect.gen(function* () {
-    const service = yield* initialize;
-    yield* service.configure(config);
-    const board = yield* service.control({ projectId: config.projectId, action: "start" });
-    return { service, caller: board.projects[0]!.threadId };
-  });
+  /** A configured, running project; overrides change the setup it runs with. */
+  const setupWith = (overrides: Partial<AssistantProjectConfig> = {}) =>
+    Effect.gen(function* () {
+      const service = yield* initialize;
+      yield* service.configure({ ...config, ...overrides });
+      const board = yield* service.control({ projectId: config.projectId, action: "start" });
+      return { service, caller: board.projects[0]!.threadId };
+    });
   return {
     initialize,
-    setup,
+    setup: setupWith(),
+    setupWith,
     make,
     makeWithWorkers: Assistant.make.pipe(Effect.provide(dependencies)),
     replayEvents,
@@ -512,14 +517,45 @@ const activeTask = (service: Service) =>
 const taskById = (service: Service, id: string) =>
   service.board(null).pipe(Effect.map((b) => b.tasks.find((t) => t.id === id)!));
 
-/** The team the loop started takes its issue; the worker's first turn is queued. */
-const takeIssue = (h: Harness, service: Service, brief = "Fix it") =>
+/** Every issue the project's teams hold, by identifier. */
+const heldTasks = (service: Service) =>
+  service
+    .board(null)
+    .pipe(
+      Effect.map((b) =>
+        b.tasks
+          .filter((t) => assistantTaskHoldsProject(t.status))
+          .toSorted((a, c) => a.issue.identifier.localeCompare(c.issue.identifier)),
+      ),
+    );
+
+/** One team takes its issue; the worker's first turn is queued. */
+const takeTask = (h: Harness, service: Service, t: AssistantTask, brief = "Fix it") =>
   Effect.gen(function* () {
-    const t = yield* activeTask(service);
     yield* service.deliver();
     yield* service.acceptIssue(leadOf(t), brief);
     yield* endTurn(h, service, leadOf(t));
     return yield* taskById(service, t.id);
+  });
+
+/** The team the loop started takes its issue; the worker's first turn is queued. */
+const takeIssue = (h: Harness, service: Service, brief = "Fix it") =>
+  Effect.gen(function* () {
+    const t = yield* activeTask(service);
+    return yield* takeTask(h, service, t, brief);
+  });
+
+/** The code reviewer approves the worker's commit. */
+const approveReview = (h: Harness, service: Service, t: AssistantTask) =>
+  Effect.gen(function* () {
+    const reviewer = assistantTaskThreadId(t, "review");
+    yield* service.deliver();
+    yield* service.requestReview(t.threadId, "Ready for review: PR #1");
+    yield* endTurn(h, service, t.threadId);
+    yield* service.deliver();
+    yield* service.submitReview(reviewer, "approved", "Looks right.", "Covered the fix.");
+    yield* endTurn(h, service, reviewer);
+    yield* service.deliver();
   });
 
 /** Carry a taken issue through review and merge, ready for staging. */
@@ -2743,5 +2779,253 @@ it.effect("a Linear card is posted only after the state that stops it being post
     const tested = atPost.at(-1)!;
     assert.isTrue(tested.e2e);
     assert.notEqual(tested.stage, "e2e");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("works two issues at once, each team in its own slot", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setupWith({ parallelIssues: 2 });
+    const held = yield* heldTasks(service);
+    assert.deepEqual(
+      held.map((t) => t.issue.identifier),
+      ["APP-1", "APP-2"],
+    );
+    assert.deepEqual(
+      held.map((t) => t.slot),
+      [0, 1],
+    );
+    // Linear is read once for the pass that filled both slots, and the third
+    // issue waits for one of them.
+    assert.lengthOf(h.listed, 1);
+    yield* service.scan();
+    assert.lengthOf(yield* heldTasks(service), 2);
+
+    // The delivered team's slot goes to the next issue.
+    const first = yield* takeTask(h, service, held[0]!, "Fix the page");
+    yield* deliverIssue(h, service, first);
+    assert.equal((yield* taskById(service, first.id)).status, "review");
+    yield* service.scan();
+    const working = yield* heldTasks(service);
+    assert.deepEqual(
+      working.map((t) => t.issue.identifier),
+      ["APP-2", "APP-3"],
+    );
+    assert.equal(working.find((t) => t.issue.identifier === "APP-3")?.slot, 0);
+    assert.equal(working.find((t) => t.issue.identifier === "APP-2")?.slot, 1);
+
+    // A blocked team holds its slot until the person deals with it.
+    const third = working.find((t) => t.issue.identifier === "APP-3")!;
+    let outcome = "waiting";
+    while (outcome === "waiting")
+      outcome = (yield* service.waitForExternal(leadOf(third), "Deploy is pending")).outcome;
+    assert.equal((yield* taskById(service, third.id)).status, "blocked");
+    h.issues.push(makeIssue(4));
+    yield* service.scan();
+    assert.lengthOf(yield* heldTasks(service), 2);
+    yield* service.review({ taskId: third.id, action: "skip", feedback: "Later" });
+    yield* service.scan();
+    const fourth = (yield* heldTasks(service)).find((t) => t.issue.identifier === "APP-4")!;
+    assert.equal(fourth.slot, 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("starting saves how many issues to work at once, and a start without it keeps it", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    yield* service.configure(config);
+    const board = yield* service.control({
+      projectId: config.projectId,
+      action: "start",
+      options: { autoPick: true, assignedToMe: true, parallelIssues: 3 },
+    });
+    assert.equal(board.projects[0]?.config.parallelIssues, 3);
+    assert.lengthOf(yield* heldTasks(service), 3);
+    yield* service.control({ projectId: config.projectId, action: "pause" });
+    // An earlier client sends no count and keeps the one the person chose.
+    const again = yield* service.control({
+      projectId: config.projectId,
+      action: "start",
+      options: { autoPick: true, assignedToMe: true },
+    });
+    assert.equal(again.projects[0]?.config.parallelIssues, 3);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a team leader's wait is its issue's own, and blocks only that issue", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setupWith({ parallelIssues: 2 });
+    const [first, second] = yield* heldTasks(service);
+    // Both leaders have their start turn; nothing else is queued for them.
+    yield* service.deliver();
+    h.finish(leadOf(first!));
+    h.finish(leadOf(second!));
+    yield* service.waitForExternal(leadOf(first!), "Staging is deploying");
+    const waiting = yield* taskById(service, first!.id);
+    assert.equal(waiting.wait?.reason, "Staging is deploying");
+    assert.equal(waiting.wait?.checks, 1);
+    assert.isFalse(waiting.wait?.notified);
+    // The project itself is untouched by a team leader's wait.
+    assert.isNull((yield* service.board(null)).projects[0]?.error ?? null);
+
+    // One call produces one check-again message, to that leader alone.
+    yield* service.scan();
+    assert.include(
+      turnsOf(h, leadOf(first!)).at(-1),
+      "Waiting: Staging is deploying\nCheck again.",
+    );
+    assert.lengthOf(turnsOf(h, leadOf(first!)), 2);
+    h.finish(leadOf(first!));
+    yield* service.scan();
+    assert.lengthOf(turnsOf(h, leadOf(first!)), 2);
+    assert.lengthOf(turnsOf(h, leadOf(second!)), 1);
+
+    // The other team's wait is its own.
+    yield* service.waitForExternal(leadOf(second!), "CI is running");
+    yield* service.scan();
+    assert.include(turnsOf(h, leadOf(second!)).at(-1), "Waiting: CI is running\nCheck again.");
+    assert.lengthOf(turnsOf(h, leadOf(first!)), 2);
+
+    // The fifteenth check blocks that issue; the project and its other team run on.
+    let outcome = "waiting";
+    while (outcome === "waiting")
+      outcome = (yield* service.waitForExternal(leadOf(first!), "Staging is deploying")).outcome;
+    assert.equal(outcome, "limit");
+    const blocked = yield* taskById(service, first!.id);
+    assert.equal(blocked.status, "blocked");
+    assert.isNull(blocked.wait ?? null);
+    assert.include(blocked.error!, "15 checks");
+    const board = yield* service.board(null);
+    assert.equal(board.projects[0]?.status, "running");
+    assert.isNull(board.projects[0]?.error ?? null);
+    assert.equal(board.tasks.find((t) => t.id === second!.id)?.status, "working");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("in the worktree the e2e check runs before the merge, and staging delivers", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setupWith({ e2eEnvironment: "worktree" });
+    const first = yield* takeIssue(h, service);
+    const lead = leadOf(first);
+    const tester = assistantTaskThreadId(first, "e2e");
+    assert.equal(first.e2eEnvironment, "worktree");
+    // The check runs on the commit code review approved, so there must be one.
+    const early = yield* service.startE2e(lead, undefined, "Open the page.").pipe(Effect.flip);
+    assert.include(early.detail, "code review approves");
+
+    yield* approveReview(h, service, first);
+    // The leader starts the check; the worker is not told to merge yet.
+    assert.include(turnsOf(h, lead).at(-1), "Start the e2e check in the worktree");
+    assert.lengthOf(turnsOf(h, first.threadId), 1);
+    const unchecked = yield* service
+      .reportMerged(first.threadId, "The page loads")
+      .pipe(Effect.flip);
+    assert.include(unchecked.detail, "e2e check has not passed");
+
+    yield* service.startE2e(lead, undefined, "Open the page.");
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    assert.include(turnsOf(h, tester).at(-1), `in the worktree`);
+    const passed = yield* service.submitE2e(tester, {
+      verdict: "passed",
+      report: "- The page loads: passed",
+      humanChecks: [],
+      screenshots: [{ path: `/evidence/${first.id}/page.png`, caption: "The page after the fix" }],
+    });
+    // Nothing is on the issue yet; the worker is told to merge the tested commit.
+    assert.equal(passed.status, "working");
+    assert.equal(passed.e2e?.environment, "worktree");
+    assert.equal(passed.e2e?.commit, h.git.head);
+    assert.lengthOf(h.comments, 0);
+    yield* endTurn(h, service, tester);
+    yield* service.deliver();
+    assert.include(turnsOf(h, first.threadId).at(-1), "Merge the PR into develop");
+
+    yield* service.reportMerged(first.threadId, "The page loads again.");
+    yield* endTurn(h, service, first.threadId);
+    yield* service.deliver();
+    assert.include(turnsOf(h, lead).at(-1), "Verify staging with assistant_verify_staging");
+    const delivered = yield* service.verifyStaging(lead, undefined);
+    assert.equal(delivered.status, "review");
+    // The merged card and the e2e card, and no "deployed, e2e running" card.
+    assert.lengthOf(h.comments, 2);
+    assert.match(h.comments[0]!.body, /^\*\*Code review passed/);
+    assert.lengthOf(
+      h.comments.filter((c) => c.body.includes("To accept, move this issue to Done")),
+      1,
+    );
+    assert.lengthOf(h.descriptions, 1);
+    assert.deepEqual(h.transitions, ["review"]);
+    yield* endTurn(h, service, lead);
+    for (const role of ["lead", "implement", "review", "e2e"] as const)
+      assert.equal(h.threads.get(assistantTaskThreadId(first, role))?.archivedAt, timestamp);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a commit the worktree e2e check did not cover cannot be merged", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setupWith({ e2eEnvironment: "worktree" });
+    const first = yield* takeIssue(h, service);
+    const lead = leadOf(first);
+    const tester = assistantTaskThreadId(first, "e2e");
+    yield* approveReview(h, service, first);
+    yield* service.startE2e(lead, undefined, "Open the page.");
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    yield* service.submitE2e(tester, {
+      verdict: "passed",
+      report: "- The page loads: passed",
+      humanChecks: [],
+      screenshots: [],
+    });
+    yield* endTurn(h, service, tester);
+    // The worker pushes again and the reviewer approves the new commit; the
+    // e2e result covers the old one.
+    h.git.head = "c".repeat(40);
+    yield* service.deliver();
+    yield* service.requestReview(first.threadId, "One more fix");
+    yield* endTurn(h, service, first.threadId);
+    yield* service.deliver();
+    yield* service.submitReview(
+      assistantTaskThreadId(first, "review"),
+      "approved",
+      "Still right.",
+      "Re-checked the fix.",
+    );
+    yield* endTurn(h, service, assistantTaskThreadId(first, "review"));
+    const stale = yield* service.reportMerged(first.threadId, "Merged").pipe(Effect.flip);
+    assert.include(stale.detail, "e2e check has not passed");
+    assert.lengthOf(h.comments, 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a failed worktree e2e run goes to the team leader with nothing posted on Linear", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setupWith({ e2eEnvironment: "worktree" });
+    const first = yield* takeIssue(h, service);
+    const lead = leadOf(first);
+    const tester = assistantTaskThreadId(first, "e2e");
+    yield* approveReview(h, service, first);
+    yield* service.startE2e(lead, undefined, "Open the page.");
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    const failed = yield* service.submitE2e(tester, {
+      verdict: "failed",
+      report: "- The page loads: failed, it shows a 500",
+      humanChecks: [],
+      screenshots: [],
+    });
+    assert.equal(failed.e2e?.verdict, "failed");
+    assert.equal(failed.stage, "lead");
+    assert.lengthOf(h.comments, 0);
+    yield* endTurn(h, service, tester);
+    yield* service.deliver();
+    assert.include(turnsOf(h, lead).at(-1), "failed its e2e check in the worktree");
+    assert.isFalse(turnsOf(h, first.threadId).some((text) => text.includes("Merge the PR")));
   }).pipe(Effect.provide(database()), Effect.scoped),
 );

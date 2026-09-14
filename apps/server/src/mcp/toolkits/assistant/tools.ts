@@ -120,7 +120,7 @@ export const AssistantToolkit = Toolkit.make(
   }).annotate(Tool.Readonly, true),
   Tool.make("assistant_message_worker", {
     description:
-      "Send follow-up work to one of the active issue's threads: the implementer (default), the code reviewer, the e2e tester after assistant_start_e2e, or (from the developer assistant) the team leader. Use it when a thread stalls, an e2e failure needs a fix, or the person redirected the work; the implementer and reviewer hand work to each other on their own. Waits while another of the issue's threads runs; refuses with unanswered decisions or past the worker turn limit. End your turn afterward.",
+      "Send follow-up work to one of the active issue's threads: the implementer (default), the code reviewer, the e2e tester once its run has started, or (from the developer assistant) the team leader. Use it when a thread stalls, an e2e failure needs a fix, or the person redirected the work; the implementer and reviewer hand work to each other on their own. Waits while another of the issue's threads runs; refuses with unanswered decisions or past the worker turn limit. End your turn afterward.",
     parameters: Schema.Struct({ taskId, message: text, thread }),
     success: AssistantTask,
     failure,
@@ -175,7 +175,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_report_merged", {
     description:
-      "Implementation thread only: report that the approved commit is merged into the integration branch. T3 checks that the worktree still sits on the approved commit and that origin's integration branch contains it, posts the merge update on the Linear issue, and hands the issue to the team leader for staging. End your turn afterward.",
+      "Implementation thread only: report that the approved commit is merged into the integration branch. T3 checks that the worktree still sits on the approved commit and that origin's integration branch contains it, posts the merge update on the Linear issue, and hands the issue to the team leader for staging. In worktree mode the e2e check must have passed on this commit first. End your turn afterward.",
     parameters: Schema.Struct({
       summary: text.annotate({
         description:
@@ -188,7 +188,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_verify_staging", {
     description:
-      "Team leader, after the implementer reports the merge: check the saved deployment targets or custom check. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts a deployed update on the Linear issue; then call assistant_start_e2e. If staging is still deploying, use assistant_wait.",
+      "Team leader, after the implementer reports the merge: check the saved deployment targets or custom check. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts the update on the Linear issue; in staging mode call assistant_start_e2e next, and in worktree mode this is the delivery: T3 then puts the issue in review. If staging is still deploying, use assistant_wait.",
     parameters: Schema.Struct({
       taskId,
       targetIds: Schema.optionalKey(Schema.Array(text)),
@@ -199,7 +199,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_start_e2e", {
     description:
-      "Team leader, after assistant_verify_staging succeeds: start (or rerun) the issue's e2e tester on staging. The brief lists each acceptance criterion as a check a person could follow on staging, the affected pages or endpoints, the data it needs and what to clean up. The tester reports passed, partial or failed with screenshots; T3 posts that on the Linear issue. End your turn afterward.",
+      "Team leader: start (or rerun) the issue's e2e tester, on staging after assistant_verify_staging succeeds, or in the team's worktree on the approved commit before the merge when the project is set up that way. The brief lists each acceptance criterion as a check a person could follow, the affected pages or endpoints, the data it needs and what to clean up. The tester reports passed, partial or failed with screenshots. End your turn afterward.",
     parameters: Schema.Struct({ taskId, brief: text }),
     success: AssistantTask,
     failure,
@@ -207,11 +207,11 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_submit_e2e", {
     description:
-      "E2E thread only: report the staging test. T3 uploads the screenshots, posts the result on the Linear issue, and on passed or partial puts the issue in review and frees the project; on failed the team leader decides the fix. End your turn after submitting.",
+      "E2E thread only: report your test, on staging or in the team's worktree, wherever you ran it. T3 uploads the screenshots and records the result; on passed or partial the issue moves on (in staging mode straight to review, in worktree mode to the merge and the staging deploy), and on failed the team leader decides the fix. End your turn after submitting.",
     parameters: Schema.Struct({
       verdict: Schema.Literals(["passed", "partial", "failed"]).annotate({
         description:
-          "passed: every criterion verified on staging. partial: what could be checked passed, and humanChecks lists what a person must check. failed: a criterion does not hold on staging.",
+          "passed: every criterion verified where you tested. partial: what could be checked passed, and humanChecks lists what a person must check. failed: a criterion does not hold.",
       }),
       report: text.annotate({
         description:

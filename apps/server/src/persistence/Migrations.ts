@@ -66,6 +66,7 @@ import Migration0052 from "./Migrations/052_DeveloperAssistant.ts";
 import Migration0053 from "./Migrations/053_AssistantSetup.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadLinkedIssue.ts";
 import Migration0054 from "./Migrations/054_AssistantHotQueryIndexes.ts";
+import Migration0055 from "./Migrations/055_AssistantParallelIssues.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -132,6 +133,7 @@ export const migrationEntries = [
   [52, "DeveloperAssistant", Migration0052],
   [53, "AssistantSetup", Migration0053],
   [54, "AssistantHotQueryIndexes", Migration0054],
+  [55, "AssistantParallelIssues", Migration0055],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

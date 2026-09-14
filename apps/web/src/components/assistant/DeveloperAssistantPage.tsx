@@ -40,7 +40,7 @@ import { AssistantSetupDialog } from "./AssistantSetupDialog";
 import { AssistantSetupSheet } from "./AssistantSetupReview";
 import { inboxElementId, InboxItemCard, type InboxContext } from "./AssistantInbox";
 import { ActiveTaskCard, AssistantHistory, AssistantQueue } from "./AssistantWork";
-import { activeTaskFor, buildInbox, historyTasks, queuedTasks } from "./assistantBoard.logic";
+import { activeTasksFor, buildInbox, historyTasks, queuedTasks } from "./assistantBoard.logic";
 import { SectionHeading } from "./assistantUi";
 
 export function DeveloperAssistantPage() {
@@ -237,7 +237,7 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
                   environmentId={environmentId}
                   project={project}
                   title={projectTitle(project.config.projectId)}
-                  activeTask={activeTaskFor(data, project.config.projectId)}
+                  activeTasks={activeTasksFor(data, project.config.projectId)}
                   linearProjectName={linearProjectName(project.config.linearProjectId)}
                   providers={environment.serverConfig?.providers ?? []}
                   onOpenThread={openThread}

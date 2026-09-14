@@ -120,12 +120,16 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const active = yield* sql<{
       data: string;
     }>`SELECT data FROM assistant_tasks WHERE project_id = ${setup.preferences.projectId} AND status IN ('preparing','working','waiting','blocked')`;
+    // A project can work several issues at once; each of them keeps its branch.
+    const inProgress = yield* Effect.forEach(active, (row) =>
+      decodeTask(row.data).pipe(Effect.map((t) => t.issue.identifier)),
+    );
     return {
       setup,
       instructions: setupInstructions(
         setup.preferences,
         configured[0] ? yield* decodeConfig(configured[0].config) : null,
-        active[0] ? (yield* decodeTask(active[0].data)).issue.identifier : null,
+        inProgress.length ? inProgress.join(", ") : null,
       ),
     };
   });

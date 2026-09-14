@@ -51,7 +51,7 @@ export const THREAD_KIND: Record<
     label: "E2E test",
     icon: MonitorCheckIcon,
     className: "text-emerald-700 dark:text-emerald-300",
-    does: "Tests the deployed change on staging like a person would and takes screenshots.",
+    does: "Tests the change like a person would, in the team's worktree or on staging, and takes screenshots.",
   },
   setup: {
     label: "Setup",
