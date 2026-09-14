@@ -4,6 +4,7 @@ import {
   type AssistantDecision,
   type AssistantProject,
   type AssistantTask,
+  type AssistantThreadRole,
   type EnvironmentId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -48,10 +49,13 @@ import {
   IssueLink,
   StatusDot,
   threadIsBusy,
+  threadKeepsTeamWaiting,
   useAssistantAction,
   type StatusTone,
 } from "./assistantUi";
 import { THREAD_KIND } from "./threadKinds";
+
+const TEAM_ROLES: ReadonlyArray<AssistantThreadRole> = ["lead", "implement", "review", "e2e"];
 
 const PHASE_STYLE: Record<TaskPhaseTone, string> = {
   active: "bg-success/8 text-success-foreground",
@@ -212,6 +216,13 @@ export function ActiveTaskCard({
           ? leader
           : worker;
   const holderBusy = threadIsBusy(holder);
+  // The issue's threads share one worktree: a handoff waits while a teammate runs on.
+  const waitingOn =
+    holderBusy || task.stage === undefined
+      ? null
+      : (TEAM_ROLES.find(
+          (role) => shells[role] !== holder && threadKeepsTeamWaiting(shells[role]),
+        ) ?? null);
   const openDecision = decisions.find((d) => d.answer === null && d.taskId === task.id) ?? null;
   const phase = describeTaskPhase({
     task,
@@ -219,6 +230,7 @@ export function ActiveTaskCard({
     workerNeedsInput: Boolean(holder?.hasPendingApprovals || holder?.hasPendingUserInput),
     step: holder?.planProgress?.step ?? null,
     hasOpenDecision: openDecision !== null,
+    waitingOn,
   });
   const pipeline = taskPipeline(task);
   const asking = openDecision ? assistantThreadKind(openDecision.threadId) : null;

@@ -3,6 +3,9 @@ import { describe, expect, it } from "@effect/vitest";
 import type { LinearIssueDetail } from "@t3tools/contracts";
 
 import {
+  DELIVERED_MARKER_END,
+  DELIVERED_MARKER_START,
+  deliveredDescription,
   e2eComment,
   issueFingerprint,
   linearFailureDetail,
@@ -53,6 +56,76 @@ describe("e2eComment", () => {
         ].join("\n"),
       ].join("\n\n"),
     );
+  });
+});
+
+describe("deliveredDescription", () => {
+  const e2e = {
+    verdict: "partial" as const,
+    report: "- Blog post shows its body: passed",
+    humanChecks: ["Open the reminder email in the test inbox."],
+    screenshots: [],
+    at: "2026-09-13T03:00:00.000Z",
+  };
+  const merge = { commit: deployment.revision, summary: "Blog posts show their body.", at: "" };
+  const input = { current: "Images break.", merge, e2e, deployment, acceptedState: "Done" };
+
+  it("keeps the person's description and adds what shipped below it", () => {
+    expect(deliveredDescription(input)).toBe(
+      [
+        "Images break.",
+        "",
+        DELIVERED_MARKER_START,
+        "## What shipped",
+        "",
+        "Delivered to staging and waiting to be accepted. Move this issue to Done to accept it.",
+        "",
+        "Blog posts show their body.",
+        "",
+        "**Check before accepting**",
+        "",
+        "1. Open the reminder email in the test inbox.",
+        "",
+        "Staging: [staging.garibet.id](https://staging.garibet.id)",
+        DELIVERED_MARKER_END,
+      ].join("\n"),
+    );
+  });
+
+  it("replaces its own section rather than stacking a second one", () => {
+    const first = deliveredDescription(input);
+    const second = deliveredDescription({
+      ...input,
+      current: `${first}\n\nAdded later by the person.`,
+      merge: { ...merge, summary: "Blog posts show their body and their cover image." },
+    });
+    expect(second.split(DELIVERED_MARKER_START)).toHaveLength(2);
+    expect(second).toContain("Blog posts show their body and their cover image.");
+    expect(second).not.toContain("Blog posts show their body.\n");
+    expect(second.startsWith("Images break.\n")).toBe(true);
+    expect(second.endsWith("Added later by the person.")).toBe(true);
+  });
+
+  it("is the section alone when the issue has no description", () => {
+    for (const current of [null, "   "])
+      expect(deliveredDescription({ ...input, current }).startsWith(DELIVERED_MARKER_START)).toBe(
+        true,
+      );
+  });
+
+  it("leaves out the checks when a person has nothing to check", () => {
+    const body = deliveredDescription({
+      ...input,
+      e2e: { ...e2e, verdict: "passed", humanChecks: [] },
+    });
+    expect(body).not.toContain("Check before accepting");
+    expect(body).toContain("Blog posts show their body.");
+  });
+
+  it("points at the comments when the implementer reported no summary", () => {
+    const body = deliveredDescription({ ...input, merge: null, acceptedState: "" });
+    expect(body).toContain("See the developer assistant's comments below for what changed.");
+    expect(body).toContain("Move this issue to a completed state to accept it.");
   });
 });
 

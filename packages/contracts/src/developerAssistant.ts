@@ -35,7 +35,14 @@ export type AssistantDeploymentTarget = typeof AssistantDeploymentTarget.Type;
 export const AssistantProjectConfig = Schema.Struct({
   projectId: ProjectId,
   linearProjectId: TrimmedNonEmptyString,
+  /** The loop takes only issues assigned to the connected Linear user. */
   assignedToMe: Schema.Boolean,
+  /**
+   * The loop takes ready issues from Linear by itself. When false, the
+   * assistant works only on issues the person dispatches. Absent on setups
+   * from before the start options existed, which means true.
+   */
+  autoPick: Schema.optionalKey(Schema.Boolean),
   readyStates: Schema.Array(TrimmedNonEmptyString),
   modelSelection: ModelSelection,
   workerModelSelection: ModelSelection,
@@ -50,6 +57,10 @@ export const AssistantProjectConfig = Schema.Struct({
   maxWorkerTurns: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 30 })),
 });
 export type AssistantProjectConfig = typeof AssistantProjectConfig.Type;
+
+/** Whether the loop picks ready issues from Linear itself; see AssistantProjectConfig.autoPick. */
+export const assistantPicksIssues = (config: Pick<AssistantProjectConfig, "autoPick">): boolean =>
+  config.autoPick !== false;
 
 export const AssistantSetupInput = Schema.Struct({
   projectId: ProjectId,
@@ -284,10 +295,21 @@ export const AssistantBoard = Schema.Struct({
 });
 export type AssistantBoard = typeof AssistantBoard.Type;
 
+/** What the person chose on the Start button; saved to the project's config. */
+export const AssistantStartOptions = Schema.Struct({
+  /** Pick ready issues from Linear; off means only dispatched issues run. */
+  autoPick: Schema.Boolean,
+  /** Only issues assigned to the connected user; off takes the project's other issues too. */
+  assignedToMe: Schema.Boolean,
+});
+export type AssistantStartOptions = typeof AssistantStartOptions.Type;
+
 export const AssistantControlInput = Schema.Struct({
   projectId: ProjectId,
   // "stop" is what earlier clients send for "pause".
   action: Schema.Literals(["start", "pause", "stop", "interrupt", "wake"]),
+  /** Read on "start" only; earlier clients send none and keep the config as it is. */
+  options: Schema.optionalKey(AssistantStartOptions),
 });
 /** The person gives one issue to the next team, ahead of the loop's own picks. */
 export const AssistantDispatchInput = Schema.Struct({

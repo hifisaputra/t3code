@@ -1,10 +1,13 @@
-import type {
-  AssistantProject,
-  AssistantSetup,
-  AssistantTask,
-  EnvironmentId,
-  ServerProvider,
-  ThreadId,
+import {
+  assistantPicksIssues,
+  type AssistantProject,
+  type AssistantProjectConfig,
+  type AssistantSetup,
+  type AssistantStartOptions,
+  type AssistantTask,
+  type EnvironmentId,
+  type ServerProvider,
+  type ThreadId,
 } from "@t3tools/contracts";
 import {
   ArrowRightIcon,
@@ -28,7 +31,10 @@ import { useThreadShell } from "~/state/entities";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import { Label } from "../ui/label";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
+import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AssistantDispatchDialog } from "./AssistantDispatchDialog";
@@ -76,6 +82,103 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function StartOption({
+  label,
+  hint,
+  checked,
+  disabled,
+  onCheckedChange,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  disabled?: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className={cn(disabled === true && "opacity-56")}>
+      <Label className="items-start gap-2.5 font-normal">
+        <Checkbox
+          className="mt-0.5"
+          checked={checked}
+          disabled={disabled ?? false}
+          onCheckedChange={(next) => onCheckedChange(next === true)}
+        />
+        <span className="min-w-0 flex-1">{label}</span>
+      </Label>
+      <p className="mt-1 pl-7 text-muted-foreground text-xs">{hint}</p>
+    </div>
+  );
+}
+
+/**
+ * Start asks how the loop should run before it runs: whether it picks issues
+ * from Linear itself, and whose issues it may take. Both are saved to the
+ * project, so the boxes open on what it is set to now.
+ */
+function StartButton({
+  title,
+  config,
+  pending,
+  onStart,
+}: {
+  title: string;
+  config: AssistantProjectConfig;
+  pending: string | null;
+  onStart: (options: AssistantStartOptions) => Promise<unknown>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [autoPick, setAutoPick] = useState(true);
+  const [anyAssignee, setAnyAssignee] = useState(false);
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        if (next) {
+          setAutoPick(assistantPicksIssues(config));
+          setAnyAssignee(!config.assignedToMe);
+        }
+        setOpen(next);
+      }}
+    >
+      <PopoverTrigger render={<Button size="sm" disabled={pending !== null} />}>
+        {pending === "start" ? <Spinner className="size-3.5" /> : <PlayIcon />}
+        Start
+      </PopoverTrigger>
+      <PopoverPopup align="start" className="w-80 max-w-[calc(100vw-2rem)]" viewportClassName="p-4">
+        <PopoverTitle className="font-medium text-sm">Start {title}</PopoverTitle>
+        <div className="mt-3 flex flex-col gap-3">
+          <StartOption
+            label="Pick issues from Linear automatically"
+            hint="Off: the assistant works only on issues you dispatch."
+            checked={autoPick}
+            onCheckedChange={setAutoPick}
+          />
+          <StartOption
+            label="Take issues not assigned to me too"
+            hint="Off: only issues assigned to you in Linear."
+            checked={anyAssignee}
+            disabled={!autoPick}
+            onCheckedChange={setAnyAssignee}
+          />
+        </div>
+        <Button
+          size="sm"
+          className="mt-4 w-full"
+          disabled={pending !== null}
+          onClick={async () => {
+            await onStart({ autoPick, assignedToMe: !anyAssignee });
+            setOpen(false);
+          }}
+        >
+          <PlayIcon />
+          Start
+        </Button>
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
 export function AssistantProjectCard({
   environmentId,
   project,
@@ -106,17 +209,25 @@ export function AssistantProjectCard({
   const stopped = project.status === "stopped";
   const projectId = config.projectId;
 
-  const act = (action: "start" | "pause" | "interrupt" | "wake") =>
-    run(action, () => control({ environmentId, input: { projectId, action } }), {
-      failure:
-        action === "start"
-          ? `Could not start ${title}`
-          : action === "wake"
-            ? "Could not wake the assistant"
-            : action === "pause" && stopped
-              ? `Could not resume ${title}`
-              : `Could not pause ${title}`,
-    });
+  const act = (action: "start" | "pause" | "interrupt" | "wake", options?: AssistantStartOptions) =>
+    run(
+      action,
+      () =>
+        control({
+          environmentId,
+          input: { projectId, action, ...(options ? { options } : {}) },
+        }),
+      {
+        failure:
+          action === "start"
+            ? `Could not start ${title}`
+            : action === "wake"
+              ? "Could not wake the assistant"
+              : action === "pause" && stopped
+                ? `Could not resume ${title}`
+                : `Could not pause ${title}`,
+      },
+    );
 
   // An issue in progress may stay; the server keeps its base branch and scope.
   const canEdit = !running;
@@ -132,7 +243,11 @@ export function AssistantProjectCard({
           <h3 className="truncate font-semibold text-sm">{title}</h3>
           <p className="mt-0.5 truncate text-muted-foreground text-xs">
             {linearProjectName ?? "Linear project"} ·{" "}
-            {config.assignedToMe ? "your issues" : "all issues"}
+            {!assistantPicksIssues(config)
+              ? "dispatched issues only"
+              : config.assignedToMe
+                ? "your issues"
+                : "all issues"}
           </p>
         </div>
         <StatusPill
@@ -196,32 +311,35 @@ export function AssistantProjectCard({
       </dl>
 
       <div className="flex flex-wrap items-center gap-1.5">
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="sm"
-                variant={running ? "outline" : "default"}
-                disabled={pending !== null}
-                onClick={() => void act(running ? "pause" : "start")}
-              />
-            }
-          >
-            {pending === "start" || (pending === "pause" && running) ? (
-              <Spinner className="size-3.5" />
-            ) : running ? (
-              <PauseIcon />
-            ) : (
-              <PlayIcon />
-            )}
-            {running ? "Pause" : "Start"}
-          </TooltipTrigger>
-          <TooltipPopup className="max-w-64">
-            {running
-              ? "Stop taking issues from Linear. The team at work finishes its issue, and issues you dispatch still run."
-              : "Take issues from Linear, one at a time."}
-          </TooltipPopup>
-        </Tooltip>
+        {running ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={pending !== null}
+                  onClick={() => void act("pause")}
+                />
+              }
+            >
+              {pending === "pause" ? <Spinner className="size-3.5" /> : <PauseIcon />}
+              Pause
+            </TooltipTrigger>
+            <TooltipPopup className="max-w-64">
+              {assistantPicksIssues(config)
+                ? "Stop taking issues from Linear. The team at work finishes its issue, and issues you dispatch still run."
+                : "Stop the loop. The team at work finishes its issue, and issues you dispatch still run."}
+            </TooltipPopup>
+          </Tooltip>
+        ) : (
+          <StartButton
+            title={title}
+            config={config}
+            pending={pending}
+            onStart={(options) => act("start", options)}
+          />
+        )}
         <Tooltip>
           <TooltipTrigger
             render={<Button size="sm" variant="outline" onClick={() => setDispatching(true)} />}

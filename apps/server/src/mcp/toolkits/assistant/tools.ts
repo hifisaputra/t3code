@@ -179,7 +179,7 @@ export const AssistantToolkit = Toolkit.make(
     parameters: Schema.Struct({
       summary: text.annotate({
         description:
-          "What changed and why it matters, in plain Markdown for people who read the Linear issue but not the code. No first person, no PR or commit; T3 adds them.",
+          'What a user can now do, in plain Markdown for people who read the Linear issue but not the code. T3 puts this in the issue\'s description under "What shipped" once staging verifies it. No first person, no file or branch names, no PR or commit; T3 adds those to its comments.',
       }),
     }),
     success: AssistantTask,

@@ -203,6 +203,16 @@ export function threadIsBusy(
   );
 }
 
+/**
+ * Whether a thread keeps its issue's team waiting: mid-turn, or with background
+ * work the server counts as busy, a watch loop included.
+ */
+export function threadKeepsTeamWaiting(
+  shell: Pick<OrchestrationThreadShell, "session" | "latestTurn" | "backgroundLiveness"> | null,
+): boolean {
+  return threadIsBusy(shell) || (shell?.backgroundLiveness ?? null) !== null;
+}
+
 /** The themed confirmation, falling back to the browser's when no host is mounted. */
 export async function confirmDestructive(message: string): Promise<boolean> {
   return (

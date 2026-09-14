@@ -37,6 +37,7 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
 import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
+import { ProviderService } from "../provider/Services/ProviderService.ts";
 import * as Settings from "../serverSettings.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { ServerActivation } from "../serverActivation.ts";
@@ -115,7 +116,10 @@ function harness() {
   const prepared: LinearPrepareIssueThreadInput[] = [];
   const removed: string[] = [];
   const comments: Array<{ issueId: string; body: string }> = [];
+  const descriptions: Array<{ issueId: string; description: string | undefined }> = [];
+  const listed: Array<{ assignedToMe: boolean }> = [];
   let commentsHealthy = true;
+  let descriptionsHealthy = true;
   const pendingStarts = new Set<ThreadId>();
   let stagingHealthy = true;
   let setupHealthy = true;
@@ -123,7 +127,17 @@ function harness() {
   const git = { head: "b".repeat(40), merged: true };
   const verified: Array<{ expectedRevision?: string }> = [];
   const uploads: string[] = [];
+  const stopped: ThreadId[] = [];
   const dependencies = Layer.mergeAll(
+    // Like a provider, a stopped session drops the thread's background work.
+    Layer.mock(ProviderService)({
+      stopSession: ({ threadId }) =>
+        Effect.sync(() => {
+          stopped.push(threadId);
+          const thread = threads.get(threadId);
+          if (thread) threads.set(threadId, { ...thread, session: null, backgroundLiveness: null });
+        }),
+    }),
     Settings.layerTest({ linear: { agentAccess: true, apiKey: "test-key" } }),
     Layer.mock(ProjectionTurnRepository)({
       getPendingTurnStartByThreadId: ({ threadId }) =>
@@ -179,7 +193,11 @@ function harness() {
         viewer: { id: "me", name: "Me", displayName: "Me" },
         workspace: { id: "workspace", name: "Workspace", urlKey: "workspace" },
       }),
-      listIssues: () => Effect.succeed({ issues }),
+      listIssues: (input) =>
+        Effect.sync(() => {
+          listed.push({ assignedToMe: input.assignedToMe === true });
+          return { issues };
+        }),
       getIssue: ({ reference }) =>
         Effect.succeed(
           issues.find((i) => i.id === reference || i.identifier === reference) ?? issues[0]!,
@@ -210,6 +228,17 @@ function harness() {
           uploads.push(input.fileName);
           return { url: `https://uploads.linear.app/${input.fileName}` };
         }),
+      updateIssue: (input) =>
+        descriptionsHealthy
+          ? Effect.sync(() => {
+              descriptions.push({ issueId: input.issueId, description: input.description });
+            })
+          : Effect.fail(
+              new LinearOperationError({
+                operation: "updateIssue",
+                detail: "Linear refused to save the issue.",
+              }),
+            ),
       createComment: (input) =>
         commentsHealthy
           ? Effect.sync(() => {
@@ -393,13 +422,19 @@ function harness() {
     prepared,
     removed,
     comments,
+    descriptions,
+    listed,
     setCommentsHealthy: (value: boolean) => {
       commentsHealthy = value;
+    },
+    setDescriptionsHealthy: (value: boolean) => {
+      descriptionsHealthy = value;
     },
     pendingStarts,
     git,
     verified,
     uploads,
+    stopped,
     setStagingHealthy: (value: boolean) => {
       stagingHealthy = value;
     },
@@ -862,6 +897,19 @@ it.effect("posts a Linear update for each phase, with the e2e card last", () =>
     assert.equal(delivered.status, "review");
     assert.deepEqual(delivered.linearCommentIds, ["comment-1", "comment-2", "comment-3"]);
     assert.include(delivered.reviewInstructions, "Open the reminder email");
+    // The issue itself says what shipped, above the person's own description.
+    assert.deepEqual(
+      h.descriptions.map((d) => d.issueId),
+      ["issue-1"],
+    );
+    const description = h.descriptions[0]!.description!;
+    assert.isTrue(description.startsWith("Implement this issue\n\n<!-- t3:delivered -->"));
+    assert.include(description, "## What shipped");
+    assert.include(description, "Move this issue to Done to accept it.");
+    assert.include(description, "The page loads again.");
+    assert.include(description, "1. Open the reminder email in the test inbox.");
+    assert.include(description, "Staging: [staging.example.com](https://staging.example.com)");
+    assert.notInclude(description, "Pull request");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -876,6 +924,22 @@ it.effect("keeps a delivery whose Linear comment fails, and says so on the task"
     assert.include(delivered.error ?? "", "Could not post the update on Linear");
     assert.include(delivered.error ?? "", "Linear refused to add the comment.");
     assert.deepEqual(h.transitions, ["review"]);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("keeps a delivery whose Linear description update fails, and says so on the task", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    h.setDescriptionsHealthy(false);
+    const delivered = yield* deliverIssue(h, service, first);
+    assert.equal(delivered.status, "review");
+    assert.include(delivered.error ?? "", "Could not update the issue description on Linear");
+    assert.include(delivered.error ?? "", "Linear refused to save the issue.");
+    // The rest of the delivery still happened.
+    assert.deepEqual(h.transitions, ["review"]);
+    assert.equal(delivered.deliveredState, "In Review");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -1043,6 +1107,142 @@ it.effect("a paused loop takes no new issue, while its team and dispatched issue
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
+it.effect("a paused loop reworks a dispatched issue the person sent back, and only that", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    // The loop's own pick is delivered; its review feedback waits for the loop.
+    const own = yield* takeIssue(h, service);
+    yield* deliverIssue(h, service, own);
+    yield* service.control({ projectId: config.projectId, action: "pause" });
+    yield* service.review({ taskId: own.id, action: "request-changes", feedback: "Bigger." });
+    yield* service.scan();
+    assert.isUndefined(yield* activeTask(service));
+    // An issue the person dispatched is theirs: its rework starts while paused.
+    yield* service.dispatch({ projectId: config.projectId, reference: "APP-2", note: "" });
+    const dispatched = yield* takeIssue(h, service);
+    assert.equal(dispatched.issue.identifier, "APP-2");
+    yield* deliverIssue(h, service, dispatched);
+    yield* service.review({
+      taskId: dispatched.id,
+      action: "request-changes",
+      feedback: "Port the newer design.",
+    });
+    yield* service.scan();
+    const rework = yield* activeTask(service);
+    assert.equal(rework.issue.identifier, "APP-2");
+    assert.equal(rework.feedback, "Port the newer design.");
+    assert.isTrue(rework.dispatched);
+    yield* service.deliver();
+    assert.include(turnsOf(h, leadOf(rework))[0], "Port the newer design.");
+    // Once the loop runs again, its own sent-back issue comes back too.
+    yield* service.review({ taskId: rework.id, action: "skip", feedback: "Later" });
+    yield* service.control({ projectId: config.projectId, action: "start" });
+    yield* service.scan();
+    assert.equal((yield* activeTask(service)).issue.identifier, "APP-1");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("starting with picking off saves the mode and reads nothing from Linear", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    yield* service.configure(config);
+    const board = yield* service.control({
+      projectId: config.projectId,
+      action: "start",
+      options: { autoPick: false, assignedToMe: true },
+    });
+    assert.equal(board.projects[0]?.status, "running");
+    assert.isFalse(board.projects[0]?.config.autoPick);
+    assert.isTrue(board.projects[0]?.config.assignedToMe);
+    // No ready issue is even looked for, so no team starts.
+    assert.lengthOf(board.tasks, 0);
+    yield* service.scan();
+    assert.lengthOf((yield* service.board(null)).tasks, 0);
+    assert.lengthOf(h.listed, 0);
+    // What the person dispatches still runs.
+    yield* service.dispatch({ projectId: config.projectId, reference: "APP-3", note: "" });
+    assert.equal((yield* activeTask(service)).issue.identifier, "APP-3");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("starting with picking on takes the top ready issue, the person's or not", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    yield* service.configure(config);
+    const board = yield* service.control({
+      projectId: config.projectId,
+      action: "start",
+      options: { autoPick: true, assignedToMe: false },
+    });
+    assert.isTrue(board.projects[0]?.config.autoPick);
+    assert.isFalse(board.projects[0]?.config.assignedToMe);
+    assert.deepEqual(h.listed, [{ assignedToMe: false }]);
+    assert.equal((yield* activeTask(service)).issue.identifier, "APP-1");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect(
+  "a start without options keeps the mode the person last chose, and so does a revision",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      const service = yield* h.initialize;
+      yield* service.configure(config);
+      yield* service.control({
+        projectId: config.projectId,
+        action: "start",
+        options: { autoPick: false, assignedToMe: false },
+      });
+      yield* service.control({ projectId: config.projectId, action: "pause" });
+      // An older client sends no options at all.
+      const started = yield* service.control({ projectId: config.projectId, action: "start" });
+      assert.isFalse(started.projects[0]?.config.autoPick);
+      assert.isFalse(started.projects[0]?.config.assignedToMe);
+      assert.lengthOf(h.listed, 0);
+      // A setup revision carries no picking choice, but does carry the Linear scope.
+      yield* service.control({ projectId: config.projectId, action: "pause" });
+      const revised = yield* service.configure({ ...config, maxWorkerTurns: 3 });
+      assert.isFalse(revised.projects[0]?.config.autoPick);
+      assert.isTrue(revised.projects[0]?.config.assignedToMe);
+      assert.equal(revised.projects[0]?.config.maxWorkerTurns, 3);
+    }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("with picking off, only a dispatched issue's rework goes back to a team", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    // Delivered while the loop still picked issues itself.
+    const own = yield* takeIssue(h, service);
+    yield* deliverIssue(h, service, own);
+    yield* service.control({
+      projectId: config.projectId,
+      action: "start",
+      options: { autoPick: false, assignedToMe: true },
+    });
+    yield* service.dispatch({ projectId: config.projectId, reference: "APP-2", note: "" });
+    const dispatched = yield* takeIssue(h, service);
+    assert.equal(dispatched.issue.identifier, "APP-2");
+    yield* deliverIssue(h, service, dispatched);
+    // The loop's own pick stays put; the person's issue is reworked.
+    yield* service.review({ taskId: own.id, action: "request-changes", feedback: "Bigger." });
+    yield* service.scan();
+    assert.isUndefined(yield* activeTask(service));
+    yield* service.review({
+      taskId: dispatched.id,
+      action: "request-changes",
+      feedback: "Port the newer design.",
+    });
+    yield* service.scan();
+    const rework = yield* activeTask(service);
+    assert.equal(rework.issue.identifier, "APP-2");
+    assert.isTrue(rework.dispatched);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 it.effect("with the loop never started, dispatching is the only way in", () =>
   Effect.gen(function* () {
     const h = harness();
@@ -1206,6 +1406,57 @@ it.effect("the assistant passes on an answer the person gave in its chat, and on
       "through the developer assistant.\nQuestion: Fix the XSS here or separately?\nAnswer: Fix it in this PR.",
     );
   }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect(
+  "a thread that handed off is released when its leftover background work holds the team",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      const { service } = yield* h.setup;
+      const t = yield* takeIssue(h, service);
+      const reviewer = assistantTaskThreadId(t, "review");
+      yield* service.deliver();
+      yield* service.requestReview(t.threadId, "Ready for review: PR #1");
+      yield* endTurn(h, service, t.threadId);
+      yield* service.deliver();
+      yield* service.submitReview(reviewer, "changes-requested", "Missing a test.", "One gap.");
+      // The reviewer's turn ends with a watch loop still running in its session.
+      yield* endTurn(h, service, reviewer);
+      h.threads.set(reviewer, { ...h.threads.get(reviewer)!, backgroundLiveness: "monitoring" });
+      const before = turnsOf(h, t.threadId).length;
+      yield* service.deliver();
+      // The handoff waits for the reviewer, whose session is released rather than waited on.
+      assert.equal(turnsOf(h, t.threadId).length, before);
+      assert.deepEqual(h.stopped, [reviewer]);
+      // The provider reports the released session; that is no failure of the team's.
+      yield* service.observe({
+        ...eventBase(reviewer),
+        type: "thread.session-set",
+        payload: {
+          threadId: reviewer,
+          session: {
+            threadId: reviewer,
+            status: "stopped",
+            providerName: "test",
+            activeTurnId: null,
+            runtimeMode: "approval-required",
+            lastError: null,
+            updatedAt: timestamp,
+          },
+        },
+      });
+      yield* service.deliver();
+      assert.include(turnsOf(h, t.threadId).at(-1), "Code review requested changes");
+      const after = yield* taskById(service, t.id);
+      assert.equal(after.status, "working");
+      assert.equal(after.stage, "implement");
+      assert.isNull(after.error);
+      // The thread that holds the issue keeps its background work.
+      h.threads.set(t.threadId, { ...h.threads.get(t.threadId)!, backgroundLiveness: "working" });
+      yield* service.deliver();
+      assert.deepEqual(h.stopped, [reviewer]);
+    }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
 it.effect("a waiting thread's idle session being released does not block its issue", () =>
@@ -1971,6 +2222,8 @@ it.effect(
       assert.equal(failed.status, "working");
       assert.match(h.comments.at(-1)!.body, /^\*\*❌ Failed on staging/);
       assert.notInclude(h.comments.at(-1)!.body, "To accept");
+      // Nothing shipped, so the issue's description is left alone.
+      assert.lengthOf(h.descriptions, 0);
       yield* endTurn(h, service, tester);
       yield* service.deliver();
       assert.include(turnsOf(h, lead).at(-1), "failed its e2e check");

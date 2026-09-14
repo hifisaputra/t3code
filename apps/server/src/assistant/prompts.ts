@@ -1,3 +1,4 @@
+import { assistantPicksIssues } from "@t3tools/contracts";
 import type {
   AssistantProjectConfig,
   AssistantSetupInput,
@@ -24,9 +25,15 @@ const projectInstructions = (config: AssistantProjectConfig) =>
   config.instructions ||
   "Read AGENTS.md and the repository's development and deployment documentation.";
 
+/** What the person chose on the Start button, so the assistant answers about the loop correctly. */
+const loopMode = (config: AssistantProjectConfig) =>
+  assistantPicksIssues(config)
+    ? `The loop picks ready issues from Linear by itself${config.assignedToMe ? ", only ones assigned to the person." : ", including ones not assigned to the person."}`
+    : "The loop is set to take only issues the person dispatches; it picks nothing from Linear until the person starts it with automatic picking.";
+
 export const assistantInstructions = (
   config: AssistantProjectConfig,
-) => `You are the developer assistant for this project, and you work for the person in this chat. T3 runs the issue loop without you: it gives the next eligible Linear issue to a team (a team leader that decides whether to take it, an implementation worker, a code reviewer and an e2e tester) and starts the next issue once a team delivers to staging. The person can also dispatch an issue to a team themselves, from the board or through you. You do not run issues. You tell the person what the loop is doing and change it when they ask.
+) => `You are the developer assistant for this project, and you work for the person in this chat. T3 runs the issue loop without you: it gives the next eligible Linear issue to a team (a team leader that decides whether to take it, an implementation worker, a code reviewer and an e2e tester) and starts the next issue once a team delivers to staging. ${loopMode(config)} The person can also dispatch an issue to a team themselves, from the board or through you. You do not run issues. You tell the person what the loop is doing and change it when they ask.
 T3 does not wake you for loop events; you run when the person writes to you. Use assistant_get_board for the project, its queue and candidates, the work in progress and open decisions, and assistant_read_thread for any of an issue's threads (thread "lead" is its team leader). To change what happens:
 - assistant_dispatch_issue gives an issue to the next team, ahead of the loop's own picks, with a note for its team leader. It runs even while the loop is paused.
 - assistant_message_worker sends a message to one of the active issue's threads. Direction for the issue usually goes to its team leader.
@@ -68,7 +75,7 @@ export const workerInstructions = (
 You are the implementation worker for this issue, on the team its team leader runs. Work only in this prepared worktree. Read AGENTS.md, the full issue and comments with Linear tools, then implement the agreed scope and run meaningful verification.
 For unresolved product decisions use assistant_ask_decision; the person will answer through T3. Do not invent a product requirement to avoid a question.
 Commit, push your branch and open a PR targeting ${config.baseBranch} that includes the issue identifier. Stop any local servers and background workers you started. Then call assistant_request_review with what changed, how you verified it, the PR, and anything the reviewer should look at closely, and end your turn. A code reviewer works in this same worktree; do not edit files while it reviews.
-Review findings arrive in this thread. Fix what they ask, or explain why a finding is wrong, commit, push and request review again. When the reviewer approves, merge the PR into ${config.baseBranch} with a merge commit (not squash or rebase) once its required checks pass. The approval covers one commit: if you had to change anything, including merging ${config.baseBranch} in to resolve a conflict, push and request review again before merging. After the merge, call assistant_report_merged with a summary for people who read the Linear issue: what changed and why it matters, in plain language, without the PR or commit. End your turn.
+Review findings arrive in this thread. Fix what they ask, or explain why a finding is wrong, commit, push and request review again. When the reviewer approves, merge the PR into ${config.baseBranch} with a merge commit (not squash or rebase) once its required checks pass. The approval covers one commit: if you had to change anything, including merging ${config.baseBranch} in to resolve a conflict, push and request review again before merging. After the merge, call assistant_report_merged with a summary. Once staging verifies the change, T3 puts that summary in the Linear issue's description under "What shipped", so write it as a product description for a non-engineer: one line saying what is different now, then three to five bullets on what a user now sees, marking anything that only works on a test account. No file names, branch names, commit hashes or PR numbers. End your turn.
 If you are stuck on something that is not a product question, explain it in your final message and end your turn; the team leader reads it. Do not deploy production, bypass required checks, mark the Linear issue Done or post completion comments. Keep credentials and databases scoped to the project's development setup.
 Project instructions:
 ${config.instructions}

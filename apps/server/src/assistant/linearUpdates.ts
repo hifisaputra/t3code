@@ -140,6 +140,46 @@ export function e2eComment(input: {
   );
 }
 
+/** The markers around T3's own section of an issue description, so it is replaced and never duplicated. */
+export const DELIVERED_MARKER_START = "<!-- t3:delivered -->";
+export const DELIVERED_MARKER_END = "<!-- /t3:delivered -->";
+const DELIVERED_BLOCK = /<!-- t3:delivered -->[\s\S]*?<!-- \/t3:delivered -->/;
+
+/**
+ * The issue's description once staging verifies the work: the person's own text
+ * untouched above, and below it a "What shipped" section a non-engineer can
+ * read. A redelivery after changes were requested replaces that section in
+ * place. Engineering detail (commits, pull requests) stays in the comments.
+ */
+export function deliveredDescription(input: {
+  readonly current: string | null;
+  readonly merge: AssistantMerge | null;
+  readonly e2e: AssistantE2eResult;
+  readonly deployment: AssistantDeployment;
+  readonly acceptedState: string;
+}): string {
+  const accept = input.acceptedState.trim() || "a completed state";
+  const section = [
+    DELIVERED_MARKER_START,
+    sections(
+      "## What shipped",
+      `Delivered to staging and waiting to be accepted. Move this issue to ${accept} to accept it.`,
+      input.merge?.summary.trim() ||
+        "See the developer assistant's comments below for what changed.",
+      input.e2e.humanChecks.length
+        ? `**Check before accepting**\n\n${input.e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
+        : null,
+      `Staging: ${link(host(input.deployment.url), input.deployment.url)}`,
+    ),
+    DELIVERED_MARKER_END,
+  ].join("\n");
+  const current = input.current?.trim() ?? "";
+  if (!current) return section;
+  // A function replacement, so a summary containing `$&` is kept as written.
+  if (DELIVERED_BLOCK.test(current)) return current.replace(DELIVERED_BLOCK, () => section);
+  return `${current}\n\n${section}`;
+}
+
 /** A Linear failure's own sentence, which names the fix better than a generic one. */
 export function linearFailureDetail(error: unknown): string {
   if (typeof error === "object" && error !== null) {

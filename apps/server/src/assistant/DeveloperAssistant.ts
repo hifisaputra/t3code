@@ -1,4 +1,5 @@
 import * as NodeCrypto from "node:crypto";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -18,9 +19,13 @@ import {
   AssistantTask,
   CommandId,
   DeveloperAssistantError,
+  LinearIssueNotFoundError,
+  LinearOperationError,
+  LinearUnavailableError,
   MessageId,
   ProjectId,
   ThreadId,
+  assistantPicksIssues,
   assistantTaskHoldsProject,
   assistantTaskThreadId,
   assistantThreadKind,
@@ -47,12 +52,14 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
 import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
+import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { forkParked } from "../serverActivation.ts";
 import { AssistantEvidence } from "./AssistantEvidence.ts";
 import {
   declinedComment,
+  deliveredDescription,
   deployedComment,
   e2eComment,
   issueFingerprint,
@@ -92,6 +99,10 @@ const encodeConfig = Schema.encodeSync(Schema.fromJsonString(AssistantProjectCon
 const encodeTask = Schema.encodeSync(Schema.fromJsonString(AssistantTask));
 const encodeDecision = Schema.encodeSync(Schema.fromJsonString(AssistantDecision));
 const isAssistantError = Schema.is(DeveloperAssistantError);
+/** Linear's errors say what the person can act on: a bad reference, a rejected key, a rate limit. */
+const isLinearError = Schema.is(
+  Schema.Union([LinearIssueNotFoundError, LinearOperationError, LinearUnavailableError]),
+);
 const decodeRequest = Schema.decodeUnknownEffect(Schema.Struct({ requestId: Schema.String }));
 // Answering a request the provider no longer knows (e.g. after a server restart)
 // closes it, matching the thread's pending accounting.
@@ -111,13 +122,17 @@ const fail = (detail: string) => new DeveloperAssistantError({ detail });
 const wrap = (error: unknown) =>
   isAssistantError(error)
     ? error
-    : fail(
-        "The developer assistant operation failed. Inspect the thread or server logs and retry.",
-      );
+    : isLinearError(error)
+      ? fail(error.message)
+      : fail(
+          "The developer assistant operation failed. Inspect the thread or server logs and retry.",
+        );
 const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 const newId = () => NodeCrypto.randomUUID();
 const busy = (status: string | undefined) => status === "running" || status === "starting";
 const ROLES = ["lead", "implement", "review", "e2e"] as const;
+/** How long a released session gets to report itself stopped before it is asked again. */
+const RELEASE_RETRY_MS = 30_000;
 const ROLE_THREAD = /^assistant-(lead|review|e2e)-(.+)$/;
 const ROLE_TITLES = { lead: "team leader", review: "code review", e2e: "e2e on staging" } as const;
 const ROLE_NAMES = {
@@ -150,6 +165,7 @@ export const make = Effect.gen(function* () {
   const verifier = yield* StagingVerifier;
   const evidence = yield* AssistantEvidence;
   const terminals = yield* TerminalManager;
+  const providers = yield* ProviderService;
   const lock = yield* Semaphore.make(1);
   const deliveryLock = yield* Semaphore.make(1);
   const changes = yield* PubSub.unbounded<void>();
@@ -171,6 +187,9 @@ export const make = Effect.gen(function* () {
   // Issues declined in a row since the last one a team took, per project. In
   // memory: a restart only allows a few more declines before the pause.
   const declineStreak = new Map<string, ReadonlyArray<string>>();
+  // Threads whose session the assistant released, and when: their stop is no
+  // failure, and one that never reports back is asked again after a while.
+  const releasedAt = new Map<string, number>();
 
   const project = Effect.fn("Assistant.project")(function* (id: string) {
     const rows = yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE project_id = ${id}`;
@@ -238,6 +257,46 @@ export const make = Effect.gen(function* () {
       if (Option.isSome(shell) && (yield* threadBusy(shell.value))) return true;
     }
     return false;
+  });
+  /**
+   * A thread that handed the issue on may leave background work behind: a
+   * watch loop, a dev server. That keeps it busy, and a loop that never ends
+   * would hold the team for good. Nothing of a thread that no longer holds the
+   * issue may run on in the shared worktree, so its session is released, which
+   * orphans that work. Its next turn resumes the conversation.
+   */
+  const releaseHandedOff = Effect.fn("Assistant.releaseHandedOff")(function* (t: AssistantTask) {
+    if (t.stage === undefined) return;
+    const time = yield* Clock.currentTimeMillis;
+    for (const role of ROLES) {
+      if (role === t.stage) continue;
+      const id = assistantTaskThreadId(t, role);
+      const shell = yield* snapshots.getThreadShellById(id);
+      if (Option.isNone(shell) || shell.value.backgroundLiveness == null) continue;
+      const last = releasedAt.get(id);
+      if (
+        busy(shell.value.session?.status) ||
+        shell.value.latestTurn?.state === "running" ||
+        Option.isSome(yield* turns.getPendingTurnStartByThreadId({ threadId: id })) ||
+        (last !== undefined && time - last < RELEASE_RETRY_MS)
+      )
+        continue;
+      releasedAt.set(id, time);
+      yield* Effect.logInfo("Developer assistant released a handed-off thread's background work", {
+        threadId: id,
+        role,
+        task: t.id,
+        backgroundLiveness: shell.value.backgroundLiveness,
+      });
+      yield* providers.stopSession({ threadId: id }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("Developer assistant could not release a handed-off thread", {
+            threadId: id,
+            error,
+          }),
+        ),
+      );
+    }
   });
   const taskQueued = Effect.fn("Assistant.taskQueued")(function* (
     t: AssistantTask,
@@ -326,6 +385,46 @@ export const make = Effect.gen(function* () {
         Effect.succeed<AssistantTask>({
           ...t,
           error: `Could not post the update on Linear: ${linearFailureDetail(error)}`,
+        }),
+      ),
+    );
+  });
+  /**
+   * On delivery the issue's description gets a "What shipped" section, so the
+   * issue itself says what was delivered rather than only its comments.
+   * Delivery never waits on Linear; a failure is noted on the task.
+   */
+  const updateDescription = Effect.fn("Assistant.updateDescription")(function* (
+    t: AssistantTask,
+    p: AwaitedProject,
+    e2e: AssistantE2eResult,
+  ) {
+    const deployment = t.deployment;
+    if (!deployment) return t;
+    return yield* linear.getIssue({ reference: t.issue.id }).pipe(
+      Effect.flatMap((issue) =>
+        linear.updateIssue({
+          issueId: t.issue.id,
+          description: deliveredDescription({
+            current: issue.description,
+            merge: t.merge ?? null,
+            e2e,
+            deployment,
+            acceptedState: p.config.acceptedState,
+          }),
+        }),
+      ),
+      Effect.as(t),
+      Effect.catch((error) =>
+        Effect.succeed<AssistantTask>({
+          ...t,
+          error:
+            [
+              t.error,
+              `Could not update the issue description on Linear: ${linearFailureDetail(error)}`,
+            ]
+              .filter(Boolean)
+              .join(" ") || null,
         }),
       ),
     );
@@ -529,7 +628,14 @@ export const make = Effect.gen(function* () {
       yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${existing[0].thread_id}`;
       yield* sql`UPDATE assistant_decisions SET resolved = 1 WHERE thread_id = ${existing[0].thread_id}`;
     }
-    yield* sql`INSERT INTO assistant_projects (project_id, repository_key, thread_id, config) VALUES (${config.projectId}, ${repositoryKey}, ${threadId}, ${encodeConfig(config)})
+    // A setup revision rebuilds the config from the plan and the person's
+    // preferences, which carry no picking choice: the one the Start button
+    // saved stands until they start the loop again.
+    const saved: AssistantProjectConfig =
+      config.autoPick === undefined && current?.autoPick !== undefined
+        ? { ...config, autoPick: current.autoPick }
+        : config;
+    yield* sql`INSERT INTO assistant_projects (project_id, repository_key, thread_id, config) VALUES (${config.projectId}, ${repositoryKey}, ${threadId}, ${encodeConfig(saved)})
       ON CONFLICT(project_id) DO UPDATE SET repository_key = excluded.repository_key, thread_id = excluded.thread_id, config = excluded.config, error = NULL`;
     yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${threadId} AND delivered = 0`;
     yield* createCoordinator(yield* project(config.projectId));
@@ -625,6 +731,13 @@ export const make = Effect.gen(function* () {
           return yield* fail(
             "Enable Linear agent access in Settings → Integrations → Linear first.",
           );
+        // What the person chose on the Start button is the loop's mode from
+        // here on. Earlier clients send no options and keep the config as it is.
+        if (action === "start" && input.options) {
+          const options = input.options;
+          yield* sql`UPDATE assistant_projects SET config = ${encodeConfig({ ...p.config, autoPick: options.autoPick, assignedToMe: options.assignedToMe })} WHERE project_id = ${input.projectId}`;
+          p = yield* project(input.projectId);
+        }
         // Only a deleted coordinator is replaced; an archived one keeps its decisions.
         const coordinator = yield* snapshots.getThreadShellById(ThreadId.make(p.thread_id), {
           includeArchived: true,
@@ -943,8 +1056,9 @@ export const make = Effect.gen(function* () {
   /**
    * The loop. While the project has no active issue, the next issue goes to a
    * new team: an issue the person dispatched first, then, unless the loop is
-   * paused, an issue sent back for changes, then ready issues by priority,
-   * including a declined issue someone has changed since.
+   * paused or set not to pick issues itself, an issue sent back for changes,
+   * then ready issues by priority, including a declined issue someone has
+   * changed since.
    */
   const advance = Effect.fn("Assistant.advance")(function* (projectId: string) {
     const p = yield* project(projectId);
@@ -952,12 +1066,16 @@ export const make = Effect.gen(function* () {
     const dispatched =
       yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE project_id = ${projectId} AND status = 'queued' ORDER BY rowid LIMIT 1`;
     if (dispatched[0]) return yield* startTeam(p, yield* decodeTask(dispatched[0].data));
-    if (p.status === "paused") return;
     const sentBack =
       yield* sql<TaskRow>`SELECT * FROM assistant_tasks t WHERE project_id = ${projectId} AND status = 'changes-requested'
-      AND rowid = (SELECT MAX(rowid) FROM assistant_tasks WHERE issue_id = t.issue_id) ORDER BY rowid LIMIT 1`;
-    if (sentBack[0]) {
-      const previous = yield* decodeTask(sentBack[0].data);
+      AND rowid = (SELECT MAX(rowid) FROM assistant_tasks WHERE issue_id = t.issue_id) ORDER BY rowid`;
+    for (const row of sentBack) {
+      const previous = yield* decodeTask(row.data);
+      // A loop that is paused, or set not to pick issues, takes nothing of its
+      // own; an issue the person dispatched stays theirs, so their change
+      // request goes to a new team all the same.
+      if ((p.status === "paused" || !assistantPicksIssues(p.config)) && !previous.dispatched)
+        continue;
       const issue = yield* linear.getIssue({ reference: previous.issue.id });
       // Closed in Linear after it was sent back: there is nothing left to redo.
       if (issue.state.type === "completed" || issue.state.type === "canceled")
@@ -965,8 +1083,16 @@ export const make = Effect.gen(function* () {
           ...previous,
           status: issue.state.type === "completed" ? "accepted" : "skipped",
         });
-      return yield* startTeam(p, yield* newTask(p, issue, { feedback: previous.feedback }));
+      return yield* startTeam(
+        p,
+        yield* newTask(p, issue, {
+          feedback: previous.feedback,
+          ...(previous.dispatched ? { dispatched: true } : {}),
+        }),
+      );
     }
+    // Nothing is read from Linear while the loop is paused or picks nothing.
+    if (p.status === "paused" || !assistantPicksIssues(p.config)) return;
     const ready = yield* readyIssues(p.config);
     const next = [...(yield* unclaimed(ready)), ...(yield* changedSinceDeclined(p, ready))].sort(
       byPriority,
@@ -1197,6 +1323,7 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           "The issue has an unanswered decision or permission request. If the person answered a decision in your chat, pass it on with assistant_answer_decision; otherwise wait for their answer.",
         );
+      yield* releaseHandedOff(t);
       if (yield* taskBusy(t, caller))
         return yield* fail(
           "One of the issue's threads is still running. End your turn and wait for its result.",
@@ -1620,6 +1747,7 @@ export const make = Effect.gen(function* () {
         }),
       );
       if (input.verdict === "failed") return yield* saveTask({ ...updated, stage: leadStage(t) });
+      updated = yield* updateDescription(updated, p, e2e);
       const linearError = yield* changeLinearState(updated, p.config.reviewState).pipe(
         Effect.as(null),
         Effect.catch((error) => Effect.succeed(wrap(error).detail)),
@@ -1786,7 +1914,10 @@ export const make = Effect.gen(function* () {
         if (Option.isNone(current) || (yield* threadBusy(current.value))) continue;
         // An issue's threads share one worktree: a handoff waits for the sender's turn to end.
         const owner = yield* threadTask(threadId);
-        if (owner && (yield* taskBusy(owner.task))) continue;
+        if (owner && (yield* taskBusy(owner.task))) {
+          yield* releaseHandedOff(owner.task);
+          continue;
+        }
         const pending =
           yield* sql`SELECT id FROM assistant_decisions WHERE thread_id = ${threadId} AND resolved = 0`;
         if (
@@ -1991,7 +2122,11 @@ export const make = Effect.gen(function* () {
         status === "error" ||
         status === "interrupted" ||
         status === "stopped";
-      if (t && status === "stopped" && (yield* releasedWhileIdle(threadId))) {
+      if (
+        t &&
+        status === "stopped" &&
+        (releasedAt.delete(threadId) || (yield* releasedWhileIdle(threadId)))
+      ) {
         // Nothing to do: the thread's turn ended normally before its session was released.
       } else if (
         // A delivered issue's tester may stop instead of settling; either way its work is done.

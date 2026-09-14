@@ -1,4 +1,5 @@
 import {
+  assistantPicksIssues,
   assistantTaskHoldsProject,
   type AssistantBoard,
   type AssistantDecision,
@@ -6,6 +7,7 @@ import {
   type AssistantSetup,
   type AssistantTask,
   type AssistantThreadKind,
+  type AssistantThreadRole,
   type ProjectId,
 } from "@t3tools/contracts";
 
@@ -90,6 +92,16 @@ export function describeProjectActivity(input: {
       headline: "Taking only issues you dispatch",
       detail: "Start to let it pick issues from Linear again.",
     };
+  // Started with automatic picking off: idle is the choice the person made, not
+  // a queue that ran dry, so it is never an alarm.
+  if (!assistantPicksIssues(project.config))
+    return {
+      tone: "idle",
+      status,
+      headline: "Waiting for you to dispatch an issue",
+      detail:
+        "It picks nothing from Linear. Dispatch an issue, or start again with automatic picking.",
+    };
   return {
     tone: "idle",
     status,
@@ -113,15 +125,20 @@ const STAGE_THREAD: Record<string, string> = {
   e2e: "e2e tester",
 };
 
-/** The phase of the issue's thread that holds it; `worker*` fields describe that thread. */
+/**
+ * The phase of the issue's thread that holds it; `worker*` fields describe that
+ * thread. `waitingOn` is a teammate still running, or with background work
+ * left, that the handoff to the holder waits for.
+ */
 export function describeTaskPhase(input: {
   task: AssistantTask;
   workerBusy: boolean;
   workerNeedsInput: boolean;
   step: string | null;
   hasOpenDecision: boolean;
+  waitingOn?: AssistantThreadRole | null;
 }): TaskPhase {
-  const { task, workerBusy, workerNeedsInput, step, hasOpenDecision } = input;
+  const { task, workerBusy, workerNeedsInput, step, hasOpenDecision, waitingOn } = input;
   const holder = STAGE_THREAD[task.stage ?? "implement"] ?? "worker";
   // A question outranks whatever state the issue was left in while it waits.
   if (hasOpenDecision && task.status !== "preparing")
@@ -145,6 +162,13 @@ export function describeTaskPhase(input: {
           tone: "waiting",
           label: "Waiting for input",
           detail: `The ${holder} asked something in its thread.`,
+        };
+      // The issue's threads share one worktree: a handoff waits for the rest of the team.
+      if (!workerBusy && waitingOn && task.stage !== undefined)
+        return {
+          tone: "idle",
+          label: `Waiting for the ${STAGE_THREAD[waitingOn]}`,
+          detail: `The ${holder} starts when the ${STAGE_THREAD[waitingOn]}'s turn and background work end. T3 releases a finished thread's background work by itself.`,
         };
       switch (task.stage) {
         default:
@@ -375,6 +399,8 @@ export function buildInbox(board: AssistantBoard): ReadonlyArray<InboxItem> {
       blocking.push({ kind: "setup", key: `setup:${setup.threadId}`, at: "", setup });
   }
   for (const project of board.projects) {
+    // Only a failure earns a row: a paused loop, or one started with automatic
+    // picking off, is a deliberate choice and needs nothing from the person.
     const reason = project.status === "running" ? null : projectFailure(project);
     if (reason)
       blocking.push({

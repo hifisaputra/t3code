@@ -24,11 +24,15 @@ import {
 
 const projectId = ProjectId.make("project-1");
 
-const project = (overrides: Partial<AssistantProject> = {}): AssistantProject => ({
+const project = ({
+  autoPick,
+  ...overrides
+}: Partial<AssistantProject> & { autoPick?: boolean } = {}): AssistantProject => ({
   config: {
     projectId,
     linearProjectId: "linear-project",
     assignedToMe: false,
+    ...(autoPick === undefined ? {} : { autoPick }),
     readyStates: [],
     modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-opus-5" },
     workerModelSelection: {
@@ -134,6 +138,36 @@ describe("project status text", () => {
     ).toMatchObject({ tone: "paused", headline: "Taking only issues you dispatch" });
   });
 
+  it("says a running loop with automatic picking off is waiting on a dispatch", () => {
+    const manual = project({ autoPick: false });
+    expect(
+      describeProjectActivity({ project: manual, activeTask: null, coordinatorBusy: false }),
+    ).toMatchObject({
+      tone: "idle",
+      status: "Running",
+      headline: "Waiting for you to dispatch an issue",
+    });
+    // A deliberate choice, so nothing in the inbox asks about it.
+    expect(buildInbox(board({ projects: [manual] }))).toEqual([]);
+    // Its team at work still outranks the setting.
+    const active = task();
+    expect(
+      describeProjectActivity({ project: manual, activeTask: active, coordinatorBusy: false }),
+    ).toMatchObject({ tone: "active", headline: `Working on ${active.issue.identifier}` });
+    // Automatic picking on is the default, and a paused loop keeps its own text.
+    expect(
+      describeProjectActivity({ project: project(), activeTask: null, coordinatorBusy: false })
+        .headline,
+    ).toBe("Watching for issues");
+    expect(
+      describeProjectActivity({
+        project: project({ status: "paused", autoPick: false }),
+        activeTask: null,
+        coordinatorBusy: false,
+      }),
+    ).toMatchObject({ tone: "paused", headline: "Taking only issues you dispatch" });
+  });
+
   it("ignores a stale waiting note once the queue is stopped", () => {
     const stopped = project({ status: "stopped", error: "Waiting: deploy" });
     expect(projectWaitingReason(stopped)).toBeNull();
@@ -193,6 +227,20 @@ describe("describeTaskPhase", () => {
     });
     expect(describeTaskPhase({ ...base, task: merged }).detail).toBe(
       "Merged after code review. The assistant is checking the staging deploy.",
+    );
+  });
+
+  it("names the teammate whose turn or leftover work holds the handoff", () => {
+    const coding = task({ stage: "implement" });
+    const phase = describeTaskPhase({ ...base, task: coding, waitingOn: "review" });
+    expect(phase.label).toBe("Waiting for the code reviewer");
+    expect(phase.detail).toContain("The worker starts when the code reviewer's turn");
+    // A holder at work is never waiting, and work without a team has no teammates.
+    expect(
+      describeTaskPhase({ ...base, task: coding, workerBusy: true, waitingOn: "review" }).label,
+    ).toBe("Coding");
+    expect(describeTaskPhase({ ...base, task: task(), waitingOn: "review" }).label).toBe(
+      "With the assistant",
     );
   });
 
