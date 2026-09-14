@@ -45,6 +45,26 @@ const DEFAULT_LIST_STATE_TYPES: ReadonlyArray<LinearWorkflowStateType> = ["unsta
 /** Details reach the UI verbatim, so a long GraphQL message is cut rather than wrapped forever. */
 const MAX_DETAIL_LENGTH = 200;
 
+/**
+ * People paste issue links as often as identifiers. Linear's `issue(id:)` takes
+ * `DEL-123` or a UUID, not `https://linear.app/acme/issue/DEL-123/slug`, so a
+ * link is reduced to the identifier in its path; anything else is passed on as typed.
+ */
+export function issueReferenceFromText(text: string): string {
+  const trimmed = text.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed;
+  try {
+    const url = new URL(trimmed);
+    const segments = url.pathname.split("/").filter((segment) => segment.length > 0);
+    const issueAt = segments.indexOf("issue");
+    const identifier = issueAt >= 0 ? segments[issueAt + 1] : undefined;
+    if (identifier && /^[A-Za-z0-9]+-\d+$/.test(identifier)) return identifier.toUpperCase();
+  } catch {
+    // Not a URL after all: let Linear decide what it is.
+  }
+  return trimmed;
+}
+
 /** Redirectable so tests and workspace proxies can stand in for Linear. */
 const LinearApiBaseUrl = Config.string("T3CODE_LINEAR_API_BASE_URL").pipe(
   Config.withDefault(DEFAULT_API_BASE_URL),
@@ -810,23 +830,24 @@ export const make = Effect.gen(function* () {
   );
 
   const getIssue = Effect.fn("LinearApi.getIssue")(function* (input: LinearGetIssueInput) {
+    const reference = issueReferenceFromText(input.reference);
     const result = yield* request({
       operation: "getIssue",
       query: GET_ISSUE_QUERY,
       // Linear's `issue(id:)` takes an identifier such as `DEL-123` as well as a UUID.
-      variables: { id: input.reference },
+      variables: { id: reference },
       decode: decodeGetIssueResult,
     }).pipe(
       Effect.catchTag(
         "LinearRequestFailure",
         (failure): Effect.Effect<never, LinearIssueNotFoundError | LinearOperationError> =>
           isEntityNotFound(failure)
-            ? Effect.fail(new LinearIssueNotFoundError({ reference: input.reference }))
+            ? Effect.fail(new LinearIssueNotFoundError({ reference }))
             : failOperation(failure),
       ),
     );
     if (result.issue === null) {
-      return yield* new LinearIssueNotFoundError({ reference: input.reference });
+      return yield* new LinearIssueNotFoundError({ reference });
     }
     return toIssueDetail(result.issue);
   });

@@ -272,6 +272,43 @@ it.effect("decodes an issue with a null assignee and its nested connections", ()
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("looks an issue up by the identifier in a pasted Linear link", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { issue: issueDetail } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const issue = yield* linear.getIssue({
+      reference: "https://linear.app/acme/issue/DEL-123/wire-up-linear?view=board",
+    });
+
+    assert.strictEqual(issue.identifier, "DEL-123");
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, { id: "DEL-123" });
+  }).pipe(Effect.provide(layer));
+});
+
+it("reduces Linear links to identifiers and leaves other references alone", () => {
+  assert.strictEqual(
+    LinearApi.issueReferenceFromText("https://linear.app/acme/issue/del-7/slug"),
+    "DEL-7",
+  );
+  assert.strictEqual(
+    LinearApi.issueReferenceFromText(" https://linear.app/acme/issue/DEL-7 "),
+    "DEL-7",
+  );
+  assert.strictEqual(LinearApi.issueReferenceFromText(" DEL-7 "), "DEL-7");
+  assert.strictEqual(
+    LinearApi.issueReferenceFromText("0f1c1f3e-4c4e-4f1b-9d3a-2c3b4a5d6e7f"),
+    "0f1c1f3e-4c4e-4f1b-9d3a-2c3b4a5d6e7f",
+  );
+  assert.strictEqual(
+    LinearApi.issueReferenceFromText("https://linear.app/acme/project/roadmap-1"),
+    "https://linear.app/acme/project/roadmap-1",
+  );
+});
+
 it.effect("reports a missing issue when Linear answers with no issue", () => {
   const { layer } = makeLayer({ response: () => Response.json({ data: { issue: null } }) });
 
