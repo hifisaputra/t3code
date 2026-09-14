@@ -47,8 +47,10 @@ export function describeProjectActivity(input: {
   coordinatorBusy: boolean;
 }): ProjectActivity {
   const { project, activeTask, coordinatorBusy } = input;
-  // A running loop clears its failures itself; a paused or stopped one waits for the person.
-  const failure = project.status === "running" ? null : projectFailure(project);
+  // A running loop records a failure too, when its scan cannot advance (a
+  // revoked Linear key, a state name that no longer exists). It clears only on
+  // the next scan that works, so the person has to see it meanwhile.
+  const failure = projectFailure(project);
   if (project.status === "stopped")
     return failure
       ? { tone: "attention", status: "Stopped", headline: "Stopped by a problem", detail: failure }
@@ -62,7 +64,12 @@ export function describeProjectActivity(input: {
         };
   const status = project.status === "paused" ? "Paused" : "Running";
   if (failure)
-    return { tone: "attention", status, headline: "Loop paused by a problem", detail: failure };
+    return {
+      tone: "attention",
+      status,
+      headline: project.status === "running" ? "Stuck on a problem" : "Loop paused by a problem",
+      detail: failure,
+    };
   const waiting = projectWaitingReason(project);
   if (coordinatorBusy)
     return {
@@ -400,8 +407,11 @@ export function buildInbox(board: AssistantBoard): ReadonlyArray<InboxItem> {
   }
   for (const project of board.projects) {
     // Only a failure earns a row: a paused loop, or one started with automatic
-    // picking off, is a deliberate choice and needs nothing from the person.
-    const reason = project.status === "running" ? null : projectFailure(project);
+    // picking off, is a deliberate choice and needs nothing from the person. A
+    // running loop counts too: the scan records what stopped it from advancing
+    // and clears it only once a scan works again. `projectFailure` already
+    // leaves out the "Waiting: " notes, which are progress, not a problem.
+    const reason = projectFailure(project);
     if (reason)
       blocking.push({
         kind: "paused",
@@ -429,8 +439,11 @@ export function buildInbox(board: AssistantBoard): ReadonlyArray<InboxItem> {
     const project = projects.get(task.projectId);
     // A blocked issue in a running project is the assistant's to repair. It
     // becomes the person's when the assistant has no rounds left to spend, or
-    // when nothing is running that could pick it up.
-    if (taskRoundsExhausted(task))
+    // when nothing is running that could pick it up. The server counts a round
+    // before it queues that round's message, so `turns === turnLimit` on an
+    // issue still in flight is the last round running, not a failure: only a
+    // blocked issue is actually out of rounds.
+    if (task.status === "blocked" && taskRoundsExhausted(task))
       blocking.push({
         kind: "stuck",
         key: `stuck:${task.id}`,

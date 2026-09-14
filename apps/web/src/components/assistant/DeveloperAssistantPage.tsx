@@ -16,6 +16,7 @@ import {
   CircleIcon,
   PlusIcon,
   ServerIcon,
+  TriangleAlertIcon,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 
@@ -161,7 +162,13 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
 
   const data = board.data;
   const projectTitle = (id: ProjectId) => projects.find((p) => p.id === id)?.title ?? "Project";
-  const multiple = data.projects.length + (data.setups?.length ?? 0) > 1;
+  // A project being revised has both a card and a setup row; it is still one
+  // assistant, so names only appear once two repositories are really involved.
+  const assistantProjectIds = new Set<ProjectId>([
+    ...data.projects.map((p) => p.config.projectId),
+    ...(data.setups ?? []).map((s) => s.preferences.projectId),
+  ]);
+  const multiple = assistantProjectIds.size > 1;
   const projectLabel = (id: ProjectId) => (multiple ? projectTitle(id) : null);
   const inbox = buildInbox(data);
   const stuck = new Set(inbox.flatMap((item) => (item.kind === "stuck" ? [item.task.id] : [])));
@@ -183,7 +190,11 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
     onToggle: toggle,
   };
   const empty = !hasProjects && (data.setups?.length ?? 0) === 0;
-  const canAdd = setupState.unavailableReason === null;
+  // A dropped stream still leaves a usable snapshot: the reason only hides the
+  // button when there is genuinely nothing to add.
+  const canAdd =
+    setupState.unavailableReason === null ||
+    (setupState.unavailableReason === "connection" && setupState.availableProjectIds.length > 0);
   // Hidden rather than disabled when every repository already has one: there
   // is nothing to add, and a dead button would only raise the question.
   const addButton = canAdd ? (
@@ -195,6 +206,7 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
 
   return (
     <main className="min-h-0 flex-1 overflow-y-auto">
+      {board.error ? <StaleBoardWarning reason={board.error} /> : null}
       {empty ? (
         <Onboarding
           environment={environment}
@@ -308,6 +320,11 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
               ? (data.projects.find((p) => p.config.projectId === dialog.projectId)?.config ?? null)
               : null
           }
+          pendingSetup={
+            dialog.projectId
+              ? (data.setups?.find((s) => s.preferences.projectId === dialog.projectId) ?? null)
+              : null
+          }
           onStarted={openThread}
         />
       ) : null}
@@ -321,6 +338,26 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
         onOpenThread={openThread}
       />
     </main>
+  );
+}
+
+/**
+ * The board keeps rendering its last snapshot when the stream drops, so say so
+ * rather than letting stale rows look live. The page stays usable meanwhile.
+ */
+function StaleBoardWarning({ reason }: { reason: string }) {
+  return (
+    <div
+      role="status"
+      className="mx-auto flex w-full max-w-6xl items-start gap-2.5 px-4 pt-4 sm:px-6"
+    >
+      <div className="flex min-w-0 flex-1 items-start gap-2.5 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
+        <TriangleAlertIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-warning-foreground" />
+        <p className="min-w-0 text-sm text-warning-foreground">
+          The board is not updating: {reason.replace(/[.\s]+$/, "")}. Reconnecting…
+        </p>
+      </div>
+    </div>
   );
 }
 

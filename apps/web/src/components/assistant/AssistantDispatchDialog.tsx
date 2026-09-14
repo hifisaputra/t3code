@@ -159,12 +159,20 @@ export function AssistantDispatchButton({
   if (!project || !board.data) return null;
   const projectId = project.config.projectId;
   const tasks = board.data.tasks.filter((t) => t.projectId === projectId);
-  const claimed = tasks.some(
-    (t) =>
-      t.issue.identifier === identifier &&
-      (t.status === "queued" || assistantTaskHoldsProject(t.status)),
+  const forIssue = tasks.filter((t) => t.issue.identifier === identifier);
+  const claimed = forIssue.some(
+    (t) => t.status === "queued" || assistantTaskHoldsProject(t.status),
   );
   if (claimed) return null;
+  // The server refuses to dispatch an issue whose last run is waiting on the
+  // person, so say what to do instead of offering a button that fails.
+  const latest = forIssue.toSorted((a, b) => a.updatedAt.localeCompare(b.updatedAt)).at(-1);
+  if (latest?.status === "review")
+    return (
+      <span className="text-muted-foreground text-xs">
+        Waiting for your review. Accept it or request changes to dispatch it again.
+      </span>
+    );
   const activeTask = tasks.find((t) => assistantTaskHoldsProject(t.status)) ?? null;
   return (
     <>

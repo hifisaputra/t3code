@@ -188,6 +188,39 @@ describe("issueFingerprint", () => {
     expect(issueFingerprint(withOwnComment, ["t3"])).toBe(before);
   });
 
+  it("ignores an old comment leaving the window Linear returns", () => {
+    // Linear hands back the newest comments first, so a decline comment of T3's own
+    // pushes the oldest one out of the 50 it reads. Nobody changed the issue.
+    const thread = Array.from({ length: 50 }, (_, i) => ({
+      ...comment(`person-${i}`, `Comment ${i}`),
+      createdAt: `2026-09-13T00:${String(i).padStart(2, "0")}:00.000Z`,
+    }));
+    const before = issueFingerprint({ ...issue, comments: thread }, []);
+    const declined = {
+      ...issue,
+      comments: [
+        {
+          ...comment("t3", "Not taken by the developer assistant"),
+          createdAt: "2026-09-13T01:00:00.000Z",
+        },
+        ...thread.slice(1),
+      ],
+    };
+    expect(issueFingerprint(declined, ["t3"])).toBe(before);
+    expect(
+      issueFingerprint(
+        {
+          ...declined,
+          comments: [
+            ...declined.comments,
+            { ...comment("person-new", "Please redo"), createdAt: "2026-09-13T02:00:00.000Z" },
+          ],
+        },
+        ["t3"],
+      ),
+    ).not.toBe(before);
+  });
+
   it("changes when a person edits the issue or comments on it", () => {
     const before = issueFingerprint(issue, []);
     expect(issueFingerprint({ ...issue, description: "Images break on save." }, [])).not.toBe(

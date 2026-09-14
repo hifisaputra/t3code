@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Stream from "effect/Stream";
 import * as Effect from "effect/Effect";
@@ -117,7 +118,12 @@ function harness() {
   const removed: string[] = [];
   const comments: Array<{ issueId: string; body: string }> = [];
   const descriptions: Array<{ issueId: string; description: string | undefined }> = [];
-  const listed: Array<{ assignedToMe: boolean }> = [];
+  const listed: Array<{ assignedToMe: boolean; stateTypes: ReadonlyArray<string> }> = [];
+  // Issues Linear refuses to read, and hooks that run while it is being read
+  // or commented on, to test what the assistant does around those calls.
+  const linearFailures = new Set<string>();
+  let onIssueRead: (reference: string) => Effect.Effect<void> = () => Effect.void;
+  let onComment: (body: string) => Effect.Effect<void> = () => Effect.void;
   let commentsHealthy = true;
   let descriptionsHealthy = true;
   const pendingStarts = new Set<ThreadId>();
@@ -195,13 +201,22 @@ function harness() {
       }),
       listIssues: (input) =>
         Effect.sync(() => {
-          listed.push({ assignedToMe: input.assignedToMe === true });
+          listed.push({
+            assignedToMe: input.assignedToMe === true,
+            stateTypes: input.stateTypes ?? [],
+          });
           return { issues };
         }),
       getIssue: ({ reference }) =>
-        Effect.succeed(
-          issues.find((i) => i.id === reference || i.identifier === reference) ?? issues[0]!,
-        ),
+        linearFailures.has(reference)
+          ? Effect.fail(
+              new LinearOperationError({ operation: "getIssue", detail: "Linear is unavailable." }),
+            )
+          : onIssueRead(reference).pipe(
+              Effect.as(
+                issues.find((i) => i.id === reference || i.identifier === reference) ?? issues[0]!,
+              ),
+            ),
       workflowStates: () =>
         Effect.succeed([
           { id: "review", name: "In Review", type: "started", position: 1, color: "#fff" },
@@ -241,10 +256,12 @@ function harness() {
             ),
       createComment: (input) =>
         commentsHealthy
-          ? Effect.sync(() => {
-              comments.push(input);
-              return { id: `comment-${comments.length}`, url: "https://linear.app/c" };
-            })
+          ? onComment(input.body).pipe(
+              Effect.map(() => {
+                comments.push(input);
+                return { id: `comment-${comments.length}`, url: "https://linear.app/c" };
+              }),
+            )
           : Effect.fail(
               new LinearOperationError({
                 operation: "createComment",
@@ -424,6 +441,13 @@ function harness() {
     comments,
     descriptions,
     listed,
+    linearFailures,
+    whenIssueRead: (hook: typeof onIssueRead) => {
+      onIssueRead = hook;
+    },
+    whenCommentPosted: (hook: typeof onComment) => {
+      onComment = hook;
+    },
     setCommentsHealthy: (value: boolean) => {
       commentsHealthy = value;
     },
@@ -1179,7 +1203,7 @@ it.effect("starting with picking on takes the top ready issue, the person's or n
     });
     assert.isTrue(board.projects[0]?.config.autoPick);
     assert.isFalse(board.projects[0]?.config.assignedToMe);
-    assert.deepEqual(h.listed, [{ assignedToMe: false }]);
+    assert.deepEqual(h.listed, [{ assignedToMe: false, stateTypes: ["unstarted"] }]);
     assert.equal((yield* activeTask(service)).issue.identifier, "APP-1");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
@@ -1366,7 +1390,8 @@ it.effect("the assistant passes on an answer the person gave in its chat, and on
     yield* service.deliver();
     h.finish(first.threadId);
     const decision = yield* service.askDecision(first.threadId, "Fix the XSS here or separately?");
-    const at = (offset: number) => new Date(Date.parse(decision.createdAt) + offset).toISOString();
+    const at = (offset: number) =>
+      DateTime.formatIso(DateTime.makeUnsafe(Date.parse(decision.createdAt) + offset));
     const message = (id: string, createdAt: string): OrchestrationMessage => ({
       id: MessageId.make(id),
       role: "user",
@@ -1674,23 +1699,41 @@ it.effect("serializes concurrent issue starts", () =>
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-it.effect("bounds external progress checks and allows an explicit restart", () =>
+it.effect("bounds external progress checks, blocking the issue and not the project", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service } = yield* h.setup;
-    const lead = leadOf(yield* activeTask(service));
-    for (let i = 0; i < 16; i++) yield* service.waitForExternal(lead, "Deploy is pending");
-    const paused = (yield* service.board(null)).projects[0]!;
-    assert.equal(paused.status, "stopped");
-    assert.include(paused.error!, "15 checks");
-    yield* service.control({ projectId: config.projectId, action: "start" });
-    yield* service.waitForExternal(lead, "One more check");
+    const { service, caller } = yield* h.setup;
+    const task = yield* activeTask(service);
+    const lead = leadOf(task);
+    for (let i = 0; i < 15; i++)
+      assert.equal((yield* service.waitForExternal(lead, "Deploy is pending")).outcome, "waiting");
+    assert.equal((yield* service.waitForExternal(lead, "Deploy is pending")).outcome, "limit");
+    // Only the issue that waited is held; the loop and the person's other work run on.
+    const board = yield* service.board(null);
+    assert.equal(board.projects[0]?.status, "running");
+    const blocked = board.tasks.find((t) => t.id === task.id)!;
+    assert.equal(blocked.status, "blocked");
+    assert.include(blocked.error!, "15 checks");
+    // Retrying from the board gives the team its checks back.
+    yield* service.review({ taskId: task.id, action: "retry", feedback: "Staging is up." });
+    assert.equal((yield* service.waitForExternal(lead, "One more check")).outcome, "waiting");
     assert.equal((yield* service.board(null)).projects[0]?.status, "running");
-    // The scan brings the wait back to the leader, not the assistant.
-    yield* service.deliver();
-    h.finish(lead);
+    // The scan brings the wait back to the leader, not the assistant. Its start
+    // and the retry go first; each queued turn is delivered and finished.
+    for (const _ of [1, 2]) {
+      yield* service.deliver();
+      h.finish(lead);
+    }
     yield* service.scan();
     assert.include(turnsOf(h, lead).at(-1), "Waiting: One more check");
+    // Work from before team leaders has only the assistant to stop.
+    let outcome = "waiting";
+    while (outcome === "waiting")
+      outcome = (yield* service.waitForExternal(caller, "Deploy is pending")).outcome;
+    assert.equal(outcome, "stopped");
+    const stopped = (yield* service.board(null)).projects[0]!;
+    assert.equal(stopped.status, "stopped");
+    assert.include(stopped.error!, "15 checks");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -2443,5 +2486,262 @@ it.effect("work started before team leaders keeps reporting to the assistant", (
     yield* service.deliver();
     assert.equal((yield* taskById(service, "legacy")).stage, "coordinator");
     assert.include(turnsOf(h, caller).at(-1), "ended its turn without handing off");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a team leader's thread the person archived is brought back for its next message", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const task = yield* takeIssue(h, service);
+    const lead = leadOf(task);
+    yield* service.deliver();
+    // The person archives the leader's thread while its worker is running.
+    h.threads.set(lead, { ...h.threads.get(lead)!, archivedAt: timestamp });
+    yield* endTurn(h, service, task.threadId);
+    yield* service.deliver();
+    assert.isNull(h.threads.get(lead)?.archivedAt);
+    assert.include(turnsOf(h, lead).at(-1), "ended its turn without handing off");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("an accepted state Linear does not call completed still accepts the delivery", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    yield* service.configure({ ...config, acceptedState: "Ready to Deploy" });
+    yield* service.control({ projectId: config.projectId, action: "start" });
+    const task = yield* takeIssue(h, service);
+    yield* deliverIssue(h, service, task);
+    // The person moved the issue where the card asked them to, a started state.
+    h.issues[0] = {
+      ...h.issues[0]!,
+      state: { id: "deploy", name: " ready to deploy ", type: "started", position: 3, color: "#f" },
+    };
+    yield* service.scan();
+    const accepted = yield* taskById(service, task.id);
+    assert.equal(accepted.status, "accepted");
+    assert.include(accepted.feedback, "Accepted in Linear");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a review made while Linear is being read is not overwritten by the sync", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const task = yield* takeIssue(h, service);
+    yield* deliverIssue(h, service, task);
+    // In Linear the issue was moved out of its delivered state, which the sync
+    // reads as a request for changes.
+    h.issues[0] = {
+      ...h.issues[0]!,
+      state: { id: "todo", name: "Todo", type: "unstarted", position: 0, color: "#fff" },
+    };
+    // The person sends it back from the board, with their own words, while
+    // that read is in flight.
+    let raced = false;
+    h.whenIssueRead(() =>
+      Effect.gen(function* () {
+        if (raced) return;
+        raced = true;
+        yield* service.review({
+          taskId: task.id,
+          action: "request-changes",
+          feedback: "The button is still grey.",
+        });
+      }).pipe(Effect.catch(() => Effect.void)),
+    );
+    yield* service.scan();
+    const reviewed = yield* taskById(service, task.id);
+    assert.isTrue(raced);
+    assert.equal(reviewed.status, "changes-requested");
+    assert.equal(reviewed.feedback, "The button is still grey.");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("interrupting keeps an update made while its threads were stopped", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const task = yield* takeIssue(h, service);
+    const sql = yield* SqlClient.SqlClient;
+    // A turn ending writes to the same row between the board read and the save.
+    let raced = false;
+    h.onDispatch((command) =>
+      command.type === "thread.turn.interrupt" && command.threadId === leadOf(task) && !raced
+        ? Effect.sync(() => {
+            raced = true;
+          }).pipe(
+            Effect.andThen(
+              sql`UPDATE assistant_tasks SET data = json_set(data, '$.summary', 'Pushed the fix') WHERE id = ${task.id}`,
+            ),
+            Effect.asVoid,
+            Effect.orDie,
+          )
+        : Effect.void,
+    );
+    yield* service.control({ projectId: config.projectId, action: "interrupt" });
+    const interrupted = yield* taskById(service, task.id);
+    assert.isTrue(raced);
+    assert.equal(interrupted.status, "blocked");
+    assert.equal(interrupted.summary, "Pushed the fix");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a ready state Linear calls started is still listed and taken", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    h.issues[0] = {
+      ...h.issues[0]!,
+      state: { id: "wip", name: "In Progress", type: "started", position: 1, color: "#fff" },
+    };
+    yield* service.configure({ ...config, readyStates: ["In Progress"] });
+    yield* service.control({ projectId: config.projectId, action: "start" });
+    assert.equal((yield* activeTask(service)).issue.identifier, "APP-1");
+    assert.include(h.listed.at(-1)?.stateTypes ?? [], "started");
+    assert.notInclude(h.listed.at(-1)?.stateTypes ?? [], "completed");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("another T3 project's claim on the same Linear issue does not hide it", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    const sql = yield* SqlClient.SqlClient;
+    // A second assistant on the same Linear project is working APP-1 itself.
+    const other = {
+      id: "other",
+      projectId: "other-project",
+      issue: makeIssue(1),
+      threadId: "assistant-work-other",
+      status: "working",
+      brief: "",
+      summary: "",
+      reviewInstructions: "",
+      feedback: "",
+      turns: 1,
+      turnLimit: 2,
+      deployment: null,
+      error: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      stage: "implement",
+      leader: true,
+      linearCommentIds: [],
+    };
+    yield* sql`INSERT INTO assistant_tasks (id, project_id, issue_id, thread_id, status, data) VALUES (${other.id}, ${other.projectId}, ${other.issue.id}, ${other.threadId}, ${other.status}, ${yield* encodeJson(other)})`;
+    yield* service.configure(config);
+    yield* service.control({ projectId: config.projectId, action: "start" });
+    assert.equal((yield* activeTask(service)).issue.identifier, "APP-1");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a sent-back issue Linear cannot read does not hold up the others", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const service = yield* h.initialize;
+    yield* service.configure(config);
+    const sql = yield* SqlClient.SqlClient;
+    for (const [id, issue] of [
+      ["one", makeIssue(1)],
+      ["two", makeIssue(2)],
+    ] as const) {
+      const sentBack = {
+        id,
+        projectId: config.projectId,
+        issue,
+        threadId: `assistant-work-${id}`,
+        status: "changes-requested",
+        brief: "",
+        summary: "",
+        reviewInstructions: "",
+        feedback: `Rework ${issue.identifier}`,
+        turns: 1,
+        turnLimit: 2,
+        deployment: null,
+        error: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        stage: "lead",
+        leader: true,
+        linearCommentIds: [],
+      };
+      yield* sql`INSERT INTO assistant_tasks (id, project_id, issue_id, thread_id, status, data) VALUES (${id}, ${config.projectId}, ${issue.id}, ${sentBack.threadId}, ${"changes-requested"}, ${yield* encodeJson(sentBack)})`;
+    }
+    h.linearFailures.add("issue-1");
+    yield* service.control({ projectId: config.projectId, action: "start" });
+    const active = yield* activeTask(service);
+    assert.equal(active.issue.identifier, "APP-2");
+    assert.equal(active.feedback, "Rework APP-2");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a delivered team is closed once its threads are all finished, and only once", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const task = yield* takeIssue(h, service);
+    const tester = assistantTaskThreadId(task, "e2e");
+    yield* reachMerge(h, service, task);
+    yield* leadToE2e(h, service, task);
+    yield* service.submitE2e(tester, {
+      verdict: "passed",
+      report: "- The page loads: passed",
+      humanChecks: [],
+      screenshots: [],
+    });
+    // The leader is running again when the tester's turn ends; the team stays open.
+    h.pendingStarts.add(leadOf(task));
+    yield* endTurn(h, service, tester);
+    assert.lengthOf(h.removed, 0);
+    h.pendingStarts.delete(leadOf(task));
+    yield* endTurn(h, service, leadOf(task));
+    assert.lengthOf(h.removed, 1);
+    // Whatever settles afterwards finds the team closed.
+    for (const threadId of [task.threadId, tester]) yield* endTurn(h, service, threadId);
+    assert.lengthOf(h.removed, 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the tester cannot be messaged before its run is started", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const task = yield* takeIssue(h, service);
+    yield* reachMerge(h, service, task);
+    yield* leadToE2e(h, service, task);
+    // T3 stopped between creating the tester's thread and queueing its brief.
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`DELETE FROM assistant_messages WHERE thread_id = ${assistantTaskThreadId(task, "e2e")}`;
+    const refused = yield* service
+      .messageWorker(leadOf(task), undefined, "Check the header too", "e2e")
+      .pipe(Effect.flip);
+    assert.equal(refused.detail, "Start the tester with assistant_start_e2e first.");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a Linear card is posted only after the state that stops it being posted twice", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const task = yield* takeIssue(h, service);
+    // What the issue looked like in T3 as each card was posted.
+    const atPost: Array<{ merge: boolean; e2e: boolean; stage: string | undefined }> = [];
+    h.whenCommentPosted(() =>
+      taskById(service, task.id).pipe(
+        Effect.map((t) => {
+          atPost.push({ merge: t.merge != null, e2e: t.e2e != null, stage: t.stage });
+        }),
+        Effect.orDie,
+      ),
+    );
+    yield* deliverIssue(h, service, task);
+    const merged = atPost[0]!;
+    assert.isTrue(merged.merge);
+    assert.equal(merged.stage, "lead");
+    const tested = atPost.at(-1)!;
+    assert.isTrue(tested.e2e);
+    assert.notEqual(tested.stage, "e2e");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );

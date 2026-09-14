@@ -90,9 +90,17 @@ export function declinedComment(reason: string): string {
   );
 }
 
+/** How many of a person's newest comments the fingerprint reads. */
+const FINGERPRINT_COMMENTS = 20;
+
 /**
  * What the issue says, as a person would change it. T3's own comments are left
  * out, so posting one never makes a declined issue look edited.
+ *
+ * Linear returns the newest comments first and T3 reads a window of 50, so on a
+ * long thread its own comment pushes an older one out of the window. Only the
+ * newest {@link FINGERPRINT_COMMENTS} comments a person wrote are hashed, so what
+ * leaves the far end of the window does not, by itself, make the issue look changed.
  */
 export function issueFingerprint(
   issue: LinearIssueDetail,
@@ -109,7 +117,11 @@ export function issueFingerprint(
     labels: issue.labels.map((label) => label.id).toSorted(),
     parent: issue.parent?.id ?? null,
     children: issue.children.map((child) => `${child.id}:${child.stateName}`).toSorted(),
-    comments: issue.comments.filter((c) => !posted.has(c.id)).map((c) => `${c.id}:${c.body}`),
+    comments: issue.comments
+      .filter((c) => !posted.has(c.id))
+      .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(-FINGERPRINT_COMMENTS)
+      .map((c) => `${c.id}:${c.body}`),
   };
   return NodeCrypto.createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }

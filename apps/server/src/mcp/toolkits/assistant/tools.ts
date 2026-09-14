@@ -356,7 +356,10 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_wait: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      yield* service.waitForExternal(caller, input.reason.trim());
+      const result = yield* service.waitForExternal(caller, input.reason.trim());
+      if (result.outcome === "limit")
+        return "T3 has checked back 15 times without this completing, so the issue is now blocked for the person to look at. End your turn.";
+      if (result.outcome === "stopped") return "The assistant is stopped. End your turn.";
       return "T3 checks back in about a minute. End your turn now.";
     }),
 });

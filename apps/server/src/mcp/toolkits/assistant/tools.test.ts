@@ -132,7 +132,11 @@ it.effect("pausing and waiting answer the agent with text instead of an internal
       Layer.provideMerge(
         Layer.mock(DeveloperAssistant)({
           pause: () => Effect.sync(() => void calls.push("pause")),
-          waitForExternal: () => Effect.sync(() => void calls.push("wait")),
+          waitForExternal: () =>
+            Effect.sync(() => {
+              calls.push("wait");
+              return { outcome: "waiting" as const };
+            }),
         }),
       ),
       Layer.provideMerge(McpServer.McpServer.layer),
@@ -150,6 +154,11 @@ it.effect("pausing and waiting answer the agent with text instead of an internal
         arguments: { reason: "Staging deploy is running" },
       });
       assert.isFalse(waiting.isError);
+      const waitText = waiting.content[0];
+      assert.include(
+        waitText?.type === "text" ? waitText.text : "",
+        "T3 checks back in about a minute",
+      );
       assert.deepEqual(calls, ["pause", "wait"]);
     }).pipe(
       Effect.provide(layer),

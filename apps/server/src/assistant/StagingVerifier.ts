@@ -10,7 +10,7 @@ import {
   type AssistantDeploymentTarget,
 } from "@t3tools/contracts";
 import { ProcessRunner } from "../processRunner.ts";
-import { checkDeployment } from "./deploymentChecks.ts";
+import { checkDeployment, processFailureDetail } from "./deploymentChecks.ts";
 
 const Receipt = Schema.Struct({
   revision: AssistantDeployment.fields.revision,
@@ -19,6 +19,8 @@ const Receipt = Schema.Struct({
 
 const decodeReceipt = Schema.decodeUnknownEffect(Schema.fromJsonString(Receipt));
 const isAssistantError = Schema.is(DeveloperAssistantError);
+/** A commit as a person reads it; a ref name is already readable. */
+const label = (value: string) => (/^[0-9a-f]{40}$/.test(value) ? value.slice(0, 7) : value);
 
 export class StagingVerifier extends Context.Service<
   StagingVerifier,
@@ -59,32 +61,63 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const runner = yield* ProcessRunner;
     const platform = yield* HostProcessPlatform;
-    const git = Effect.fn("Assistant.git")(
-      function* (
-        cwd: string,
-        args: ReadonlyArray<string>,
-        timeout: "30 seconds" | "5 minutes" = "30 seconds",
-      ) {
-        const result = yield* runner.run({
-          command: "git",
-          args,
-          cwd,
-          timeout,
-          maxOutputBytes: 16000,
+    const gitRun = (
+      cwd: string,
+      args: ReadonlyArray<string>,
+      timeout: "30 seconds" | "5 minutes" = "30 seconds",
+    ) =>
+      runner.run({ command: "git", args, cwd, timeout, maxOutputBytes: 16000 }).pipe(
+        Effect.mapError(
+          (error) =>
+            new DeveloperAssistantError({
+              detail: processFailureDetail(error, "Git verification"),
+            }),
+        ),
+      );
+    const git = Effect.fn("Assistant.git")(function* (
+      cwd: string,
+      args: ReadonlyArray<string>,
+      timeout: "30 seconds" | "5 minutes" = "30 seconds",
+    ) {
+      const result = yield* gitRun(cwd, args, timeout);
+      if (result.code !== 0)
+        return yield* new DeveloperAssistantError({
+          detail:
+            "Git could not verify the repository or staging revision. Check the base branch, remote, and merge method.",
         });
-        if (result.code !== 0)
-          return yield* new DeveloperAssistantError({
-            detail:
-              "Git could not verify the repository or staging revision. Check the base branch, remote, and merge method.",
-          });
-        return result.stdout.trim();
-      },
-      Effect.mapError((error) =>
-        isAssistantError(error)
-          ? error
-          : new DeveloperAssistantError({ detail: "Could not run Git verification." }),
-      ),
-    );
+      return result.stdout.trim();
+    });
+    /**
+     * Whether `ref` contains `commit`. `git merge-base --is-ancestor` answers "no"
+     * with exit code 1, which is the ordinary "staging is still on an older commit";
+     * anything above that is a broken repository, ref or remote and is reported as one.
+     */
+    const isAncestor = Effect.fn("Assistant.isAncestor")(function* (
+      cwd: string,
+      commit: string,
+      ref: string,
+    ) {
+      const result = yield* gitRun(cwd, ["merge-base", "--is-ancestor", commit, ref]);
+      if (result.code === 0) return true;
+      if (result.code === 1) return false;
+      return yield* new DeveloperAssistantError({
+        detail: `Git could not tell whether ${label(ref)} contains ${label(commit)}. Check the base branch, remote, and merge method.`,
+      });
+    });
+    const requireAncestor = Effect.fn("Assistant.requireAncestor")(function* (
+      cwd: string,
+      commit: string,
+      ref: string,
+      /** What the person should do while the commit has not arrived yet. */
+      notYet: string,
+    ) {
+      if (!(yield* isAncestor(cwd, commit, ref)))
+        return yield* new DeveloperAssistantError({ detail: notYet });
+    });
+    // Refspecs are agent-proposed, so they are passed after `--`; a branch named
+    // `--upload-pack=...` is otherwise an option to git rather than a ref.
+    const fetchBase = (cwd: string, baseBranch: string) =>
+      git(cwd, ["fetch", "origin", "--", baseBranch]);
     const revision = Effect.fn("Assistant.revision")(function* (
       worktreePath: string,
       options?: { readonly allowUncommitted?: boolean },
@@ -100,21 +133,19 @@ export const layer = Layer.effect(
       repositoryKey: (cwd) => git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
       revision,
       isMerged: Effect.fn("Assistant.isMerged")(function* (input) {
-        yield* git(input.cwd, ["fetch", "origin", input.baseBranch]);
-        // merge-base exits 1 for "not an ancestor", which git() reports as a failure.
-        return yield* git(input.cwd, [
-          "merge-base",
-          "--is-ancestor",
+        yield* fetchBase(input.cwd, input.baseBranch);
+        return yield* isAncestor(
+          input.cwd,
           input.revision,
           `refs/remotes/origin/${input.baseBranch}`,
-        ]).pipe(
-          Effect.as(true),
-          Effect.orElseSucceed(() => false),
         );
       }),
       verify: Effect.fn("Assistant.verifyStaging")(
         function* (input) {
-          const workerRevision = yield* revision(input.worktreePath);
+          // The commit under verification is fixed by expectedRevision and proved to be
+          // on origin's branch below, so a stray file in the shared worktree is not this
+          // team leader's problem to clean up. Approvals still read HEAD strictly.
+          const workerRevision = yield* revision(input.worktreePath, { allowUncommitted: true });
           if (input.expectedRevision && workerRevision !== input.expectedRevision) {
             return yield* new DeveloperAssistantError({
               detail:
@@ -139,24 +170,24 @@ export const layer = Layer.effect(
                   "Select at least one known staging deployment target from the saved project setup.",
               });
             const evidence = yield* Effect.forEach(targets, (target) =>
-              checkDeployment(target, input.cwd, input.baseBranch).pipe(
+              checkDeployment(target, input.cwd, input.baseBranch, workerRevision).pipe(
                 Effect.provideService(ProcessRunner, runner),
               ),
             );
-            yield* git(input.cwd, ["fetch", "origin", input.baseBranch]);
+            yield* fetchBase(input.cwd, input.baseBranch);
             for (const receipt of evidence) {
-              yield* git(input.cwd, [
-                "merge-base",
-                "--is-ancestor",
+              yield* requireAncestor(
+                input.cwd,
                 workerRevision,
                 receipt.revision,
-              ]);
-              yield* git(input.cwd, [
-                "merge-base",
-                "--is-ancestor",
+                `${receipt.targetId} is still on ${label(receipt.revision)}, which does not contain ${label(workerRevision)}. Wait for the merge to deploy, then verify again.`,
+              );
+              yield* requireAncestor(
+                input.cwd,
                 receipt.revision,
                 `refs/remotes/origin/${input.baseBranch}`,
-              ]);
+                `${receipt.targetId} deployed ${label(receipt.revision)}, which is not on origin/${input.baseBranch} yet. Wait for the merge to land and deploy; if it already landed, check the base branch, remote, and merge method.`,
+              );
             }
             return {
               revision: evidence[0]!.revision,
@@ -195,14 +226,19 @@ export const layer = Layer.effect(
                 }),
             ),
           );
-          yield* git(input.cwd, ["fetch", "origin", input.baseBranch]);
-          yield* git(input.cwd, ["merge-base", "--is-ancestor", workerRevision, receipt.revision]);
-          yield* git(input.cwd, [
-            "merge-base",
-            "--is-ancestor",
+          yield* fetchBase(input.cwd, input.baseBranch);
+          yield* requireAncestor(
+            input.cwd,
+            workerRevision,
+            receipt.revision,
+            `The staging check reports ${label(receipt.revision)}, which does not contain ${label(workerRevision)}. Staging is still on an older commit; wait for the merge to deploy, then verify again.`,
+          );
+          yield* requireAncestor(
+            input.cwd,
             receipt.revision,
             `refs/remotes/origin/${input.baseBranch}`,
-          ]);
+            `The staging check reports ${label(receipt.revision)}, which is not on origin/${input.baseBranch} yet. Wait for the merge to land and deploy; if it already landed, check the base branch, remote, and merge method.`,
+          );
           return { ...receipt, verifiedAt: DateTime.formatIso(yield* DateTime.now) };
         },
         Effect.mapError((error) =>

@@ -290,12 +290,44 @@ describe("buildInbox", () => {
     ).toMatchObject([{ kind: "stuck", reason: "stopped" }]);
   });
 
+  it("leaves the last round alone while it is still running", () => {
+    // The server counts the round before it sends that round's message, so a
+    // worker on its last round sits at turns === turnLimit mid-edit.
+    const lastRound = task({ status: "working", turns: 6, turnLimit: 6 });
+    expect(buildInbox(board({ tasks: [lastRound] }))).toEqual([]);
+    const waiting = task({ status: "waiting", turns: 6, turnLimit: 6 });
+    expect(buildInbox(board({ tasks: [waiting] }))).toEqual([]);
+  });
+
   it("reports a failed queue once, as the paused project", () => {
     const failed = project({ status: "stopped", error: "The assistant thread was deleted." });
     const held = task({ status: "blocked", error: "The worker thread was deleted." });
     expect(buildInbox(board({ projects: [failed], tasks: [held] }))).toMatchObject([
       { kind: "paused" },
     ]);
+  });
+
+  it("reports a running loop that cannot advance", () => {
+    // The scan writes the reason on a running project and clears it only on the
+    // next scan that works, so the person has to see it meanwhile.
+    const stuck = project({ error: "Linear rejected the API key." });
+    expect(buildInbox(board({ projects: [stuck] }))).toMatchObject([
+      { kind: "paused", reason: "Linear rejected the API key." },
+    ]);
+    expect(
+      describeProjectActivity({ project: stuck, activeTask: null, coordinatorBusy: false }),
+    ).toMatchObject({
+      tone: "attention",
+      status: "Running",
+      headline: "Stuck on a problem",
+      detail: "Linear rejected the API key.",
+    });
+    // A waiting note on a running project is progress, and stays out of the inbox.
+    const waiting = project({ error: "Waiting: staging deploy is running" });
+    expect(buildInbox(board({ projects: [waiting] }))).toEqual([]);
+    expect(
+      describeProjectActivity({ project: waiting, activeTask: null, coordinatorBusy: false }),
+    ).toMatchObject({ tone: "waiting", detail: "staging deploy is running" });
   });
 
   it("lists setups only once their proposal is ready", () => {

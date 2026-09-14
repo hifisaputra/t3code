@@ -4,6 +4,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   ProjectId,
   type AssistantProjectConfig,
+  type AssistantSetup,
   type ModelSelection,
   type RuntimeMode,
   type ThreadId,
@@ -114,6 +115,7 @@ export function AssistantSetupDialog({
   environment,
   projectIds,
   initial,
+  pendingSetup,
   onStarted,
 }: {
   open: boolean;
@@ -121,6 +123,8 @@ export function AssistantSetupDialog({
   environment: EnvironmentPresentation;
   projectIds: ReadonlyArray<ProjectId>;
   initial: AssistantProjectConfig | null;
+  /** A setup conversation already under way for this project, if any. */
+  pendingSetup: AssistantSetup | null;
   onStarted: (threadId: ThreadId) => void;
 }) {
   const environmentId = environment.environmentId;
@@ -134,19 +138,34 @@ export function AssistantSetupDialog({
   const beginSetup = useAtomCommand(developerAssistant.beginSetup);
   const { pending, run } = useAssistantAction();
   const providers = environment.serverConfig?.providers ?? [];
-  const defaultModel = resolveDefaultProviderModelSelection(providers, initial?.modelSelection);
-  const [projectId, setProjectId] = useState<string>(initial?.projectId ?? projects[0]?.id ?? "");
-  const [linearProjectId, setLinearProjectId] = useState(initial?.linearProjectId ?? "");
+  // A setup conversation already under way holds the choices the person made
+  // last; starting again rewrites those, so they are what the form shows. The
+  // saved config is the fallback for a project with no setup in flight.
+  const prefill = pendingSetup?.preferences ?? null;
+  const defaultModel = resolveDefaultProviderModelSelection(
+    providers,
+    prefill?.modelSelection ?? initial?.modelSelection,
+  );
+  const [projectId, setProjectId] = useState<string>(
+    prefill?.projectId ?? initial?.projectId ?? projects[0]?.id ?? "",
+  );
+  const [linearProjectId, setLinearProjectId] = useState(
+    prefill?.linearProjectId ?? initial?.linearProjectId ?? "",
+  );
   const [model, setModel] = useState<ModelSelection | null>(defaultModel);
   const [workerModel, setWorkerModel] = useState<ModelSelection | null>(
-    initial?.workerModelSelection ?? defaultModel,
+    prefill?.workerModelSelection ?? initial?.workerModelSelection ?? defaultModel,
   );
-  const [assignedToMe, setAssignedToMe] = useState(initial?.assignedToMe ?? true);
+  const [assignedToMe, setAssignedToMe] = useState(
+    prefill?.assignedToMe ?? initial?.assignedToMe ?? true,
+  );
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(
-    initial?.runtimeMode ?? "approval-required",
+    prefill?.runtimeMode ?? initial?.runtimeMode ?? "approval-required",
   );
-  const [setupRuntimeMode, setSetupRuntimeMode] = useState<RuntimeMode>(DEFAULT_RUNTIME_MODE);
-  const [context, setContext] = useState("");
+  const [setupRuntimeMode, setSetupRuntimeMode] = useState<RuntimeMode>(
+    prefill?.setupRuntimeMode ?? DEFAULT_RUNTIME_MODE,
+  );
+  const [context, setContext] = useState(prefill?.context ?? "");
 
   const linearProjects = [
     ...new Map(
@@ -238,7 +257,11 @@ export function AssistantSetupDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <SparklesIcon className="size-4" />
-            {initial ? `Revise ${project?.title ?? "project"} setup` : "Add a project"}
+            {initial
+              ? `Revise ${project?.title ?? "project"} setup`
+              : prefill
+                ? `Restart ${project?.title ?? "project"} setup`
+                : "Add a project"}
           </DialogTitle>
           <DialogDescription>
             Pick the repository, its Linear project and the models. Your assistant then reads the
@@ -253,7 +276,7 @@ export function AssistantSetupDialog({
                 <Select
                   value={projectId}
                   onValueChange={(next) => setProjectId(String(next))}
-                  disabled={initial !== null || busy}
+                  disabled={initial !== null || prefill !== null || busy}
                 >
                   <SelectTrigger aria-label="Repository">
                     <SelectValue>

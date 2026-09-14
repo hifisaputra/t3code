@@ -770,7 +770,13 @@ function PausedProjectCard({
     <InboxRow
       {...row}
       accent="paused"
-      kind={project.status === "paused" ? "Loop paused" : "Assistant stopped"}
+      kind={
+        project.status === "running"
+          ? "Assistant cannot continue"
+          : project.status === "paused"
+            ? "Loop paused"
+            : "Assistant stopped"
+      }
       context={<span className="truncate">{title}</span>}
       summary={reason}
     >

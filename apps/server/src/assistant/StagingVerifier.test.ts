@@ -144,13 +144,9 @@ it.effect("reads the reviewed commit and whether origin's integration branch has
   }).pipe(Effect.provide(dependencies), Effect.scoped),
 );
 
-it.effect("rejects dirty work, failed checks and malformed deployment receipts", () =>
+it.effect("rejects failed checks and malformed deployment receipts", () =>
   Effect.gen(function* () {
     const h = yield* fixture;
-    yield* h.fs.writeFileString(h.path.join(h.worktreePath, "unfinished.txt"), "not committed");
-    assert.isTrue(yield* h.verifier.verify(h.input).pipe(Effect.isFailure));
-    assert.lengthOf(h.checks, 0);
-    yield* h.fs.remove(h.path.join(h.worktreePath, "unfinished.txt"));
     for (const receipt of [
       { code: 1, stdout: "deployment failed" },
       { code: 0, stdout: "deploying" },
@@ -301,4 +297,47 @@ it.effect(
       assert.equal(h.checks[0]?.command, "railway");
       assert.isTrue(h.checks[0]?.args?.includes(`--environment=${environmentId}`));
     }).pipe(Effect.provide(dependencies), Effect.scoped),
+);
+
+it.effect("verifies the reviewed commit even when the shared worktree has stray files", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture;
+    yield* h.git(["merge", "--no-ff", "--no-edit", "assistant/APP-1"]);
+    yield* h.git(["push", "origin", "develop"]);
+    const deployed = yield* h.git(["rev-parse", "HEAD"]);
+    h.setReceipt({
+      code: 0,
+      stdout: encodeJson({ revision: deployed, url: "https://staging.example.test" }),
+    });
+    // A test artifact nobody committed is not something the team leader can act on,
+    // and the commit being verified is fixed by expectedRevision regardless.
+    yield* h.fs.writeFileString(h.path.join(h.worktreePath, "screenshot.png"), "artifact");
+    const result = yield* h.verifier.verify({ ...h.input, expectedRevision: h.workerRevision });
+    assert.equal(result.revision, deployed);
+    // Approvals still read HEAD strictly, so an unreviewed change cannot slip through.
+    assert.isTrue(yield* h.verifier.revision(h.worktreePath).pipe(Effect.isFailure));
+  }).pipe(Effect.provide(dependencies), Effect.scoped),
+);
+
+it.effect("separates a deployment that is behind from a git failure", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture;
+    // merge-base exits 1 here: staging simply does not have the commit yet.
+    const behind = yield* h.verifier.verify(h.input).pipe(Effect.flip);
+    assert.include(behind.detail, "not on origin/develop yet");
+    assert.include(behind.detail, "Wait for the merge");
+    yield* h.git(["merge", "--no-ff", "--no-edit", "assistant/APP-1"]);
+    yield* h.git(["push", "origin", "develop"]);
+    // A revision the repository has never seen exits above 1: a real git failure.
+    h.setReceipt({
+      code: 0,
+      stdout: encodeJson({ revision: "f".repeat(40), url: "https://staging.example.test" }),
+    });
+    const broken = yield* h.verifier.verify(h.input).pipe(Effect.flip);
+    assert.include(broken.detail, "Git could not tell whether");
+    // The same distinction keeps isMerged answering rather than failing.
+    assert.isTrue(
+      yield* h.verifier.isMerged({ cwd: h.cwd, revision: h.initial, baseBranch: "develop" }),
+    );
+  }).pipe(Effect.provide(dependencies), Effect.scoped),
 );

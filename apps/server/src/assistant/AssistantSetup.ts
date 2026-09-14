@@ -41,8 +41,30 @@ const encodeConfig = Schema.encodeSync(Schema.fromJsonString(AssistantProjectCon
 const fail = (detail: string) => new DeveloperAssistantError({ detail });
 const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
+/**
+ * A branch name git itself would accept. The setup plan is agent-proposed and the
+ * name reaches git as an argument, so a leading `-` (an option, not a ref) and the
+ * rest of `git check-ref-format --branch`'s rules are refused here rather than
+ * changing what a git command means.
+ */
+export function isValidBranchName(branch: string): boolean {
+  if (!branch || branch.length > 255 || branch === "@") return false;
+  if (branch.startsWith("-") || branch.startsWith("/") || branch.endsWith("/")) return false;
+  if (branch.endsWith(".") || branch.endsWith(".lock") || branch.includes("..")) return false;
+  // Control characters and space, then the characters git reserves for refspecs and globs.
+  if ([...branch].some((character) => character <= " " || character === "\u007f")) return false;
+  if (/[~^:?*[\\]/.test(branch) || branch.includes("@{")) return false;
+  return branch
+    .split("/")
+    .every((segment) => segment !== "" && !segment.startsWith(".") && !segment.endsWith(".lock"));
+}
+
 export function validateDeploymentConfig(config: AssistantProjectConfig) {
   const targets = config.deploymentTargets ?? [];
+  if (!isValidBranchName(config.baseBranch))
+    return fail(
+      `"${config.baseBranch}" is not a usable branch name. Use the integration branch's exact name, such as main or develop.`,
+    );
   if (config.stagingCheckCommand.trim()) {
     if (targets.length)
       return fail("Choose provider deployment checks or a custom command, not both.");
@@ -153,10 +175,24 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
       yield* sql`DELETE FROM assistant_setups WHERE project_id = ${input.projectId}`;
       row = undefined;
     }
+    const encoded = encodePreferences(input);
+    let revised = false;
     if (!row) {
       const threadId = ThreadId.make(`assistant-setup-${NodeCrypto.randomUUID()}`);
-      yield* sql`INSERT INTO assistant_setups (project_id, repository_key, thread_id, preferences) VALUES (${input.projectId}, ${repositoryKey}, ${threadId}, ${encodePreferences(input)})`;
+      yield* sql`INSERT INTO assistant_setups (project_id, repository_key, thread_id, preferences) VALUES (${input.projectId}, ${repositoryKey}, ${threadId}, ${encoded})`;
       row = yield* get(threadId);
+    } else if (row.preferences !== encoded) {
+      // Reopening "Revise setup" with different choices rewrites the brief the
+      // conversation works from. A proposal made from the old brief is no longer
+      // the person's, so it goes with it and the revision moves past any pending save.
+      if (Option.isSome(thread) && (yield* options.threadBusy(thread.value)))
+        return yield* fail(
+          "Wait for the setup conversation's turn to finish before changing its brief.",
+        );
+      yield* sql`UPDATE assistant_setups SET preferences = ${encoded}, proposal = NULL, summary = '',
+        proposed_after = NULL, revision = revision + 1 WHERE project_id = ${input.projectId}`;
+      row = yield* get(ThreadId.make(row.thread_id));
+      revised = true;
     }
     const value = yield* decode(row);
     // The engine rejects unarchiving a live thread, so only restore an archived one.
@@ -181,16 +217,21 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
         threadId: value.threadId,
       });
     yield* options.changed;
-    // A stable command id makes retries after a disconnect reuse the first turn.
+    // A stable command id makes retries after a disconnect reuse the first turn; a
+    // revised brief is a different turn and carries the revision it was written for.
+    const start = revised ? `${value.threadId}:start:${value.revision}` : `${value.threadId}:start`;
+    const note = value.preferences.context.trim();
     yield* engine.dispatch({
       type: "thread.turn.start",
-      commandId: CommandId.make(`${value.threadId}:start`),
+      commandId: CommandId.make(start),
       threadId: value.threadId,
       message: {
-        messageId: MessageId.make(`${value.threadId}:start`),
+        messageId: MessageId.make(start),
         role: "user",
         attachments: [],
-        text: "Help me set up the developer assistant for this project. Read the saved setup brief using your assistant setup tools, then inspect the repository and its staging deployment. Ask me for missing details and propose a setup I can review and save. This is an inspection and discussion; do not change files, deploy, or start issues.",
+        text: revised
+          ? `I changed the setup brief: my models, Linear project, permissions or notes are not what they were. Read the saved brief again using your assistant setup tools, check what it changes about the repository and staging deployment you inspected, and propose a setup that matches it. Any earlier proposal is out of date. This is an inspection and discussion; do not change files, deploy, or start issues.${note ? `\n\nWhat I asked for this time:\n${note}` : ""}`
+          : "Help me set up the developer assistant for this project. Read the saved setup brief using your assistant setup tools, then inspect the repository and its staging deployment. Ask me for missing details and propose a setup I can review and save. This is an inspection and discussion; do not change files, deploy, or start issues.",
       },
       modelSelection: value.preferences.modelSelection,
       runtimeMode: value.preferences.setupRuntimeMode,
