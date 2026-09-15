@@ -627,10 +627,53 @@ const HISTORY_STATUSES = new Set<AssistantTask["status"]>([
   "declined",
 ]);
 
+/** Whether the issue is done with: its team settled and its row moved to history. */
+export const taskIsFinished = (task: Pick<AssistantTask, "status">): boolean =>
+  HISTORY_STATUSES.has(task.status);
+
 export function historyTasks(board: AssistantBoard): ReadonlyArray<AssistantTask> {
   return board.tasks
-    .filter((t) => HISTORY_STATUSES.has(t.status))
+    .filter(taskIsFinished)
     .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/**
+ * The four threads of an issue's team, in the order the work moves through
+ * them. Every strip and menu lists them this way, so a role keeps its place.
+ */
+export const teamRoleOrder: ReadonlyArray<AssistantThreadRole> = [
+  "lead",
+  "implement",
+  "review",
+  "e2e",
+];
+
+export interface TaskOutcome {
+  /** How the issue ended, as a sentence opener. */
+  readonly label: string;
+  /** The person's or the team leader's words for it, when there are any. */
+  readonly detail: string | null;
+}
+
+const trimmedOrNull = (text: string | null | undefined): string | null => text?.trim() || null;
+
+/** How a finished issue ended, for its history record. */
+export function taskOutcome(task: AssistantTask): TaskOutcome {
+  switch (task.status) {
+    case "accepted":
+      return {
+        label: "Accepted",
+        detail: task.deliveredState ? `Left in ${task.deliveredState} in Linear.` : null,
+      };
+    case "changes-requested":
+      return { label: "Sent back for changes", detail: trimmedOrNull(task.feedback) };
+    case "skipped":
+      return { label: "Skipped", detail: trimmedOrNull(task.feedback) };
+    case "declined":
+      return { label: "Declined", detail: trimmedOrNull(task.declined?.reason) };
+    default:
+      return { label: "Still in progress", detail: null };
+  }
 }
 
 /** Issues the person put next, in the order the loop takes them. */

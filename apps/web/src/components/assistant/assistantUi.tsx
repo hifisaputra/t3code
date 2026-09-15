@@ -10,15 +10,23 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon, ExternalLinkIcon } from "lucide-react";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  GitCommitHorizontalIcon,
+} from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
+import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { cn } from "~/lib/utils";
 
 import ChatMarkdown from "../ChatMarkdown";
 import { useOpenIssueLink } from "../ThreadStatusIndicators";
 import { toastManager } from "../ui/toast";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { isLongText } from "./assistantBoard.logic";
 
 export type StatusTone =
@@ -167,6 +175,37 @@ export function IssueLink({
       {issue.identifier}
       <ExternalLinkIcon aria-hidden className="size-3" />
     </a>
+  );
+}
+
+/** The commit a staging deployment was verified at, copyable in one click. */
+export function CommitChip({ revision }: { revision: string }) {
+  const { copyToClipboard, isCopied } = useCopyToClipboard();
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            onClick={() => copyToClipboard(revision, undefined)}
+            className="inline-flex items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+          />
+        }
+      >
+        <GitCommitHorizontalIcon aria-hidden className="size-3" />
+        {revision.slice(0, 7)}
+        {isCopied ? (
+          <CheckIcon aria-hidden className="size-3" />
+        ) : (
+          <CopyIcon aria-hidden className="size-3 opacity-60" />
+        )}
+      </TooltipTrigger>
+      <TooltipPopup>
+        {isCopied
+          ? "Copied"
+          : "The commit verified on staging. Later issues may have landed since."}
+      </TooltipPopup>
+    </Tooltip>
   );
 }
 

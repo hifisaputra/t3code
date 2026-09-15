@@ -11,7 +11,9 @@ import {
 
 const stationary = { x: 0, y: 0, scaleX: 1, scaleY: 1 };
 const hidden = { ...stationary, scaleY: 0 };
-type ThreadItem = Extract<SidebarListItem, { kind: "thread" }>;
+/** Rows that occupy a slot in the list: thread rows, plus the team rows that
+ *  stand in for several threads. Both translate to open the gap. */
+type RowItem = Extract<SidebarListItem, { kind: "thread" | "team" }>;
 type Layout = Parameters<SortingStrategy>[0];
 
 /** Keep the lifted card below the Pins label, including when Pins is empty.
@@ -118,7 +120,7 @@ export function createSidebarSortingStrategy(input: {
     if (active?.kind !== "thread" || !over || !rects[0]) return [];
     const target = resolveSidebarDropTarget(items, active.key, sidebarListItemId(over));
     if (!target) return [];
-    const groups: Record<SidebarSection, ThreadItem[]> = {
+    const groups: Record<SidebarSection, RowItem[]> = {
       pinned: [],
       active: [],
       snoozed: [],
@@ -135,9 +137,13 @@ export function createSidebarSortingStrategy(input: {
         }
         continue;
       }
-      if (item.section === "pinned" || item.section === "active")
-        cardHeight ??= rects[index]?.height;
-      else slimHeight ??= rects[index]?.height;
+      // A team row is taller than the thread row it replaces, so only real
+      // thread rows may stand in for the measured card/slim geometry.
+      if (item.kind === "thread") {
+        if (item.section === "pinned" || item.section === "active")
+          cardHeight ??= rects[index]?.height;
+        else slimHeight ??= rects[index]?.height;
+      }
       if (item.key !== active.key) groups[item.section].push(item);
     }
     // Cards are 4.875rem + 0.25rem padding; slim rows/placeholders are h-9.
@@ -155,12 +161,18 @@ export function createSidebarSortingStrategy(input: {
           : target.activeOrder;
     const ranks = new Map(order.map((key, index) => [key, index]));
     const rank = ranks.get(active.key) ?? Number.POSITIVE_INFINITY;
-    const index = group.findIndex(
-      (item) => (ranks.get(item.key) ?? Number.POSITIVE_INFINITY) > rank,
-    );
+    // A team row ranks where its first member ranks: the whole group is one
+    // landing slot, so the gap opens before or after all of it.
+    const rankOf = (item: RowItem) =>
+      item.kind === "team"
+        ? Math.min(...item.threadKeys.map((key) => ranks.get(key) ?? Number.POSITIVE_INFINITY))
+        : (ranks.get(item.key) ?? Number.POSITIVE_INFINITY);
+    const index = group.findIndex((item) => rankOf(item) > rank);
     group.splice(index < 0 ? group.length : index, 0, { ...active, section: target.section });
     const settledOrder = (
-      input.settledOrder.length > 0 ? input.settledOrder : groups.settled.map((item) => item.key)
+      input.settledOrder.length > 0
+        ? input.settledOrder
+        : groups.settled.flatMap((item) => (item.kind === "team" ? item.threadKeys : [item.key]))
     ).filter((key) => key !== active.key || target.section === "settled");
     const visible = input.settledExpanded
       ? settledOrder.slice(0, input.settledVisibleCount ?? settledOrder.length)
@@ -169,7 +181,26 @@ export function createSidebarSortingStrategy(input: {
     if (routeKey && settledOrder.includes(routeKey) && !visible.includes(routeKey)) {
       visible.push(routeKey);
     }
-    groups.settled = visible.map((key) => ({ kind: "thread", key, section: "settled" }));
+    // The settled tail is rebuilt from canonical thread order; fold its
+    // threads back into the team rows that actually render them.
+    const settledTeamByThreadKey = new Map<string, RowItem>();
+    for (const item of items) {
+      if (item.kind !== "team" || item.section !== "settled") continue;
+      for (const key of item.threadKeys) settledTeamByThreadKey.set(key, item);
+    }
+    const settledRows: RowItem[] = [];
+    const placedTeams = new Set<string>();
+    for (const key of visible) {
+      const team = settledTeamByThreadKey.get(key);
+      if (team === undefined) {
+        settledRows.push({ kind: "thread", key, section: "settled" });
+        continue;
+      }
+      if (placedTeams.has(team.key)) continue;
+      placedTeams.add(team.key);
+      settledRows.push(team);
+    }
+    groups.settled = settledRows;
     const projected: SidebarListItem[] = [];
     const marker = (name: SidebarListMarker) => projected.push({ kind: "marker", marker: name });
     const section = (name: "active" | "settled") => {

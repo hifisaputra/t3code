@@ -33,6 +33,7 @@ import {
   shouldRecedeSidebarThread,
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebar,
+  groupSidebarTeamThreads,
   resolveSidebarDropTarget,
   pinOrderKeyBetween,
   planPinnedReorder,
@@ -1188,6 +1189,125 @@ describe("resolveSidebarDropTarget", () => {
     expect(resolve("a1", "nope")).toBeNull();
     expect(resolve("nope", "a1")).toBeNull();
     expect(resolve(sidebarMarkerId("pinned-divider"), "a1")).toBeNull();
+  });
+});
+
+describe("groupSidebarTeamThreads", () => {
+  type Row = { readonly id: string; readonly team: string | null };
+  const teamOf = (row: Row) => row.team;
+  const group = (rows: readonly Row[]) =>
+    groupSidebarTeamThreads(rows, teamOf).map((entry) =>
+      entry.kind === "thread"
+        ? entry.thread.id
+        : { team: entry.teamId, threads: entry.threads.map((row) => row.id) },
+    );
+
+  it("emits one entry where the team's first member sits and skips the rest", () => {
+    expect(
+      group([
+        { id: "solo", team: null },
+        { id: "lead", team: "t1" },
+        { id: "work", team: "t1" },
+        { id: "other", team: null },
+      ]),
+    ).toEqual(["solo", { team: "t1", threads: ["lead", "work"] }, "other"]);
+  });
+
+  it("keeps the members in list order when other rows sit between them", () => {
+    expect(
+      group([
+        { id: "lead", team: "t1" },
+        { id: "solo", team: null },
+        { id: "work", team: "t1" },
+      ]),
+    ).toEqual([{ team: "t1", threads: ["lead", "work"] }, "solo"]);
+  });
+
+  it("still groups a team with a single visible thread: the issue label is the point", () => {
+    expect(group([{ id: "work", team: "t1" }])).toEqual([{ team: "t1", threads: ["work"] }]);
+  });
+
+  it("interleaves several teams at their own first members", () => {
+    expect(
+      group([
+        { id: "a-lead", team: "a" },
+        { id: "b-lead", team: "b" },
+        { id: "a-work", team: "a" },
+        { id: "b-work", team: "b" },
+      ]),
+    ).toEqual([
+      { team: "a", threads: ["a-lead", "a-work"] },
+      { team: "b", threads: ["b-lead", "b-work"] },
+    ]);
+  });
+
+  it("passes threads with no team through untouched", () => {
+    expect(
+      group([
+        { id: "one", team: null },
+        { id: "two", team: null },
+      ]),
+    ).toEqual(["one", "two"]);
+  });
+});
+
+describe("resolveSidebarDropTarget with team rows", () => {
+  const thread = (key: string, section: SidebarSection): SidebarListItem => ({
+    kind: "thread",
+    key,
+    section,
+  });
+  const team = (
+    key: string,
+    section: SidebarSection,
+    threadKeys: readonly string[],
+  ): SidebarListItem => ({ kind: "team", key, section, threadKeys });
+  const marker = (marker: SidebarListMarker): SidebarListItem => ({ kind: "marker", marker });
+  // Pinned p1 | Active a1, [team1: a2 a3], a4 | Settled [team2: s1]
+  const items: readonly SidebarListItem[] = [
+    marker("pinned-header"),
+    thread("p1", "pinned"),
+    marker("pinned-divider"),
+    thread("a1", "active"),
+    team("team:env:t1", "active", ["a2", "a3"]),
+    thread("a4", "active"),
+    marker("settled-header"),
+    team("team:env:t2", "settled", ["s1"]),
+  ];
+  const resolve = (activeKey: string, overId: string) =>
+    resolveSidebarDropTarget(items, activeKey, overId);
+
+  it("identifies a team item by its key", () => {
+    expect(sidebarListItemId(items[4]!)).toBe("team:env:t1");
+  });
+
+  it("lands after the whole team when the row comes from above", () => {
+    expect(resolve("a1", "team:env:t1")).toEqual({
+      section: "active",
+      pinnedOrder: ["p1"],
+      activeOrder: ["a2", "a3", "a1", "a4"],
+    });
+  });
+
+  it("lands before the whole team when the row comes from below", () => {
+    expect(resolve("a4", "team:env:t1")).toEqual({
+      section: "active",
+      pinnedOrder: ["p1"],
+      activeOrder: ["a1", "a4", "a2", "a3"],
+    });
+  });
+
+  it("expands every team into its members so an untouched order stays complete", () => {
+    expect(resolve("p1", "a1")?.activeOrder).toEqual(["a1", "p1", "a2", "a3", "a4"]);
+  });
+
+  it("reads the section around a team row like any other row", () => {
+    expect(resolve("a1", "team:env:t2")?.section).toBe("settled");
+  });
+
+  it("never treats a team row as the dragged item", () => {
+    expect(resolve("team:env:t1", "a1")).toBeNull();
+    expect(resolve("team:env:t2", "a1")).toBeNull();
   });
 });
 

@@ -270,6 +270,7 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
                     project={data.projects.find((p) => p.config.projectId === task.projectId)}
                     projectLabel={projectLabel(task.projectId)}
                     decisions={data.decisions}
+                    board={data}
                     onOpenThread={openThread}
                     onShowDecision={showDecision}
                   />
@@ -295,7 +296,12 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
             {history.length > 0 ? (
               <section aria-label="History" className="flex flex-col gap-2">
                 <SectionHeading>History</SectionHeading>
+                <p className="-mt-1 text-muted-foreground text-xs">
+                  Open a row to see what the team did and to reopen its threads.
+                </p>
                 <AssistantHistory
+                  environmentId={environmentId}
+                  board={data}
                   tasks={history}
                   projectLabel={(task) => projectLabel(task.projectId)}
                   onOpenThread={openThread}

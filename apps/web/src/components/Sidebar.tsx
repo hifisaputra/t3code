@@ -26,6 +26,7 @@ import {
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
 import {
+  assistantTeamThread,
   resolveEnvironmentMachineKind,
   type EnvironmentMachineKind,
   type ProjectIconOverride,
@@ -143,6 +144,7 @@ import {
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
+  groupSidebarTeamThreads,
   hasUnseenCompletion,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
@@ -222,6 +224,7 @@ import {
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarTeamRow } from "./sidebar/SidebarTeamRow";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { openThreadUsageStats } from "./chat/threadUsageStatsStore";
@@ -2578,6 +2581,17 @@ export default function Sidebar() {
         active.push(thread);
       }
     }
+    // An assistant team's threads render inside one team row in Active and
+    // Settled, so there is no individual row left to pick up. A member the
+    // user pinned or snoozed keeps its own row — and stays draggable — where
+    // they put it. Members stay in activeReorderable on purpose: the row is
+    // gone, but the thread still takes an activeOrderKey when a neighbouring
+    // drop rewrites the section, and refusing those writes would make every
+    // Active reorder a no-op as soon as one team is on the board.
+    for (const thread of [...active, ...settled]) {
+      if (assistantTeamThread(thread.id) === null) continue;
+      draggable.delete(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)));
+    }
     // One shared rule on every platform (see sortPinnedThreadsByOrderKey):
     // user-arranged keys first, keyless threads in creation order below.
     // Server capability only gates DRAGGING — it must not influence the
@@ -3272,14 +3286,32 @@ export default function Sidebar() {
   // Include every visible row in the measured order. Older servers disable
   // pickup on their rows without changing where those rows render.
   const sidebarListItems = useMemo((): readonly SidebarListItem[] => {
+    const keyOf = (thread: EnvironmentThreadShell) =>
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
     const rowsOf = (
       list: readonly EnvironmentThreadShell[],
       section: SidebarSection,
+    ): SidebarListItem[] => list.map((thread) => ({ kind: "thread", key: keyOf(thread), section }));
+    // Active and Settled fold each managed issue's four assistant threads
+    // into one team row, in place of the first member's row. Pinned and
+    // Snoozed keep every row the user put there, individually.
+    const teamRowsOf = (
+      list: readonly EnvironmentThreadShell[],
+      section: SidebarSection,
     ): SidebarListItem[] =>
-      list.map((thread) => {
-        const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-        return { kind: "thread", key, section };
-      });
+      groupSidebarTeamThreads(list, (thread) => {
+        const team = assistantTeamThread(thread.id);
+        return team === null ? null : `${thread.environmentId}:${team.taskId}`;
+      }).map((entry) =>
+        entry.kind === "thread"
+          ? { kind: "thread", key: keyOf(entry.thread), section }
+          : {
+              kind: "team",
+              key: `team:${entry.teamId}`,
+              section,
+              threadKeys: entry.threads.map(keyOf),
+            },
+      );
     if (
       pinnedThreads.length +
         activeThreads.length +
@@ -3293,7 +3325,7 @@ export default function Sidebar() {
     const pinnedRows = rowsOf(pinnedThreads, "pinned");
     items.push(...pinnedRows);
     items.push({ kind: "marker", marker: "pinned-divider" });
-    const activeRows = rowsOf(activeThreads, "active");
+    const activeRows = teamRowsOf(activeThreads, "active");
     items.push({ kind: "marker", marker: "active-placeholder" });
     items.push(...activeRows);
     if (snoozedThreads.length > 0) {
@@ -3301,7 +3333,7 @@ export default function Sidebar() {
       items.push(...rowsOf(visibleSnoozedThreads, "snoozed"));
     }
     items.push({ kind: "marker", marker: "settled-header" });
-    const settledRows = rowsOf(renderedSettledThreads, "settled");
+    const settledRows = teamRowsOf(renderedSettledThreads, "settled");
     items.push({ kind: "marker", marker: "settled-placeholder" });
     items.push(...settledRows);
     return items;
@@ -4811,6 +4843,40 @@ export default function Sidebar() {
                           </SortableThreadRow>
                         );
                       };
+                      // One row per managed issue: the team's threads live
+                      // inside it, so they never reach renderThreadRow.
+                      const renderTeamRow = (
+                        item: Extract<SidebarListItem, { kind: "team" }>,
+                      ): ReactNode => {
+                        const members = item.threadKeys.flatMap((key) => {
+                          const thread = threadByKey.get(key);
+                          return thread === undefined ? [] : [thread];
+                        });
+                        const first = members[0];
+                        if (first === undefined) return null;
+                        const projectKey = `${first.environmentId}:${first.projectId}`;
+                        return (
+                          <SidebarTeamRow
+                            key={item.key}
+                            teamKey={item.key}
+                            section={item.section}
+                            threadKeys={item.threadKeys}
+                            threadByKey={threadByKey}
+                            environmentId={first.environmentId}
+                            routeThreadKey={routeThreadKey}
+                            jumpLabelByKey={showThreadJumpHints ? jumpLabelByKey : null}
+                            currentEnvironmentId={primaryEnvironmentId}
+                            projectCwd={projectCwdByKey.get(projectKey) ?? null}
+                            projectFaviconPath={projectFaviconPathByKey.get(projectKey) ?? null}
+                            projectIcon={projectIconByKey.get(projectKey) ?? null}
+                            projectTitle={projectTitleByKey.get(projectKey) ?? null}
+                            timestampFormat={timestampFormat}
+                            onThreadClick={handleThreadClick}
+                            onThreadActivate={navigateToThread}
+                            onContextMenu={handleThreadContextMenu}
+                          />
+                        );
+                      };
                       const from = dragState?.activeSection ?? null;
                       const items: ReactNode[] = [
                         <SidebarDraftBlock
@@ -4828,6 +4894,10 @@ export default function Sidebar() {
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
                           items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          continue;
+                        }
+                        if (item.kind === "team") {
+                          items.push(renderTeamRow(item));
                           continue;
                         }
                         switch (item.marker) {

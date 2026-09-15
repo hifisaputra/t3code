@@ -35,6 +35,7 @@ import { LinearThreadService } from "../linear/LinearThreadService.ts";
 import {
   OrchestrationCommandInvariantError,
   OrchestrationCommandPreviouslyRejectedError,
+  OrchestrationThreadSettleBlockedError,
 } from "../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -319,9 +320,18 @@ function harness() {
               ? target && "Thread already exists."
               : command.type === "thread.unarchive"
                 ? (target?.archivedAt ?? null) === null && "Thread is not archived."
-                : command.type === "thread.archive"
+                : command.type === "thread.archive" || command.type === "thread.settle"
                   ? (!target || target.archivedAt !== null) && "Thread is missing or archived."
                   : "threadId" in command && !target && "Thread does not exist.";
+          // Like the decider, a thread whose session is alive cannot be settled.
+          if (
+            command.type === "thread.settle" &&
+            !violation &&
+            (target?.session?.status === "starting" || target?.session?.status === "running")
+          ) {
+            rejected.set(command.commandId, "Thread still needs attention.");
+            return yield* new OrchestrationThreadSettleBlockedError({ threadId: command.threadId });
+          }
           if (violation) {
             rejected.set(command.commandId, violation);
             return yield* new OrchestrationCommandInvariantError({
@@ -364,6 +374,12 @@ function harness() {
           if (thread && command.type === "thread.turn.start")
             threads.set(thread.id, {
               ...thread,
+              // The projection stamps the message that started the turn, which
+              // is also how a thread shows it has ever run one.
+              latestUserMessageAt: timestamp,
+              // Like the decider, work on a settled thread un-settles it.
+              settledOverride: null,
+              settledAt: null,
               session: {
                 threadId: thread.id,
                 status: "running",
@@ -378,6 +394,14 @@ function harness() {
             threads.set(thread.id, { ...thread, archivedAt: timestamp });
           if (thread && command.type === "thread.unarchive")
             threads.set(thread.id, { ...thread, archivedAt: null });
+          if (thread && command.type === "thread.settle")
+            threads.set(thread.id, {
+              ...thread,
+              settledOverride: "settled",
+              settledAt: timestamp,
+            });
+          if (thread && command.type === "thread.unsettle")
+            threads.set(thread.id, { ...thread, settledOverride: null, settledAt: null });
           if (thread && command.type === "thread.turn.interrupt")
             threads.set(thread.id, { ...thread, session: null });
           return { sequence: commands.length };
@@ -911,8 +935,13 @@ it.effect("the loop gives one issue at a time to a team and moves on after e2e",
     });
     assert.equal(delivered.status, "review");
     yield* endTurn(h, service, tester);
-    for (const role of ["lead", "implement", "review", "e2e"] as const)
-      assert.equal(h.threads.get(assistantTaskThreadId(first, role))?.archivedAt, timestamp);
+    // A finished team's threads are settled, not archived: the person can still
+    // open them from the assistant page.
+    for (const role of ["lead", "implement", "review", "e2e"] as const) {
+      const thread = h.threads.get(assistantTaskThreadId(first, role));
+      assert.equal(thread?.settledOverride, "settled");
+      assert.isNull(thread?.archivedAt);
+    }
     assert.deepEqual(h.removed, [`/worktrees/${first.threadId}`]);
     yield* service.scan();
     const next = yield* activeTask(service);
@@ -1027,7 +1056,8 @@ it.effect("a declined issue gets one comment and waits until a person changes it
     assert.include(h.comments[0]!.body, "no acceptance criteria");
     assert.lengthOf(h.started, 0);
     yield* endTurn(h, service, leadOf(team));
-    assert.equal(h.threads.get(leadOf(team))?.archivedAt, timestamp);
+    assert.equal(h.threads.get(leadOf(team))?.settledOverride, "settled");
+    assert.isNull(h.threads.get(leadOf(team))?.archivedAt);
     assert.deepEqual(h.removed, [`/worktrees/${team.threadId}`]);
 
     // Only the declined issue is left: an unchanged issue stays declined.
@@ -1163,11 +1193,56 @@ it.effect("a paused loop takes no new issue, while its team and dispatched issue
     assert.equal(dispatched.issue.identifier, "APP-3");
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, leadOf(dispatched)), 1);
-    // Starting the loop again does not wake an assistant that has its instructions.
+    // Starting the loop again does not wake an assistant that has already run.
     const started = yield* service.control({ projectId: config.projectId, action: "start" });
     assert.equal(started.projects[0]?.status, "running");
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, caller), 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("starting again does not wake the assistant", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    // The assistant's first turn is the briefing Start sent it.
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, caller), 1);
+    h.finish(caller);
+    yield* service.control({ projectId: config.projectId, action: "pause" });
+    yield* service.control({ projectId: config.projectId, action: "start" });
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, caller), 1);
+    // A restarted server has forgotten what it briefed, and Start still leaves
+    // the assistant alone: the next real wake repeats the instructions.
+    const restarted = yield* h.make;
+    yield* restarted.control({ projectId: config.projectId, action: "start" });
+    yield* restarted.deliver();
+    assert.lengthOf(turnsOf(h, caller), 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a revised setup does not wake the assistant on start", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service, caller } = yield* h.setup;
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, caller), 1);
+    h.finish(caller);
+    // Configuration changes while the loop is stopped, so Start follows a revision.
+    yield* service.control({ projectId: config.projectId, action: "pause" });
+    const revised = "Never touch the production database.";
+    yield* service.configure({ ...config, instructions: revised });
+    yield* service.control({ projectId: config.projectId, action: "start" });
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, caller), 1);
+    // The next real wake carries the revised instructions.
+    const question = yield* service.askDecision(caller, "Which issue should go first?");
+    yield* service.answer({ decisionId: question.id, answer: "APP-2" });
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, caller), 2);
+    assert.include(turnsOf(h, caller).at(-1), "The person answered your question");
+    assert.include(turnsOf(h, caller).at(-1), revised);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -1874,8 +1949,9 @@ it.effect("verifies staging for a worker the person already archived", () =>
     });
     yield* endTurn(h, service, tester);
     assert.equal(delivered.status, "review");
+    // A thread the person archived is left alone when its team closes.
     assert.lengthOf(
-      h.commands.filter((c) => c.type === "thread.archive" && c.threadId === first.threadId),
+      h.commands.filter((c) => c.type === "thread.settle" && c.threadId === first.threadId),
       0,
     );
   }).pipe(Effect.provide(database()), Effect.scoped),
@@ -2964,8 +3040,13 @@ it.effect("in the worktree the e2e check runs before the merge, and staging deli
     assert.lengthOf(h.descriptions, 1);
     assert.deepEqual(h.transitions, ["review"]);
     yield* endTurn(h, service, lead);
-    for (const role of ["lead", "implement", "review", "e2e"] as const)
-      assert.equal(h.threads.get(assistantTaskThreadId(first, role))?.archivedAt, timestamp);
+    // A finished team's threads are settled, not archived: the person can still
+    // open them from the assistant page.
+    for (const role of ["lead", "implement", "review", "e2e"] as const) {
+      const thread = h.threads.get(assistantTaskThreadId(first, role));
+      assert.equal(thread?.settledOverride, "settled");
+      assert.isNull(thread?.archivedAt);
+    }
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 

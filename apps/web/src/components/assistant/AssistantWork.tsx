@@ -1,11 +1,11 @@
 import {
   assistantParallelIssues,
-  assistantTaskThreadId,
+  assistantTaskE2eEnvironment,
   assistantThreadKind,
+  type AssistantBoard,
   type AssistantDecision,
   type AssistantProject,
   type AssistantTask,
-  type AssistantThreadRole,
   type EnvironmentId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -17,18 +17,19 @@ import {
   CircleSlashIcon,
   CircleXIcon,
   EllipsisIcon,
+  ExternalLinkIcon,
   GitPullRequestIcon,
   HandIcon,
+  ImageIcon,
   RotateCcwIcon,
   SkipForwardIcon,
   UndoIcon,
   XIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 import { developerAssistant } from "~/state/developerAssistant";
-import { useThreadShell } from "~/state/entities";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { formatElapsedDurationLabel, formatRelativeTimeLabel } from "~/timestampFormat";
 
@@ -40,11 +41,15 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   describeTaskPhase,
   previewLine,
+  taskOutcome,
   taskPipeline,
+  teamRoleOrder,
   type PipelineStep,
   type TaskPhaseTone,
 } from "./assistantBoard.logic";
+import { teamHolder, TeamThreads, useTeamShells } from "./AssistantTeam";
 import {
+  CommitChip,
   confirmDestructive,
   ExpandableMarkdown,
   IssueLink,
@@ -55,8 +60,6 @@ import {
   type StatusTone,
 } from "./assistantUi";
 import { THREAD_KIND } from "./threadKinds";
-
-const TEAM_ROLES: ReadonlyArray<AssistantThreadRole> = ["lead", "implement", "review", "e2e"];
 
 const PHASE_STYLE: Record<TaskPhaseTone, string> = {
   active: "bg-success/8 text-success-foreground",
@@ -179,12 +182,32 @@ function PipelineStepButton({
   );
 }
 
+/** An issue the person handed over, rather than one the loop picked. */
+function DispatchedChip() {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className="shrink-0 rounded-md border border-border/60 px-1.5 py-0.5 text-[11px] text-muted-foreground" />
+        }
+      >
+        Dispatched by you
+      </TooltipTrigger>
+      <TooltipPopup className="max-w-64">
+        You picked this issue for the assistant. Its team leader takes it or asks you about it, and
+        never declines it.
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
+
 export function ActiveTaskCard({
   environmentId,
   task,
   project,
   projectLabel,
   decisions,
+  board,
   onOpenThread,
   onShowDecision,
 }: {
@@ -193,35 +216,23 @@ export function ActiveTaskCard({
   project: AssistantProject | undefined;
   projectLabel: string | null;
   decisions: ReadonlyArray<AssistantDecision>;
+  board: AssistantBoard;
   onOpenThread: (threadId: ThreadId) => void;
   onShowDecision: (decision: AssistantDecision) => void;
 }) {
   const review = useAtomCommand(developerAssistant.review);
   const { pending, run } = useAssistantAction();
-  const worker = useThreadShell({ environmentId, threadId: task.threadId });
-  const reviewer = useThreadShell({
-    environmentId,
-    threadId: assistantTaskThreadId(task, "review"),
-  });
-  const tester = useThreadShell({ environmentId, threadId: assistantTaskThreadId(task, "e2e") });
-  const leader = useThreadShell({ environmentId, threadId: assistantTaskThreadId(task, "lead") });
+  const shells = useTeamShells(environmentId, task);
+  const worker = shells.implement;
   const coordinator = project?.threadId ?? null;
-  const shells = { lead: leader, implement: worker, review: reviewer, e2e: tester } as const;
   // The phase follows whichever of the issue's threads holds it.
-  const holder =
-    task.stage === "review"
-      ? reviewer
-      : task.stage === "e2e"
-        ? tester
-        : task.stage === "lead"
-          ? leader
-          : worker;
+  const holder = teamHolder(task, shells);
   const holderBusy = threadIsBusy(holder);
   // The issue's threads share one worktree: a handoff waits while a teammate runs on.
   const waitingOn =
     holderBusy || task.stage === undefined
       ? null
-      : (TEAM_ROLES.find(
+      : (teamRoleOrder.find(
           (role) => shells[role] !== holder && threadKeepsTeamWaiting(shells[role]),
         ) ?? null);
   const openDecision = decisions.find((d) => d.answer === null && d.taskId === task.id) ?? null;
@@ -249,6 +260,7 @@ export function ActiveTaskCard({
     <article className="flex flex-col gap-3 rounded-xl border border-border/70 bg-card p-4 shadow-xs/5">
       <div className="flex min-w-0 items-center gap-2 text-xs">
         <IssueLink issue={task.issue} />
+        {task.dispatched ? <DispatchedChip /> : null}
         {projectLabel ? (
           <span className="truncate text-muted-foreground">· {projectLabel}</span>
         ) : null}
@@ -341,6 +353,14 @@ export function ActiveTaskCard({
           </Button>
         ) : null}
       </div>
+
+      <TeamThreads
+        label="Team"
+        environmentId={environmentId}
+        task={task}
+        board={board}
+        onOpenThread={onOpenThread}
+      />
 
       {pipeline ? (
         <ol aria-label="Progress" className="flex flex-wrap gap-1.5">
@@ -498,61 +518,301 @@ export function AssistantQueue({
 
 const HISTORY_PREVIEW = 6;
 
+const CODE_REVIEW_VERDICT = {
+  approved: "Approved",
+  "changes-requested": "Changes requested",
+} as const;
+
+const E2E_VERDICT = {
+  passed: "Passed",
+  partial: "Passed, with checks for you",
+  failed: "Failed",
+} as const;
+
+/** One part of the record, folded away until the person wants it. */
+function RecordSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <Collapsible>
+      <CollapsibleTrigger className="group inline-flex items-center gap-1 font-medium text-muted-foreground text-xs hover:text-foreground">
+        <ChevronRightIcon
+          aria-hidden
+          className="size-3.5 transition-transform group-data-panel-open:rotate-90"
+        />
+        {title}
+      </CollapsibleTrigger>
+      <CollapsiblePanel>
+        <div className="mt-2 rounded-lg border border-border/60 p-3">{children}</div>
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
+/**
+ * What the team did with a finished issue, and the way back into its four
+ * conversations. Mounted only while its row is open, so a long history costs
+ * nothing until the person opens a row.
+ */
+function HistoryRecord({
+  environmentId,
+  board,
+  task,
+  onOpenThread,
+}: {
+  environmentId: EnvironmentId;
+  board: AssistantBoard | null;
+  task: AssistantTask;
+  onOpenThread: (threadId: ThreadId) => void;
+}) {
+  const shells = useTeamShells(environmentId, task);
+  const worker = shells.implement;
+  const outcome = taskOutcome(task);
+  // Null once the worker thread is archived: the shell it came from is gone.
+  const pullRequest = worker?.linkedPullRequest ?? worker?.branchPullRequest ?? null;
+  const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
+  return (
+    <div className="mt-1 mb-2 ml-2 flex flex-col gap-3 rounded-lg border border-border/60 bg-card px-3 py-3">
+      <div className="flex flex-col gap-1.5">
+        <p className="text-sm">
+          <span className="font-medium">{outcome.label}</span>
+          <span className="text-muted-foreground">
+            {" · "}
+            {formatRelativeTimeLabel(task.updatedAt)} · started{" "}
+            {formatRelativeTimeLabel(task.createdAt)}
+          </span>
+        </p>
+        {outcome.detail ? (
+          <blockquote className="border-border/70 border-l-2 pl-2.5 text-muted-foreground text-sm">
+            {outcome.detail}
+          </blockquote>
+        ) : null}
+        {task.error ? <p className="text-destructive-foreground text-xs">{task.error}</p> : null}
+      </div>
+
+      <TeamThreads
+        label="Team"
+        size="sm"
+        environmentId={environmentId}
+        task={task}
+        board={board}
+        onOpenThread={onOpenThread}
+      />
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-muted-foreground text-xs">
+        {pullRequest ? (
+          <a
+            href={pullRequest.url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
+          >
+            <GitPullRequestIcon aria-hidden className="size-3.5" />
+            PR #{pullRequest.number}
+          </a>
+        ) : null}
+        {worker?.branch ? (
+          <span className="min-w-0 truncate font-mono text-[11px]">{worker.branch}</span>
+        ) : null}
+        {task.deployment ? (
+          <>
+            <a
+              href={task.deployment.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
+            >
+              <ExternalLinkIcon aria-hidden className="size-3.5" />
+              Staging
+            </a>
+            <CommitChip revision={task.deployment.revision} />
+          </>
+        ) : null}
+        {task.dispatched ? <DispatchedChip /> : null}
+        {task.e2e ? <span>{inWorktree ? "E2E in the worktree" : "E2E on staging"}</span> : null}
+        {task.slot !== undefined ? (
+          <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[11px]">
+            Slot {task.slot}
+          </span>
+        ) : null}
+      </div>
+
+      {task.merge?.summary.trim() ? (
+        <RecordSection title="What shipped">
+          <ExpandableMarkdown text={task.merge.summary} environmentId={environmentId} />
+        </RecordSection>
+      ) : null}
+      {task.codeReview ? (
+        <RecordSection title="Code review">
+          <p className="mb-2 font-medium text-xs">{CODE_REVIEW_VERDICT[task.codeReview.verdict]}</p>
+          {task.codeReview.summary.trim() ? (
+            <ExpandableMarkdown text={task.codeReview.summary} environmentId={environmentId} />
+          ) : null}
+        </RecordSection>
+      ) : null}
+      {task.e2e ? (
+        <RecordSection title="E2E check">
+          <p className="mb-2 font-medium text-xs">{E2E_VERDICT[task.e2e.verdict]}</p>
+          {task.e2e.report.trim() ? (
+            <ExpandableMarkdown text={task.e2e.report} environmentId={environmentId} />
+          ) : null}
+          {task.e2e.humanChecks.length > 0 ? (
+            <div className="mt-2">
+              <p className="mb-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
+                Checks for you
+              </p>
+              <ul className="flex list-disc flex-col gap-1 pl-4 text-sm">
+                {task.e2e.humanChecks.map((check) => (
+                  <li key={check}>{check}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {task.e2e.screenshots.length > 0 ? (
+            <ul className="mt-2 flex flex-col gap-1">
+              {task.e2e.screenshots.map((shot) => (
+                <li key={shot.url}>
+                  <a
+                    href={shot.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground hover:underline"
+                  >
+                    <ImageIcon aria-hidden className="size-3.5 shrink-0" />
+                    <span className="min-w-0 truncate">{shot.caption || "Screenshot"}</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </RecordSection>
+      ) : null}
+      {task.reviewInstructions.trim() ? (
+        <RecordSection title="How to check it">
+          <ExpandableMarkdown text={task.reviewInstructions} environmentId={environmentId} />
+        </RecordSection>
+      ) : null}
+      {task.brief.trim() ? (
+        <RecordSection
+          title={task.leader ? "The team leader's brief" : "What the assistant asked for"}
+        >
+          <ExpandableMarkdown text={task.brief} environmentId={environmentId} />
+        </RecordSection>
+      ) : null}
+      {task.summary.trim() ? (
+        <RecordSection title="Summary">
+          <ExpandableMarkdown text={task.summary} environmentId={environmentId} />
+        </RecordSection>
+      ) : null}
+    </div>
+  );
+}
+
+function HistoryRow({
+  environmentId,
+  board,
+  task,
+  projectLabel,
+  expanded,
+  onToggle,
+  onOpenThread,
+}: {
+  environmentId: EnvironmentId;
+  board: AssistantBoard | null;
+  task: AssistantTask;
+  projectLabel: string | null;
+  expanded: boolean;
+  onToggle: () => void;
+  onOpenThread: (threadId: ThreadId) => void;
+}) {
+  const status =
+    HISTORY_STATUS[task.status as keyof typeof HISTORY_STATUS] ?? HISTORY_STATUS.skipped;
+  return (
+    <li>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={onToggle}
+        className="grid w-full grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <status.icon aria-hidden className={cn("size-3.5", status.className)} />
+        <span className="font-mono text-muted-foreground text-xs">{task.issue.identifier}</span>
+        <span className="min-w-0 truncate">
+          {task.issue.title}
+          {projectLabel ? <span className="text-muted-foreground"> · {projectLabel}</span> : null}
+        </span>
+        <span className="shrink-0 text-muted-foreground text-xs">
+          {status.label} · {formatRelativeTimeLabel(task.updatedAt)}
+        </span>
+        <ChevronRightIcon
+          aria-hidden
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground transition-transform",
+            expanded && "rotate-90",
+          )}
+        />
+      </button>
+      {expanded ? (
+        <HistoryRecord
+          environmentId={environmentId}
+          board={board}
+          task={task}
+          onOpenThread={onOpenThread}
+        />
+      ) : (
+        <>
+          {task.status === "declined" && task.declined ? (
+            <p className="line-clamp-2 px-2 pb-1 pl-8 text-muted-foreground text-xs">
+              {previewLine(task.declined.reason)}
+            </p>
+          ) : null}
+          {task.error ? (
+            <p className="px-2 pb-1 pl-8 text-destructive-foreground text-xs">{task.error}</p>
+          ) : null}
+        </>
+      )}
+    </li>
+  );
+}
+
+/** Finished issues, each row opening the record of what its team did. */
 export function AssistantHistory({
+  environmentId,
+  board,
   tasks,
   projectLabel,
   onOpenThread,
 }: {
+  environmentId: EnvironmentId;
+  board: AssistantBoard | null;
   tasks: ReadonlyArray<AssistantTask>;
   projectLabel: (task: AssistantTask) => string | null;
   onOpenThread: (threadId: ThreadId) => void;
 }) {
   const [showAll, setShowAll] = useState(false);
+  // Several records may be open at once, so comparing two issues does not mean
+  // opening one and losing the other.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (id: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
   const visible = showAll ? tasks : tasks.slice(0, HISTORY_PREVIEW);
   return (
     <div className="flex flex-col">
       <ul className="-mx-2 flex flex-col">
-        {visible.map((task) => {
-          const status =
-            HISTORY_STATUS[task.status as keyof typeof HISTORY_STATUS] ?? HISTORY_STATUS.skipped;
-          const label = projectLabel(task);
-          return (
-            <li key={task.id}>
-              <button
-                type="button"
-                // A declined issue never had a worker; its leader's thread says why.
-                onClick={() =>
-                  onOpenThread(
-                    task.status === "declined"
-                      ? assistantTaskThreadId(task, "lead")
-                      : task.threadId,
-                  )
-                }
-                className="grid w-full grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                <status.icon aria-hidden className={cn("size-3.5", status.className)} />
-                <span className="font-mono text-muted-foreground text-xs">
-                  {task.issue.identifier}
-                </span>
-                <span className="min-w-0 truncate">
-                  {task.issue.title}
-                  {label ? <span className="text-muted-foreground"> · {label}</span> : null}
-                </span>
-                <span className="shrink-0 text-muted-foreground text-xs">
-                  {status.label} · {formatRelativeTimeLabel(task.updatedAt)}
-                </span>
-              </button>
-              {task.status === "declined" && task.declined ? (
-                <p className="line-clamp-2 px-2 pb-1 pl-8 text-muted-foreground text-xs">
-                  {previewLine(task.declined.reason)}
-                </p>
-              ) : null}
-              {task.error ? (
-                <p className="px-2 pb-1 pl-8 text-destructive-foreground text-xs">{task.error}</p>
-              ) : null}
-            </li>
-          );
-        })}
+        {visible.map((task) => (
+          <HistoryRow
+            key={task.id}
+            environmentId={environmentId}
+            board={board}
+            task={task}
+            projectLabel={projectLabel(task)}
+            expanded={expanded.has(task.id)}
+            onToggle={() => toggle(task.id)}
+            onOpenThread={onOpenThread}
+          />
+        ))}
       </ul>
       {tasks.length > HISTORY_PREVIEW ? (
         <Button

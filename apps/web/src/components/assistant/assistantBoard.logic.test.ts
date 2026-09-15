@@ -2,6 +2,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  assistantTeamThread,
   assistantThreadKind,
   type AssistantBoard,
   type AssistantDecision,
@@ -20,7 +21,9 @@ import {
   projectFailure,
   projectLimitHold,
   projectWaitingReason,
+  taskOutcome,
   taskPipeline,
+  teamRoleOrder,
 } from "./assistantBoard.logic";
 
 const projectId = ProjectId.make("project-1");
@@ -640,6 +643,69 @@ describe("assistantThreadKind", () => {
     expect(assistantThreadKind(`assistant-e2e-${id}`)).toBe("e2e");
     expect(assistantThreadKind(`assistant-setup-${id}`)).toBe("setup");
     expect(assistantThreadKind(id)).toBeNull();
+  });
+});
+
+describe("assistantTeamThread", () => {
+  it("names the issue and the role behind each of a team's four thread ids", () => {
+    const id = "8d0c8385-df68-422e-b90a-db197f3c0263";
+    expect(assistantTeamThread(`assistant-lead-${id}`)).toEqual({ taskId: id, role: "lead" });
+    expect(assistantTeamThread(`assistant-work-${id}`)).toEqual({ taskId: id, role: "implement" });
+    expect(assistantTeamThread(`assistant-review-${id}`)).toEqual({ taskId: id, role: "review" });
+    expect(assistantTeamThread(`assistant-e2e-${id}`)).toEqual({ taskId: id, role: "e2e" });
+  });
+
+  it("claims no thread that is not one of a team's", () => {
+    const id = "8d0c8385-df68-422e-b90a-db197f3c0263";
+    expect(assistantTeamThread(`assistant-${id}`)).toBeNull();
+    expect(assistantTeamThread(`assistant-setup-${id}`)).toBeNull();
+    expect(assistantTeamThread(id)).toBeNull();
+  });
+});
+
+describe("teamRoleOrder", () => {
+  it("runs from the team leader to the e2e tester, the way the work does", () => {
+    expect(teamRoleOrder).toEqual(["lead", "implement", "review", "e2e"]);
+  });
+});
+
+describe("taskOutcome", () => {
+  it("quotes the words the person or the team leader left with the issue", () => {
+    expect(taskOutcome(task({ status: "accepted", deliveredState: "Done" }))).toEqual({
+      label: "Accepted",
+      detail: "Left in Done in Linear.",
+    });
+    expect(
+      taskOutcome(task({ status: "changes-requested", feedback: "  Fix the empty state  " })),
+    ).toEqual({ label: "Sent back for changes", detail: "Fix the empty state" });
+    expect(
+      taskOutcome(
+        task({
+          status: "declined",
+          declined: {
+            reason: "The issue has no acceptance criteria.",
+            fingerprint: "f",
+            issueUpdatedAt: "2026-09-13T00:00:00.000Z",
+            at: "2026-09-13T00:00:00.000Z",
+          },
+        }),
+      ),
+    ).toEqual({ label: "Declined", detail: "The issue has no acceptance criteria." });
+    expect(
+      taskOutcome(task({ status: "skipped", feedback: "Skipped from the assistant board." })),
+    ).toEqual({ label: "Skipped", detail: "Skipped from the assistant board." });
+  });
+
+  it("has no detail when nothing was written down", () => {
+    expect(taskOutcome(task({ status: "accepted" }))).toEqual({ label: "Accepted", detail: null });
+    expect(taskOutcome(task({ status: "changes-requested", feedback: "   " }))).toEqual({
+      label: "Sent back for changes",
+      detail: null,
+    });
+  });
+
+  it("says an unfinished issue is still in progress", () => {
+    expect(taskOutcome(task({ status: "working" })).label).toBe("Still in progress");
   });
 });
 

@@ -115,10 +115,60 @@ export function sidebarMarkerId(marker: SidebarListMarker): string {
 
 export type SidebarListItem =
   | { readonly kind: "thread"; readonly key: string; readonly section: SidebarSection }
+  /** One developer-assistant team's threads collapsed into a single row (the
+      Active and Settled sections only — a pinned or snoozed member keeps its
+      own row where the user put it). `key` is `team:<environmentId>:<taskId>`;
+      `threadKeys` are its members in list order so a drop can expand the row
+      back into the threads it stands for. */
+  | {
+      readonly kind: "team";
+      readonly key: string;
+      readonly section: SidebarSection;
+      readonly threadKeys: readonly string[];
+    }
   | { readonly kind: "marker"; readonly marker: SidebarListMarker };
 
 export function sidebarListItemId(item: SidebarListItem): string {
-  return item.kind === "thread" ? item.key : sidebarMarkerId(item.marker);
+  return item.kind === "marker" ? sidebarMarkerId(item.marker) : item.key;
+}
+
+/**
+ * Collapse each team's threads into one entry at the position of its first
+ * member, walking an already-sorted list so the surrounding rows keep their
+ * order. A team with a single visible thread still becomes a team entry: the
+ * issue label is the point, not the row count. Threads with no team id pass
+ * through untouched.
+ */
+export function groupSidebarTeamThreads<T>(
+  threads: readonly T[],
+  teamOf: (thread: T) => string | null,
+): ReadonlyArray<
+  | { readonly kind: "thread"; readonly thread: T }
+  | { readonly kind: "team"; readonly teamId: string; readonly threads: T[] }
+> {
+  const members = new Map<string, T[]>();
+  for (const thread of threads) {
+    const teamId = teamOf(thread);
+    if (teamId === null) continue;
+    const existing = members.get(teamId);
+    if (existing) existing.push(thread);
+    else members.set(teamId, [thread]);
+  }
+  const emitted = new Set<string>();
+  const entries: Array<
+    { kind: "thread"; thread: T } | { kind: "team"; teamId: string; threads: T[] }
+  > = [];
+  for (const thread of threads) {
+    const teamId = teamOf(thread);
+    if (teamId === null) {
+      entries.push({ kind: "thread", thread });
+      continue;
+    }
+    if (emitted.has(teamId)) continue;
+    emitted.add(teamId);
+    entries.push({ kind: "team", teamId, threads: members.get(teamId) ?? [thread] });
+  }
+  return entries;
 }
 
 /** The section a slot belongs to, read off the markers around it: from
@@ -129,6 +179,7 @@ function sectionAtSidebarSlot(items: readonly SidebarListItem[], index: number):
   let section: SidebarSection = "pinned";
   for (let i = 0; i < index && i < items.length; i += 1) {
     const item = items[i]!;
+    // Team rows are ordinary rows here: only the markers move the boundary.
     if (item.kind !== "marker") continue;
     if (item.marker === "pinned-divider") section = "active";
     else if (item.marker === "snoozed-header") section = "snoozed";
@@ -152,6 +203,8 @@ export function resolveSidebarDropTarget(
 ): SidebarDropTarget | null {
   const activeIndex = items.findIndex((item) => sidebarListItemId(item) === activeKey);
   const overIndex = items.findIndex((item) => sidebarListItemId(item) === overId);
+  // Only a thread row can be lifted: a team row is a landing slot, never the
+  // dragged item.
   if (activeIndex === -1 || overIndex === -1 || items[activeIndex]?.kind !== "thread") return null;
   const moved = items.filter((_, index) => index !== activeIndex);
   moved.splice(overIndex, 0, items[activeIndex]!);
@@ -164,8 +217,13 @@ export function resolveSidebarDropTarget(
     if (item.kind === "marker") {
       if (item.marker === "pinned-divider") currentSection = "active";
       else if (item.marker === "snoozed-header" || item.marker === "settled-header") break;
-    } else if (currentSection === "pinned") pinnedOrder.push(item.key);
-    else activeOrder.push(item.key);
+      continue;
+    }
+    // A team row stands in for its members: expanding it keeps the written
+    // order complete, so dropping beside a team never strands its threads.
+    const keys = item.kind === "team" ? item.threadKeys : [item.key];
+    if (currentSection === "pinned") pinnedOrder.push(...keys);
+    else activeOrder.push(...keys);
   }
   return { section, pinnedOrder, activeOrder };
 }

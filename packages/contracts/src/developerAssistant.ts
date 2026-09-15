@@ -308,7 +308,25 @@ export const assistantTaskThreadId = (
 export type AssistantThreadKind = "coordinator" | "setup" | AssistantThreadRole;
 
 const ISSUE_THREAD_ID = /^assistant-(work|review|e2e|lead|setup)-/;
+const TEAM_THREAD_ID = /^assistant-(work|review|e2e|lead)-(.+)$/;
 const COORDINATOR_THREAD_ID = /^assistant-[0-9a-f]{8}-[0-9a-f]{4}-/;
+
+/**
+ * The managed issue one of a team's threads belongs to, and which of its
+ * threads it is, read from the id the server assigns (see
+ * assistantTaskThreadId). Null for the developer assistant, a setup
+ * conversation and every thread that is not the assistant's.
+ */
+export const assistantTeamThread = (
+  threadId: string,
+): { readonly taskId: string; readonly role: AssistantThreadRole } | null => {
+  const match = TEAM_THREAD_ID.exec(threadId);
+  if (!match) return null;
+  return {
+    taskId: match[2]!,
+    role: match[1] === "work" ? "implement" : (match[1] as "review" | "e2e" | "lead"),
+  };
+};
 
 /** Read from the thread id the server assigns, so a thread list needs no board to label its rows. */
 export const assistantThreadKind = (threadId: string): AssistantThreadKind | null => {

@@ -11,9 +11,7 @@ import {
   ArrowUpRightIcon,
   CheckIcon,
   ChevronDownIcon,
-  CopyIcon,
   ExternalLinkIcon,
-  GitCommitHorizontalIcon,
   MessageCircleQuestionIcon,
   MessageSquareIcon,
   OctagonAlertIcon,
@@ -28,7 +26,6 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { cn, isMacPlatform } from "~/lib/utils";
 import { developerAssistant } from "~/state/developerAssistant";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -38,9 +35,10 @@ import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
 import { Spinner } from "../ui/spinner";
 import { Textarea } from "../ui/textarea";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { decisionOptions, previewLine, type InboxItem } from "./assistantBoard.logic";
+import { TeamThreads } from "./AssistantTeam";
 import {
+  CommitChip,
   confirmDestructive,
   ExpandableMarkdown,
   IssueLink,
@@ -417,36 +415,6 @@ function DecisionCard({
   );
 }
 
-function CommitChip({ revision }: { revision: string }) {
-  const { copyToClipboard, isCopied } = useCopyToClipboard();
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <button
-            type="button"
-            onClick={() => copyToClipboard(revision, undefined)}
-            className="inline-flex items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
-          />
-        }
-      >
-        <GitCommitHorizontalIcon aria-hidden className="size-3" />
-        {revision.slice(0, 7)}
-        {isCopied ? (
-          <CheckIcon aria-hidden className="size-3" />
-        ) : (
-          <CopyIcon aria-hidden className="size-3 opacity-60" />
-        )}
-      </TooltipTrigger>
-      <TooltipPopup>
-        {isCopied
-          ? "Copied"
-          : "The commit verified on staging. Later issues may have landed since."}
-      </TooltipPopup>
-    </Tooltip>
-  );
-}
-
 function reviewHeadline(task: AssistantTask): { kind: string; outcome: string } {
   const checks = task.e2e?.humanChecks.length ?? 0;
   const shots = task.e2e?.screenshots.length ?? 0;
@@ -519,16 +487,18 @@ function ReviewCard({
       at={task.deployment?.verifiedAt ?? task.updatedAt}
       links={
         <>
-          <RowLinks
-            issue={task.issue}
-            thread={task.threadId}
-            threadLabel="Open worker thread"
-            onOpenThread={context.onOpenThread}
-          />
+          <IssueLink issue={task.issue} />
           <span className="text-muted-foreground">{headline.outcome}</span>
         </>
       }
     >
+      <TeamThreads
+        label="Team"
+        size="sm"
+        environmentId={context.environmentId}
+        task={task}
+        onOpenThread={context.onOpenThread}
+      />
       {task.summary.trim() ? (
         <ExpandableMarkdown text={task.summary} environmentId={context.environmentId} />
       ) : null}

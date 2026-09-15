@@ -387,13 +387,31 @@ export const make = Effect.gen(function* () {
       yield* sql`SELECT id FROM assistant_decisions WHERE resolved = 0 AND thread_id IN (${ids[0]}, ${ids[1]}, ${ids[2]}, ${ids[3]})`;
     return rows.length > 0;
   });
-  const archiveThread = Effect.fn("Assistant.archiveThread")(function* (threadId: ThreadId) {
+  /**
+   * Park a finished thread on the Settled shelf. Settling keeps the thread in
+   * the client's live snapshot, so its conversation stays open from the
+   * assistant page, while archiving takes it out of the snapshot entirely.
+   * The decider refuses to settle a thread whose session is starting or
+   * running, one with an open approval or native question, or one with a turn
+   * just queued (OrchestrationThreadSettleBlockedError); such a thread simply
+   * stays active, which is the right answer for a thread still doing something.
+   */
+  const settleThread = Effect.fn("Assistant.settleThread")(function* (threadId: ThreadId) {
     // The engine keeps rejected command ids, so never reuse one across attempts.
     const shell = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
-    if (Option.isSome(shell) && shell.value.archivedAt === null)
+    if (
+      Option.isSome(shell) &&
+      shell.value.archivedAt === null &&
+      shell.value.settledOverride !== "settled"
+    )
       yield* engine
-        .dispatch({ type: "thread.archive", commandId: CommandId.make(newId()), threadId })
-        .pipe(Effect.catchTag("OrchestrationCommandInvariantError", () => Effect.void));
+        .dispatch({ type: "thread.settle", commandId: CommandId.make(newId()), threadId })
+        .pipe(
+          Effect.catchTags({
+            OrchestrationCommandInvariantError: () => Effect.void,
+            OrchestrationThreadSettleBlockedError: () => Effect.void,
+          }),
+        );
   });
   /** The issue's shared worktree; the leader's thread holds it from the start. */
   const taskWorktree = Effect.fn("Assistant.taskWorktree")(function* (t: AssistantTask) {
@@ -405,19 +423,26 @@ export const make = Effect.gen(function* () {
     return null;
   });
   /**
-   * A team is done: archive its threads and, for work its leader ran, remove
-   * the worktree. Git keeps a worktree with uncommitted changes, and so do we.
+   * A team is done: settle its threads and, for work its leader ran, remove the
+   * worktree. Git keeps a worktree with uncommitted changes, and so do we.
+   * Settled rather than archived, so a finished issue's conversations stay
+   * reachable from the assistant page and from the sidebar's Settled shelf.
    */
   const closeTeam = Effect.fn("Assistant.closeTeam")(function* (t: AssistantTask) {
-    // Several threads can settle after a delivery; the first close is the one
-    // that counts, and its archived lead thread says the team is already closed.
+    // Several threads can finish after a delivery; the first close is the one
+    // that counts, and its settled primary thread says the team is closed
+    // already. An archived one was closed before settling, or by the person.
     const primary = t.leader ? assistantTaskThreadId(t, "lead") : t.threadId;
     const held = yield* snapshots.getThreadShellById(primary, { includeArchived: true });
-    if (Option.isSome(held) && held.value.archivedAt !== null) return;
+    if (
+      Option.isSome(held) &&
+      (held.value.settledOverride === "settled" || held.value.archivedAt !== null)
+    )
+      return;
     const worktree = yield* taskWorktree(t);
     for (const threadId of taskThreadIds(t)) {
       yield* terminals.close({ threadId });
-      yield* archiveThread(threadId);
+      yield* settleThread(threadId);
     }
     const root = yield* snapshots.getProjectShellById(t.projectId);
     if (!t.leader || !worktree || Option.isNone(root)) return;
@@ -851,17 +876,24 @@ export const make = Effect.gen(function* () {
         const held = yield* heldTasks(input.projectId);
         if (action === "start") {
           declineStreak.delete(input.projectId);
-          // Work from before team leaders still needs the assistant to carry it.
-          // Otherwise it is woken only to receive instructions it does not have yet.
+          // Team leaders run the issues, so Start has nothing for the assistant.
+          // Work from before leaders is still its own to carry. A never-run
+          // assistant is briefed once so its chat works; after that Start is
+          // silent, and a real wake repeats the instructions when they changed
+          // or the server restarted (see deliver).
           const legacy = held.find((t) => !t.leader);
+          // Never run: no turn on record, and no message that started one. A
+          // first turn stamps both, so either one says the assistant has run.
+          const neverRan =
+            Option.isNone(coordinator) ||
+            (coordinator.value.latestTurn === null &&
+              coordinator.value.latestUserMessageAt === null);
           if (legacy)
             yield* wake(
               input.projectId,
               `The person started the assistant. ${legacy.issue.identifier} was started before issues had team leaders, so it is still yours to carry to review: check its threads with assistant_read_thread and take the next step. The issue loop starts once it is done.`,
             );
-          else if (
-            briefed.get(input.projectId) !== `${p.thread_id}\n${assistantInstructions(p.config)}`
-          )
+          else if (neverRan)
             yield* wake(
               input.projectId,
               "The person started the issue loop. Nothing needs you now.",

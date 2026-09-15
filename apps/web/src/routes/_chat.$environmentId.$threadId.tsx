@@ -1,8 +1,10 @@
+import { assistantTeamThread } from "@t3tools/contracts";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import ChatView from "../components/ChatView";
 import { AssistantSetupThreadPanel } from "../components/assistant/AssistantSetupReview";
+import { AssistantTeamThreadPanel } from "../components/assistant/AssistantTeamThreadPanel";
 import { threadHasStarted } from "../components/ChatView.logic";
 import { finalizePromotedDraftThreadByRef, useComposerDraftStore } from "../composerDraftStore";
 import { resolveThreadRouteRef, resolveThreadRouteRenderState } from "../threadRoutes";
@@ -83,6 +85,12 @@ function ChatThreadRouteView() {
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
       {threadRef.threadId.startsWith("assistant-setup-") && (
         <AssistantSetupThreadPanel
+          environmentId={threadRef.environmentId}
+          threadId={threadRef.threadId}
+        />
+      )}
+      {assistantTeamThread(threadRef.threadId) !== null && (
+        <AssistantTeamThreadPanel
           environmentId={threadRef.environmentId}
           threadId={threadRef.threadId}
         />

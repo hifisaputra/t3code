@@ -21,6 +21,11 @@ const thread = (key: string, section: SidebarSection): SidebarListItem => ({
   section,
 });
 const marker = (marker: SidebarListMarker): SidebarListItem => ({ kind: "marker", marker });
+const team = (
+  key: string,
+  section: SidebarSection,
+  threadKeys: readonly string[],
+): SidebarListItem => ({ kind: "team", key, section, threadKeys });
 const pinnedHeader = marker("pinned-header");
 const divider = marker("pinned-divider");
 const settledHeader = marker("settled-header");
@@ -38,9 +43,12 @@ function layout(
     const height =
       item.kind === "thread"
         ? (item.section === "pinned" || item.section === "active" ? cardHeight : 36) * scale
-        : item.marker === "pinned-header" || item.marker === "pinned-divider"
-          ? 0
-          : (item.marker.endsWith("placeholder") ? 0 : 32) * scale;
+        : item.kind === "team"
+          ? // Header row plus one compact row per member.
+            (36 + item.threadKeys.length * 32) * scale
+          : item.marker === "pinned-header" || item.marker === "pinned-divider"
+            ? 0
+            : (item.marker.endsWith("placeholder") ? 0 : 32) * scale;
     const rect = { top, height, bottom: top + height, left: 0, right: 260, width: 260 };
     top += height + 1;
     return rect;
@@ -758,6 +766,85 @@ describe("sidebar drag projection", () => {
     );
     expect(result.get(sidebarMarkerId("snoozed-header"))).toEqual({ ...stationary, y: 83 });
     expect(result.get(sidebarMarkerId("settled-header"))?.y).toBe(46);
+  });
+});
+
+describe("sidebar team rows during a drag", () => {
+  it("shifts a team row like a thread row to open the gap", () => {
+    const items = [
+      pinnedHeader,
+      divider,
+      thread("a1", "active"),
+      team("team:env:t1", "active", ["a2", "a3"]),
+      settledHeader,
+      marker("settled-placeholder"),
+    ];
+    const transforms = preview(
+      { items, settledOrder: [], settledExpanded: false },
+      "a1",
+      "team:env:t1",
+    );
+    // a1 lands below the whole team, so the team row rises by a1's height.
+    expect(transforms.get("team:env:t1")).toEqual({ ...stationary, y: -83 });
+    expect(transforms.get("a1")).toEqual(stationary);
+  });
+
+  it("keeps a settled team row measured instead of hiding it behind its members", () => {
+    const items = [
+      pinnedHeader,
+      divider,
+      thread("a1", "active"),
+      marker("active-placeholder"),
+      settledHeader,
+      team("team:env:t1", "settled", ["s1", "s2"]),
+      thread("s3", "settled"),
+    ];
+    // The projected settled tail is rebuilt from canonical THREAD order; the
+    // team row only survives it because its members fold back into it.
+    const transforms = preview(
+      { items, settledOrder: ["a1", "s1", "s2", "s3"], settledExpanded: true },
+      "a1",
+      "team:env:t1",
+    );
+    expect(transforms.get("team:env:t1")).toEqual({ ...stationary, y: -10 });
+    expect(transforms.get("s3")).toEqual({ ...stationary, y: -10 });
+    expect(transforms.get("a1")).toEqual(stationary);
+  });
+
+  it("treats a team id as a valid collision target", () => {
+    const items = [
+      pinnedHeader,
+      divider,
+      thread("a1", "active"),
+      team("team:env:t1", "active", ["a2"]),
+    ];
+    const seen: string[] = [];
+    const detector = createSidebarCollisionDetection((id) => {
+      seen.push(id);
+      return resolveSidebarDropTarget(items, "a1", id) !== null;
+    });
+    const { rects } = layout(items, "a1", "team:env:t1");
+    const collisionRect = rects[3]!;
+    const collisions = detector({
+      active: {
+        id: "a1",
+        data: { current: {} },
+        rect: { current: { initial: rects[2]!, translated: collisionRect } },
+      },
+      collisionRect,
+      droppableRects: new Map(items.map((item, index) => [sidebarListItemId(item), rects[index]!])),
+      droppableContainers: items.map((item, index) => ({
+        id: sidebarListItemId(item),
+        key: sidebarListItemId(item),
+        disabled: false,
+        data: { current: {} },
+        node: { current: null },
+        rect: { current: rects[index]! },
+      })),
+      pointerCoordinates: null,
+    } satisfies Parameters<CollisionDetection>[0]);
+    expect(collisions[0]?.id).toBe("team:env:t1");
+    expect(seen).toContain("team:env:t1");
   });
 });
 
