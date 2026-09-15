@@ -266,6 +266,7 @@ import {
   UsageSummary,
   UsageSummaryInput,
 } from "./usage.ts";
+import { ProjectHistory, ProjectHistoryInput, ProjectHistoryReadError } from "./history.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
   SourceControlCloneRepositoryInput,
@@ -381,6 +382,7 @@ export const WS_METHODS = {
   serverGetUsageSummary: "server.getUsageSummary",
   serverGetThreadUsageStats: "server.getThreadUsageStats",
   serverRefreshUsageRates: "server.refreshUsageRates",
+  serverGetProjectHistory: "server.getProjectHistory",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -667,6 +669,16 @@ const WsServerGetThreadUsageStatsRpc = Rpc.make(WS_METHODS.serverGetThreadUsageS
   payload: ThreadUsageStatsInput,
   success: ThreadUsageStats,
   error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
+});
+
+/**
+ * One project's work, bucketed per day and thread, read from the turn
+ * projection. Powers the History page.
+ */
+const WsServerGetProjectHistoryRpc = Rpc.make(WS_METHODS.serverGetProjectHistory, {
+  payload: ProjectHistoryInput,
+  success: ProjectHistory,
+  error: Schema.Union([EnvironmentAuthorizationError, ProjectHistoryReadError]),
 });
 
 const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
@@ -1464,6 +1476,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetUsageSummaryRpc,
   WsServerGetThreadUsageStatsRpc,
   WsServerRefreshUsageRatesRpc,
+  WsServerGetProjectHistoryRpc,
   WsServerSignalProcessRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,

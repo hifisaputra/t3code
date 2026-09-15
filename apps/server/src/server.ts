@@ -139,6 +139,7 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as ProjectHistoryService from "./history/ProjectHistoryService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -221,6 +222,10 @@ const UsageLayerLive = UsageService.layer.pipe(
       ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceLayerLive)),
     ),
   ),
+);
+
+const ProjectHistoryLayerLive = ProjectHistoryService.layer.pipe(
+  Layer.provide(SqlitePersistenceLayerLive),
 );
 
 const ResourceDiagnosticsLayerLive = Layer.mergeAll(
@@ -570,6 +575,7 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
   Layer.provideMerge(UsageLayerLive),
+  Layer.provideMerge(ProjectHistoryLayerLive),
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(AnalyticsService.layer),
   Layer.provideMerge(ExternalLauncher.layer),

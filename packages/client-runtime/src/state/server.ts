@@ -1055,6 +1055,14 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverGetThreadUsageStats,
       staleTimeMs: 30_000,
     }),
+    // A project's turn history is a small projection read; a short hold keeps
+    // switching between period and project instant without going stale while
+    // a turn is running.
+    projectHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:project-history",
+      tag: WS_METHODS.serverGetProjectHistory,
+      staleTimeMs: 15_000,
+    }),
     configProjection,
     welcome,
     consumeResetCredit: createEnvironmentRpcCommand(runtime, {

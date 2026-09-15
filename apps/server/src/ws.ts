@@ -144,6 +144,7 @@ import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as ProjectHistoryService from "./history/ProjectHistoryService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as LinearApi from "./linear/LinearApi.ts";
@@ -624,6 +625,7 @@ const makeWsRpcLayer = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const usage = yield* UsageService.UsageService;
+      const projectHistory = yield* ProjectHistoryService.ProjectHistoryService;
       const relayClient = yield* RelayClient.RelayClient;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
@@ -2211,6 +2213,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetThreadUsageStats, usage.readThreadStats(input), {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.serverGetProjectHistory]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverGetProjectHistory,
+            projectHistory.readProjectHistory(input),
+            {
+              "rpc.aggregate": "server",
+            },
+          ),
         [WS_METHODS.serverRefreshUsageRates]: (_input) =>
           observeRpcEffect(WS_METHODS.serverRefreshUsageRates, usage.refreshRates, {
             "rpc.aggregate": "server",

@@ -44,6 +44,7 @@ import {
   FileSearchIcon,
   FolderIcon,
   FolderPlusIcon,
+  HistoryIcon,
   LinkIcon,
   MessageSquareIcon,
   PaletteIcon,
@@ -1646,6 +1647,25 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:history",
+    searchTerms: ["history", "timeline", "what did i work on", "time spent"],
+    title: "Open history",
+    icon: <HistoryIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      // Naming the current project keeps the page on the work the user is
+      // looking at; without one it falls back to its own resolution.
+      await navigate({
+        to: "/history",
+        search:
+          currentProjectId !== null && currentProjectEnvironmentId !== null
+            ? { environment: currentProjectEnvironmentId, project: currentProjectId }
+            : { environment: undefined, project: undefined },
+      });
+    },
+  });
 
   actionItems.push({
     kind: "action",

@@ -4,6 +4,7 @@ import {
   ChartNoAxesColumnIcon,
   CircleDotIcon,
   GitPullRequestIcon,
+  HistoryIcon,
   SettingsIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -166,11 +167,13 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
           ? "project-settings"
           : location.pathname === "/usage"
             ? "usage"
-            : location.pathname === "/pull-requests"
-              ? "pull-requests"
-              : location.pathname === "/issues"
-                ? "issues"
-                : null,
+            : location.pathname === "/history"
+              ? "history"
+              : location.pathname === "/pull-requests"
+                ? "pull-requests"
+                : location.pathname === "/issues"
+                  ? "issues"
+                  : null,
   });
   const { environments } = useEnvironments();
   // The page reads every connected server, so one of them offering pull requests is enough for
@@ -213,6 +216,13 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     }
     void navigate({ to: "/usage" });
   }, [isMobile, navigate, setOpenMobile]);
+
+  // No project in the search params: the page resolves the active thread's
+  // project itself, which is the one the user just came from.
+  const handleHistoryClick = useCallback(() => {
+    closeMobileSidebar();
+    void navigate({ to: "/history", search: { environment: undefined, project: undefined } });
+  }, [closeMobileSidebar, navigate]);
 
   const handleBackClick = useCallback(() => {
     closeMobileSidebar();
@@ -264,6 +274,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               onClick={handleIssuesClick}
             />
           ) : null}
+          <SidebarUtilityItem icon={<HistoryIcon />} label="History" onClick={handleHistoryClick} />
           <SidebarUtilityItem
             icon={<ChartNoAxesColumnIcon />}
             label="Usage"
