@@ -100,6 +100,35 @@ const HEADLINES: Record<"staging" | "worktree", Record<AssistantE2eResult["verdi
   },
 };
 
+const RESULTS: Record<NonNullable<AssistantE2eResult["checks"]>[number]["result"], string> = {
+  passed: "✅ passed",
+  failed: "❌ failed",
+  "not-checked": "👀 not checked",
+};
+
+/** A table cell: one line, and no pipe that would end the column early. */
+const cell = (text: string) => text.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
+
+/**
+ * One row per acceptance criterion, as the tester reported it, with the caption
+ * of the screenshot that proves it. The free report stays below for what the
+ * run did not cover.
+ */
+const checksTable = (
+  checks: NonNullable<AssistantE2eResult["checks"]>,
+  criteria: ReadonlyArray<string>,
+  screenshots: AssistantE2eResult["screenshots"],
+) =>
+  [
+    "| Criterion | Result | Evidence |",
+    "| --- | --- | --- |",
+    ...checks.map((check) => {
+      const shot = check.screenshot ? screenshots[check.screenshot - 1] : undefined;
+      const evidence = [check.evidence, shot ? `*${shot.caption}*` : ""].filter(Boolean).join(" ");
+      return `| ${cell(criteria[check.criterion - 1] ?? `Criterion ${check.criterion}`)} | ${RESULTS[check.result]} | ${cell(evidence)} |`;
+    }),
+  ].join("\n");
+
 /** Why the issue's team leader did not take it, and what brings it back. */
 export function declinedComment(reason: string): string {
   return sections(
@@ -151,6 +180,8 @@ export function e2eComment(input: {
   readonly deployment: AssistantDeployment;
   readonly pullRequest: PullRequest;
   readonly acceptedState: string;
+  /** The issue's acceptance criteria, to name the rows of the checks table. */
+  readonly criteria?: ReadonlyArray<string> | null;
 }): string {
   const { e2e } = input;
   const delivered = e2e.verdict !== "failed";
@@ -165,6 +196,9 @@ export function e2eComment(input: {
       ? `**Check before accepting**\n\n${e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
       : null,
     delivered && input.merge ? `**What changed**\n\n${input.merge.summary}` : null,
+    e2e.checks?.length && input.criteria?.length
+      ? checksTable(e2e.checks, input.criteria, e2e.screenshots)
+      : null,
     `${checkTitle}\n\n${e2e.report}`,
     ...e2e.screenshots.map((shot) => `*${shot.caption}*\n\n![${shot.caption}](${shot.url})`),
     "---",

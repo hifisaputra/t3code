@@ -75,6 +75,35 @@ const decodeRevision = Schema.decodeUnknownEffect(AssistantDeployment.fields.rev
 const GITHUB_RUN_WINDOW = 20;
 const short = (revision: string) => revision.slice(0, 7);
 
+/**
+ * What a target says about a commit: the deployment it is serving, a deploy
+ * that has not arrived yet, or one that will not arrive without someone acting.
+ * T3 waits on the first and hands the second to the issue's team leader, so
+ * only a broken CLI, a rejected login or unreadable output fails the check.
+ */
+export type DeploymentCheck =
+  | {
+      readonly outcome: "deployed";
+      readonly targetId: string;
+      readonly revision: string;
+      readonly reference: string;
+    }
+  | { readonly outcome: "pending"; readonly detail: string }
+  | { readonly outcome: "failed"; readonly detail: string };
+
+const pending = (detail: string): DeploymentCheck => ({ outcome: "pending", detail });
+const failed = (detail: string): DeploymentCheck => ({ outcome: "failed", detail });
+const deployed = (targetId: string, revision: string, reference: string): DeploymentCheck => ({
+  outcome: "deployed",
+  targetId,
+  revision,
+  reference,
+});
+/** Railway statuses that mean the deploy is still on its way. */
+const RAILWAY_PENDING = new Set(["BUILDING", "DEPLOYING", "QUEUED", "INITIALIZING", "WAITING"]);
+/** Railway statuses that mean this deploy will not serve the commit. */
+const RAILWAY_FAILED = new Set(["FAILED", "CRASHED", "REMOVED"]);
+
 // These commands are fixed read operations. Proposed setup cannot introduce shell
 // code into the server's process runner; custom scripts remain an explicit option.
 export const checkDeployment = Effect.fn("Assistant.checkDeployment")(function* (
@@ -136,19 +165,23 @@ export const checkDeployment = Effect.fn("Assistant.checkDeployment")(function* 
     // back to the newest successful deployment; the caller checks by ancestry
     // whether that one already carries this commit.
     const own = runs.find((run) => run.headSha === expectedRevision);
-    if (own && (own.status !== "completed" || own.conclusion !== "success"))
-      return yield* new DeveloperAssistantError({
-        detail: `${target.id}: the ${target.workflow} run for ${short(expectedRevision)} is ${own.conclusion ?? own.status}, not a successful deployment. Inspect pending, failed, or skipped deployments.`,
-      });
+    if (own && own.status !== "completed")
+      return pending(
+        `${target.id}: the ${target.workflow} run for ${short(expectedRevision)} is ${own.status}.`,
+      );
+    if (own && own.conclusion !== "success")
+      return failed(
+        `${target.id}: the ${target.workflow} run for ${short(expectedRevision)} completed as ${own.conclusion ?? "unknown"}, not a successful deployment. Inspect the run.`,
+      );
     const run =
       own ?? runs.find((r) => r.status === "completed" && r.conclusion === "success") ?? null;
     if (!run)
-      return yield* new DeveloperAssistantError({
-        detail: runs.length
-          ? `${target.id}: none of the last ${GITHUB_RUN_WINDOW} ${target.workflow} runs on ${baseBranch} succeeded, and none of them deployed ${short(expectedRevision)}. Inspect pending, failed, or skipped deployments.`
-          : `${target.id}: ${target.workflow} has no runs on ${baseBranch} yet. ${short(expectedRevision)} is not deployed; wait for the deployment to start.`,
-      });
-    return { targetId: target.id, revision: run.headSha, reference: run.url };
+      return pending(
+        runs.length
+          ? `${target.id}: none of the last ${GITHUB_RUN_WINDOW} ${target.workflow} runs on ${baseBranch} succeeded, and none of them deployed ${short(expectedRevision)}.`
+          : `${target.id}: ${target.workflow} has no runs on ${baseBranch} yet, so ${short(expectedRevision)} is not deployed.`,
+      );
+    return deployed(target.id, run.headSha, run.url);
   }
   const status = yield* decodeRailway(result.stdout).pipe(
     Effect.mapError(() =>
@@ -162,21 +195,35 @@ export const checkDeployment = Effect.fn("Assistant.checkDeployment")(function* 
     (s) => s.node.serviceId === target.serviceId,
   )?.node;
   const deployment = service?.latestDeployment;
+  if (status.id !== target.railwayProjectId || !service)
+    return failed(
+      `${target.id}: the configured Railway project, environment and service do not name a service. Check the saved deployment target.`,
+    );
+  if (!deployment) return pending(`${target.id}: the staging service has no deployment yet.`);
+  if (RAILWAY_PENDING.has(deployment.status))
+    return pending(`${target.id}: its latest Railway deployment is ${deployment.status}.`);
+  if (RAILWAY_FAILED.has(deployment.status))
+    return failed(
+      `${target.id}: its latest Railway deployment is ${deployment.status}. Inspect its deployment and worker/cron status.`,
+    );
   if (
-    status.id !== target.railwayProjectId ||
-    !deployment ||
     deployment.status !== "SUCCESS" ||
-    deployment.meta?.branch !== baseBranch ||
-    !deployment.meta.commitHash ||
-    !service?.activeDeployments.some((d) => d.id === deployment.id && d.status === "SUCCESS")
+    !service.activeDeployments.some((d) => d.id === deployment.id && d.status === "SUCCESS")
   )
-    return yield* new DeveloperAssistantError({
-      detail: `${target.id}: the expected staging service has no successful active deployment from ${baseBranch}. Inspect its deployment and worker/cron status.`,
-    });
+    return failed(
+      `${target.id}: the expected staging service has no successful active deployment. Inspect its deployment and worker/cron status.`,
+    );
+  // Another branch's deploy is in front of this commit's; ancestry decides the rest.
+  if (deployment.meta?.branch !== baseBranch)
+    return pending(
+      `${target.id}: its latest successful deployment is from ${deployment.meta?.branch ?? "an unnamed branch"}, not ${baseBranch}.`,
+    );
+  if (!deployment.meta.commitHash)
+    return pending(`${target.id}: its latest successful deployment names no commit yet.`);
   const revision = yield* decodeRevision(deployment.meta.commitHash).pipe(
     Effect.mapError(() =>
       unreadable(`${target.id}: Railway reported a deployment without a usable commit.`),
     ),
   );
-  return { targetId: target.id, revision, reference: deployment.id };
+  return deployed(target.id, revision, deployment.id);
 });

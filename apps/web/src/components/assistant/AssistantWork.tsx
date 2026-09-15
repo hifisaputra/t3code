@@ -3,7 +3,9 @@ import {
   assistantTaskE2eEnvironment,
   assistantThreadKind,
   type AssistantBoard,
+  type AssistantCheckRun,
   type AssistantDecision,
+  type AssistantE2eCheckResult,
   type AssistantProject,
   type AssistantTask,
   type EnvironmentId,
@@ -201,6 +203,100 @@ function DispatchedChip() {
   );
 }
 
+const E2E_CHECK_RESULT: Record<AssistantE2eCheckResult, { label: string; className: string }> = {
+  passed: { label: "Passed", className: "text-success-foreground" },
+  failed: { label: "Failed", className: "text-destructive-foreground" },
+  "not-checked": { label: "Not checked", className: "text-muted-foreground" },
+};
+
+/**
+ * What the team leader said the issue has to do, numbered as every thread sees
+ * them, each with the tester's result once the e2e run reports one.
+ */
+function CriteriaList({ task }: { task: AssistantTask }) {
+  const criteria = task.criteria;
+  if (!criteria || criteria.length === 0) return null;
+  const checks = task.e2e?.checks ?? null;
+  const screenshots = task.e2e?.screenshots ?? [];
+  return (
+    <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm marker:text-muted-foreground">
+      {criteria.map((criterion, index) => {
+        const check = checks?.find((entry) => entry.criterion === index + 1) ?? null;
+        const result = check ? E2E_CHECK_RESULT[check.result] : null;
+        const shot = check?.screenshot ? (screenshots[check.screenshot - 1] ?? null) : null;
+        // Criteria are distinct checks, so the text identifies a row; the number
+        // comes from the position, which is what the tester's results index into.
+        return (
+          <li key={criterion}>
+            <span>{criterion}</span>
+            {result ? (
+              <span className={cn("ml-1.5 font-medium text-xs", result.className)}>
+                {result.label}
+              </span>
+            ) : null}
+            {check?.evidence.trim() ? (
+              <p className="mt-0.5 whitespace-pre-line text-muted-foreground text-xs">
+                {check.evidence}
+              </p>
+            ) : null}
+            {shot ? (
+              <a
+                href={shot.url}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-0.5 inline-flex max-w-full items-center gap-1 text-muted-foreground text-xs hover:text-foreground hover:underline"
+              >
+                <ImageIcon aria-hidden className="size-3.5 shrink-0" />
+                <span className="min-w-0 truncate">{shot.caption || "Screenshot"}</span>
+              </a>
+            ) : null}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/**
+ * The project's own check command as T3 ran it for the last review request. A
+ * red run never reached the reviewer: the worker was sent back with this output.
+ */
+function CheckRunLine({ checks }: { checks: AssistantCheckRun }) {
+  const passed = checks.exitCode === 0;
+  const line = (
+    <>
+      <span className={passed ? "text-success-foreground" : "text-destructive-foreground"}>
+        {passed ? "Checks passed" : `Checks failed (exit ${checks.exitCode})`}
+      </span>{" "}
+      at <span className="font-mono">{checks.commit.slice(0, 7)}</span>
+    </>
+  );
+  if (!checks.output.trim()) return <p className="text-muted-foreground text-xs">{line}</p>;
+  return (
+    <Collapsible>
+      <CollapsibleTrigger className="group inline-flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
+        <ChevronRightIcon
+          aria-hidden
+          className="size-3.5 shrink-0 transition-transform group-data-panel-open:rotate-90"
+        />
+        {line}
+      </CollapsibleTrigger>
+      <CollapsiblePanel>
+        <div className="mt-1.5 rounded-lg border border-border/60 p-2">
+          {checks.command.trim() ? (
+            <p className="mb-1 break-all font-mono text-[11px] text-muted-foreground">
+              {checks.command}
+            </p>
+          ) : null}
+          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px]">
+            {checks.output}
+          </pre>
+        </div>
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
 export function ActiveTaskCard({
   environmentId,
   task,
@@ -346,6 +442,14 @@ export function ActiveTaskCard({
           {phaseDetail ? (
             <p className="mt-0.5 line-clamp-2 text-xs opacity-90">{phaseDetail}</p>
           ) : null}
+          {task.deployWait ? (
+            <p className="mt-0.5 line-clamp-2 text-xs opacity-90">
+              Watching the staging deploy of{" "}
+              <span className="font-mono">{task.deployWait.commit.slice(0, 7)}</span> ·{" "}
+              {task.deployWait.checks} check{task.deployWait.checks === 1 ? "" : "s"}
+              {task.deployWait.detail.trim() ? ` · ${task.deployWait.detail}` : ""}
+            </p>
+          ) : null}
         </div>
         {openDecision ? (
           <Button size="xs" className="shrink-0" onClick={() => onShowDecision(openDecision)}>
@@ -429,6 +533,17 @@ export function ActiveTaskCard({
           </button>
         ) : null}
       </div>
+
+      {task.checks ? <CheckRunLine checks={task.checks} /> : null}
+
+      {task.criteria?.length ? (
+        <div>
+          <p className="mb-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
+            Acceptance criteria
+          </p>
+          <CriteriaList task={task} />
+        </div>
+      ) : null}
 
       {task.brief.trim() ? (
         <Collapsible>
@@ -635,9 +750,16 @@ function HistoryRecord({
         ) : null}
       </div>
 
+      {task.checks ? <CheckRunLine checks={task.checks} /> : null}
+
       {task.merge?.summary.trim() ? (
         <RecordSection title="What shipped">
           <ExpandableMarkdown text={task.merge.summary} environmentId={environmentId} />
+        </RecordSection>
+      ) : null}
+      {task.criteria?.length ? (
+        <RecordSection title="Acceptance criteria">
+          <CriteriaList task={task} />
         </RecordSection>
       ) : null}
       {task.codeReview ? (

@@ -9,6 +9,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   ArrowRightIcon,
   ChevronRightIcon,
+  FileTextIcon,
   GitBranchIcon,
   LayoutDashboardIcon,
   RocketIcon,
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import { cn } from "~/lib/utils";
 import { developerAssistant } from "~/state/developerAssistant";
 import { useEnvironmentQuery } from "~/state/query";
 import { useProjects, useThreadShell } from "~/state/entities";
@@ -36,6 +38,7 @@ import {
   SheetTitle,
 } from "../ui/sheet";
 import { Spinner } from "../ui/spinner";
+import { instructionSections } from "./assistantBoard.logic";
 import {
   confirmDestructive,
   ExpandableMarkdown,
@@ -81,6 +84,18 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/** The roles a repository skill can be named for, in the order work moves through them. */
+const ROLE_SKILL_ORDER = ["lead", "implement", "review", "e2e"] as const;
+
+/** "lead: name · implement: name", or null when the setup names no skill. */
+function roleSkillList(config: AssistantProjectConfig): string | null {
+  const named = ROLE_SKILL_ORDER.flatMap((role) => {
+    const skill = config.roleSkills?.[role];
+    return skill ? [`${role}: ${skill}`] : [];
+  });
+  return named.length > 0 ? named.join(" · ") : null;
+}
+
 /** The proposed configuration, grouped by what each part decides. */
 function SetupProposal({
   setup,
@@ -94,6 +109,7 @@ function SetupProposal({
   const { environments } = useEnvironments();
   const providers =
     environments.find((e) => e.environmentId === environmentId)?.serverConfig?.providers ?? [];
+  const roleSkills = roleSkillList(proposal);
   return (
     <div className="grid gap-5">
       {setup.summary.trim() ? (
@@ -156,6 +172,21 @@ function SetupProposal({
             </p>
           </div>
         ) : null}
+        {proposal.checkCommand?.trim() ? (
+          <div className="mt-3 rounded-md border border-border/60 bg-muted/40 p-3">
+            <p className="flex items-center gap-1.5 font-medium text-sm">
+              <TerminalSquareIcon aria-hidden className="size-4" />
+              Review check
+            </p>
+            <pre className="mt-2 whitespace-pre-wrap break-all rounded bg-background/60 px-2 py-1.5 font-mono text-xs">
+              {proposal.checkCommand}
+            </pre>
+            <p className="mt-2 text-muted-foreground text-xs">
+              T3 runs this in the team&apos;s worktree before each code review; a red run sends the
+              worker back.
+            </p>
+          </div>
+        ) : null}
       </Section>
 
       <Section icon={LayoutDashboardIcon} title="Issues and agents">
@@ -166,6 +197,11 @@ function SetupProposal({
           </Fact>
           <Fact label="Assistant">{modelLabel(providers, proposal.modelSelection)}</Fact>
           <Fact label="Coding worker">{modelLabel(providers, proposal.workerModelSelection)}</Fact>
+          {roleSkills ? (
+            <Fact label="Role skills">
+              <span className="font-mono text-xs">{roleSkills}</span>
+            </Fact>
+          ) : null}
           <Fact label="Permissions">{runtimeModeLabel(proposal.runtimeMode)}</Fact>
           <Fact label="Rounds per issue">{proposal.maxWorkerTurns}, then it asks you</Fact>
           <Fact label="E2E check">
@@ -187,27 +223,44 @@ function SetupProposal({
         </Facts>
       </Section>
 
-      <Collapsible>
-        <CollapsibleTrigger className="group inline-flex items-center gap-1 font-medium text-muted-foreground text-xs uppercase tracking-wide hover:text-foreground">
-          <ChevronRightIcon
-            aria-hidden
-            className="size-3.5 transition-transform group-data-panel-open:rotate-90"
-          />
-          Project instructions
-        </CollapsibleTrigger>
-        <CollapsiblePanel>
-          <div className="mt-2 rounded-lg border border-border/60 p-3">
-            <p className="mb-2 text-muted-foreground text-xs">
-              The assistant and every coding worker read these on each issue.
-            </p>
-            {proposal.instructions.trim() ? (
-              <ExpandableMarkdown text={proposal.instructions} environmentId={environmentId} />
-            ) : (
-              <p className="text-muted-foreground text-sm">None yet.</p>
-            )}
-          </div>
-        </CollapsiblePanel>
-      </Collapsible>
+      <Section icon={FileTextIcon} title="Project instructions">
+        <p className="mb-2 text-muted-foreground text-xs">
+          Each thread reads the shared policy and its own section, nothing else.
+        </p>
+        <div className="grid gap-0.5">
+          {instructionSections(proposal).map((section) => (
+            <Collapsible key={section.key}>
+              <CollapsibleTrigger className="group flex w-full items-center gap-1.5 py-0.5 text-left text-sm text-muted-foreground hover:text-foreground">
+                <ChevronRightIcon
+                  aria-hidden
+                  className="size-3.5 shrink-0 transition-transform group-data-panel-open:rotate-90"
+                />
+                <span className="min-w-0 truncate font-medium text-foreground">
+                  {section.label}
+                </span>
+                <span
+                  className={cn(
+                    "ml-auto flex shrink-0 items-center gap-1 text-[11px] tabular-nums",
+                    section.over && "font-medium text-warning-foreground",
+                  )}
+                >
+                  {section.over ? <TriangleAlertIcon aria-hidden className="size-3" /> : null}
+                  {section.length.toLocaleString()} / {section.budget.toLocaleString()} characters
+                </span>
+              </CollapsibleTrigger>
+              <CollapsiblePanel>
+                <div className="mt-1.5 mb-1 rounded-lg border border-border/60 p-3">
+                  {section.text ? (
+                    <ExpandableMarkdown text={section.text} environmentId={environmentId} />
+                  ) : (
+                    <p className="text-muted-foreground text-sm">None yet.</p>
+                  )}
+                </div>
+              </CollapsiblePanel>
+            </Collapsible>
+          ))}
+        </div>
+      </Section>
     </div>
   );
 }

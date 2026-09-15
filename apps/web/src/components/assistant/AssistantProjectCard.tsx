@@ -349,6 +349,11 @@ export function AssistantProjectCard({
             : ""}
         </Fact>
         <Fact label="Permissions">{runtimeModeLabel(config.runtimeMode)}</Fact>
+        {config.checkCommand?.trim() ? (
+          <Fact label="Checks">
+            <span className="font-mono">{config.checkCommand}</span>
+          </Fact>
+        ) : null}
         {parallelIssues > 1 ? (
           <Fact label="At once">{parallelIssues} issues, each in its own worktree</Fact>
         ) : null}

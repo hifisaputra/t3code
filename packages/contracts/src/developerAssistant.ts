@@ -41,6 +41,61 @@ export type AssistantDeploymentTarget = typeof AssistantDeploymentTarget.Type;
 export const AssistantE2eEnvironment = Schema.Literals(["staging", "worktree"]);
 export type AssistantE2eEnvironment = typeof AssistantE2eEnvironment.Type;
 
+/** Which of the assistant's threads a section of the project instructions is written for. */
+export const AssistantInstructionAudience = Schema.Literals([
+  "assistant",
+  "lead",
+  "implement",
+  "review",
+  "e2e",
+]);
+export type AssistantInstructionAudience = typeof AssistantInstructionAudience.Type;
+
+/**
+ * Character budgets for the project instructions: the shared policy once
+ * sections are present, each section, and everything together. The setup
+ * refuses a plan over budget so that repository facts end up in repository
+ * documents, which every thread can read, rather than in every prompt.
+ */
+export const ASSISTANT_INSTRUCTION_BUDGET = { shared: 4000, section: 6000, total: 20000 } as const;
+
+const InstructionSection = Schema.String.check(
+  Schema.isMaxLength(ASSISTANT_INSTRUCTION_BUDGET.section),
+);
+/**
+ * What each of the assistant's threads is told beyond the shared policy. A
+ * thread receives the policy and its own section only, so the tester's
+ * credentials never reach the worker and the reviewer's standard never reaches
+ * the tester.
+ */
+export const AssistantRoleInstructions = Schema.Struct({
+  assistant: Schema.optionalKey(InstructionSection),
+  lead: Schema.optionalKey(InstructionSection),
+  implement: Schema.optionalKey(InstructionSection),
+  review: Schema.optionalKey(InstructionSection),
+  e2e: Schema.optionalKey(InstructionSection),
+});
+export type AssistantRoleInstructions = typeof AssistantRoleInstructions.Type;
+
+/** A Claude Code skill name, as the composer's `$name` mention accepts it. */
+export const AssistantSkillName = Schema.String.check(
+  Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9:_-]*$/),
+  Schema.isMaxLength(100),
+);
+/**
+ * A skill from the repository's own `.claude/skills` per team role, invoked
+ * with the role thread's first message so it carries the project's method for
+ * that role. Repository skills are shared by every T3 instance working the
+ * repository; a person's user-scope skills are not accepted.
+ */
+export const AssistantRoleSkills = Schema.Struct({
+  lead: Schema.optionalKey(AssistantSkillName),
+  implement: Schema.optionalKey(AssistantSkillName),
+  review: Schema.optionalKey(AssistantSkillName),
+  e2e: Schema.optionalKey(AssistantSkillName),
+});
+export type AssistantRoleSkills = typeof AssistantRoleSkills.Type;
+
 export const AssistantProjectConfig = Schema.Struct({
   projectId: ProjectId,
   linearProjectId: TrimmedNonEmptyString,
@@ -57,7 +112,21 @@ export const AssistantProjectConfig = Schema.Struct({
   workerModelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   baseBranch: TrimmedNonEmptyString,
-  instructions: Schema.String.check(Schema.isMaxLength(20000)),
+  /**
+   * The project's assistant policy. With `roleInstructions` present this is the
+   * part every thread shares; on setups from before sections existed it is
+   * everything, and goes to every thread as it is.
+   */
+  instructions: Schema.String.check(Schema.isMaxLength(ASSISTANT_INSTRUCTION_BUDGET.total)),
+  roleInstructions: Schema.optionalKey(AssistantRoleInstructions),
+  /**
+   * The repository's own non-mutating check (lint, typecheck, tests), which T3
+   * runs in the team's worktree when the worker requests review; a red run
+   * refuses the request before a review round is spent. Absent or empty: T3
+   * runs nothing and the reviewer runs the checks itself.
+   */
+  checkCommand: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(2000))),
+  roleSkills: Schema.optionalKey(AssistantRoleSkills),
   stagingCheckCommand: Schema.String,
   stagingUrl: Schema.optionalKey(ReviewUrl),
   deploymentTargets: Schema.optionalKey(Schema.Array(AssistantDeploymentTarget)),
@@ -87,6 +156,18 @@ export const assistantE2eEnvironment = (
 export const assistantParallelIssues = (
   config: Pick<AssistantProjectConfig, "parallelIssues">,
 ): number => config.parallelIssues ?? 1;
+/**
+ * The project instructions one of the assistant's threads receives: the shared
+ * policy, then the section written for that audience when the setup has one.
+ * Empty when the setup has neither.
+ */
+export const assistantInstructionsFor = (
+  config: Pick<AssistantProjectConfig, "instructions" | "roleInstructions">,
+  audience: AssistantInstructionAudience,
+): string =>
+  [config.instructions.trim(), config.roleInstructions?.[audience]?.trim() ?? ""]
+    .filter(Boolean)
+    .join("\n\n");
 
 export const AssistantSetupInput = Schema.Struct({
   projectId: ProjectId,
@@ -108,6 +189,9 @@ export const AssistantSetupPlan = Schema.Struct({
   baseBranch: AssistantProjectConfig.fields.baseBranch,
   readyStates: AssistantProjectConfig.fields.readyStates,
   instructions: AssistantProjectConfig.fields.instructions,
+  roleInstructions: AssistantProjectConfig.fields.roleInstructions,
+  checkCommand: AssistantProjectConfig.fields.checkCommand,
+  roleSkills: AssistantProjectConfig.fields.roleSkills,
   stagingCheckCommand: AssistantProjectConfig.fields.stagingCheckCommand,
   stagingUrl: AssistantProjectConfig.fields.stagingUrl,
   deploymentTargets: AssistantProjectConfig.fields.deploymentTargets,
@@ -221,9 +305,50 @@ export const AssistantMerge = Schema.Struct({
 });
 export type AssistantMerge = typeof AssistantMerge.Type;
 
+/**
+ * The issue's acceptance criteria as its team leader listed them when taking
+ * it: each one a check a person could perform on the product. The worker and
+ * reviewer see them numbered; the tester reports one result per criterion.
+ */
+export const AssistantCriteria = Schema.Array(
+  TrimmedNonEmptyString.check(Schema.isMaxLength(300)),
+).check(Schema.isMinLength(1), Schema.isMaxLength(12));
+export type AssistantCriteria = typeof AssistantCriteria.Type;
+
+export const AssistantE2eCheckResult = Schema.Literals(["passed", "failed", "not-checked"]);
+export type AssistantE2eCheckResult = typeof AssistantE2eCheckResult.Type;
+/** The tester's result for one criterion. */
+export const AssistantE2eCheck = Schema.Struct({
+  /** 1-based position in the task's criteria. */
+  criterion: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 12 })),
+  result: AssistantE2eCheckResult,
+  /** What was done and seen; for a failure, expected versus actual. */
+  evidence: Schema.String,
+  /** 1-based position in the result's screenshots, when one proves it. */
+  screenshot: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 12 }))),
+});
+export type AssistantE2eCheck = typeof AssistantE2eCheck.Type;
+
+export const AssistantE2eVerdict = Schema.Literals(["passed", "partial", "failed"]);
+export type AssistantE2eVerdict = typeof AssistantE2eVerdict.Type;
+/**
+ * The verdict the per-criterion results add up to: one failure fails the run,
+ * otherwise anything left for a person makes it partial.
+ */
+export const assistantE2eVerdict = (
+  checks: ReadonlyArray<Pick<AssistantE2eCheck, "result">>,
+): AssistantE2eVerdict =>
+  checks.some((check) => check.result === "failed")
+    ? "failed"
+    : checks.some((check) => check.result === "not-checked")
+      ? "partial"
+      : "passed";
+
 export const AssistantE2eResult = Schema.Struct({
-  verdict: Schema.Literals(["passed", "partial", "failed"]),
+  verdict: AssistantE2eVerdict,
   report: Schema.String,
+  /** One result per criterion; absent on runs of issues taken before criteria were recorded. */
+  checks: Schema.optionalKey(Schema.Array(AssistantE2eCheck)),
   /** What a person should still check on staging before accepting. */
   humanChecks: Schema.Array(Schema.String),
   screenshots: Schema.Array(Schema.Struct({ url: Schema.String, caption: Schema.String })),
@@ -245,6 +370,31 @@ export const AssistantWait = Schema.Struct({
   notified: Schema.Boolean,
 });
 export type AssistantWait = typeof AssistantWait.Type;
+
+/** A run of the project's check command, recorded with the review request it gated. */
+export const AssistantCheckRun = Schema.Struct({
+  command: Schema.String,
+  commit: CommitSha,
+  exitCode: Schema.Int,
+  /** The end of the combined output, at most 8,000 characters. */
+  output: Schema.String,
+  at: IsoDateTime,
+});
+export type AssistantCheckRun = typeof AssistantCheckRun.Type;
+
+/**
+ * A staging deploy T3 watches for the team leader: which targets (null for
+ * all), for which merged commit, since when, how many checks so far, and what
+ * the last check reported. The leader hears once it verifies, fails or times out.
+ */
+export const AssistantDeployWait = Schema.Struct({
+  targetIds: Schema.NullOr(Schema.Array(Schema.String)),
+  commit: CommitSha,
+  since: IsoDateTime,
+  checks: Schema.Int,
+  detail: Schema.String,
+});
+export type AssistantDeployWait = typeof AssistantDeployWait.Type;
 
 export const AssistantTask = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -290,6 +440,12 @@ export const AssistantTask = Schema.Struct({
    * change mid-issue does not move the goalposts. Absent means staging.
    */
   e2eEnvironment: Schema.optionalKey(AssistantE2eEnvironment),
+  /** Listed by the team leader on taking the issue; absent on issues taken before then. */
+  criteria: Schema.optionalKey(AssistantCriteria),
+  /** The last run of the project's check command for a review request. */
+  checks: Schema.optionalKey(Schema.NullOr(AssistantCheckRun)),
+  /** The staging deploy T3 is watching for the team leader, while it lasts. */
+  deployWait: Schema.optionalKey(Schema.NullOr(AssistantDeployWait)),
 });
 export type AssistantTask = typeof AssistantTask.Type;
 

@@ -17,6 +17,7 @@ import {
   describeProjectActivity,
   describeTaskPhase,
   historyTasks,
+  instructionSections,
   previewLine,
   projectFailure,
   projectLimitHold,
@@ -754,5 +755,48 @@ describe("decisionOptions", () => {
 
   it("needs at least two choices", () => {
     expect(decisionOptions("Options:\n1. Only this")).toEqual([]);
+  });
+});
+
+describe("instructionSections", () => {
+  it("gives the whole budget to a setup written before sections existed", () => {
+    expect(instructionSections({ instructions: "  Ship carefully.  " })).toEqual([
+      {
+        key: "shared",
+        label: "Shared policy",
+        text: "Ship carefully.",
+        length: 15,
+        budget: 20000,
+        over: false,
+      },
+    ]);
+  });
+
+  it("lists the sections that have text, shared policy first and on the shared budget", () => {
+    const sections = instructionSections({
+      instructions: "Shared",
+      roleInstructions: {
+        e2e: "Sign in as the test account",
+        lead: "Take small issues",
+        review: " ",
+      },
+    });
+    expect(sections.map((section) => [section.key, section.label, section.budget])).toEqual([
+      ["shared", "Shared policy", 4000],
+      ["lead", "Team leader", 6000],
+      ["e2e", "E2E tester", 6000],
+    ]);
+  });
+
+  it("marks a section over its budget", () => {
+    const sections = instructionSections({
+      instructions: "x".repeat(4001),
+      roleInstructions: { implement: "y".repeat(6001), review: "fine" },
+    });
+    expect(sections.map((section) => [section.key, section.over])).toEqual([
+      ["shared", true],
+      ["implement", true],
+      ["review", false],
+    ]);
   });
 });

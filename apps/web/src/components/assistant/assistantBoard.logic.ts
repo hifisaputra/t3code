@@ -1,10 +1,13 @@
 import {
+  ASSISTANT_INSTRUCTION_BUDGET,
   assistantPicksIssues,
   assistantTaskE2eEnvironment,
   assistantTaskHoldsProject,
   type AssistantBoard,
   type AssistantDecision,
+  type AssistantInstructionAudience,
   type AssistantProject,
+  type AssistantProjectConfig,
   type AssistantSetup,
   type AssistantTask,
   type AssistantThreadKind,
@@ -735,3 +738,68 @@ function shortOptionLabel(text: string): string {
 
 /** A long agent message is read in part, then opened; short ones stay whole. */
 export const isLongText = (text: string) => text.length > 600 || text.split("\n").length > 10;
+
+export interface InstructionSection {
+  readonly key: "shared" | AssistantInstructionAudience;
+  readonly label: string;
+  readonly text: string;
+  readonly length: number;
+  readonly budget: number;
+  /** Over budget: the setup refuses to save a plan this long. */
+  readonly over: boolean;
+}
+
+/** The role sections, in the order a review lists them after the shared policy. */
+const INSTRUCTION_SECTIONS: ReadonlyArray<{
+  readonly audience: AssistantInstructionAudience;
+  readonly label: string;
+}> = [
+  { audience: "assistant", label: "Assistant" },
+  { audience: "lead", label: "Team leader" },
+  { audience: "implement", label: "Implementation worker" },
+  { audience: "review", label: "Code reviewer" },
+  { audience: "e2e", label: "E2E tester" },
+];
+
+const instructionSection = (
+  key: InstructionSection["key"],
+  label: string,
+  text: string,
+  budget: number,
+): InstructionSection => ({
+  key,
+  label,
+  text,
+  length: text.length,
+  budget,
+  over: text.length > budget,
+});
+
+/**
+ * The project instructions as the threads receive them: the shared policy,
+ * always listed, then each role section that has any text. The shared policy
+ * keeps the whole budget on a setup written before sections existed, when it is
+ * the entire instructions, and the smaller shared budget once sections split it.
+ */
+export function instructionSections(
+  config: Pick<AssistantProjectConfig, "instructions" | "roleInstructions">,
+): ReadonlyArray<InstructionSection> {
+  const sections = INSTRUCTION_SECTIONS.flatMap(({ audience, label }) => {
+    const text = config.roleInstructions?.[audience]?.trim() ?? "";
+    return text
+      ? [instructionSection(audience, label, text, ASSISTANT_INSTRUCTION_BUDGET.section)]
+      : [];
+  });
+  const shared = config.instructions.trim();
+  return [
+    instructionSection(
+      "shared",
+      "Shared policy",
+      shared,
+      sections.length > 0
+        ? ASSISTANT_INSTRUCTION_BUDGET.shared
+        : ASSISTANT_INSTRUCTION_BUDGET.total,
+    ),
+    ...sections,
+  ];
+}

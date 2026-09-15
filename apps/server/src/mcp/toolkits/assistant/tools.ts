@@ -3,7 +3,9 @@ import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
 import {
   AssistantBoard,
+  AssistantCriteria,
   AssistantDecision,
+  AssistantE2eCheck,
   AssistantTask,
   AssistantSetup,
   AssistantSetupPlan,
@@ -11,6 +13,7 @@ import {
   DeveloperAssistantError,
   LinearIssueSummary,
   PreviewAutomationUnavailableError,
+  assistantTaskE2eEnvironment,
 } from "@t3tools/contracts";
 import { DeveloperAssistant } from "../../../assistant/DeveloperAssistant.ts";
 import { McpInvocationContext, requireMcpCapability } from "../../McpInvocationContext.ts";
@@ -86,6 +89,10 @@ export const AssistantToolkit = Toolkit.make(
       brief: text.annotate({
         description:
           "For the worker: the scope, the acceptance criteria, and what the issue leaves implicit.",
+      }),
+      criteria: AssistantCriteria.annotate({
+        description:
+          "Each criterion is one check a person could perform on the product, not a diff. T3 gives them, numbered, to the worker, the reviewer and the tester.",
       }),
     }),
     success: AssistantTask,
@@ -188,18 +195,22 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_verify_staging", {
     description:
-      "Team leader, after the implementer reports the merge: check the saved deployment targets or custom check. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts the update on the Linear issue; in staging mode call assistant_start_e2e next, and in worktree mode this is the delivery: T3 then puts the issue in review. If staging is still deploying, use assistant_wait.",
+      "Team leader, after the implementer reports the merge: check the saved deployment targets or custom check. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts the update on the Linear issue; in staging mode call assistant_start_e2e next, and in worktree mode this is the delivery: T3 then puts the issue in review. While staging is still deploying T3 watches it for you and messages you when it is verified or fails, so end your turn; a deployment that failed comes back here for you to decide.",
     parameters: Schema.Struct({
       taskId,
       targetIds: Schema.optionalKey(Schema.Array(text)),
     }),
-    success: AssistantTask,
+    success: Schema.Struct({
+      task: AssistantTask,
+      outcome: Schema.Literals(["verified", "watching"]),
+      note: Schema.String,
+    }),
     failure,
     dependencies,
   }),
   Tool.make("assistant_start_e2e", {
     description:
-      "Team leader: start (or rerun) the issue's e2e tester, on staging after assistant_verify_staging succeeds, or in the team's worktree on the approved commit before the merge when the project is set up that way. The brief lists each acceptance criterion as a check a person could follow, the affected pages or endpoints, the data it needs and what to clean up. The tester reports passed, partial or failed with screenshots. End your turn afterward.",
+      "Team leader: start (or rerun) the issue's e2e tester, on staging after assistant_verify_staging succeeds, or in the team's worktree on the approved commit before the merge when the project is set up that way. The brief gives the tester the pages or endpoints affected, the data it needs and what to clean up; T3 gives it the acceptance criteria you listed when you took the issue. The tester reports one result per criterion with screenshots. End your turn afterward.",
     parameters: Schema.Struct({ taskId, brief: text }),
     success: AssistantTask,
     failure,
@@ -209,13 +220,21 @@ export const AssistantToolkit = Toolkit.make(
     description:
       "E2E thread only: report your test, on staging or in the team's worktree, wherever you ran it. T3 uploads the screenshots and records the result; on passed or partial the issue moves on (in staging mode straight to review, in worktree mode to the merge and the staging deploy), and on failed the team leader decides the fix. End your turn after submitting.",
     parameters: Schema.Struct({
-      verdict: Schema.Literals(["passed", "partial", "failed"]).annotate({
-        description:
-          "passed: every criterion verified where you tested. partial: what could be checked passed, and humanChecks lists what a person must check. failed: a criterion does not hold.",
-      }),
+      checks: Schema.optionalKey(
+        Schema.Array(AssistantE2eCheck).annotate({
+          description:
+            "checks is required when the issue has acceptance criteria (the brief lists them numbered): one entry per criterion, in order. T3 derives the verdict from them: one failed criterion fails the run, otherwise any not-checked criterion makes it partial, and each not-checked criterion needs a matching entry in humanChecks. screenshot is the 1-based position in screenshots of the one that proves the check.",
+        }),
+      ),
+      verdict: Schema.optionalKey(
+        Schema.Literals(["passed", "partial", "failed"]).annotate({
+          description:
+            "Only read for an issue with no acceptance criteria; with criteria T3 derives it from checks. passed: every criterion verified where you tested. partial: what could be checked passed, and humanChecks lists what a person must check. failed: a criterion does not hold.",
+        }),
+      ),
       report: text.annotate({
         description:
-          "Markdown for the Linear issue: one line per acceptance criterion marked passed, failed or not checked, with its evidence; then anything not covered and why. For a failure, expected versus actual and steps to reproduce. No first person or 'you'.",
+          "Markdown for the Linear issue, below the table T3 renders from checks: what the run did not cover and why, and for a failure the expected versus actual and the steps to reproduce. For an issue with no acceptance criteria, give one line per criterion marked passed, failed or not checked, with its evidence. No first person or 'you'.",
       }),
       humanChecks: Schema.Array(text).annotate({
         description:
@@ -244,6 +263,18 @@ export const AssistantToolkit = Toolkit.make(
     dependencies,
   }),
 );
+
+/** What the team leader does next with the deployment T3 just checked. */
+const verifyNote = (result: {
+  readonly task: AssistantTask;
+  readonly outcome: "verified" | "watching";
+}) => {
+  if (result.outcome === "watching")
+    return `Staging is still deploying: ${result.task.deployWait?.detail ?? "the deploy has not landed yet"}. T3 checks every minute for up to 45 minutes and messages you when it is verified or fails. End your turn.`;
+  return assistantTaskE2eEnvironment(result.task) === "worktree"
+    ? "Verified: the issue is delivered and in review. End your turn."
+    : "Verified. Start the e2e check with assistant_start_e2e.";
+};
 
 const scope = Effect.gen(function* () {
   const invocation = yield* requireMcpCapability("linear");
@@ -283,7 +314,11 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_accept_issue: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.acceptIssue(caller, input.brief.trim());
+      return yield* service.acceptIssue(
+        caller,
+        input.brief.trim(),
+        input.criteria.map((criterion) => criterion.trim()),
+      );
     }),
   assistant_decline_issue: (input) =>
     Effect.gen(function* () {
@@ -333,7 +368,8 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_verify_staging: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.verifyStaging(caller, input.taskId, input.targetIds);
+      const result = yield* service.verifyStaging(caller, input.taskId, input.targetIds);
+      return { ...result, note: verifyNote(result) };
     }),
   assistant_start_e2e: (input) =>
     Effect.gen(function* () {
@@ -344,7 +380,8 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.submitE2e(caller, {
-        verdict: input.verdict,
+        ...(input.verdict ? { verdict: input.verdict } : {}),
+        ...(input.checks ? { checks: input.checks } : {}),
         report: input.report.trim(),
         humanChecks: input.humanChecks.map((check) => check.trim()).filter(Boolean),
         screenshots: input.screenshots.map((shot) => ({

@@ -59,6 +59,58 @@ describe("e2eComment", () => {
     );
   });
 
+  it("puts the per-criterion results in a table above the tester's report", () => {
+    const body = e2eComment({
+      e2e: {
+        verdict: "partial",
+        report: "The reminder email could not be read from staging.",
+        checks: [
+          {
+            criterion: 1,
+            result: "passed",
+            evidence: "Opened /blog/hello and saw the body.",
+            screenshot: 1,
+          },
+          { criterion: 2, result: "not-checked", evidence: "No test inbox on staging." },
+        ],
+        humanChecks: ["Open the reminder email in the test inbox."],
+        screenshots: [{ url: "https://uploads.linear.app/post.png", caption: "The post" }],
+        at: "2026-09-13T03:00:00.000Z",
+      },
+      merge: { commit: deployment.revision, summary: "Blog posts show their body.", at: "" },
+      deployment,
+      pullRequest: null,
+      acceptedState: "Done",
+      criteria: ["A blog post shows its body", "The author gets a reminder email"],
+    });
+    expect(body).toContain("| Criterion | Result | Evidence |");
+    expect(body).toContain(
+      "| A blog post shows its body | ✅ passed | Opened /blog/hello and saw the body. *The post* |",
+    );
+    expect(body).toContain(
+      "| The author gets a reminder email | 👀 not checked | No test inbox on staging. |",
+    );
+    // The table sits above the free report, which says what was not covered.
+    expect(body.indexOf("| Criterion |")).toBeLessThan(body.indexOf("**E2E check on staging**"));
+  });
+
+  it("leaves the table out for an issue with no recorded criteria", () => {
+    const body = e2eComment({
+      e2e: {
+        verdict: "passed",
+        report: "- Blog post shows its body: passed",
+        humanChecks: [],
+        screenshots: [],
+        at: "2026-09-13T03:00:00.000Z",
+      },
+      merge: null,
+      deployment,
+      pullRequest: null,
+      acceptedState: "Done",
+    });
+    expect(body).not.toContain("| Criterion |");
+  });
+
   it("says a worktree run was verified in the development environment and names its commit", () => {
     const body = e2eComment({
       e2e: {

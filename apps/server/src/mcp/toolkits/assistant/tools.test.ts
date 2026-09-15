@@ -8,6 +8,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   type AssistantSetup,
+  type AssistantTask,
 } from "@t3tools/contracts";
 import { DeveloperAssistant } from "../../../assistant/DeveloperAssistant.ts";
 import { McpInvocationContext } from "../../McpInvocationContext.ts";
@@ -160,6 +161,156 @@ it.effect("pausing and waiting answer the agent with text instead of an internal
         "T3 checks back in about a minute",
       );
       assert.deepEqual(calls, ["pause", "wait"]);
+    }).pipe(
+      Effect.provide(layer),
+      Effect.provideService(
+        McpSchema.McpServerClient,
+        McpSchema.McpServerClient.of({
+          clientId: 1,
+          protocolVersion: "2025-06-18",
+          initializePayload: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "assistant-test", version: "1" },
+          },
+          getClient: Effect.die("unused"),
+        }),
+      ),
+    );
+  }).pipe(Effect.scoped),
+);
+
+const managedTask = {
+  id: "task",
+  projectId: ProjectId.make("project"),
+  issue: {
+    id: "issue",
+    identifier: "APP-1",
+    title: "Issue 1",
+    url: "https://linear.app/test/issue/APP-1",
+    branchName: "app-1",
+    priority: 3,
+    state: { id: "todo", name: "Todo", type: "unstarted" as const, position: 0, color: "#fff" },
+    team: { id: "team", key: "APP", name: "App" },
+    assignee: null,
+    project: null,
+    cycle: null,
+    updatedAt: "2026-09-15T00:00:00.000Z",
+  },
+  threadId: ThreadId.make("assistant-work-task"),
+  status: "working" as const,
+  brief: "",
+  summary: "",
+  reviewInstructions: "",
+  feedback: "",
+  turns: 1,
+  turnLimit: 6,
+  deployment: null,
+  error: null,
+  createdAt: "2026-09-15T00:00:00.000Z",
+  updatedAt: "2026-09-15T00:00:00.000Z",
+} satisfies AssistantTask;
+
+it.effect("carries acceptance criteria, per-criterion checks and the deploy note", () =>
+  Effect.gen(function* () {
+    const taken: Array<ReadonlyArray<string>> = [];
+    const reported: Array<unknown> = [];
+    const layer = McpServer.toolkit(AssistantToolkit).pipe(
+      Layer.provide(AssistantToolkitHandlers),
+      Layer.provideMerge(
+        Layer.mock(DeveloperAssistant)({
+          acceptIssue: (_caller, _brief, criteria) =>
+            Effect.sync(() => {
+              taken.push(criteria);
+              return { ...managedTask, criteria };
+            }),
+          submitE2e: (_caller, input) =>
+            Effect.sync(() => {
+              reported.push(input);
+              return managedTask;
+            }),
+          verifyStaging: () =>
+            Effect.succeed({
+              task: {
+                ...managedTask,
+                deployWait: {
+                  targetIds: ["web"],
+                  commit: "b".repeat(40),
+                  since: "2026-09-15T00:00:00.000Z",
+                  checks: 1,
+                  detail: "web is still building.",
+                },
+              },
+              outcome: "watching" as const,
+            }),
+        }),
+      ),
+      Layer.provideMerge(McpServer.McpServer.layer),
+    );
+    yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (input: { name: string; arguments: Record<string, unknown> }) =>
+        server.callTool(input).pipe(Effect.provideService(McpInvocationContext, invocation));
+      const missing = yield* call({
+        name: "assistant_accept_issue",
+        arguments: { brief: "Fix it" },
+      }).pipe(Effect.flip);
+      assert.equal(missing._tag, "InvalidParams");
+      const empty = yield* call({
+        name: "assistant_accept_issue",
+        arguments: { brief: "Fix it", criteria: [] },
+      }).pipe(Effect.flip);
+      assert.equal(empty._tag, "InvalidParams");
+      const accepted = yield* call({
+        name: "assistant_accept_issue",
+        arguments: { brief: "Fix it", criteria: [" The page loads ", "The email arrives"] },
+      });
+      assert.isFalse(accepted.isError);
+      assert.deepEqual(taken, [["The page loads", "The email arrives"]]);
+
+      const submitted = yield* call({
+        name: "assistant_submit_e2e",
+        arguments: {
+          report: "The email never arrived.",
+          humanChecks: [],
+          screenshots: [{ path: "/evidence/task/page.png", caption: "The page" }],
+          checks: [
+            { criterion: 1, result: "passed", evidence: "Loaded", screenshot: 1 },
+            { criterion: 2, result: "failed", evidence: "No email" },
+          ],
+        },
+      });
+      assert.isFalse(submitted.isError);
+      // The verdict is T3's to derive, so the tester need not send one.
+      assert.deepEqual(reported, [
+        {
+          checks: [
+            { criterion: 1, result: "passed", evidence: "Loaded", screenshot: 1 },
+            { criterion: 2, result: "failed", evidence: "No email" },
+          ],
+          report: "The email never arrived.",
+          humanChecks: [],
+          screenshots: [{ path: "/evidence/task/page.png", caption: "The page" }],
+        },
+      ]);
+      const bad = yield* call({
+        name: "assistant_submit_e2e",
+        arguments: {
+          report: "Report",
+          humanChecks: [],
+          screenshots: [],
+          checks: [{ criterion: 0, result: "passed", evidence: "" }],
+        },
+      }).pipe(Effect.flip);
+      assert.equal(bad._tag, "InvalidParams");
+
+      const watching = yield* call({ name: "assistant_verify_staging", arguments: {} });
+      assert.isFalse(watching.isError);
+      const note = watching.content[0];
+      assert.include(
+        note?.type === "text" ? note.text : "",
+        "Staging is still deploying: web is still building.",
+      );
     }).pipe(
       Effect.provide(layer),
       Effect.provideService(

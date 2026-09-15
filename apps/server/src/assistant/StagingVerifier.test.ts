@@ -88,6 +88,11 @@ const fixture = Effect.gen(function* () {
   };
 });
 const dependencies = ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer));
+/** The deployment a check verified; any other outcome fails the assertion. */
+const verifiedDeployment = (check: StagingVerifier.DeployCheck) => {
+  assert.equal(check.outcome, "verified");
+  return check.outcome === "verified" ? check.deployment : null;
+};
 
 it.effect("requires the worker commit to be deployed on origin's integration branch", () =>
   Effect.gen(function* () {
@@ -97,7 +102,7 @@ it.effect("requires the worker commit to be deployed on origin's integration bra
       yield* h.verifier.repositoryKey(h.worktreePath),
     );
     // A provider reporting the worker revision before it reaches develop cannot release the queue.
-    assert.isTrue(yield* h.verifier.verify(h.input).pipe(Effect.isFailure));
+    assert.equal((yield* h.verifier.checkDeploy(h.input)).outcome, "failed");
     yield* h.git(["merge", "--no-ff", "--no-edit", "assistant/APP-1"]);
     yield* h.git(["push", "origin", "develop"]);
     const deployed = yield* h.git(["rev-parse", "HEAD"]);
@@ -105,16 +110,41 @@ it.effect("requires the worker commit to be deployed on origin's integration bra
       code: 0,
       stdout: encodeJson({ revision: deployed, url: "https://staging.example.test" }),
     });
-    const result = yield* h.verifier.verify(h.input);
-    assert.equal(result.revision, deployed);
+    assert.equal(verifiedDeployment(yield* h.verifier.checkDeploy(h.input))?.revision, deployed);
     assert.equal(h.checks[0]?.env?.T3_ASSISTANT_WORKER_REVISION, h.workerRevision);
     assert.equal(h.checks[0]?.env?.T3_ASSISTANT_BASE_BRANCH, "develop");
-    // The previous healthy deployment is insufficient even when develop has moved forward.
+    // The previous healthy deployment is insufficient even when develop has moved
+    // forward: staging simply has not caught up yet.
     h.setReceipt({
       code: 0,
       stdout: encodeJson({ revision: h.initial, url: "https://staging.example.test" }),
     });
-    assert.isTrue(yield* h.verifier.verify(h.input).pipe(Effect.isFailure));
+    assert.equal((yield* h.verifier.checkDeploy(h.input)).outcome, "pending");
+  }).pipe(Effect.provide(dependencies), Effect.scoped),
+);
+
+it.effect("runs the project's check command in the worktree and reports what it printed", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture;
+    h.setReceipt({ code: 3, stdout: "12 tests failed" });
+    // A red run is a result the caller acts on, not a failure of the verifier.
+    const red = yield* h.verifier.runCheck({
+      worktreePath: h.worktreePath,
+      command: "pnpm check",
+    });
+    assert.equal(red.exitCode, 3);
+    assert.include(red.output, "12 tests failed");
+    const call = h.checks.at(-1);
+    assert.equal(call?.cwd, h.worktreePath);
+    assert.equal(call?.timeout, "20 minutes");
+    assert.equal(call?.outputMode, "truncate");
+    assert.isTrue(call?.args?.includes("pnpm check"));
+    h.setReceipt({ code: 0, stdout: "ok" });
+    const green = yield* h.verifier.runCheck({
+      worktreePath: h.worktreePath,
+      command: "pnpm check",
+    });
+    assert.equal(green.exitCode, 0);
   }).pipe(Effect.provide(dependencies), Effect.scoped),
 );
 
@@ -135,20 +165,24 @@ it.effect("reads the reviewed commit and whether origin's integration branch has
       stdout: encodeJson({ revision: deployed, url: "https://staging.example.test" }),
     });
     assert.isTrue(
-      yield* h.verifier.verify({ ...h.input, expectedRevision: h.initial }).pipe(Effect.isFailure),
+      yield* h.verifier
+        .checkDeploy({ ...h.input, expectedRevision: h.initial })
+        .pipe(Effect.isFailure),
     );
     assert.lengthOf(h.checks, 0);
-    yield* h.verifier.verify({ ...h.input, expectedRevision: h.workerRevision });
+    yield* h.verifier.checkDeploy({ ...h.input, expectedRevision: h.workerRevision });
     yield* h.fs.writeFileString(h.path.join(h.worktreePath, "unfinished.txt"), "not committed");
     assert.isTrue(yield* h.verifier.revision(h.worktreePath).pipe(Effect.isFailure));
   }).pipe(Effect.provide(dependencies), Effect.scoped),
 );
 
-it.effect("rejects failed checks and malformed deployment receipts", () =>
+it.effect("waits on a red staging check and rejects malformed deployment receipts", () =>
   Effect.gen(function* () {
     const h = yield* fixture;
+    // The check is written to fail while the deploy is pending, so a red run waits.
+    h.setReceipt({ code: 1, stdout: "deployment failed" });
+    assert.equal((yield* h.verifier.checkDeploy(h.input)).outcome, "pending");
     for (const receipt of [
-      { code: 1, stdout: "deployment failed" },
       { code: 0, stdout: "deploying" },
       {
         code: 0,
@@ -160,7 +194,7 @@ it.effect("rejects failed checks and malformed deployment receipts", () =>
       },
     ]) {
       h.setReceipt(receipt);
-      assert.isTrue(yield* h.verifier.verify(h.input).pipe(Effect.isFailure));
+      assert.isTrue(yield* h.verifier.checkDeploy(h.input).pipe(Effect.isFailure));
     }
   }).pipe(Effect.provide(dependencies), Effect.scoped),
 );
@@ -192,24 +226,34 @@ it.effect(
         conclusion: "success",
         url: "https://github.com/owner/app/actions/runs/42",
       };
-      for (const rows of [
-        [],
-        [{ ...run, status: "in_progress", conclusion: null }],
-        [{ ...run, conclusion: "failure" }],
-        [{ ...run, headSha: h.initial }],
-      ]) {
+      // A deploy that has not run, is running, or built someone else's commit is
+      // waited on; a run that completed unsuccessfully is the leader's to decide.
+      for (const [rows, outcome] of [
+        [[], "pending"],
+        [
+          [{ ...run, headSha: h.workerRevision, status: "in_progress", conclusion: null }],
+          "pending",
+        ],
+        [[{ ...run, headSha: h.workerRevision, conclusion: "failure" }], "failed"],
+        [[{ ...run, conclusion: "failure" }], "pending"],
+        [[{ ...run, headSha: h.initial }], "pending"],
+      ] as const) {
         h.setReceipt({ code: 0, stdout: encodeJson(rows) });
-        assert.isTrue(yield* h.verifier.verify(input).pipe(Effect.isFailure));
+        assert.equal((yield* h.verifier.checkDeploy(input)).outcome, outcome);
       }
       h.setReceipt({ code: 0, stdout: encodeJson([run]) });
-      const result = yield* h.verifier.verify(input);
-      assert.equal(result.revision, deployed);
-      assert.equal(result.evidence?.[0]?.reference, run.url);
+      const result = verifiedDeployment(yield* h.verifier.checkDeploy(input));
+      assert.equal(result?.revision, deployed);
+      assert.equal(result?.evidence?.[0]?.reference, run.url);
       assert.equal(h.checks[0]?.command, "gh");
       assert.isTrue(h.checks[0]?.args?.includes("--branch=develop"));
-      assert.isTrue(yield* h.verifier.verify({ ...input, targetIds: [] }).pipe(Effect.isFailure));
       assert.isTrue(
-        yield* h.verifier.verify({ ...input, targetIds: ["production"] }).pipe(Effect.isFailure),
+        yield* h.verifier.checkDeploy({ ...input, targetIds: [] }).pipe(Effect.isFailure),
+      );
+      assert.isTrue(
+        yield* h.verifier
+          .checkDeploy({ ...input, targetIds: ["production"] })
+          .pipe(Effect.isFailure),
       );
     }).pipe(Effect.provide(dependencies), Effect.scoped),
 );
@@ -275,25 +319,29 @@ it.effect(
         },
       });
       h.setReceipt({ code: 0, stdout: encodeJson(status(environmentId, "CRASHED")) });
-      assert.isTrue(yield* h.verifier.verify(input).pipe(Effect.isFailure));
+      assert.equal((yield* h.verifier.checkDeploy(input)).outcome, "failed");
       // A UI-only issue may select web; collector changes must include the collector.
-      const ui = yield* h.verifier.verify({ ...input, targetIds: ["web"] });
+      const ui = verifiedDeployment(
+        yield* h.verifier.checkDeploy({ ...input, targetIds: ["web"] }),
+      );
       assert.deepEqual(
-        ui.evidence?.map((e) => e.targetId),
+        ui?.evidence?.map((e) => e.targetId),
         ["web"],
       );
       h.setReceipt({ code: 0, stdout: encodeJson(status("other-environment", "SUCCESS")) });
-      assert.isTrue(yield* h.verifier.verify(input).pipe(Effect.isFailure));
-      const pending = status(environmentId, "SUCCESS");
-      pending.environments.edges[0]!.node.serviceInstances.edges[0]!.node.latestDeployment.status =
+      assert.equal((yield* h.verifier.checkDeploy(input)).outcome, "failed");
+      const building = status(environmentId, "SUCCESS");
+      building.environments.edges[0]!.node.serviceInstances.edges[0]!.node.latestDeployment.status =
         "DEPLOYING";
       assert.isTrue(
-        yield* h.verifier.verify({ ...input, targetIds: ["web", "web"] }).pipe(Effect.isFailure),
+        yield* h.verifier
+          .checkDeploy({ ...input, targetIds: ["web", "web"] })
+          .pipe(Effect.isFailure),
       );
-      h.setReceipt({ code: 0, stdout: encodeJson(pending) });
-      assert.isTrue(yield* h.verifier.verify(input).pipe(Effect.isFailure));
+      h.setReceipt({ code: 0, stdout: encodeJson(building) });
+      assert.equal((yield* h.verifier.checkDeploy(input)).outcome, "pending");
       h.setReceipt({ code: 0, stdout: encodeJson(status(environmentId, "SUCCESS")) });
-      assert.lengthOf((yield* h.verifier.verify(input)).evidence ?? [], 2);
+      assert.lengthOf(verifiedDeployment(yield* h.verifier.checkDeploy(input))?.evidence ?? [], 2);
       assert.equal(h.checks[0]?.command, "railway");
       assert.isTrue(h.checks[0]?.args?.includes(`--environment=${environmentId}`));
     }).pipe(Effect.provide(dependencies), Effect.scoped),
@@ -312,8 +360,10 @@ it.effect("verifies the reviewed commit even when the shared worktree has stray 
     // A test artifact nobody committed is not something the team leader can act on,
     // and the commit being verified is fixed by expectedRevision regardless.
     yield* h.fs.writeFileString(h.path.join(h.worktreePath, "screenshot.png"), "artifact");
-    const result = yield* h.verifier.verify({ ...h.input, expectedRevision: h.workerRevision });
-    assert.equal(result.revision, deployed);
+    const result = verifiedDeployment(
+      yield* h.verifier.checkDeploy({ ...h.input, expectedRevision: h.workerRevision }),
+    );
+    assert.equal(result?.revision, deployed);
     // Approvals still read HEAD strictly, so an unreviewed change cannot slip through.
     assert.isTrue(yield* h.verifier.revision(h.worktreePath).pipe(Effect.isFailure));
   }).pipe(Effect.provide(dependencies), Effect.scoped),
@@ -322,18 +372,29 @@ it.effect("verifies the reviewed commit even when the shared worktree has stray 
 it.effect("separates a deployment that is behind from a git failure", () =>
   Effect.gen(function* () {
     const h = yield* fixture;
-    // merge-base exits 1 here: staging simply does not have the commit yet.
-    const behind = yield* h.verifier.verify(h.input).pipe(Effect.flip);
-    assert.include(behind.detail, "not on origin/develop yet");
-    assert.include(behind.detail, "Wait for the merge");
+    // merge-base exits 1 here: the deployed commit is not on the branch at all.
+    const early = yield* h.verifier.checkDeploy(h.input);
+    assert.equal(early.outcome, "failed");
+    assert.include(early.outcome === "failed" ? early.detail : "", "not on origin/develop");
     yield* h.git(["merge", "--no-ff", "--no-edit", "assistant/APP-1"]);
     yield* h.git(["push", "origin", "develop"]);
+    // A deployment on the branch that predates the merge is simply behind.
+    h.setReceipt({
+      code: 0,
+      stdout: encodeJson({ revision: h.initial, url: "https://staging.example.test" }),
+    });
+    const behind = yield* h.verifier.checkDeploy(h.input);
+    assert.equal(behind.outcome, "pending");
+    assert.include(
+      behind.outcome === "pending" ? behind.detail : "",
+      "Staging is still on an older commit",
+    );
     // A revision the repository has never seen exits above 1: a real git failure.
     h.setReceipt({
       code: 0,
       stdout: encodeJson({ revision: "f".repeat(40), url: "https://staging.example.test" }),
     });
-    const broken = yield* h.verifier.verify(h.input).pipe(Effect.flip);
+    const broken = yield* h.verifier.checkDeploy(h.input).pipe(Effect.flip);
     assert.include(broken.detail, "Git could not tell whether");
     // The same distinction keeps isMerged answering rather than failing.
     assert.isTrue(
