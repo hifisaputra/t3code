@@ -26,6 +26,11 @@ on:
         required: false
         default: true
         type: boolean
+      distribution:
+        description: "Distribution id. The app installs next to the official T3 Code under its own name, bundle id, scheme and data directory (~/.t3-<id>). Leave empty to build with the official names."
+        required: false
+        default: fork
+        type: string
 
 permissions:
   contents: read
@@ -244,6 +249,7 @@ jobs:
           # No signing identity exists on these runners; stop electron-builder
           # from searching the keychain for one.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          DISTRIBUTION: ${{ inputs.distribution }}
         run: |
           set -euo pipefail
           args=(
@@ -255,6 +261,9 @@ jobs:
           )
           if [[ "${{ matrix.platform }}" == "win" ]]; then
             args+=(--wsl-prebuild "$GITHUB_WORKSPACE/wsl-prebuild/pty.node")
+          fi
+          if [[ -n "$DISTRIBUTION" ]]; then
+            args+=(--distribution "$DISTRIBUTION")
           fi
           vp run dist:desktop:artifact "${args[@]}"
 
@@ -272,6 +281,8 @@ jobs:
             "release/*.blockmap" \
             "release/*.yml"; do
             for file in $pattern; do
+              # electron-builder's debug dump is not an updater manifest.
+              [[ "$(basename "$file")" == "builder-debug.yml" ]] && continue
               cp "$file" release-publish/
             done
           done
@@ -348,12 +359,22 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
           BRANCH: ${{ github.ref_name }}
+          DISTRIBUTION: ${{ inputs.distribution }}
         run: |
           set -euo pipefail
           {
             echo "Unsigned desktop build of this fork from \`$BRANCH\` at $SHORT_SHA."
             echo
-            echo "macOS: the DMG is not notarized. After copying the app, run \`xattr -dr com.apple.quarantine \"/Applications/T3 Code (Alpha).app\"\` once, or right-click the app and choose Open."
+            if [[ -n "$DISTRIBUTION" ]]; then
+              echo "Distribution \`$DISTRIBUTION\`: installs next to the official T3 Code as its own app, with its own data directory \`~/.t3-$DISTRIBUTION\` and \`t3code-$DISTRIBUTION://\` scheme. It does not read or change the official app's data."
+              echo
+            fi
+            app_name="T3 Code (Alpha)"
+            if [[ -n "$DISTRIBUTION" ]]; then
+              label="$(printf '%s' "$DISTRIBUTION" | sed -E 's/(^|-)([a-z0-9])/ \U\2/g')"
+              app_name="T3 Code${label} (Alpha)"
+            fi
+            echo "macOS: the DMG is not notarized. After copying the app, run \`xattr -dr com.apple.quarantine \"/Applications/$app_name.app\"\` once, or right-click the app and choose Open."
             echo
             echo "Windows: the installer is not signed, so SmartScreen shows a warning on first run."
             echo
