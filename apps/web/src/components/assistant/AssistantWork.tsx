@@ -320,7 +320,6 @@ export function ActiveTaskCard({
   const { pending, run } = useAssistantAction();
   const shells = useTeamShells(environmentId, task);
   const worker = shells.implement;
-  const coordinator = project?.threadId ?? null;
   // The phase follows whichever of the issue's threads holds it.
   const holder = teamHolder(task, shells);
   const holderBusy = threadIsBusy(holder);
@@ -469,9 +468,8 @@ export function ActiveTaskCard({
       {pipeline ? (
         <ol aria-label="Progress" className="flex flex-wrap gap-1.5">
           {pipeline.map((step) => {
-            const shell =
-              step.kind === "coordinator" || step.kind === "setup" ? null : shells[step.kind];
-            const thread = step.kind === "coordinator" ? coordinator : (shell?.id ?? null);
+            const shell = step.kind === "setup" ? null : shells[step.kind];
+            const thread = shell?.id ?? null;
             const current = step.state === "current";
             return (
               <PipelineStepButton

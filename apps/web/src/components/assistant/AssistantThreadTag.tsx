@@ -42,7 +42,7 @@ export function AssistantThreadTag({
   return (
     <span
       role="img"
-      aria-label={kind === "coordinator" ? "Developer assistant" : `Assistant ${label}`}
+      aria-label={`Assistant ${label}`}
       className={cn("inline-flex shrink-0 items-center gap-1 text-xs", tint, className)}
     >
       <Icon aria-hidden className="size-3.5 shrink-0" />

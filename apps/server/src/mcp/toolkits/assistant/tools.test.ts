@@ -125,14 +125,13 @@ it.effect(
     }).pipe(Effect.scoped),
 );
 
-it.effect("pausing and waiting answer the agent with text instead of an internal error", () =>
+it.effect("waiting answers the agent with text instead of an internal error", () =>
   Effect.gen(function* () {
     const calls: string[] = [];
     const layer = McpServer.toolkit(AssistantToolkit).pipe(
       Layer.provide(AssistantToolkitHandlers),
       Layer.provideMerge(
         Layer.mock(DeveloperAssistant)({
-          pause: () => Effect.sync(() => void calls.push("pause")),
           waitForExternal: () =>
             Effect.sync(() => {
               calls.push("wait");
@@ -146,10 +145,15 @@ it.effect("pausing and waiting answer the agent with text instead of an internal
       const server = yield* McpServer.McpServer;
       const call = (input: { name: string; arguments: Record<string, unknown> }) =>
         server.callTool(input).pipe(Effect.provideService(McpInvocationContext, invocation));
-      const paused = yield* call({ name: "assistant_pause", arguments: {} });
-      assert.isFalse(paused.isError);
-      const text = paused.content[0];
-      assert.include(text?.type === "text" ? text.text : "", "Paused");
+      // The retired assistant chat's tools are gone.
+      const tools = Object.keys(AssistantToolkit.tools);
+      for (const removed of [
+        "assistant_pause",
+        "assistant_get_board",
+        "assistant_dispatch_issue",
+        "assistant_answer_decision",
+      ])
+        assert.notInclude(tools, removed);
       const waiting = yield* call({
         name: "assistant_wait",
         arguments: { reason: "Staging deploy is running" },
@@ -160,7 +164,7 @@ it.effect("pausing and waiting answer the agent with text instead of an internal
         waitText?.type === "text" ? waitText.text : "",
         "T3 checks back in about a minute",
       );
-      assert.deepEqual(calls, ["pause", "wait"]);
+      assert.deepEqual(calls, ["wait"]);
     }).pipe(
       Effect.provide(layer),
       Effect.provideService(

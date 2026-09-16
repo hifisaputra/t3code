@@ -1,5 +1,4 @@
 import { assert, it } from "@effect/vitest";
-import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Stream from "effect/Stream";
@@ -50,6 +49,7 @@ import Migration from "../persistence/Migrations/052_DeveloperAssistant.ts";
 import SetupMigration from "../persistence/Migrations/053_AssistantSetup.ts";
 import ParallelMigration from "../persistence/Migrations/055_AssistantParallelIssues.ts";
 import UsageLimitMigration from "../persistence/Migrations/056_AssistantUsageLimit.ts";
+import RetireChatMigration from "../persistence/Migrations/057_RetireAssistantCoordinator.ts";
 import * as Assistant from "./DeveloperAssistant.ts";
 import { AssistantEvidence } from "./AssistantEvidence.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
@@ -465,6 +465,7 @@ function harness() {
     yield* SetupMigration;
     yield* ParallelMigration;
     yield* UsageLimitMigration;
+    yield* RetireChatMigration;
     return yield* make;
   });
   /** A configured, running project; overrides change the setup it runs with. */
@@ -472,8 +473,8 @@ function harness() {
     Effect.gen(function* () {
       const service = yield* initialize;
       yield* service.configure({ ...config, ...overrides });
-      const board = yield* service.control({ projectId: config.projectId, action: "start" });
-      return { service, caller: board.projects[0]!.threadId };
+      yield* service.control({ projectId: config.projectId, action: "start" });
+      return { service };
     });
   return {
     initialize,
@@ -577,6 +578,12 @@ const taskById = (service: Service, id: string) =>
   service.board(null).pipe(Effect.map((b) => b.tasks.find((t) => t.id === id)!));
 
 /** Every issue the project's teams hold, by identifier. */
+/** The person dispatches an issue from the board; the task it became. */
+const dispatchIssue = (service: Service, reference: string, note = "") =>
+  service
+    .dispatch({ projectId: config.projectId, reference, note })
+    .pipe(Effect.map((b) => b.tasks.find((t) => t.issue.identifier === reference)!));
+
 const heldTasks = (service: Service) =>
   service
     .board(null)
@@ -647,8 +654,8 @@ const reachMerge = (h: Harness, service: Service, t: AssistantTask) =>
 const leadToE2e = (h: Harness, service: Service, t: AssistantTask) =>
   Effect.gen(function* () {
     yield* service.deliver();
-    yield* service.verifyStaging(leadOf(t), undefined);
-    yield* service.startE2e(leadOf(t), undefined, "Open the page.");
+    yield* service.verifyStaging(leadOf(t));
+    yield* service.startE2e(leadOf(t), "Open the page.");
     yield* endTurn(h, service, leadOf(t));
     yield* service.deliver();
   });
@@ -710,9 +717,6 @@ it.effect("setup is a durable conversation and saving never starts the issue que
     );
     assert.equal(h.threads.get(draft.threadId)?.runtimeMode, "approval-required");
     assert.lengthOf((yield* service.board(null)).projects, 0);
-    assert.isTrue(
-      yield* service.dispatchFromAssistant(draft.threadId, "APP-1", "").pipe(Effect.isFailure),
-    );
     assert.isTrue(
       yield* service
         .proposeSetup(ThreadId.make("unrelated"), setupPlan, "Not authorized")
@@ -915,7 +919,7 @@ it.effect("rejects missing deployment checks and duplicate repository setup", ()
 it.effect("the loop gives one issue at a time to a team and moves on after e2e", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service, caller } = yield* h.setup;
+    const { service } = yield* h.setup;
     const team = yield* activeTask(service);
     const lead = leadOf(team);
     assert.equal(team.issue.identifier, "APP-1");
@@ -951,17 +955,17 @@ it.effect("the loop gives one issue at a time to a team and moves on after e2e",
     yield* service.deliver();
     assert.include(turnsOf(h, lead).at(-1), "merged into its integration branch");
     h.setStaging("broken");
-    assert.isTrue(yield* service.verifyStaging(lead, undefined).pipe(Effect.isFailure));
+    assert.isTrue(yield* service.verifyStaging(lead).pipe(Effect.isFailure));
     h.setStaging("healthy");
-    // A leader acts only on its own issue.
-    assert.isTrue(yield* service.verifyStaging(lead, "another-task").pipe(Effect.isFailure));
-    const verified = yield* service.verifyStaging(lead, undefined);
+    // Only the team leader verifies staging.
+    assert.isTrue(yield* service.verifyStaging(first.threadId).pipe(Effect.isFailure));
+    const verified = yield* service.verifyStaging(lead);
     // Staging alone does not release the project; the e2e check does.
     assert.equal(verified.outcome, "verified");
     assert.equal(verified.task.status, "working");
     yield* service.scan();
     assert.lengthOf((yield* service.board(null)).tasks, 1);
-    yield* service.startE2e(lead, undefined, "Open the page.");
+    yield* service.startE2e(lead, "Open the page.");
     yield* endTurn(h, service, lead);
     yield* service.deliver();
     const tester = assistantTaskThreadId(first, "e2e");
@@ -985,9 +989,6 @@ it.effect("the loop gives one issue at a time to a team and moves on after e2e",
     const next = yield* activeTask(service);
     assert.equal(next.issue.identifier, "APP-2");
     assert.deepEqual(h.transitions, ["review"]);
-    // The loop never needed the assistant: its only turn is the one from Start.
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -1002,12 +1003,12 @@ it.effect("posts a Linear update for each phase, with the e2e card last", () =>
     assert.include(h.comments[0]!.body, "The page loads again.");
     assert.include(h.comments[0]!.body, "**Code review:** Covered the fix and its tests.");
     yield* service.deliver();
-    yield* service.verifyStaging(leadOf(first), undefined);
+    yield* service.verifyStaging(leadOf(first));
     // A repeated call returns the recorded deployment without posting twice.
-    yield* service.verifyStaging(leadOf(first), undefined);
+    yield* service.verifyStaging(leadOf(first));
     assert.lengthOf(h.comments, 2);
     assert.include(h.comments[1]!.body, "[staging.example.com](https://staging.example.com)");
-    yield* service.startE2e(leadOf(first), undefined, "Open the page.");
+    yield* service.startE2e(leadOf(first), "Open the page.");
     yield* endTurn(h, service, leadOf(first));
     yield* service.deliver();
     const tester = assistantTaskThreadId(first, "e2e");
@@ -1156,7 +1157,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const h = harness();
-      const { service, caller } = yield* h.setup;
+      const { service } = yield* h.setup;
       const first = yield* activeTask(service);
       const board = yield* service.dispatch({
         projectId: config.projectId,
@@ -1166,22 +1167,15 @@ it.effect(
       const picked = board.tasks.find((t) => t.issue.identifier === "APP-3")!;
       assert.equal(picked.status, "queued");
       assert.isTrue(picked.dispatched);
-      assert.equal((yield* service.dispatchFromAssistant(caller, "APP-3", "Again")).id, picked.id);
-      // A team leader does not dispatch, and nothing outside the project's scope is dispatched.
-      assert.isTrue(
-        yield* service.dispatchFromAssistant(leadOf(first), "APP-2", "").pipe(Effect.isFailure),
-      );
+      assert.equal((yield* dispatchIssue(service, "APP-3", "Again")).id, picked.id);
+      // Nothing outside the project's scope is dispatched.
       h.issues[1] = { ...h.issues[1]!, project: null };
-      assert.isTrue(
-        yield* service.dispatchFromAssistant(caller, "APP-2", "").pipe(Effect.isFailure),
-      );
+      assert.isTrue(yield* dispatchIssue(service, "APP-2").pipe(Effect.isFailure));
       h.issues[1] = {
         ...makeIssue(2),
         state: { id: "done", name: "Done", type: "completed", position: 2, color: "#fff" },
       };
-      assert.isTrue(
-        yield* service.dispatchFromAssistant(caller, "APP-2", "").pipe(Effect.isFailure),
-      );
+      assert.isTrue(yield* dispatchIssue(service, "APP-2").pipe(Effect.isFailure));
       h.issues[1] = makeIssue(2);
 
       yield* service.review({ taskId: first.id, action: "skip", feedback: "Later" });
@@ -1199,7 +1193,7 @@ it.effect(
 
       // Someone else's issue can be dispatched: the person chose it.
       h.issues[1] = { ...makeIssue(2), assignee: null };
-      const later = yield* service.dispatchFromAssistant(caller, "APP-2", "");
+      const later = yield* dispatchIssue(service, "APP-2");
       yield* service.review({ taskId: later.id, action: "skip", feedback: "Taken out" });
       assert.equal((yield* taskById(service, later.id)).status, "skipped");
     }).pipe(Effect.provide(database()), Effect.scoped),
@@ -1208,10 +1202,9 @@ it.effect(
 it.effect("a paused loop takes no new issue, while its team and dispatched issues run", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service, caller } = yield* h.setup;
+    const { service } = yield* h.setup;
     const team = yield* activeTask(service);
     yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
     const paused = yield* service.control({ projectId: config.projectId, action: "pause" });
     assert.equal(paused.projects[0]?.status, "paused");
     // The team at work carries on.
@@ -1231,56 +1224,8 @@ it.effect("a paused loop takes no new issue, while its team and dispatched issue
     assert.equal(dispatched.issue.identifier, "APP-3");
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, leadOf(dispatched)), 1);
-    // Starting the loop again does not wake an assistant that has already run.
     const started = yield* service.control({ projectId: config.projectId, action: "start" });
     assert.equal(started.projects[0]?.status, "running");
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
-  }).pipe(Effect.provide(database()), Effect.scoped),
-);
-
-it.effect("starting again does not wake the assistant", () =>
-  Effect.gen(function* () {
-    const h = harness();
-    const { service, caller } = yield* h.setup;
-    // The assistant's first turn is the briefing Start sent it.
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
-    h.finish(caller);
-    yield* service.control({ projectId: config.projectId, action: "pause" });
-    yield* service.control({ projectId: config.projectId, action: "start" });
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
-    // A restarted server has forgotten what it briefed, and Start still leaves
-    // the assistant alone: the next real wake repeats the instructions.
-    const restarted = yield* h.make;
-    yield* restarted.control({ projectId: config.projectId, action: "start" });
-    yield* restarted.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
-  }).pipe(Effect.provide(database()), Effect.scoped),
-);
-
-it.effect("a revised setup does not wake the assistant on start", () =>
-  Effect.gen(function* () {
-    const h = harness();
-    const { service, caller } = yield* h.setup;
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
-    h.finish(caller);
-    // Configuration changes while the loop is stopped, so Start follows a revision.
-    yield* service.control({ projectId: config.projectId, action: "pause" });
-    const revised = "Never touch the production database.";
-    yield* service.configure({ ...config, instructions: revised });
-    yield* service.control({ projectId: config.projectId, action: "start" });
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
-    // The next real wake carries the revised instructions.
-    const question = yield* service.askDecision(caller, "Which issue should go first?");
-    yield* service.answer({ decisionId: question.id, answer: "APP-2" });
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 2);
-    assert.include(turnsOf(h, caller).at(-1), "The person answered your question");
-    assert.include(turnsOf(h, caller).at(-1), revised);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -1492,7 +1437,7 @@ it.effect("retains ownership and queued turns across service recreation", () =>
 it.effect("answers a decision exactly once in its worker and prevents unattended guessing", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service, caller } = yield* h.setup;
+    const { service } = yield* h.setup;
     const first = yield* takeIssue(h, service);
     yield* service.deliver();
     h.finish(first.threadId);
@@ -1501,10 +1446,8 @@ it.effect("answers a decision exactly once in its worker and prevents unattended
       "Should existing users keep access?",
     );
     assert.equal(decision.taskId, first.id);
-    assert.isTrue(
-      yield* service.messageWorker(caller, first.id, "Just guess").pipe(Effect.isFailure),
-    );
-    assert.isTrue(yield* service.verifyStaging(caller, first.id).pipe(Effect.isFailure));
+    assert.isTrue(yield* service.messageWorker(leadOf(first), "Just guess").pipe(Effect.isFailure));
+    assert.isTrue(yield* service.verifyStaging(leadOf(first)).pipe(Effect.isFailure));
     yield* service.answer({ decisionId: decision.id, answer: "Keep existing access." });
     yield* service.answer({ decisionId: decision.id, answer: "Duplicate" });
     yield* service.deliver();
@@ -1532,57 +1475,6 @@ it.effect("a reviewer's question is answered in the reviewer's thread", () =>
     yield* service.answer({ decisionId: decision.id, answer: "No, remove it." });
     yield* service.deliver();
     assert.include(turnsOf(h, reviewer).at(-1), "No, remove it.");
-  }).pipe(Effect.provide(database()), Effect.scoped),
-);
-
-it.effect("the assistant passes on an answer the person gave in its chat, and only then", () =>
-  Effect.gen(function* () {
-    const h = harness();
-    const { service, caller } = yield* h.setup;
-    const first = yield* takeIssue(h, service);
-    yield* service.deliver();
-    h.finish(first.threadId);
-    const decision = yield* service.askDecision(first.threadId, "Fix the XSS here or separately?");
-    const at = (offset: number) =>
-      DateTime.formatIso(DateTime.makeUnsafe(Date.parse(decision.createdAt) + offset));
-    const message = (id: string, createdAt: string): OrchestrationMessage => ({
-      id: MessageId.make(id),
-      role: "user",
-      text: "Go with your recommendation.",
-      turnId: null,
-      streaming: false,
-      createdAt,
-      updatedAt: createdAt,
-    });
-    const relay = service.relayAnswer(caller, decision.id, "Fix it in this PR.");
-
-    // An earlier message, or one T3 sent itself, is not the person answering.
-    const wake = h.commands.findLast(
-      (c) => c.type === "thread.turn.start" && c.threadId === caller,
-    );
-    h.messages.set(caller, [
-      message("before-the-question", at(-1000)),
-      message(wake?.type === "thread.turn.start" ? wake.message.messageId : "missing", at(1000)),
-    ]);
-    assert.isTrue(yield* relay.pipe(Effect.isFailure));
-    assert.isTrue(
-      yield* service.relayAnswer(first.threadId, decision.id, "Anything").pipe(Effect.isFailure),
-    );
-
-    h.messages.set(caller, [message("person", at(1000))]);
-    const relayed = yield* relay;
-    assert.equal(relayed.answer, "Fix it in this PR.");
-    const board = yield* service.board(null);
-    assert.equal(board.tasks[0]?.status, "working");
-    assert.isTrue(yield* relay.pipe(Effect.isFailure));
-    yield* service.deliver();
-    const reply = h.commands.findLast(
-      (c) => c.type === "thread.turn.start" && c.threadId === first.threadId,
-    );
-    assert.include(
-      reply?.type === "thread.turn.start" ? reply.message.text : "",
-      "through the developer assistant.\nQuestion: Fix the XSS here or separately?\nAnswer: Fix it in this PR.",
-    );
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -1746,20 +1638,20 @@ it.effect("review feedback gives the issue to a new team and never rolls back la
 it.effect("enforces the turn limit and an explicit retry does not reuse old command ids", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service, caller } = yield* h.setup;
+    const { service } = yield* h.setup;
     const first = yield* takeIssue(h, service);
     const lead = leadOf(first);
     yield* service.deliver();
     h.finish(first.threadId);
-    yield* service.messageWorker(caller, first.id, "Fix review feedback");
+    yield* service.messageWorker(lead, "Fix review feedback");
     yield* service.deliver();
     h.finish(first.threadId);
-    assert.isTrue(yield* service.messageWorker(caller, first.id, "Again").pipe(Effect.isFailure));
+    assert.isTrue(yield* service.messageWorker(lead, "Again").pipe(Effect.isFailure));
     yield* service.review({ taskId: first.id, action: "retry", feedback: "Allow another attempt" });
     yield* service.deliver();
     assert.include(turnsOf(h, lead).at(-1), "The person allowed more rounds for APP-1");
     // The leader sends the next round from its own turn.
-    yield* service.messageWorker(lead, undefined, "One more attempt");
+    yield* service.messageWorker(lead, "One more attempt");
     yield* endTurn(h, service, lead);
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, first.threadId), 3);
@@ -1799,15 +1691,13 @@ it.effect("refuses a second project record for the same Git repository", () =>
 it.effect("a pending provider start blocks duplicate delivery and staging acceptance", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service, caller } = yield* h.setup;
+    const { service } = yield* h.setup;
     const first = yield* takeIssue(h, service);
     h.pendingStarts.add(first.threadId);
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, first.threadId), 0);
-    assert.isTrue(
-      yield* service.messageWorker(caller, first.id, "More work").pipe(Effect.isFailure),
-    );
-    assert.isTrue(yield* service.verifyStaging(caller, first.id).pipe(Effect.isFailure));
+    assert.isTrue(yield* service.messageWorker(leadOf(first), "More work").pipe(Effect.isFailure));
+    assert.isTrue(yield* service.verifyStaging(leadOf(first)).pipe(Effect.isFailure));
     h.pendingStarts.delete(first.threadId);
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, first.threadId), 1);
@@ -1855,9 +1745,13 @@ it.effect("serializes concurrent issue starts", () =>
 it.effect("bounds external progress checks, blocking the issue and not the project", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service, caller } = yield* h.setup;
+    const { service } = yield* h.setup;
     const task = yield* activeTask(service);
     const lead = leadOf(task);
+    // Only a team leader waits; its issue carries the count.
+    assert.isTrue(
+      yield* service.waitForExternal(task.threadId, "Deploy is pending").pipe(Effect.isFailure),
+    );
     for (let i = 0; i < 15; i++)
       assert.equal((yield* service.waitForExternal(lead, "Deploy is pending")).outcome, "waiting");
     assert.equal((yield* service.waitForExternal(lead, "Deploy is pending")).outcome, "limit");
@@ -1871,36 +1765,14 @@ it.effect("bounds external progress checks, blocking the issue and not the proje
     yield* service.review({ taskId: task.id, action: "retry", feedback: "Staging is up." });
     assert.equal((yield* service.waitForExternal(lead, "One more check")).outcome, "waiting");
     assert.equal((yield* service.board(null)).projects[0]?.status, "running");
-    // The scan brings the wait back to the leader, not the assistant. Its start
-    // and the retry go first; each queued turn is delivered and finished.
+    // The scan brings the wait back to the leader. Its start and the retry go
+    // first; each queued turn is delivered and finished.
     for (const _ of [1, 2]) {
       yield* service.deliver();
       h.finish(lead);
     }
     yield* service.scan();
     assert.include(turnsOf(h, lead).at(-1), "Waiting: One more check");
-    // Work from before team leaders has only the assistant to stop.
-    let outcome = "waiting";
-    while (outcome === "waiting")
-      outcome = (yield* service.waitForExternal(caller, "Deploy is pending")).outcome;
-    assert.equal(outcome, "stopped");
-    const stopped = (yield* service.board(null)).projects[0]!;
-    assert.equal(stopped.status, "stopped");
-    assert.include(stopped.error!, "15 checks");
-  }).pipe(Effect.provide(database()), Effect.scoped),
-);
-
-it.effect("replaces a deleted assistant thread without losing its active issue", () =>
-  Effect.gen(function* () {
-    const h = harness();
-    const { service, caller } = yield* h.setup;
-    const first = yield* activeTask(service);
-    yield* service.control({ projectId: config.projectId, action: "pause" });
-    h.threads.delete(caller);
-    const restarted = yield* service.control({ projectId: config.projectId, action: "start" });
-    assert.notEqual(restarted.projects[0]?.threadId, caller);
-    assert.equal(restarted.tasks[0]?.id, first.id);
-    assert.isTrue(yield* service.getAgentBoard(caller).pipe(Effect.isFailure));
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -1941,32 +1813,6 @@ it.effect("resuming setup restores its archived conversation", () =>
     h.threads.set(draft.threadId, { ...h.threads.get(draft.threadId)!, archivedAt: timestamp });
     assert.equal((yield* service.beginSetup(setupInput)).threadId, draft.threadId);
     assert.isNull(h.threads.get(draft.threadId)?.archivedAt);
-  }).pipe(Effect.provide(database()), Effect.scoped),
-);
-
-it.effect("starting after the assistant was archived restores its conversation", () =>
-  Effect.gen(function* () {
-    const h = harness();
-    const { service, caller } = yield* h.setup;
-    yield* service.review({
-      taskId: (yield* activeTask(service)).id,
-      action: "skip",
-      feedback: "Not now",
-    });
-    h.finish(caller);
-    h.threads.set(caller, { ...h.threads.get(caller)!, archivedAt: timestamp });
-    yield* service.observe({
-      ...eventBase(caller),
-      type: "thread.archived",
-      payload: { threadId: caller, archivedAt: timestamp, updatedAt: timestamp },
-    });
-    assert.equal((yield* service.board(null)).projects[0]?.status, "stopped");
-    yield* service.configure({ ...config, maxWorkerTurns: 4 });
-    assert.equal((yield* service.board(null)).projects[0]?.threadId, caller);
-    const board = yield* service.control({ projectId: config.projectId, action: "start" });
-    assert.equal(board.projects[0]?.threadId, caller);
-    assert.equal(board.projects[0]?.status, "running");
-    assert.isNull(h.threads.get(caller)?.archivedAt);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -2011,12 +1857,13 @@ it.effect("interrupting a team whose worktree setup failed stops the project", (
 it.effect("a provider request that expired before it was answered closes its decision", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service, caller } = yield* h.setup;
+    const { service } = yield* h.setup;
+    const lead = leadOf(yield* activeTask(service));
     const activity = (kind: string, detail?: string) => ({
-      ...eventBase(caller),
+      ...eventBase(lead),
       type: "thread.activity-appended" as const,
       payload: {
-        threadId: caller,
+        threadId: lead,
         activity: {
           id: EventId.make(kind),
           kind,
@@ -2046,7 +1893,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const h = harness();
-      const { service, caller } = yield* h.setup;
+      const { service } = yield* h.setup;
       const first = yield* takeIssue(h, service);
       yield* service.deliver();
       yield* service.observe({
@@ -2094,8 +1941,6 @@ it.effect(
       yield* service.deliver();
       assert.include(turnsOf(h, leadOf(first)).at(-1), "ended its turn without handing off");
       assert.equal((yield* taskById(service, first.id)).status, "working");
-      // None of it needed the assistant.
-      assert.lengthOf(turnsOf(h, caller), 1);
     }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -2133,9 +1978,9 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const h = harness();
-      const { service, caller } = yield* h.setup;
-      const first = yield* activeTask(service);
-      const lead = leadOf(first);
+      const { service } = yield* h.setupWith({ parallelIssues: 2 });
+      const [first, second] = yield* heldTasks(service);
+      const lead = leadOf(first!);
       h.replayEvents.push({
         ...eventBase(lead),
         type: "thread.activity-appended",
@@ -2154,9 +1999,9 @@ it.effect(
       });
       const activation = yield* Deferred.make<void>();
       const resumed = yield* Deferred.make<void>();
-      // Start's wake for the assistant is still undelivered: its turn marks delivery.
+      // Both leaders' start turns are undelivered: the other team's marks delivery.
       h.onDispatch((command) =>
-        command.type === "thread.turn.start" && command.threadId === caller
+        command.type === "thread.turn.start" && command.threadId === leadOf(second!)
           ? Deferred.succeed(resumed, undefined).pipe(Effect.asVoid)
           : Effect.void,
       );
@@ -2171,75 +2016,41 @@ it.effect(
       yield* Deferred.await(resumed);
       const board = yield* restarted.board(null);
       assert.equal(board.decisions[0]?.question, "A question retained across restart");
-      assert.equal(board.tasks[0]?.status, "waiting");
+      assert.equal(board.tasks.find((t) => t.id === first!.id)?.status, "waiting");
       assert.lengthOf(turnsOf(h, lead), 0);
     }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-it.effect("sends the assistant its instructions once, and again after compaction", () =>
+it.effect("recovery archives the retired developer assistant chat threads", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service, caller } = yield* h.setup;
-    const briefing = "You are the developer assistant for this project";
-    const compaction = (state: string) =>
-      service.observe({
-        ...eventBase(caller),
-        type: "thread.activity-appended",
-        payload: {
-          threadId: caller,
-          activity: {
-            id: EventId.make(`compaction-${state}`),
-            kind: "context-compaction",
-            summary: "Context compacted",
-            tone: "info",
-            turnId: null,
-            createdAt: timestamp,
-            payload: { state },
-          },
-        },
-      });
-    yield* service.deliver();
-    assert.include(turnsOf(h, caller)[0], briefing);
-    h.finish(caller);
-    yield* compaction("compacting");
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
-    // The assistant is not woken by the loop, so compaction restores its instructions at once.
-    yield* compaction("compacted");
-    yield* service.deliver();
-    assert.include(turnsOf(h, caller).at(-1), briefing);
-    assert.include(turnsOf(h, caller).at(-1), "Your conversation was compacted");
-    h.finish(caller);
-    const question = yield* service.askDecision(caller, "Which issue should go first?");
-    yield* service.answer({ decisionId: question.id, answer: "APP-2" });
-    yield* service.deliver();
-    assert.notInclude(turnsOf(h, caller).at(-1), briefing);
-    assert.include(turnsOf(h, caller).at(-1), "APP-2");
-  }).pipe(Effect.provide(database()), Effect.scoped),
-);
-
-it.effect("an idle provider session stopping does not disable the persistent assistant", () =>
-  Effect.gen(function* () {
-    const h = harness();
-    const { service, caller } = yield* h.setup;
-    yield* service.observe({
-      ...eventBase(caller),
-      type: "thread.session-set",
-      payload: {
-        threadId: caller,
-        session: {
-          threadId: caller,
-          status: "stopped",
-          providerName: "test",
-          activeTurnId: null,
-          runtimeMode: "approval-required",
-          lastError: null,
-          updatedAt: timestamp,
-        },
-      },
+    const sql = yield* SqlClient.SqlClient;
+    const { service } = yield* h.setup;
+    const lead = leadOf(yield* activeTask(service));
+    // The project's chat thread, still open, and one the person already deleted.
+    const chat = ThreadId.make("assistant-3f0c1a52-9d1e-4a7b-8c2d-5e6f7a8b9c0d");
+    h.threads.set(chat, {
+      ...h.threads.get(lead)!,
+      id: chat,
+      title: "Developer assistant · App",
+      linkedIssue: null,
     });
-    assert.equal((yield* service.board(null)).projects[0]?.status, "running");
-    yield* service.dispatchFromAssistant(caller, "APP-2", "");
+    yield* sql`INSERT INTO assistant_retired_threads (thread_id) VALUES (${chat}), (${"assistant-deleted"})`;
+    // The leader's start turn is delivered once recovery is done.
+    const recovered = yield* Deferred.make<void>();
+    h.onDispatch((command) =>
+      command.type === "thread.turn.start" && command.threadId === lead
+        ? Deferred.succeed(recovered, undefined).pipe(Effect.asVoid)
+        : Effect.void,
+    );
+    yield* h.makeWithWorkers;
+    yield* Deferred.await(recovered);
+    assert.equal(h.threads.get(chat)?.archivedAt, timestamp);
+    assert.lengthOf(
+      h.commands.filter((c) => c.type === "thread.archive"),
+      1,
+    );
+    assert.lengthOf(yield* sql`SELECT * FROM assistant_retired_threads`, 0);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -2298,7 +2109,7 @@ it.effect("the implementer and reviewer trade rounds without the team leader", (
 it.effect("only the approved commit can be merged, and staging checks that commit", () =>
   Effect.gen(function* () {
     const h = harness();
-    const { service, caller } = yield* h.setup;
+    const { service } = yield* h.setup;
     const first = yield* takeIssue(h, service);
     const lead = leadOf(first);
     const reviewer = assistantTaskThreadId(first, "review");
@@ -2310,8 +2121,8 @@ it.effect("only the approved commit can be merged, and staging checks that commi
     yield* service.requestReview(first.threadId, "Ready");
     yield* endTurn(h, service, first.threadId);
     yield* service.deliver();
-    // Neither the assistant, the leader nor the implementer can approve the work.
-    for (const self of [caller, lead, first.threadId])
+    // Neither the leader nor the implementer can approve the work.
+    for (const self of [lead, first.threadId])
       assert.isTrue(
         yield* service.submitReview(self, "approved", "Self", "").pipe(Effect.isFailure),
       );
@@ -2324,11 +2135,11 @@ it.effect("only the approved commit can be merged, and staging checks that commi
     h.git.head = approved;
     h.git.merged = false;
     assert.isTrue(yield* service.reportMerged(first.threadId, "Unmerged").pipe(Effect.isFailure));
-    assert.isTrue(yield* service.verifyStaging(lead, undefined).pipe(Effect.isFailure));
+    assert.isTrue(yield* service.verifyStaging(lead).pipe(Effect.isFailure));
     h.git.merged = true;
     yield* service.reportMerged(first.threadId, "The page loads again.");
     yield* endTurn(h, service, first.threadId);
-    yield* service.verifyStaging(lead, undefined);
+    yield* service.verifyStaging(lead);
     assert.equal(h.verified.at(-1)?.expectedRevision, approved);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
@@ -2380,7 +2191,7 @@ it.effect("a thread that stops without handing off returns the issue to its team
     assert.lengthOf(turnsOf(h, lead), before + 1);
     assert.include(turnsOf(h, lead).at(-1), "ended its turn without handing off");
     // A question to the person is not a stall.
-    yield* service.messageWorker(lead, undefined, "Keep going");
+    yield* service.messageWorker(lead, "Keep going");
     yield* endTurn(h, service, lead);
     yield* service.deliver();
     const asked = turnsOf(h, lead).length;
@@ -2403,9 +2214,9 @@ it.effect(
       const tester = assistantTaskThreadId(first, "e2e");
       yield* reachMerge(h, service, first);
       yield* service.deliver();
-      assert.isTrue(yield* service.startE2e(lead, undefined, "Too early").pipe(Effect.isFailure));
-      yield* service.verifyStaging(lead, undefined);
-      yield* service.startE2e(lead, undefined, "Open the page.");
+      assert.isTrue(yield* service.startE2e(lead, "Too early").pipe(Effect.isFailure));
+      yield* service.verifyStaging(lead);
+      yield* service.startE2e(lead, "Open the page.");
       yield* endTurn(h, service, lead);
       yield* service.deliver();
       assert.include(turnsOf(h, tester).at(-1), `/evidence/${first.id}`);
@@ -2426,13 +2237,13 @@ it.effect(
       assert.include(turnsOf(h, lead).at(-1), "failed its e2e check");
       assert.deepEqual(h.transitions, []);
 
-      yield* service.messageWorker(lead, undefined, "Fix the 500 on the page.");
+      yield* service.messageWorker(lead, "Fix the 500 on the page.");
       yield* endTurn(h, service, lead);
       yield* service.deliver();
       const fixing = yield* service.requestReview(first.threadId, "Fixed the 500");
       assert.isNull(fixing.merge ?? null);
       assert.isNull(fixing.deployment);
-      assert.isTrue(yield* service.startE2e(lead, undefined, "Again").pipe(Effect.isFailure));
+      assert.isTrue(yield* service.startE2e(lead, "Again").pipe(Effect.isFailure));
     }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -2574,72 +2385,6 @@ it.effect("approving the same commit again still reaches the implementer", () =>
       text.startsWith("Code review approved"),
     );
     assert.lengthOf(approvals, 2);
-  }).pipe(Effect.provide(database()), Effect.scoped),
-);
-
-it.effect("work started before team leaders keeps reporting to the assistant", () =>
-  Effect.gen(function* () {
-    const h = harness();
-    const service = yield* h.initialize;
-    yield* service.configure(config);
-    // A worker the assistant started itself, from before issues had team leaders.
-    const sql = yield* SqlClient.SqlClient;
-    const worker = ThreadId.make("assistant-work-legacy");
-    const legacy = {
-      id: "legacy",
-      projectId: config.projectId,
-      issue: makeIssue(1),
-      threadId: worker,
-      status: "working",
-      brief: "Fix it",
-      summary: "",
-      reviewInstructions: "",
-      feedback: "",
-      turns: 1,
-      turnLimit: 2,
-      deployment: null,
-      error: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      stage: "implement",
-      codeReview: null,
-      merge: null,
-      e2e: null,
-      linearCommentIds: [],
-    };
-    yield* sql`INSERT INTO assistant_tasks (id, project_id, issue_id, thread_id, status, data) VALUES (${"legacy"}, ${config.projectId}, ${"issue-1"}, ${worker}, ${"working"}, ${yield* encodeJson(legacy)})`;
-    h.threads.set(
-      worker,
-      decodeThread({
-        id: worker,
-        projectId: config.projectId,
-        title: "APP-1: Issue 1",
-        modelSelection: config.workerModelSelection,
-        runtimeMode: config.runtimeMode,
-        interactionMode: "default",
-        branch: "assistant/app-1",
-        worktreePath: "/worktrees/legacy",
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        latestTurn: null,
-        session: null,
-        latestUserMessageAt: null,
-        hasPendingApprovals: false,
-        hasPendingUserInput: false,
-        hasActionableProposedPlan: false,
-      }),
-    );
-    const board = yield* service.control({ projectId: config.projectId, action: "start" });
-    const caller = board.projects[0]!.threadId;
-    // The loop leaves the project to the work already in it.
-    assert.lengthOf(board.tasks, 1);
-    yield* service.deliver();
-    assert.include(turnsOf(h, caller).at(-1), "APP-1 was started before issues had team leaders");
-    h.finish(caller);
-    yield* endTurn(h, service, worker);
-    yield* service.deliver();
-    assert.equal((yield* taskById(service, "legacy")).stage, "coordinator");
-    assert.include(turnsOf(h, caller).at(-1), "ended its turn without handing off");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -2869,7 +2614,7 @@ it.effect("the tester cannot be messaged before its run is started", () =>
     const sql = yield* SqlClient.SqlClient;
     yield* sql`DELETE FROM assistant_messages WHERE thread_id = ${assistantTaskThreadId(task, "e2e")}`;
     const refused = yield* service
-      .messageWorker(leadOf(task), undefined, "Check the header too", "e2e")
+      .messageWorker(leadOf(task), "Check the header too", "e2e")
       .pipe(Effect.flip);
     assert.equal(refused.detail, "Start the tester with assistant_start_e2e first.");
   }).pipe(Effect.provide(database()), Effect.scoped),
@@ -3031,7 +2776,7 @@ it.effect("in the worktree the e2e check runs before the merge, and staging deli
     const tester = assistantTaskThreadId(first, "e2e");
     assert.equal(first.e2eEnvironment, "worktree");
     // The check runs on the commit code review approved, so there must be one.
-    const early = yield* service.startE2e(lead, undefined, "Open the page.").pipe(Effect.flip);
+    const early = yield* service.startE2e(lead, "Open the page.").pipe(Effect.flip);
     assert.include(early.detail, "code review approves");
 
     yield* approveReview(h, service, first);
@@ -3043,7 +2788,7 @@ it.effect("in the worktree the e2e check runs before the merge, and staging deli
       .pipe(Effect.flip);
     assert.include(unchecked.detail, "e2e check has not passed");
 
-    yield* service.startE2e(lead, undefined, "Open the page.");
+    yield* service.startE2e(lead, "Open the page.");
     yield* endTurn(h, service, lead);
     yield* service.deliver();
     assert.include(turnsOf(h, tester).at(-1), `in the worktree`);
@@ -3066,7 +2811,7 @@ it.effect("in the worktree the e2e check runs before the merge, and staging deli
     yield* endTurn(h, service, first.threadId);
     yield* service.deliver();
     assert.include(turnsOf(h, lead).at(-1), "Verify staging with assistant_verify_staging");
-    const delivered = yield* service.verifyStaging(lead, undefined);
+    const delivered = yield* service.verifyStaging(lead);
     assert.equal(delivered.task.status, "review");
     // The merged card and the e2e card, and no "deployed, e2e running" card.
     assert.lengthOf(h.comments, 2);
@@ -3096,7 +2841,7 @@ it.effect("a commit the worktree e2e check did not cover cannot be merged", () =
     const lead = leadOf(first);
     const tester = assistantTaskThreadId(first, "e2e");
     yield* approveReview(h, service, first);
-    yield* service.startE2e(lead, undefined, "Open the page.");
+    yield* service.startE2e(lead, "Open the page.");
     yield* endTurn(h, service, lead);
     yield* service.deliver();
     yield* service.submitE2e(tester, {
@@ -3134,7 +2879,7 @@ it.effect("a failed worktree e2e run goes to the team leader with nothing posted
     const lead = leadOf(first);
     const tester = assistantTaskThreadId(first, "e2e");
     yield* approveReview(h, service, first);
-    yield* service.startE2e(lead, undefined, "Open the page.");
+    yield* service.startE2e(lead, "Open the page.");
     yield* endTurn(h, service, lead);
     yield* service.deliver();
     const failed = yield* service.submitE2e(tester, {
@@ -3216,29 +2961,6 @@ it.effect(
       // The idle leader was not sent anything: only the stopped thread continues.
       assert.lengthOf(turnsOf(h, leadOf(second!)), 1);
     }).pipe(Effect.provide(database()), Effect.scoped),
-);
-
-it.effect("the assistant's own turn stopped by a usage limit keeps the loop running", () =>
-  Effect.gen(function* () {
-    const h = harness();
-    const { service, caller } = yield* h.setup;
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
-    h.finish(caller);
-    yield* service.observe(sessionError(caller, LIMIT_ERROR));
-    const board = yield* service.board(null);
-    assert.equal(board.projects[0]?.status, "running");
-    assert.isNull(board.projects[0]?.error);
-    yield* service.deliver();
-    assert.lengthOf(turnsOf(h, caller), 1);
-    yield* TestClock.adjust(Duration.hours(3));
-    yield* service.scan();
-    const resumed = turnsOf(h, caller).at(-1);
-    assert.lengthOf(turnsOf(h, caller), 2);
-    assert.include(resumed, "usage limit stopped your previous turn");
-    // The wake it was answering is repeated, so nothing it was told is lost.
-    assert.include(resumed, "The person started the issue loop");
-  }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
 it.effect("a limit failure with no reset time is tried again after a while", () =>
@@ -3445,7 +3167,7 @@ it.effect("T3 watches a staging deploy for the team leader and starts e2e when i
     yield* reachMerge(h, service, first);
     yield* service.deliver();
     h.setStaging("pending");
-    const watching = yield* service.verifyStaging(lead, undefined, ["web"]);
+    const watching = yield* service.verifyStaging(lead, ["web"]);
     assert.equal(watching.outcome, "watching");
     assert.equal(watching.task.deployWait?.checks, 1);
     assert.deepEqual(watching.task.deployWait?.targetIds, ["web"]);
@@ -3483,7 +3205,7 @@ it.effect("a watched deploy that fails or never lands goes back to the team lead
     yield* reachMerge(h, service, first);
     yield* service.deliver();
     h.setStaging("pending");
-    yield* service.verifyStaging(lead, undefined);
+    yield* service.verifyStaging(lead);
     yield* endTurn(h, service, lead);
     // Forty-five minutes of waiting is where T3 stops and the leader decides.
     yield* TestClock.adjust(Duration.minutes(46));
@@ -3493,7 +3215,7 @@ it.effect("a watched deploy that fails or never lands goes back to the team lead
     assert.include(turnsOf(h, lead).at(-1), "for 45 minutes and it has not verified");
     // The leader takes the next step in the turn T3 just gave it.
     h.setStaging("pending");
-    yield* service.verifyStaging(lead, undefined);
+    yield* service.verifyStaging(lead);
     yield* endTurn(h, service, lead);
     h.setStaging("failed");
     yield* service.scan();
@@ -3513,7 +3235,7 @@ it.effect("a watched deploy in the worktree flow delivers the issue and closes t
     const lead = leadOf(first);
     const tester = assistantTaskThreadId(first, "e2e");
     yield* approveReview(h, service, first);
-    yield* service.startE2e(lead, undefined, "Open the page.");
+    yield* service.startE2e(lead, "Open the page.");
     yield* endTurn(h, service, lead);
     yield* service.deliver();
     yield* service.submitE2e(tester, {
@@ -3528,7 +3250,7 @@ it.effect("a watched deploy in the worktree flow delivers the issue and closes t
     yield* endTurn(h, service, first.threadId);
     yield* service.deliver();
     h.setStaging("pending");
-    assert.equal((yield* service.verifyStaging(lead, undefined)).outcome, "watching");
+    assert.equal((yield* service.verifyStaging(lead)).outcome, "watching");
     yield* endTurn(h, service, lead);
     h.setStaging("healthy");
     yield* service.scan();

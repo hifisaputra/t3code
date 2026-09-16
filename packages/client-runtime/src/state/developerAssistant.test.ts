@@ -15,7 +15,6 @@ const configuredBoard: AssistantBoard = {
   ...emptyBoard,
   projects: [
     {
-      threadId: ThreadId.make("assistant-app"),
       status: "stopped",
       error: null,
       config: {

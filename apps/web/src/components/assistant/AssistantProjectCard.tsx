@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import {
   ArrowRightIcon,
+  BotIcon,
   EllipsisIcon,
   GitBranchIcon,
   GlobeIcon,
@@ -53,7 +54,6 @@ import {
   useAssistantAction,
   type StatusTone,
 } from "./assistantUi";
-import { THREAD_KIND, ThreadKindIcon } from "./threadKinds";
 
 function CardShell({ children, tone }: { children: ReactNode; tone?: StatusTone }) {
   return (
@@ -219,7 +219,6 @@ export function AssistantProjectCard({
   activeTasks,
   linearProjectName,
   providers,
-  onOpenThread,
   onEditSetup,
 }: {
   environmentId: EnvironmentId;
@@ -228,19 +227,15 @@ export function AssistantProjectCard({
   activeTasks: ReadonlyArray<AssistantTask>;
   linearProjectName: string | null;
   providers: ReadonlyArray<ServerProvider>;
-  onOpenThread: (threadId: ThreadId) => void;
   onEditSetup: () => void;
 }) {
   const control = useAtomCommand(developerAssistant.control);
   const { pending, run } = useAssistantAction();
-  const coordinator = useThreadShell({ environmentId, threadId: project.threadId });
-  const coordinatorBusy = threadIsBusy(coordinator);
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
   const limitHold = projectLimitHold(project);
   const activity = describeProjectActivity({
     project,
     activeTasks,
-    coordinatorBusy,
     limitResumesAt: limitHold ? formatUpcomingTimestamp(limitHold, timestampFormat) : null,
   });
   const [dispatching, setDispatching] = useState(false);
@@ -262,7 +257,7 @@ export function AssistantProjectCard({
           action === "start"
             ? `Could not start ${title}`
             : action === "wake"
-              ? "Could not wake the assistant"
+              ? "Could not check for work"
               : action === "pause" && stopped
                 ? `Could not resume ${title}`
                 : `Could not pause ${title}`,
@@ -278,7 +273,7 @@ export function AssistantProjectCard({
     <CardShell tone={activity.tone}>
       <div className="flex items-start gap-2.5">
         <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-violet-500/10">
-          <ThreadKindIcon kind="coordinator" className="size-4" />
+          <BotIcon aria-hidden className="size-4 text-violet-600 dark:text-violet-300" />
         </span>
         <div className="min-w-0 flex-1">
           <h3 className="truncate font-semibold text-sm">{title}</h3>
@@ -291,11 +286,7 @@ export function AssistantProjectCard({
                 : "all issues"}
           </p>
         </div>
-        <StatusPill
-          tone={activity.tone}
-          label={activity.status}
-          pulse={activity.tone === "active" && coordinatorBusy}
-        />
+        <StatusPill tone={activity.tone} label={activity.status} />
       </div>
 
       <div
@@ -402,17 +393,6 @@ export function AssistantProjectCard({
           <TooltipPopup className="max-w-64">
             Give one issue to the next team, ahead of the loop&apos;s own picks.
           </TooltipPopup>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button size="sm" variant="outline" onClick={() => onOpenThread(project.threadId)} />
-            }
-          >
-            <MessageSquareIcon />
-            Chat
-          </TooltipTrigger>
-          <TooltipPopup className="max-w-64">{THREAD_KIND.coordinator.does}</TooltipPopup>
         </Tooltip>
         <Menu>
           <MenuTrigger

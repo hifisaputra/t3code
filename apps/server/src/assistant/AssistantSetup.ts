@@ -62,7 +62,9 @@ export function isValidBranchName(branch: string): boolean {
     .every((segment) => segment !== "" && !segment.startsWith(".") && !segment.endsWith(".lock"));
 }
 
-const INSTRUCTION_SECTIONS = ["assistant", "lead", "implement", "review", "e2e"] as const;
+// Stored setups may still carry an "assistant" section from the retired
+// assistant chat. No thread reads it, so it is neither budgeted nor refused.
+const INSTRUCTION_SECTIONS = ["lead", "implement", "review", "e2e"] as const;
 /** A count as the refusals quote it, so it reads the way the budget is written. */
 const characters = (count: number) => count.toLocaleString("en-US");
 
@@ -70,7 +72,7 @@ const characters = (count: number) => count.toLocaleString("en-US");
  * The budgets only bite once the setup writes sections: a setup from before they
  * existed keeps sending its one string to every thread. They exist so that
  * repository facts end up in a repository document, which every thread can read,
- * instead of in five prompts.
+ * instead of in four prompts.
  */
 function validateInstructions(config: AssistantProjectConfig) {
   const sections = INSTRUCTION_SECTIONS.map((audience) => ({
@@ -253,20 +255,11 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const root = yield* snapshots.getProjectShellById(input.projectId);
     if (Option.isNone(root)) return yield* fail("Select an existing T3 project.");
     const configured = yield* sql<{
-      config: string;
       status: string;
-      thread_id: string;
-    }>`SELECT config, status, thread_id FROM assistant_projects WHERE project_id = ${input.projectId}`;
+    }>`SELECT status FROM assistant_projects WHERE project_id = ${input.projectId}`;
     // An issue in progress may stay: saving keeps what it depends on unchanged.
     if (configured[0]?.status === "running")
       return yield* fail("Pause the assistant before changing its setup.");
-    if (configured[0]) {
-      const coordinator = yield* snapshots.getThreadShellById(
-        ThreadId.make(configured[0].thread_id),
-      );
-      if (Option.isSome(coordinator) && (yield* options.threadBusy(coordinator.value)))
-        return yield* fail("Wait for the assistant's turn to finish before setup.");
-    }
     const repositoryKey = yield* verifier.repositoryKey(root.value.workspaceRoot);
     const conflicts =
       yield* sql`SELECT project_id FROM assistant_projects WHERE repository_key = ${repositoryKey} AND project_id != ${input.projectId}

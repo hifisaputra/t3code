@@ -25,6 +25,8 @@ import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSna
 import * as Settings from "../serverSettings.ts";
 import Migration from "../persistence/Migrations/052_DeveloperAssistant.ts";
 import SetupMigration from "../persistence/Migrations/053_AssistantSetup.ts";
+import UsageLimitMigration from "../persistence/Migrations/056_AssistantUsageLimit.ts";
+import RetireChatMigration from "../persistence/Migrations/057_RetireAssistantCoordinator.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 import { isValidBranchName, makeSetup, validateSetupPlan } from "./AssistantSetup.ts";
 
@@ -231,6 +233,8 @@ const harness = (options?: { workspaceRoot?: string; claudeHome?: string }) =>
     yield* sql`CREATE TABLE orchestration_events (sequence INTEGER)`;
     yield* Migration;
     yield* SetupMigration;
+    yield* UsageLimitMigration;
+    yield* RetireChatMigration;
     const commands: OrchestrationCommand[] = [];
     const seen = new Set<string>();
     const threads = new Map<ThreadId, OrchestrationThreadShell>();
@@ -379,8 +383,8 @@ it.effect("shows a revision what recent deliveries left for a person to check", 
     const sql = yield* SqlClient.SqlClient;
     const h = yield* harness();
     const draft = yield* h.setup.begin(preferences);
-    yield* sql`INSERT INTO assistant_projects (project_id, repository_key, thread_id, config)
-      VALUES (${project.id}, ${"/repos/app/.git"}, ${"assistant-coordinator"}, ${encodeConfig(saved)})`;
+    yield* sql`INSERT INTO assistant_projects (project_id, repository_key, config)
+      VALUES (${project.id}, ${"/repos/app/.git"}, ${encodeConfig(saved)})`;
     // Nothing is appended before the project has delivered anything partial.
     assert.notInclude(
       (yield* h.setup.read(draft.threadId)).instructions,

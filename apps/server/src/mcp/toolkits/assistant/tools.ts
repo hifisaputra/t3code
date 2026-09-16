@@ -2,7 +2,6 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
 import {
-  AssistantBoard,
   AssistantCriteria,
   AssistantDecision,
   AssistantE2eCheck,
@@ -11,7 +10,6 @@ import {
   AssistantSetupPlan,
   AssistantThreadRole,
   DeveloperAssistantError,
-  LinearIssueSummary,
   PreviewAutomationUnavailableError,
   assistantTaskE2eEnvironment,
 } from "@t3tools/contracts";
@@ -21,16 +19,9 @@ import { McpInvocationContext, requireMcpCapability } from "../../McpInvocationC
 const dependencies = [DeveloperAssistant, McpInvocationContext];
 const failure = Schema.Union([DeveloperAssistantError, PreviewAutomationUnavailableError]);
 const text = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(20000));
-const taskId = Schema.optionalKey(
-  Schema.String.check(Schema.isNonEmpty()).annotate({
-    description:
-      "The issue's taskId from assistant_get_board. A team leader leaves it out: its own issue is implied.",
-  }),
-);
 const thread = Schema.optionalKey(
   AssistantThreadRole.annotate({
-    description:
-      'Which of the issue\'s threads: "implement" (default), "review", "e2e", or "lead" for its team leader.',
+    description: 'Which of the issue\'s threads: "implement" (default), "review" or "e2e".',
   }),
 );
 
@@ -47,38 +38,6 @@ export const AssistantToolkit = Toolkit.make(
       "Propose or revise the configuration from an active assistant setup conversation after inspecting the repository and staging workflow. Does not save configuration or start issues. The person reviews and saves it in the web UI. Only the setup thread can use this tool; models, issue scope and permissions remain the person's selected preferences.",
     parameters: Schema.Struct({ plan: AssistantSetupPlan, summary: text }),
     success: AssistantSetup,
-    failure,
-    dependencies,
-  }),
-  Tool.make("assistant_pause", {
-    description:
-      "Developer assistant only: pause this project's issue loop when the person asks you to. The loop takes no new issues from Linear; the team at work finishes its issue, and issues the person dispatches still run. The person resumes the loop from the assistant board.",
-    // MCP returns text; an empty result fails to encode and reads as a server error.
-    success: Schema.String,
-    failure,
-    dependencies,
-  }),
-  Tool.make("assistant_get_board", {
-    description:
-      "Developer assistant only: read the project's setup, the issues the loop would take next (candidates), queued, active, declined and delivered work, and open decisions.",
-    success: Schema.Struct({
-      ...AssistantBoard.fields,
-      candidates: Schema.Array(LinearIssueSummary),
-    }),
-    failure,
-    dependencies,
-  }).annotate(Tool.Readonly, true),
-  Tool.make("assistant_dispatch_issue", {
-    description:
-      "Developer assistant only: dispatch a Linear issue to a team when the person asks for it. It goes ahead of the loop's own picks and runs even while the loop is paused: a free project gives it to a new team right away; otherwise it waits for the active issue to finish. Its team leader takes it or asks the person, and cannot decline it. Skipping it from the board removes it from the queue.",
-    parameters: Schema.Struct({
-      reference: text,
-      note: Schema.String.check(Schema.isMaxLength(20000)).annotate({
-        description:
-          "What the person wants from this issue, for its team leader. Empty when they said nothing more.",
-      }),
-    }),
-    success: AssistantTask,
     failure,
     dependencies,
   }),
@@ -114,8 +73,8 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_read_thread", {
     description:
-      "Read one of a managed issue's threads (lead, implement, review or e2e): the end of its conversation, its session status, the shared worktree path and the issue's recorded review, merge, deployment and e2e results.",
-    parameters: Schema.Struct({ taskId, thread }),
+      "Team leader: read one of a managed issue's threads (lead, implement, review or e2e): the end of its conversation, its session status, the shared worktree path and the issue's recorded review, merge, deployment and e2e results.",
+    parameters: Schema.Struct({ thread }),
     success: Schema.Struct({
       task: AssistantTask,
       transcript: Schema.Array(Schema.Struct({ role: Schema.String, text: Schema.String })),
@@ -127,29 +86,16 @@ export const AssistantToolkit = Toolkit.make(
   }).annotate(Tool.Readonly, true),
   Tool.make("assistant_message_worker", {
     description:
-      "Send follow-up work to one of the active issue's threads: the implementer (default), the code reviewer, the e2e tester once its run has started, or (from the developer assistant) the team leader. Use it when a thread stalls, an e2e failure needs a fix, or the person redirected the work; the implementer and reviewer hand work to each other on their own. Waits while another of the issue's threads runs; refuses with unanswered decisions or past the worker turn limit. End your turn afterward.",
-    parameters: Schema.Struct({ taskId, message: text, thread }),
+      "Team leader: send follow-up work to one of your issue's threads: the implementer (default), the code reviewer, or the e2e tester once its run has started. Use it when a thread stalls, an e2e failure needs a fix, or the person redirected the work; the implementer and reviewer hand work to each other on their own. Waits while another of the issue's threads runs; refuses with unanswered decisions or past the worker turn limit. End your turn afterward.",
+    parameters: Schema.Struct({ message: text, thread }),
     success: AssistantTask,
     failure,
     dependencies,
   }),
   Tool.make("assistant_ask_decision", {
     description:
-      "Ask the person a product question in the decision inbox, preserving the issue/thread link. Include context and a recommendation. Available to the developer assistant and every thread of a managed issue. After asking, end your turn and wait; the answer arrives in the thread that asked.",
+      "Ask the person a product question in the decision inbox, preserving the issue/thread link. Include context and a recommendation. Available to every thread of an active managed issue. After asking, end your turn and wait; the answer arrives in the thread that asked.",
     parameters: Schema.Struct({ question: text }),
-    success: AssistantDecision,
-    failure,
-    dependencies,
-  }),
-  Tool.make("assistant_answer_decision", {
-    description:
-      "Developer assistant only: pass on the person's answer to an open decision (yours or one of an issue's threads) when they gave it to you in this chat. T3 records it and sends it to the thread that asked, which then continues. Relay what the person said, with any context the asker needs; never answer from your own judgment. Refuses unless the person has written to you since the question was asked. Get the decision id from assistant_get_board.",
-    parameters: Schema.Struct({
-      decisionId: text,
-      answer: text.annotate({
-        description: "The person's answer, in their words, for the thread that asked.",
-      }),
-    }),
     success: AssistantDecision,
     failure,
     dependencies,
@@ -197,7 +143,6 @@ export const AssistantToolkit = Toolkit.make(
     description:
       "Team leader, after the implementer reports the merge: check the saved deployment targets or custom check. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts the update on the Linear issue; in staging mode call assistant_start_e2e next, and in worktree mode this is the delivery: T3 then puts the issue in review. While staging is still deploying T3 watches it for you and messages you when it is verified or fails, so end your turn; a deployment that failed comes back here for you to decide.",
     parameters: Schema.Struct({
-      taskId,
       targetIds: Schema.optionalKey(Schema.Array(text)),
     }),
     success: Schema.Struct({
@@ -211,7 +156,7 @@ export const AssistantToolkit = Toolkit.make(
   Tool.make("assistant_start_e2e", {
     description:
       "Team leader: start (or rerun) the issue's e2e tester, on staging after assistant_verify_staging succeeds, or in the team's worktree on the approved commit before the merge when the project is set up that way. The brief gives the tester the pages or endpoints affected, the data it needs and what to clean up; T3 gives it the acceptance criteria you listed when you took the issue. The tester reports one result per criterion with screenshots. End your turn afterward.",
-    parameters: Schema.Struct({ taskId, brief: text }),
+    parameters: Schema.Struct({ brief: text }),
     success: AssistantTask,
     failure,
     dependencies,
@@ -256,7 +201,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_wait", {
     description:
-      "Wait for external progress, such as CI or a staging deployment, without polling in the agent. Supply a concrete reason and end your turn. T3 wakes you in about a minute. Use assistant_ask_decision instead for a lasting blocker requiring a person.",
+      "Team leader: wait for external progress, such as CI or a staging deployment, without polling in the agent. Supply a concrete reason and end your turn. T3 wakes you in about a minute. Use assistant_ask_decision instead for a lasting blocker requiring a person.",
     parameters: Schema.Struct({ reason: text }),
     success: Schema.String,
     failure,
@@ -291,26 +236,6 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
       const { service, caller } = yield* scope;
       return yield* service.proposeSetup(caller, input.plan, input.summary.trim());
     }),
-  assistant_pause: () =>
-    Effect.gen(function* () {
-      const { service, caller } = yield* scope;
-      yield* service.pause(caller);
-      return "Paused. The loop takes no new issues; the team at work finishes its issue, and issues the person dispatches still run. The person resumes the loop from the assistant board.";
-    }),
-  assistant_get_board: () =>
-    Effect.gen(function* () {
-      const { service, caller } = yield* scope;
-      return yield* service.getAgentBoard(caller);
-    }),
-  assistant_dispatch_issue: (input) =>
-    Effect.gen(function* () {
-      const { service, caller } = yield* scope;
-      return yield* service.dispatchFromAssistant(
-        caller,
-        input.reference.trim(),
-        input.note.trim(),
-      );
-    }),
   assistant_accept_issue: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
@@ -328,22 +253,17 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_read_thread: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.readThread(caller, input.taskId, input.thread);
+      return yield* service.readThread(caller, input.thread);
     }),
   assistant_message_worker: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.messageWorker(caller, input.taskId, input.message.trim(), input.thread);
+      return yield* service.messageWorker(caller, input.message.trim(), input.thread);
     }),
   assistant_ask_decision: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.askDecision(caller, input.question.trim());
-    }),
-  assistant_answer_decision: (input) =>
-    Effect.gen(function* () {
-      const { service, caller } = yield* scope;
-      return yield* service.relayAnswer(caller, input.decisionId.trim(), input.answer.trim());
     }),
   assistant_request_review: (input) =>
     Effect.gen(function* () {
@@ -368,13 +288,13 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_verify_staging: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      const result = yield* service.verifyStaging(caller, input.taskId, input.targetIds);
+      const result = yield* service.verifyStaging(caller, input.targetIds);
       return { ...result, note: verifyNote(result) };
     }),
   assistant_start_e2e: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.startE2e(caller, input.taskId, input.brief.trim());
+      return yield* service.startE2e(caller, input.brief.trim());
     }),
   assistant_submit_e2e: (input) =>
     Effect.gen(function* () {
@@ -396,7 +316,6 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
       const result = yield* service.waitForExternal(caller, input.reason.trim());
       if (result.outcome === "limit")
         return "T3 has checked back 15 times without this completing, so the issue is now blocked for the person to look at. End your turn.";
-      if (result.outcome === "stopped") return "The assistant is stopped. End your turn.";
       return "T3 checks back in about a minute. End your turn now.";
     }),
 });

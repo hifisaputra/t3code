@@ -113,7 +113,6 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
           </Text>
           {p.error && <Text className="text-foreground-muted">{p.error}</Text>}
           <View className="flex-row flex-wrap gap-2">
-            <Action title="Conversation" onPress={() => openThread(p.threadId)} />
             <Action
               title={p.status === "running" ? "Pause loop" : "Start loop"}
               disabled={busy}

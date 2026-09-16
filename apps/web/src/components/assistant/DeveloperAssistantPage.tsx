@@ -240,7 +240,6 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
                   activeTasks={activeTasksFor(data, project.config.projectId)}
                   linearProjectName={linearProjectName(project.config.linearProjectId)}
                   providers={environment.serverConfig?.providers ?? []}
-                  onOpenThread={openThread}
                   onEditSetup={() => openSetup(project.config.projectId)}
                 />
               ))}

@@ -52,7 +52,6 @@ const project = ({
     acceptedState: "Done",
     maxWorkerTurns: 6,
   },
-  threadId: ThreadId.make("assistant-1"),
   status: "running",
   error: null,
   ...overrides,
@@ -89,8 +88,8 @@ const task = (overrides: Partial<AssistantTask> = {}): AssistantTask => {
 const decision = (overrides: Partial<AssistantDecision> = {}): AssistantDecision => ({
   id: "decision-1",
   projectId,
-  threadId: ThreadId.make("assistant-1"),
-  taskId: null,
+  threadId: ThreadId.make("assistant-lead-task-1"),
+  taskId: "task-1",
   requestId: null,
   kind: "decision",
   question: "Which way?",
@@ -115,32 +114,33 @@ describe("project status text", () => {
   });
 
   it("treats any other note as the reason the queue stopped", () => {
-    const failed = project({ status: "stopped", error: "The assistant thread was deleted." });
-    expect(projectFailure(failed)).toBe("The assistant thread was deleted.");
-    expect(
-      describeProjectActivity({ project: failed, activeTasks: [], coordinatorBusy: false }),
-    ).toMatchObject({ tone: "attention", status: "Stopped" });
+    const failed = project({ status: "stopped", error: "Linear rejected the API key" });
+    expect(projectFailure(failed)).toBe("Linear rejected the API key");
+    expect(describeProjectActivity({ project: failed, activeTasks: [] })).toMatchObject({
+      tone: "attention",
+      status: "Stopped",
+    });
     // Three declines in a row pause the loop with a reason, and the pill says so.
     const paused = project({ status: "paused", error: "Team leaders declined 3 issues in a row" });
-    expect(
-      describeProjectActivity({ project: paused, activeTasks: [], coordinatorBusy: false }),
-    ).toMatchObject({ tone: "attention", status: "Paused" });
+    expect(describeProjectActivity({ project: paused, activeTasks: [] })).toMatchObject({
+      tone: "attention",
+      status: "Paused",
+    });
     expect(buildInbox(board({ projects: [paused] }))).toMatchObject([{ kind: "paused" }]);
   });
 
   it("a paused loop still shows its team at work", () => {
     const active = task();
     const paused = project({ status: "paused" });
-    expect(
-      describeProjectActivity({ project: paused, activeTasks: [active], coordinatorBusy: false }),
-    ).toMatchObject({
+    expect(describeProjectActivity({ project: paused, activeTasks: [active] })).toMatchObject({
       tone: "active",
       status: "Paused",
       headline: `Working on ${active.issue.identifier}`,
     });
-    expect(
-      describeProjectActivity({ project: paused, activeTasks: [], coordinatorBusy: false }),
-    ).toMatchObject({ tone: "paused", headline: "Taking only issues you dispatch" });
+    expect(describeProjectActivity({ project: paused, activeTasks: [] })).toMatchObject({
+      tone: "paused",
+      headline: "Taking only issues you dispatch",
+    });
   });
 
   it("names the issues a project holds, and counts them once there are several", () => {
@@ -151,7 +151,6 @@ describe("project status text", () => {
       describeProjectActivity({
         project: project(),
         activeTasks: [one, two],
-        coordinatorBusy: false,
       }),
     ).toMatchObject({
       headline: `Working on ${one.issue.identifier} and ${two.issue.identifier}`,
@@ -160,7 +159,6 @@ describe("project status text", () => {
       describeProjectActivity({
         project: project(),
         activeTasks: [one, two, three],
-        coordinatorBusy: false,
       }),
     ).toMatchObject({
       headline: "Working on 3 issues",
@@ -170,7 +168,6 @@ describe("project status text", () => {
       describeProjectActivity({
         project: project({ status: "stopped" }),
         activeTasks: [one, two],
-        coordinatorBusy: false,
       }),
     ).toMatchObject({
       headline: `Holding ${one.issue.identifier} and ${two.issue.identifier}`,
@@ -181,9 +178,7 @@ describe("project status text", () => {
 
   it("says a running loop with automatic picking off is waiting on a dispatch", () => {
     const manual = project({ autoPick: false });
-    expect(
-      describeProjectActivity({ project: manual, activeTasks: [], coordinatorBusy: false }),
-    ).toMatchObject({
+    expect(describeProjectActivity({ project: manual, activeTasks: [] })).toMatchObject({
       tone: "idle",
       status: "Running",
       headline: "Waiting for you to dispatch an issue",
@@ -192,19 +187,18 @@ describe("project status text", () => {
     expect(buildInbox(board({ projects: [manual] }))).toEqual([]);
     // Its team at work still outranks the setting.
     const active = task();
-    expect(
-      describeProjectActivity({ project: manual, activeTasks: [active], coordinatorBusy: false }),
-    ).toMatchObject({ tone: "active", headline: `Working on ${active.issue.identifier}` });
+    expect(describeProjectActivity({ project: manual, activeTasks: [active] })).toMatchObject({
+      tone: "active",
+      headline: `Working on ${active.issue.identifier}`,
+    });
     // Automatic picking on is the default, and a paused loop keeps its own text.
-    expect(
-      describeProjectActivity({ project: project(), activeTasks: [], coordinatorBusy: false })
-        .headline,
-    ).toBe("Watching for issues");
+    expect(describeProjectActivity({ project: project(), activeTasks: [] }).headline).toBe(
+      "Watching for issues",
+    );
     expect(
       describeProjectActivity({
         project: project({ status: "paused", autoPick: false }),
         activeTasks: [],
-        coordinatorBusy: false,
       }),
     ).toMatchObject({ tone: "paused", headline: "Taking only issues you dispatch" });
   });
@@ -212,38 +206,31 @@ describe("project status text", () => {
   it("ignores a stale waiting note once the queue is stopped", () => {
     const stopped = project({ status: "stopped", error: "Waiting: deploy" });
     expect(projectWaitingReason(stopped)).toBeNull();
-    expect(
-      describeProjectActivity({ project: stopped, activeTasks: [], coordinatorBusy: false }).tone,
-    ).toBe("paused");
+    expect(describeProjectActivity({ project: stopped, activeTasks: [] }).tone).toBe("paused");
   });
 
-  it("prefers what the assistant is doing over what it is waiting on", () => {
+  it("names what the project waits on ahead of the issues it holds", () => {
     const active = task();
     const running = project({ error: "Waiting: deploy" });
-    expect(
-      describeProjectActivity({ project: running, activeTasks: [active], coordinatorBusy: true })
-        .headline,
-    ).toBe("Assistant is thinking");
-    expect(
-      describeProjectActivity({ project: running, activeTasks: [active], coordinatorBusy: false }),
-    ).toMatchObject({ tone: "waiting", detail: "deploy" });
-    expect(
-      describeProjectActivity({ project: project(), activeTasks: [active], coordinatorBusy: false })
-        .headline,
-    ).toBe(`Working on ${active.issue.identifier}`);
+    expect(describeProjectActivity({ project: running, activeTasks: [active] })).toMatchObject({
+      tone: "waiting",
+      detail: "deploy",
+    });
+    expect(describeProjectActivity({ project: project(), activeTasks: [active] }).headline).toBe(
+      `Working on ${active.issue.identifier}`,
+    );
   });
 
   it("says a usage limit holds the project, and names when it resets", () => {
     const nowMs = Date.parse("2026-09-14T13:00:00.000Z");
     const limited = project({ limitedUntil: "2026-09-14T15:00:00.000Z" });
     expect(projectLimitHold(limited, nowMs)).toBe("2026-09-14T15:00:00.000Z");
-    // The threads are idle because of the limit, so the hold outranks both the
-    // assistant's own turn and the issues its teams still hold.
+    // The threads are idle because of the limit, so the hold outranks the
+    // issues its teams still hold.
     expect(
       describeProjectActivity({
         project: limited,
         activeTasks: [task()],
-        coordinatorBusy: true,
         limitResumesAt: "3:00 PM",
         nowMs,
       }),
@@ -258,7 +245,6 @@ describe("project status text", () => {
       describeProjectActivity({
         project: project({ status: "paused", limitedUntil: "2026-09-14T15:00:00.000Z" }),
         activeTasks: [],
-        coordinatorBusy: false,
         nowMs,
       }),
     ).toMatchObject({
@@ -273,15 +259,16 @@ describe("project status text", () => {
     // The server leaves the stamp in place once it has told the threads to continue.
     const past = project({ limitedUntil: "2026-09-14T12:00:00.000Z" });
     expect(projectLimitHold(past, nowMs)).toBeNull();
-    expect(
-      describeProjectActivity({ project: past, activeTasks: [], coordinatorBusy: false, nowMs })
-        .headline,
-    ).toBe("Watching for issues");
+    expect(describeProjectActivity({ project: past, activeTasks: [], nowMs }).headline).toBe(
+      "Watching for issues",
+    );
     const stopped = project({ status: "stopped", limitedUntil: "2026-09-14T15:00:00.000Z" });
     expect(projectLimitHold(stopped, nowMs)).toBeNull();
-    expect(
-      describeProjectActivity({ project: stopped, activeTasks: [], coordinatorBusy: false, nowMs }),
-    ).toMatchObject({ tone: "paused", status: "Stopped", headline: "Stopped" });
+    expect(describeProjectActivity({ project: stopped, activeTasks: [], nowMs })).toMatchObject({
+      tone: "paused",
+      status: "Stopped",
+      headline: "Stopped",
+    });
   });
 
   it("shows a failure ahead of a usage limit", () => {
@@ -294,7 +281,6 @@ describe("project status text", () => {
       describeProjectActivity({
         project: broken,
         activeTasks: [],
-        coordinatorBusy: false,
         limitResumesAt: "3:00 PM",
         nowMs,
       }),
@@ -309,11 +295,11 @@ describe("project status text", () => {
 describe("describeTaskPhase", () => {
   const base = { workerBusy: false, workerNeedsInput: false, step: null, hasOpenDecision: false };
 
-  it("separates a coding worker from one waiting on the assistant", () => {
+  it("separates a coding worker from one whose turn has ended", () => {
     expect(
       describeTaskPhase({ ...base, task: task(), workerBusy: true, step: "Run tests" }),
     ).toEqual({ tone: "active", label: "Coding", detail: "Run tests" });
-    expect(describeTaskPhase({ ...base, task: task() }).label).toBe("With the assistant");
+    expect(describeTaskPhase({ ...base, task: task() }).label).toBe("Worker is next");
   });
 
   it("points at the inbox only when a decision there is open", () => {
@@ -335,11 +321,11 @@ describe("describeTaskPhase", () => {
       describeTaskPhase({ ...base, task: task({ stage: "e2e" }), workerNeedsInput: true }).detail,
     ).toBe("The e2e tester asked something in its thread.");
     const merged = task({
-      stage: "coordinator",
+      stage: "lead",
       merge: { commit: "a".repeat(40), summary: "Fixed", at: "2026-09-13T00:00:00.000Z" },
     });
     expect(describeTaskPhase({ ...base, task: merged }).detail).toBe(
-      "Merged after code review. The assistant is checking the staging deploy.",
+      "Merged after code review. The team leader is checking the staging deploy.",
     );
   });
 
@@ -353,7 +339,7 @@ describe("describeTaskPhase", () => {
       describeTaskPhase({ ...base, task: coding, workerBusy: true, waitingOn: "review" }).label,
     ).toBe("Coding");
     expect(describeTaskPhase({ ...base, task: task(), waitingOn: "review" }).label).toBe(
-      "With the assistant",
+      "Worker is next",
     );
   });
 
@@ -459,7 +445,7 @@ describe("buildInbox", () => {
   });
 
   it("reports a failed queue once, as the paused project", () => {
-    const failed = project({ status: "stopped", error: "The assistant thread was deleted." });
+    const failed = project({ status: "stopped", error: "Linear rejected the API key" });
     const held = task({ status: "blocked", error: "The worker thread was deleted." });
     expect(buildInbox(board({ projects: [failed], tasks: [held] }))).toMatchObject([
       { kind: "paused" },
@@ -473,9 +459,7 @@ describe("buildInbox", () => {
     expect(buildInbox(board({ projects: [stuck] }))).toMatchObject([
       { kind: "paused", reason: "Linear rejected the API key." },
     ]);
-    expect(
-      describeProjectActivity({ project: stuck, activeTasks: [], coordinatorBusy: false }),
-    ).toMatchObject({
+    expect(describeProjectActivity({ project: stuck, activeTasks: [] })).toMatchObject({
       tone: "attention",
       status: "Running",
       headline: "Stuck on a problem",
@@ -484,9 +468,10 @@ describe("buildInbox", () => {
     // A waiting note on a running project is progress, and stays out of the inbox.
     const waiting = project({ error: "Waiting: staging deploy is running" });
     expect(buildInbox(board({ projects: [waiting] }))).toEqual([]);
-    expect(
-      describeProjectActivity({ project: waiting, activeTasks: [], coordinatorBusy: false }),
-    ).toMatchObject({ tone: "waiting", detail: "staging deploy is running" });
+    expect(describeProjectActivity({ project: waiting, activeTasks: [] })).toMatchObject({
+      tone: "waiting",
+      detail: "staging deploy is running",
+    });
   });
 
   it("lists setups only once their proposal is ready", () => {
@@ -522,19 +507,19 @@ describe("taskPipeline", () => {
 
   it("follows the issue from code to e2e", () => {
     expect(states(task({ stage: "implement" }))).toBe(
-      "code:current review:todo merge:todo staging:todo e2e:todo",
+      "take:done code:current review:todo merge:todo staging:todo e2e:todo",
     );
     expect(states(task({ stage: "review" }))).toBe(
-      "code:done review:current merge:todo staging:todo e2e:todo",
+      "take:done code:done review:current merge:todo staging:todo e2e:todo",
     );
     expect(states(task({ stage: "implement", ...approved }))).toBe(
-      "code:done review:done merge:current staging:todo e2e:todo",
+      "take:done code:done review:done merge:current staging:todo e2e:todo",
     );
-    expect(states(task({ stage: "coordinator", ...merged }))).toBe(
-      "code:done review:done merge:done staging:current e2e:todo",
+    expect(states(task({ stage: "lead", ...merged }))).toBe(
+      "take:done code:done review:done merge:done staging:current e2e:todo",
     );
     expect(states(task({ stage: "e2e", ...deployed }))).toBe(
-      "code:done review:done merge:done staging:done e2e:current",
+      "take:done code:done review:done merge:done staging:done e2e:current",
     );
   });
 
@@ -543,20 +528,18 @@ describe("taskPipeline", () => {
       stage: "implement",
       codeReview: { ...approved.codeReview, verdict: "changes-requested" },
     });
-    expect(taskPipeline(findings)?.[1]).toMatchObject({ state: "todo", note: "Changes requested" });
+    expect(taskPipeline(findings)?.[2]).toMatchObject({ state: "todo", note: "Changes requested" });
     const e2e = { verdict: "failed", report: "", humanChecks: [], screenshots: [], at } as const;
-    expect(taskPipeline(task({ stage: "coordinator", ...deployed, e2e }))?.[4]).toMatchObject({
-      state: "failed",
-      note: "Failed on staging",
-    });
     // The fix goes back to the worker while the old merge and deployment stay on record.
     const fixing = task({ stage: "implement", ...deployed, e2e });
-    expect(states(fixing)).toBe("code:current review:todo merge:todo staging:todo e2e:todo");
-    expect(taskPipeline(fixing)?.[0]?.note).toBe("Fixing the e2e failure");
+    expect(states(fixing)).toBe(
+      "take:done code:current review:todo merge:todo staging:todo e2e:todo",
+    );
+    expect(taskPipeline(fixing)?.[1]?.note).toBe("Fixing the e2e failure");
   });
 
   it("starts with the team leader taking the issue, and gives it staging", () => {
-    const led = (overrides: Partial<AssistantTask>) => task({ leader: true, ...overrides });
+    const led = (overrides: Partial<AssistantTask>) => task(overrides);
     expect(states(led({ stage: "lead", turns: 0 }))).toBe(
       "take:current code:todo review:todo merge:todo staging:todo e2e:todo",
     );
@@ -574,7 +557,7 @@ describe("taskPipeline", () => {
 
   it("puts the e2e check before the merge when the issue runs it in the worktree", () => {
     const led = (overrides: Partial<AssistantTask>) =>
-      task({ leader: true, e2eEnvironment: "worktree", turns: 1, ...overrides });
+      task({ e2eEnvironment: "worktree", turns: 1, ...overrides });
     const passed = {
       ...approved,
       e2e: {
@@ -636,9 +619,10 @@ describe("previewLine", () => {
 });
 
 describe("assistantThreadKind", () => {
-  it("tells the coordinator, setup and each issue thread apart by id", () => {
+  it("tells setup and each issue thread apart by id", () => {
     const id = "8d0c8385-df68-422e-b90a-db197f3c0263";
-    expect(assistantThreadKind(`assistant-${id}`)).toBe("coordinator");
+    // The retired assistant chat thread is an ordinary thread now.
+    expect(assistantThreadKind(`assistant-${id}`)).toBeNull();
     expect(assistantThreadKind(`assistant-work-${id}`)).toBe("implement");
     expect(assistantThreadKind(`assistant-review-${id}`)).toBe("review");
     expect(assistantThreadKind(`assistant-e2e-${id}`)).toBe("e2e");

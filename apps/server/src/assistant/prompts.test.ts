@@ -7,7 +7,6 @@ import {
   type AssistantTask,
 } from "@t3tools/contracts";
 import {
-  assistantInstructions,
   e2eBrief,
   e2eInstructions,
   leadInstructions,
@@ -27,6 +26,7 @@ const config: AssistantProjectConfig = {
   readyStates: [],
   instructions: "The shared policy: ask before a migration.",
   roleInstructions: {
+    // Left in stored setups by the retired assistant chat; no thread reads it.
     assistant: "ASSISTANT SECTION",
     lead: "LEAD SECTION",
     implement: "IMPLEMENT SECTION",
@@ -77,7 +77,6 @@ const prompts = (
   project: AssistantProjectConfig,
   issue: AssistantTask = task,
 ): Record<string, string> => ({
-  assistant: assistantInstructions(project),
   lead: leadInstructions(project, issue),
   implement: workerInstructions(project, issue),
   review: reviewerInstructions(project, issue),
@@ -90,6 +89,7 @@ describe("project instructions by audience", () => {
     for (const [audience, text] of Object.entries(written)) {
       expect(text, audience).toContain("The shared policy: ask before a migration.");
       expect(text, audience).toContain(`${audience.toUpperCase()} SECTION`);
+      expect(text, audience).not.toContain("ASSISTANT SECTION");
       for (const other of Object.keys(written).filter((name) => name !== audience))
         expect(text, `${audience} has ${other}`).not.toContain(`${other.toUpperCase()} SECTION`);
     }

@@ -350,8 +350,8 @@ export function AssistantSetupDialog({
 
           <Group title="Models">
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Assistant" hint="Picks issues, reviews and merges the work.">
-                {picker(model, setModel, "Assistant model")}
+              <Field label="Team leader" hint="Takes each issue and makes the calls for its team.">
+                {picker(model, setModel, "Team leader model")}
               </Field>
               <Field label="Coding worker" hint="Writes the code in each issue's worktree.">
                 {picker(workerModel, setWorkerModel, "Coding model")}

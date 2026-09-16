@@ -23,12 +23,6 @@ export const THREAD_KIND: Record<
     readonly does: string;
   }
 > = {
-  coordinator: {
-    label: "Assistant",
-    icon: BotIcon,
-    className: "text-violet-600 dark:text-violet-300",
-    does: "The developer assistant. Tells you what the issue loop is doing, changes what it does next, and releases to production when you ask. Answer any question here.",
-  },
   lead: {
     label: "Team leader",
     icon: FlagIcon,

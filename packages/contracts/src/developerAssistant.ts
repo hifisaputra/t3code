@@ -259,17 +259,8 @@ export type AssistantDeployment = typeof AssistantDeployment.Type;
 export const AssistantThreadRole = Schema.Literals(["lead", "implement", "review", "e2e"]);
 export type AssistantThreadRole = typeof AssistantThreadRole.Type;
 
-/**
- * Who holds the issue right now: one of its threads. `coordinator` is work
- * started before issues had team leaders, held by the developer assistant.
- */
-export const AssistantTaskStage = Schema.Literals([
-  "lead",
-  "implement",
-  "review",
-  "coordinator",
-  "e2e",
-]);
+/** Who holds the issue right now: one of its threads. */
+export const AssistantTaskStage = Schema.Literals(["lead", "implement", "review", "e2e"]);
 export type AssistantTaskStage = typeof AssistantTaskStage.Type;
 
 /** Why a team leader did not take an issue, and the issue as it stood then. */
@@ -422,7 +413,7 @@ export const AssistantTask = Schema.Struct({
   linearCommentIds: Schema.optionalKey(Schema.Array(Schema.String)),
   /** The Linear state the issue was left in on delivery; moving it elsewhere is a decision. */
   deliveredState: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  /** Run by a team leader. Earlier work reports to the developer assistant instead. */
+  /** Always true: every issue runs with a team leader. Kept so stored tasks decode. */
   leader: Schema.optionalKey(Schema.Boolean),
   /** Picked by the person rather than the loop: its team leader takes it or asks, never declines. */
   dispatched: Schema.optionalKey(Schema.Boolean),
@@ -460,18 +451,17 @@ export const assistantTaskThreadId = (
 ): ThreadId =>
   role === "implement" ? task.threadId : ThreadId.make(`assistant-${role}-${task.id}`);
 
-/** What an assistant thread does: the project's developer assistant, a setup conversation, or one of an issue's threads. */
-export type AssistantThreadKind = "coordinator" | "setup" | AssistantThreadRole;
+/** What an assistant thread does: a setup conversation or one of an issue's threads. */
+export type AssistantThreadKind = "setup" | AssistantThreadRole;
 
 const ISSUE_THREAD_ID = /^assistant-(work|review|e2e|lead|setup)-/;
 const TEAM_THREAD_ID = /^assistant-(work|review|e2e|lead)-(.+)$/;
-const COORDINATOR_THREAD_ID = /^assistant-[0-9a-f]{8}-[0-9a-f]{4}-/;
 
 /**
  * The managed issue one of a team's threads belongs to, and which of its
  * threads it is, read from the id the server assigns (see
- * assistantTaskThreadId). Null for the developer assistant, a setup
- * conversation and every thread that is not the assistant's.
+ * assistantTaskThreadId). Null for a setup conversation and every thread that
+ * is not the assistant's.
  */
 export const assistantTeamThread = (
   threadId: string,
@@ -489,7 +479,7 @@ export const assistantThreadKind = (threadId: string): AssistantThreadKind | nul
   const match = ISSUE_THREAD_ID.exec(threadId);
   if (match)
     return match[1] === "work" ? "implement" : (match[1] as "review" | "e2e" | "lead" | "setup");
-  return COORDINATOR_THREAD_ID.test(threadId) ? "coordinator" : null;
+  return null;
 };
 
 export const AssistantDecision = Schema.Struct({
@@ -515,7 +505,6 @@ export type AssistantProjectStatus = typeof AssistantProjectStatus.Type;
 
 export const AssistantProject = Schema.Struct({
   config: AssistantProjectConfig,
-  threadId: ThreadId,
   status: AssistantProjectStatus,
   error: Schema.NullOr(Schema.String),
   /**

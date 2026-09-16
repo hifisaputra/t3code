@@ -91,7 +91,6 @@ export function describeProjectActivity(input: {
   project: AssistantProject;
   /** Every issue the project holds right now, in the order the board lists them. */
   activeTasks: ReadonlyArray<AssistantTask>;
-  coordinatorBusy: boolean;
   /**
    * The usage-limit reset already in the person's own clock format. The caller
    * formats it because the preference lives in the settings store, which this
@@ -100,8 +99,7 @@ export function describeProjectActivity(input: {
   limitResumesAt?: string | null;
   nowMs?: number;
 }): ProjectActivity {
-  const { project, activeTasks, coordinatorBusy, limitResumesAt, nowMs = Date.now() } = input;
-  const [firstTask] = activeTasks;
+  const { project, activeTasks, limitResumesAt, nowMs = Date.now() } = input;
   // A running loop records a failure too, when its scan cannot advance (a
   // revoked Linear key, a state name that no longer exists). It clears only on
   // the next scan that works, so the person has to see it meanwhile.
@@ -140,18 +138,6 @@ export function describeProjectActivity(input: {
       detail: limitResumesAt
         ? `Work continues by itself once it resets at ${limitResumesAt}. Start now to try sooner.`
         : "Work continues by itself once it resets. Start now to try sooner.",
-    };
-  if (coordinatorBusy)
-    return {
-      tone: "active",
-      status,
-      headline: "Assistant is thinking",
-      detail:
-        activeTasks.length === 1 && firstTask
-          ? `${firstTask.issue.identifier} · ${firstTask.issue.title}`
-          : activeTasks.length > 1
-            ? identifierList(activeTasks)
-            : null,
     };
   if (waiting)
     return {
@@ -269,16 +255,7 @@ export function describeTaskPhase(input: {
         };
       const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
       const e2ePassed = Boolean(task.e2e) && task.e2e?.verdict !== "failed";
-      switch (task.stage) {
-        default:
-          // Work started before issues had review and e2e threads.
-          return workerBusy
-            ? { tone: "active", label: "Coding", detail: step }
-            : {
-                tone: "idle",
-                label: "With the assistant",
-                detail: "The worker finished a round. The assistant is reviewing it.",
-              };
+      switch (task.stage ?? "implement") {
         case "implement":
           if (workerBusy)
             return task.codeReview?.verdict === "approved"
@@ -333,17 +310,6 @@ export function describeTaskPhase(input: {
                       ? "Code review approved the change. The team leader starts the e2e check in the worktree."
                       : "The team leader is deciding the next step.",
           };
-        case "coordinator":
-          return {
-            tone: "idle",
-            label: "With the assistant",
-            detail:
-              task.e2e?.verdict === "failed"
-                ? "It failed on staging. The assistant is deciding on a fix."
-                : task.merge && !task.deployment
-                  ? "Merged after code review. The assistant is checking the staging deploy."
-                  : "The assistant is deciding the next step.",
-          };
       }
     }
   }
@@ -384,10 +350,6 @@ const TO_STAGING_WORKTREE_E2E: ReadonlyArray<PipelineStepDef> = [
 const TAKE_ON: PipelineStepDef = { key: "take", label: "Take on", kind: "lead" };
 const LED_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING];
 const LED_WORKTREE_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING_WORKTREE_E2E];
-// Work from before team leaders: the assistant checked staging itself.
-const ASSISTANT_PIPELINE = TO_STAGING.map((step) =>
-  step.kind === "lead" ? { ...step, kind: "coordinator" as const } : step,
-);
 
 /**
  * Where an issue is on its way to staging, from what the server recorded.
@@ -396,12 +358,8 @@ const ASSISTANT_PIPELINE = TO_STAGING.map((step) =>
 export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> | null {
   if (task.stage === undefined) return null;
   const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
-  const steps = task.leader
-    ? inWorktree
-      ? LED_WORKTREE_PIPELINE
-      : LED_PIPELINE
-    : ASSISTANT_PIPELINE;
-  const offset = task.leader ? 1 : 0;
+  const steps = inWorktree ? LED_WORKTREE_PIPELINE : LED_PIPELINE;
+  const offset = 1;
   const approved = task.codeReview?.verdict === "approved";
   const e2eFailed = task.e2e?.verdict === "failed";
   const e2ePassed = Boolean(task.e2e) && !e2eFailed;
@@ -419,7 +377,6 @@ export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> |
         case "implement":
           return offset + (approved && e2ePassed && !task.merge ? 3 : 0);
         case "lead":
-        case "coordinator":
           // A failed run keeps the issue on its step while the leader decides.
           if (e2eFailed) return offset + 2;
           if (task.deployment) return steps.length;
@@ -437,7 +394,6 @@ export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> |
       case "implement":
         return offset + (approved && !task.merge ? 2 : 0);
       case "lead":
-      case "coordinator":
         return offset + (task.deployment ? 4 : task.merge ? 3 : approved ? 2 : 0);
     }
   })();
@@ -473,9 +429,7 @@ export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> |
         ? "done"
         : index > at
           ? "todo"
-          : step.key === "e2e" &&
-              e2eFailed &&
-              (task.stage === "coordinator" || task.stage === "lead")
+          : step.key === "e2e" && e2eFailed && task.stage === "lead"
             ? "failed"
             : "current",
     note: notes[step.key] ?? null,
@@ -586,8 +540,8 @@ export function buildInbox(board: AssistantBoard): ReadonlyArray<InboxItem> {
     }
     if (!assistantTaskHoldsProject(task.status)) continue;
     const project = projects.get(task.projectId);
-    // A blocked issue in a running project is the assistant's to repair. It
-    // becomes the person's when the assistant has no rounds left to spend, or
+    // A blocked issue in a running project is its team's to repair. It
+    // becomes the person's when the team has no rounds left to spend, or
     // when nothing is running that could pick it up. The server counts a round
     // before it queues that round's message, so `turns === turnLimit` on an
     // issue still in flight is the last round running, not a failure: only a
@@ -754,7 +708,7 @@ const INSTRUCTION_SECTIONS: ReadonlyArray<{
   readonly audience: AssistantInstructionAudience;
   readonly label: string;
 }> = [
-  { audience: "assistant", label: "Assistant" },
+  // The "assistant" section had only the retired chat to read it; a saved one is not shown.
   { audience: "lead", label: "Team leader" },
   { audience: "implement", label: "Implementation worker" },
   { audience: "review", label: "Code reviewer" },

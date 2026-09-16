@@ -195,7 +195,7 @@ function SetupProposal({
             {proposal.assignedToMe ? "Assigned to you" : "Anyone's"} in{" "}
             {proposal.readyStates.length ? proposal.readyStates.join(", ") : "unstarted states"}
           </Fact>
-          <Fact label="Assistant">{modelLabel(providers, proposal.modelSelection)}</Fact>
+          <Fact label="Team leader">{modelLabel(providers, proposal.modelSelection)}</Fact>
           <Fact label="Coding worker">{modelLabel(providers, proposal.workerModelSelection)}</Fact>
           {roleSkills ? (
             <Fact label="Role skills">

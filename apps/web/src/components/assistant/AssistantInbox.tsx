@@ -13,7 +13,6 @@ import {
   ChevronDownIcon,
   ExternalLinkIcon,
   MessageCircleQuestionIcon,
-  MessageSquareIcon,
   OctagonAlertIcon,
   PauseCircleIcon,
   PlayIcon,
@@ -258,9 +257,6 @@ function DecisionCard({
   const task = decision.taskId ? context.tasks.find((t) => t.id === decision.taskId) : undefined;
   const options = decision.kind === "decision" ? decisionOptions(decision.question) : [];
   const asker = THREAD_KIND[assistantThreadKind(decision.threadId) ?? "implement"];
-  const coordinator = context.projects.find(
-    (p) => p.config.projectId === decision.projectId,
-  )?.threadId;
   const askedBy = (
     <>
       <asker.icon aria-hidden className={cn("size-3.5", asker.className)} />
@@ -386,22 +382,9 @@ function DecisionCard({
           className="[&_textarea]:max-h-48 [&_textarea]:min-h-14"
         />
         <div className="flex flex-wrap items-center gap-2">
-          {coordinator && coordinator !== decision.threadId ? (
-            <button
-              type="button"
-              onClick={() => context.onOpenThread(coordinator)}
-              className="inline-flex min-w-0 flex-1 items-center gap-1 text-left text-muted-foreground text-xs hover:text-foreground"
-            >
-              <MessageSquareIcon aria-hidden className="size-3.5 shrink-0" />
-              <span className="min-w-0">
-                Or tell the assistant in its chat. It passes your answer on.
-              </span>
-            </button>
-          ) : (
-            <span className="min-w-0 flex-1 text-muted-foreground text-xs">
-              Replying in the thread works too.
-            </span>
-          )}
+          <span className="min-w-0 flex-1 text-muted-foreground text-xs">
+            Replying in the thread works too.
+          </span>
           <Button type="submit" size="sm" disabled={!draft.trim() || pending !== null}>
             {pending ? <Spinner className="size-3.5" /> : <SendHorizontalIcon />}
             Send answer
@@ -772,9 +755,6 @@ function PausedProjectCard({
         >
           {pending ? <Spinner className="size-3.5" /> : <PlayIcon />}
           Start again
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => context.onOpenThread(project.threadId)}>
-          Ask what happened
         </Button>
       </div>
     </InboxRow>
