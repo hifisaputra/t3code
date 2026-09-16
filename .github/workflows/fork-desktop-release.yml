@@ -272,6 +272,8 @@ jobs:
             "release/*.blockmap" \
             "release/*.yml"; do
             for file in $pattern; do
+              # electron-builder's debug dump is not an updater manifest.
+              [[ "$(basename "$file")" == "builder-debug.yml" ]] && continue
               cp "$file" release-publish/
             done
           done
