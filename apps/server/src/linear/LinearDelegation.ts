@@ -151,15 +151,19 @@ export const make = Effect.gen(function* () {
   ) {
     const rows = yield* outbox.withCreationLock(
       sql<{
-        id: string;
-      }>`SELECT id FROM linear_agent_sessions WHERE id = ${event.agentSession.id} AND task_id IS NOT NULL`,
+        task_id: string;
+      }>`SELECT task_id FROM linear_agent_sessions WHERE id = ${event.agentSession.id} AND task_id IS NOT NULL`,
     );
     if (!rows[0]) return false;
-    // Phase 2 routes replies to the team; until then say where to answer.
+    // A reply or stop goes to the team's assistant; the delivery stays pending
+    // until it was handled, so a failure is retried.
     if (event.action === "prompted")
-      yield* enqueueOutgoing(`${deliveryId}:team`, event.agentSession.id, {
-        type: "thought",
-        body: "Replies on Linear do not reach the team yet. Answer in T3 Code.",
+      yield* outbox.teamPrompt({
+        deliveryId,
+        sessionId: event.agentSession.id,
+        taskId: rows[0].task_id,
+        body: event.agentActivity?.content?.body ?? event.agentActivity?.body ?? "",
+        signal: event.agentActivity?.signal ?? null,
       });
     yield* sql`UPDATE linear_agent_deliveries SET processed = 1 WHERE id = ${deliveryId}`;
     return true;

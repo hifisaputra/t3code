@@ -137,3 +137,30 @@ it.effect("records a created session against its task and builds thread links", 
     assert.isTrue(yield* outbox.connected);
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
 });
+
+it.effect("hands a team reply to the registered handler and fails without one", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const outbox = yield* h.make;
+    const input = {
+      deliveryId: "d1",
+      sessionId: "s",
+      taskId: "task",
+      body: "Blue, please",
+      signal: null,
+    };
+    assert.isTrue(yield* outbox.teamPrompt(input).pipe(Effect.isFailure));
+    const handled: Outbox.TeamPromptInput[] = [];
+    yield* outbox.setTeamPrompt((next) =>
+      Effect.sync(() => {
+        handled.push(next);
+      }),
+    );
+    yield* outbox.teamPrompt(input);
+    assert.deepEqual(handled, [input]);
+    yield* outbox.setTeamPrompt(() =>
+      Effect.fail(new LinearOperationError({ operation: "agentSession", detail: "Busy" })),
+    );
+    assert.isTrue(yield* outbox.teamPrompt(input).pipe(Effect.isFailure));
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});

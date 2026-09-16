@@ -11,6 +11,8 @@ import {
   linearFailureDetail,
   linearFeedback,
   mergedComment,
+  sessionNotes,
+  withSessionNote,
 } from "./linearUpdates.ts";
 
 const deployment = {
@@ -256,6 +258,45 @@ describe("linearFeedback", () => {
     ).toBe(
       "Moved back to In Progress in Linear without a comment. Ask the person what should change.",
     );
+  });
+
+  it("adds replies from the Linear session after the comments, leaving earlier feedback out", () => {
+    const feedback = withSessionNote(
+      withSessionNote("Requested in Linear (moved to Todo):\n\nOld round.", "Make it blue."),
+      "And bigger.",
+    );
+    expect(sessionNotes("Old round.")).toBeNull();
+    expect(sessionNotes(feedback)).toBe("Make it blue.\n\nAnd bigger.");
+    expect(
+      linearFeedback({
+        comments: [{ id: "c1", body: "Wrong colour", createdAt: "2" }],
+        since: "1",
+        postedIds: [],
+        stateName: "Todo",
+        notes: sessionNotes(feedback),
+      }),
+    ).toBe("Requested in Linear (moved to Todo):\n\nWrong colour\n\nMake it blue.\n\nAnd bigger.");
+  });
+
+  it("leaves out the app's own session replies and replies already kept as notes", () => {
+    expect(
+      linearFeedback({
+        comments: [
+          {
+            id: "c1",
+            body: "**Verified on staging: ready to accept**",
+            createdAt: "2",
+            authorIsApp: true,
+          },
+          { id: "c2", body: "Make it blue.", createdAt: "3" },
+          { id: "c3", body: "Wrong colour", createdAt: "4" },
+        ],
+        since: "1",
+        postedIds: [],
+        stateName: "Todo",
+        notes: "Make it blue.",
+      }),
+    ).toBe("Requested in Linear (moved to Todo):\n\nWrong colour\n\nMake it blue.");
   });
 });
 

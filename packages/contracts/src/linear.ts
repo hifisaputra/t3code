@@ -122,6 +122,8 @@ export const LinearIssueComment = Schema.Struct({
   /** ISO 8601. */
   createdAt: Schema.String,
   author: Schema.NullOr(LinearUser),
+  /** Written by an app user, such as T3 Code's own agent session replies. */
+  authorIsApp: Schema.optionalKey(Schema.Boolean),
 });
 export type LinearIssueComment = typeof LinearIssueComment.Type;
 

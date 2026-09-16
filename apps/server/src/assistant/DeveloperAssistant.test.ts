@@ -34,6 +34,7 @@ import {
   LinearAgentOutbox,
   type OutboxContent,
   type TaskSyncResolver,
+  type TeamPromptHandler,
 } from "../linear/LinearAgentOutbox.ts";
 import { LinearApi, LinearAppCredential } from "../linear/LinearApi.ts";
 import { LinearOAuth } from "../linear/LinearOAuth.ts";
@@ -56,6 +57,7 @@ import SetupMigration from "../persistence/Migrations/053_AssistantSetup.ts";
 import ParallelMigration from "../persistence/Migrations/055_AssistantParallelIssues.ts";
 import UsageLimitMigration from "../persistence/Migrations/056_AssistantUsageLimit.ts";
 import RetireChatMigration from "../persistence/Migrations/057_RetireAssistantCoordinator.ts";
+import LinearRepliesMigration from "../persistence/Migrations/059_AssistantLinearReplies.ts";
 import * as Assistant from "./DeveloperAssistant.ts";
 import { AssistantEvidence } from "./AssistantEvidence.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
@@ -159,6 +161,7 @@ function harness() {
     sessions: [] as string[],
     queued: [] as Array<{ id: string; sessionId: string; content: OutboxContent }>,
     resolver: undefined as TaskSyncResolver | undefined,
+    teamPrompt: undefined as TeamPromptHandler | undefined,
     writes: [] as string[],
   };
   const asApp = (operation: string) =>
@@ -190,6 +193,10 @@ function harness() {
       setTaskSync: (resolver) =>
         Effect.sync(() => {
           app.resolver = resolver;
+        }),
+      setTeamPrompt: (handler) =>
+        Effect.sync(() => {
+          app.teamPrompt = handler;
         }),
       threadLink: (threadId, label = "T3 Code thread") =>
         Effect.succeed({ label, url: `https://t3.example.com/env/${threadId}` }),
@@ -521,6 +528,7 @@ function harness() {
     yield* ParallelMigration;
     yield* UsageLimitMigration;
     yield* RetireChatMigration;
+    yield* LinearRepliesMigration;
     return yield* make;
   });
   /** A configured, running project; overrides change the setup it runs with. */
@@ -3535,5 +3543,264 @@ it.effect("a declined issue keeps its comment and ends its session with the reas
       "response:Not taken: The issue has no acceptance criteria.",
     ]);
     assert.equal(h.app.queued.at(-1)?.content.type, "response");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+/** The person replies on the team's Linear session, as Linear delegation hands it on. */
+const linearReply = (
+  h: Harness,
+  t: AssistantTask,
+  deliveryId: string,
+  body: string,
+  signal?: string,
+) =>
+  h.app.teamPrompt!({
+    deliveryId,
+    sessionId: t.linearSession?.id ?? "none",
+    taskId: t.id,
+    body,
+    signal: signal ?? null,
+  });
+const queuedBody = (h: Harness, id: string) => {
+  const content = h.app.queued.find((item) => item.id === id)?.content;
+  return content && "body" in content ? content.body : undefined;
+};
+
+it.effect("a question asked in T3 is answered by a reply on the Linear session, once", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    yield* service.deliver();
+    h.finish(first.threadId);
+    const decision = yield* service.askDecision(
+      first.threadId,
+      "Should existing users keep access?",
+    );
+    assert.equal(
+      queuedBody(h, `${first.id}:decision:${decision.id}`),
+      "Implementer asks:\n\nShould existing users keep access?\n\nReply here to answer.",
+    );
+    assert.equal(
+      h.app.queued.find((item) => item.id.includes(":decision:"))?.content.type,
+      "elicitation",
+    );
+    const waiting = yield* taskById(service, first.id);
+    assert.equal(waiting.status, "waiting");
+    yield* linearReply(h, waiting, "d1", "Keep existing access.");
+    assert.equal((yield* taskById(service, first.id)).status, "working");
+    assert.equal((yield* service.board(null)).decisions[0]?.answer, "Keep existing access.");
+    assert.equal(sessionLog(h).at(-1), "thought:Answer sent to the implementer.");
+    // Answered from Linear, so T3 does not post that it was answered in T3.
+    assert.isFalse(sessionLog(h).some((entry) => entry.startsWith("thought:Answered in T3")));
+    const queued = h.app.queued.length;
+    yield* service.deliver();
+    assert.include(turnsOf(h, first.threadId).at(-1), "Answer: Keep existing access.");
+    const turns = h.commands.length;
+    // Linear redelivers the same reply: nothing happens again.
+    yield* linearReply(h, waiting, "d1", "Keep existing access.");
+    yield* service.deliver();
+    assert.equal(h.app.queued.length, queued);
+    assert.equal(h.commands.length, turns);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a reply on Linear answers the oldest open question and names the next", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    yield* service.deliver();
+    h.finish(first.threadId);
+    const older = yield* service.askDecision(first.threadId, "Which page first?");
+    const newer = yield* service.askDecision(
+      first.threadId,
+      "Keep the old URL?\nIt is linked from emails.",
+    );
+    yield* linearReply(h, first, "d1", "The settings page.");
+    const decisions = (yield* service.board(null)).decisions;
+    assert.equal(decisions.find((d) => d.id === older.id)?.answer, "The settings page.");
+    assert.isNull(decisions.find((d) => d.id === newer.id)?.answer);
+    assert.equal(
+      queuedBody(h, `${first.id}:linear-reply:d1`),
+      "Answer sent to the implementer.\n\nStill open: Keep the old URL?",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect(
+  "an answer in T3 closes the Linear question, and a later reply is a note to the leader",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      h.app.connected = true;
+      const { service } = yield* h.setup;
+      const first = yield* takeIssue(h, service);
+      yield* service.deliver();
+      h.finish(first.threadId);
+      const decision = yield* service.askDecision(
+        first.threadId,
+        "Should existing users keep access?",
+      );
+      yield* service.answer({ decisionId: decision.id, answer: "Keep it." });
+      assert.equal(sessionLog(h).at(-1), "thought:Answered in T3 Code: Keep it.");
+      yield* linearReply(h, first, "d2", "Also mind the footer.");
+      const sql = yield* SqlClient.SqlClient;
+      const notes = yield* sql<{
+        text: string;
+      }>`SELECT text FROM assistant_messages WHERE thread_id = ${leadOf(first)} AND id = ${`${first.id}:lead:linear:d2`}`;
+      assert.deepEqual(
+        notes.map((note) => note.text),
+        [
+          "The person wrote on the Linear issue:\nAlso mind the footer.\nTake it into account; ask with assistant_ask_decision if it changes the agreed scope.",
+        ],
+      );
+      assert.equal(sessionLog(h).at(-1), "thought:Passed to the team leader.");
+    }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a provider request waiting in a team thread is not answered from Linear", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    yield* service.observe({
+      ...eventBase(lead),
+      type: "thread.activity-appended",
+      payload: {
+        threadId: lead,
+        activity: {
+          id: EventId.make("approval"),
+          kind: "approval.requested",
+          summary: "Approve the command",
+          tone: "approval",
+          turnId: null,
+          createdAt: timestamp,
+          payload: { requestId: "approval-1" },
+        },
+      },
+    });
+    yield* linearReply(h, team, "d1", "approve");
+    assert.isNull((yield* service.board(null)).decisions[0]?.answer);
+    assert.equal(
+      sessionLog(h).at(-1),
+      "thought:A team leader thread is waiting on a permission or input request, which can only be answered in T3 Code.",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect(
+  "stop on the Linear session interrupts the team and blocks the issue with one error",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      h.app.connected = true;
+      const { service } = yield* h.setup;
+      const first = yield* takeIssue(h, service);
+      yield* service.deliver();
+      yield* linearReply(h, first, "d1", "", "stop");
+      const stopped = yield* taskById(service, first.id);
+      assert.equal(stopped.status, "blocked");
+      assert.equal(
+        stopped.error,
+        "Stopped from Linear. Resume or skip the issue on the developer assistant board in T3 Code.",
+      );
+      const interrupted = h.commands.flatMap((c) =>
+        c.type === "thread.turn.interrupt" ? [c.threadId] : [],
+      );
+      assert.includeMembers(interrupted, [leadOf(first), first.threadId]);
+      const errors = h.app.queued.filter((item) => item.content.type === "error");
+      assert.lengthOf(errors, 1);
+      assert.equal(
+        errors[0]!.content.type === "error" ? errors[0]!.content.body : "",
+        "Stopped from Linear. Resume or skip the issue on the developer assistant board in T3 Code.",
+      );
+      // A redelivered stop changes nothing.
+      yield* linearReply(h, first, "d1", "", "stop");
+      assert.lengthOf(
+        h.app.queued.filter((item) => item.content.type === "error"),
+        1,
+      );
+      assert.deepEqual(
+        h.commands.flatMap((c) => (c.type === "thread.turn.interrupt" ? [c.threadId] : [])),
+        interrupted,
+      );
+    }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a reply on a delivered team's session is kept for the send-back", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const delivered = yield* deliverIssue(h, service, first);
+    assert.equal(delivered.status, "review");
+    yield* linearReply(h, delivered, "d1", "The button should be blue.");
+    const noted = yield* taskById(service, first.id);
+    assert.equal(noted.status, "review");
+    assert.include(noted.feedback, "The button should be blue.");
+    assert.match(
+      queuedBody(h, `${first.id}:linear-reply:d1`) ?? "",
+      /^Noted for a send-back\. Move the issue back to In Progress .* or move it to Done to accept it\.$/,
+    );
+    // Moving the issue back sends the reply with it, without T3's marker.
+    h.issues[0] = {
+      ...h.issues[0]!,
+      state: { id: "todo", name: "Todo", type: "unstarted", position: 0, color: "#fff" },
+    };
+    yield* service.scan();
+    const sentBack = yield* taskById(service, first.id);
+    assert.equal(sentBack.status, "changes-requested");
+    assert.equal(
+      sentBack.feedback,
+      "Requested in Linear (moved to Todo):\n\nThe button should be blue.",
+    );
+    // The finished team says where to act instead.
+    yield* linearReply(h, sentBack, "d2", "Hello?");
+    assert.include(
+      queuedBody(h, `${first.id}:linear-reply:d2`),
+      "This team is finished (sent back for changes)",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a send-back from the board keeps the replies from the Linear session", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const delivered = yield* deliverIssue(h, service, first);
+    yield* linearReply(h, delivered, "d1", "The button should be blue.");
+    yield* service.review({
+      taskId: first.id,
+      action: "request-changes",
+      feedback: "Bigger, too.",
+    });
+    assert.equal(
+      (yield* taskById(service, first.id)).feedback,
+      "Bigger, too.\n\nThe button should be blue.",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("without a Linear session questions and answers stay in T3", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    yield* service.deliver();
+    h.finish(first.threadId);
+    const decision = yield* service.askDecision(
+      first.threadId,
+      "Should existing users keep access?",
+    );
+    yield* service.answer({ decisionId: decision.id, answer: "Keep it." });
+    assert.lengthOf(h.app.queued, 0);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );

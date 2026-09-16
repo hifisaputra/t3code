@@ -259,20 +259,60 @@ export function linearFailureDetail(error: unknown): string {
 }
 
 /**
+ * Marks where replies on a delivered team's Linear session start in its task's
+ * feedback. Text before it is the earlier send-back the team worked from; only
+ * the text after it goes into the next send-back, without the marker, so a
+ * new team's feedback never carries one.
+ */
+export const SESSION_NOTES_MARKER = "Replies on the Linear agent session, for a send-back:";
+
+/** The task's feedback with a reply from its Linear session added for a send-back. */
+export function withSessionNote(feedback: string, note: string): string {
+  if (feedback.includes(SESSION_NOTES_MARKER)) return `${feedback}\n\n${note.trim()}`;
+  return [feedback.trim(), `${SESSION_NOTES_MARKER}\n\n${note.trim()}`]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** The replies from the Linear session stored in a task's feedback, or null. */
+export function sessionNotes(feedback: string): string | null {
+  const at = feedback.indexOf(SESSION_NOTES_MARKER);
+  return at < 0 ? null : feedback.slice(at + SESSION_NOTES_MARKER.length).trim() || null;
+}
+
+/**
  * What a person asked for when they moved a delivered issue back in Linear:
- * their comments since the e2e card, leaving out the ones T3 posted itself.
+ * their comments since the e2e card, leaving out the ones T3 posted itself,
+ * then what they replied on the team's session.
  */
 export function linearFeedback(input: {
-  readonly comments: ReadonlyArray<{ id: string; body: string; createdAt: string }>;
+  readonly comments: ReadonlyArray<{
+    id: string;
+    body: string;
+    createdAt: string;
+    authorIsApp?: boolean;
+  }>;
   readonly since: string;
   readonly postedIds: ReadonlyArray<string>;
   readonly stateName: string;
+  readonly notes?: string | null;
 }): string {
   const posted = new Set(input.postedIds);
+  const notes = input.notes?.trim() ?? "";
   const replies = input.comments
-    .filter((c) => !posted.has(c.id) && c.createdAt > input.since && c.body.trim())
+    .filter(
+      (c) =>
+        !posted.has(c.id) &&
+        // An agent session's own replies show as comments by the app, not the person.
+        !c.authorIsApp &&
+        c.createdAt > input.since &&
+        c.body.trim() &&
+        // A reply on the session can also show as a comment; the stored note has it once.
+        !(notes && notes.includes(c.body.trim())),
+    )
     .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt))
     .map((c) => c.body.trim());
+  if (notes) replies.push(notes);
   return replies.length
     ? `Requested in Linear (moved to ${input.stateName}):\n\n${replies.join("\n\n")}`
     : `Moved back to ${input.stateName} in Linear without a comment. Ask the person what should change.`;

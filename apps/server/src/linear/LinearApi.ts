@@ -178,7 +178,9 @@ const RawIssueDetail = Schema.Struct({
         body: Schema.String,
         url: Schema.String,
         createdAt: Schema.String,
-        user: Schema.NullOr(RawUser),
+        user: Schema.NullOr(
+          Schema.Struct({ ...RawUser.fields, app: Schema.optional(Schema.Boolean) }),
+        ),
       }),
     ),
   }),
@@ -318,7 +320,7 @@ const ISSUE_DETAIL_FIELDS = `
   parent { id identifier title url state { name } }
   children { nodes { id identifier title url state { name } } }
   labels { nodes { id name color } }
-  comments(first: 50) { nodes { id body url createdAt user { id name displayName } } }
+  comments(first: 50) { nodes { id body url createdAt user { id name displayName app } } }
 `;
 
 const VIEWER_QUERY = `
@@ -520,7 +522,12 @@ function toIssueDetail(raw: typeof RawIssueDetail.Type): LinearIssueDetail {
       body: comment.body,
       url: comment.url,
       createdAt: comment.createdAt,
-      author: comment.user,
+      author: comment.user && {
+        id: comment.user.id,
+        name: comment.user.name,
+        displayName: comment.user.displayName,
+      },
+      ...(comment.user?.app ? { authorIsApp: true } : {}),
     })),
     parent: parent === null ? null : toIssueRelative(parent),
     children: children.nodes.map(toIssueRelative),

@@ -41,6 +41,15 @@ export type TaskSync = {
 };
 /** Returns null when the task has nothing to show (the sync row is then marked sent). */
 export type TaskSyncResolver = (taskId: string) => Effect.Effect<TaskSync | null, Error>;
+/** A person's reply or stop on a team's session; `deliveryId` makes a repeat a no-op. */
+export type TeamPromptInput = {
+  readonly deliveryId: string;
+  readonly sessionId: string;
+  readonly taskId: string;
+  readonly body: string;
+  readonly signal: string | null;
+};
+export type TeamPromptHandler = (input: TeamPromptInput) => Effect.Effect<void, Error>;
 
 const encodeContent = Schema.encodeEffect(Schema.fromJsonString(OutboxContent));
 const decodeContent = Schema.decodeUnknownEffect(Schema.fromJsonString(OutboxContent));
@@ -61,6 +70,7 @@ export const make = Effect.gen(function* () {
   const creationLock = yield* Semaphore.make(1);
   const sessions = yield* Queue.unbounded<string>();
   let resolver: TaskSyncResolver | undefined;
+  let teamPromptHandler: TeamPromptHandler | undefined;
 
   /**
    * Stores an update and returns without waiting for Linear. `id` is an idempotency key;
@@ -135,6 +145,22 @@ export const make = Effect.gen(function* () {
       Effect.catch(() => Effect.logWarning("Could not re-offer pending Linear updates.")),
     );
 
+  /**
+   * The assistant answers replies on its teams' sessions. Registered here, like the
+   * task sync, so delegation reaches the assistant without depending on it.
+   */
+  const setTeamPrompt = (next: TeamPromptHandler) =>
+    Effect.sync(() => {
+      teamPromptHandler = next;
+    });
+  /** Fails until the assistant registered, so the delivery stays pending and is retried. */
+  const teamPrompt = (input: TeamPromptInput) =>
+    Effect.suspend(() =>
+      teamPromptHandler
+        ? teamPromptHandler(input)
+        : Effect.fail(failure("Replies to teams are not ready yet.")),
+    );
+
   /** The app is connected and delegation is on, so session updates can be sent. */
   const connected = Effect.all([oauth.status, settings.getSettings]).pipe(
     Effect.map(([status, all]) => status.connected && all.linear.delegation.enabled),
@@ -178,6 +204,8 @@ export const make = Effect.gen(function* () {
     enqueue,
     send,
     setTaskSync,
+    setTeamPrompt,
+    teamPrompt,
     connected,
     createSession,
     withCreationLock,

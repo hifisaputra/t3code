@@ -55,7 +55,11 @@ import {
   type LinearWorkflowStateType,
 } from "@t3tools/contracts";
 import { isStaleRequestFailureDetail } from "../orchestration/decider.ts";
-import { LinearAgentOutbox, type OutboxContent } from "../linear/LinearAgentOutbox.ts";
+import {
+  LinearAgentOutbox,
+  type OutboxContent,
+  type TeamPromptInput,
+} from "../linear/LinearAgentOutbox.ts";
 import { LinearApi, LinearAppCredential } from "../linear/LinearApi.ts";
 import { LinearOAuth } from "../linear/LinearOAuth.ts";
 import { LinearThreadService } from "../linear/LinearThreadService.ts";
@@ -77,6 +81,8 @@ import {
   linearFailureDetail,
   linearFeedback,
   mergedComment,
+  sessionNotes,
+  withSessionNote,
 } from "./linearUpdates.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 import {
@@ -146,6 +152,16 @@ const ROLE_NAMES = {
   review: "code review thread",
   e2e: "e2e thread",
 } as const;
+/** How a role reads in its team's Linear session. */
+const LINEAR_ROLES = {
+  lead: "team leader",
+  implement: "implementer",
+  review: "reviewer",
+  e2e: "tester",
+} as const;
+const STOPPED_FROM_LINEAR =
+  "Stopped from Linear. Resume or skip the issue on the developer assistant board in T3 Code.";
+const firstLine = (text: string) => text.trim().split("\n")[0]!.slice(0, 300);
 /** A team leader that declines this many issues in a row pauses the loop for the person. */
 const DECLINE_STREAK_LIMIT = 3;
 /** How long T3 watches a staging deploy before handing it back to the team leader. */
@@ -231,6 +247,19 @@ const acceptedInLinear = (
     state.type === "completed" || (accepted !== "" && state.name.trim().toLowerCase() === accepted)
   );
 };
+/**
+ * The state a delivered issue was left in, which moving it away from sends it
+ * back; null when Linear could not move it, so only the board sends it back.
+ */
+const deliveredState = (
+  t: Pick<AssistantTask, "deliveredState" | "error">,
+  config: Pick<AssistantProjectConfig, "reviewState">,
+) =>
+  t.deliveredState !== undefined
+    ? t.deliveredState
+    : t.error
+      ? null
+      : config.reviewState.trim() || null;
 /** What assistant_wait told the caller to do next. */
 export type AssistantWaitResult = {
   readonly outcome: "waiting" | "limit";
@@ -329,11 +358,16 @@ export const make = Effect.gen(function* () {
     yield* sql`UPDATE assistant_tasks SET status = ${updated.status}, data = ${encodeTask(updated)} WHERE id = ${updated.id}`;
     if (updated.linearSession) {
       // Every way an issue gets blocked for the person passes here.
-      if (updated.status === "blocked" && before[0]?.status !== "blocked")
+      if (updated.status === "blocked" && before[0]?.status !== "blocked") {
+        const error = updated.error ?? "The team stopped.";
+        // A reason that already names the board says what to do itself.
         yield* sessionUpdate(updated, `blocked:${updated.updatedAt}`, {
           type: "error",
-          body: `${updated.error ?? "The team stopped."}\n\nRetry or skip the issue on the developer assistant board in T3 Code.`,
+          body: error.includes("board in T3 Code")
+            ? error
+            : `${error}\n\nRetry or skip the issue on the developer assistant board in T3 Code.`,
         });
+      }
       // The plan is read when the sync is sent, so a save only re-arms it. Linear
       // drops a finished session's plan, so nothing syncs after the final response.
       if (assistantTaskHoldsProject(updated.status))
@@ -1516,6 +1550,12 @@ export const make = Effect.gen(function* () {
         createdAt: yield* now,
       };
       yield* sql`INSERT INTO assistant_decisions (id, project_id, thread_id, data) VALUES (${value.id}, ${p.project_id}, ${caller}, ${encodeDecision(value)})`;
+      // A reply on the session answers it, the same as the inbox.
+      const role = LINEAR_ROLES[owner.role];
+      yield* sessionUpdate(t, `decision:${value.id}`, {
+        type: "elicitation",
+        body: `${role[0]!.toUpperCase()}${role.slice(1)} asks:\n\n${question.slice(0, 11_000)}\n\nReply here to answer.`,
+      });
       // The inbox shows the question; the answer goes straight to the thread that asked.
       yield* saveTask({ ...t, status: "waiting" });
       yield* changed;
@@ -1540,6 +1580,12 @@ export const make = Effect.gen(function* () {
       );
     return d;
   });
+  /** Closes the question in the team's Linear session when the person answered it in T3. */
+  const answeredInT3 = (t: AssistantTask, d: AssistantDecision, text: string) =>
+    sessionUpdate(t, `answered:${d.id}`, {
+      type: "thought",
+      body: `Answered in T3 Code: ${text.slice(0, 500)}`,
+    });
   /** Record the person's answer and send it to the thread that asked. */
   const resolveDecision = Effect.fn("Assistant.resolveDecision")(function* (
     d: AssistantDecision,
@@ -1572,10 +1618,117 @@ export const make = Effect.gen(function* () {
   const answer = Effect.fn("Assistant.answer")(
     function* (input: typeof AssistantAnswerInput.Type) {
       const d = yield* openDecision(input.decisionId);
-      if (d) yield* resolveDecision(d, input.answer);
+      if (d) {
+        yield* resolveDecision(d, input.answer);
+        if (d.taskId) yield* answeredInT3(yield* task(d.taskId), d, input.answer);
+      }
       return yield* board(null);
     },
     lock.withPermits(1),
+    Effect.mapError(wrap),
+  );
+
+  /**
+   * A person's reply on a team's Linear session, or its stop button. A reply
+   * answers the team's oldest open question, or reaches the team leader as a
+   * note, or is kept for a send-back once the work is delivered. Each webhook
+   * delivery is applied once; a failure leaves it for Linear delegation to retry.
+   */
+  const linearReply = Effect.fn("Assistant.linearReply")(
+    function* (input: TeamPromptInput) {
+      const handled =
+        yield* sql`SELECT delivery_id FROM assistant_linear_replies WHERE delivery_id = ${input.deliveryId}`;
+      if (handled.length) return;
+      const record = sql`INSERT OR IGNORE INTO assistant_linear_replies (delivery_id, task_id, handled_at) VALUES (${input.deliveryId}, ${input.taskId}, ${yield* now})`;
+      const rows = yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE id = ${input.taskId}`;
+      const body = input.body.trim();
+      const stop = input.signal === "stop";
+      if (!rows[0] || (!body && !stop)) return yield* record;
+      const t = yield* decodeTask(rows[0].data);
+      const reply = (text: string) =>
+        outbox.enqueue(`${t.id}:linear-reply:${input.deliveryId}`, input.sessionId, {
+          type: "thought",
+          body: text,
+        });
+      if (stop && assistantTaskHoldsProject(t.status)) {
+        // Like the board's interrupt, for this issue alone. Interrupting twice
+        // is harmless, so a retry after a failure below repeats it.
+        for (const threadId of taskThreadIds(t)) {
+          yield* engine
+            .dispatch({
+              type: "thread.turn.interrupt",
+              commandId: CommandId.make(newId()),
+              threadId,
+              createdAt: yield* now,
+            })
+            .pipe(Effect.catch(() => Effect.void));
+          yield* terminals.close({ threadId });
+        }
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* record;
+            // Re-read: the interrupts above are awaited. The blocked hook in
+            // saveTask sends the session its error.
+            const current = yield* task(t.id);
+            if (current.status === "blocked") yield* reply(STOPPED_FROM_LINEAR);
+            yield* saveTask({ ...current, status: "blocked", error: STOPPED_FROM_LINEAR });
+          }),
+        );
+        return;
+      }
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* record;
+          if (!stop && assistantTaskHoldsProject(t.status)) {
+            const ids = taskThreadIds(t);
+            const open = yield* sql<{
+              data: string;
+            }>`SELECT data FROM assistant_decisions WHERE resolved = 0 AND thread_id IN (${ids[0]}, ${ids[1]}, ${ids[2]}, ${ids[3]}) ORDER BY rowid`;
+            const decisions = yield* Effect.forEach(open, (row) => decodeDecision(row.data));
+            const roleOf = (threadId: ThreadId) =>
+              threadTask(threadId).pipe(
+                Effect.map((owner) => (owner ? LINEAR_ROLES[owner.role] : "team")),
+              );
+            const questions = decisions.filter((d) => d.kind === "decision");
+            if (questions[0]) {
+              yield* resolveDecision(questions[0], body);
+              const next = questions[1];
+              return yield* reply(
+                `Answer sent to the ${yield* roleOf(questions[0].threadId)}.${next ? `\n\nStill open: ${firstLine(next.question)}` : ""}`,
+              );
+            }
+            if (decisions[0])
+              return yield* reply(
+                `A ${yield* roleOf(decisions[0].threadId)} thread is waiting on a permission or input request, which can only be answered in T3 Code.`,
+              );
+            yield* queueMessage(
+              t.projectId,
+              assistantTaskThreadId(t, "lead"),
+              `${t.id}:lead:linear:${input.deliveryId}`,
+              `The person wrote on the Linear issue:\n${body}\nTake it into account; ask with assistant_ask_decision if it changes the agreed scope.`,
+            );
+            yield* changed;
+            return yield* reply("Passed to the team leader.");
+          }
+          if (!stop && t.status === "review") {
+            const p = yield* project(t.projectId);
+            yield* saveTask({ ...t, feedback: withSessionNote(t.feedback, body) });
+            // Any state other than the delivered one sends it back; see syncLinearReviews.
+            const accepted = p.config.acceptedState.trim() || "a completed state";
+            return yield* reply(
+              deliveredState(t, p.config) === null
+                ? `Noted for a send-back. Send the issue back from the developer assistant board in T3 Code, or move it to ${accepted} to accept it.`
+                : `Noted for a send-back. Move the issue back to In Progress to send it to a new team, or move it to ${accepted} to accept it.`,
+            );
+          }
+          yield* reply(
+            `This team is finished (${t.status === "changes-requested" ? "sent back for changes" : t.status}), so it cannot act on this. Use the developer assistant board in T3 Code for this issue.`,
+          );
+        }),
+      );
+    },
+    lock.withPermits(1),
+    deliveryLock.withPermits(1),
     Effect.mapError(wrap),
   );
 
@@ -2216,7 +2369,11 @@ export const make = Effect.gen(function* () {
         const updated = yield* saveTask({
           ...t,
           status: input.action === "accept" ? "accepted" : "changes-requested",
-          feedback: input.feedback,
+          // Replies kept from the Linear session go back with the person's own words.
+          feedback:
+            input.action === "accept"
+              ? input.feedback
+              : [input.feedback.trim(), sessionNotes(t.feedback)].filter(Boolean).join("\n\n"),
         });
         if (input.action === "accept")
           yield* changeLinearState(updated, p.config.acceptedState).pipe(
@@ -2525,6 +2682,7 @@ export const make = Effect.gen(function* () {
       if (decisions.length === 1) {
         const d = yield* decodeDecision(decisions[0]!.data);
         yield* sql`UPDATE assistant_decisions SET resolved = 1, data = ${encodeDecision({ ...d, answer: event.payload.text })} WHERE id = ${d.id}`;
+        yield* answeredInT3(t, d, event.payload.text);
         if (assistantTaskHoldsProject(t.status))
           yield* saveTask({
             ...t,
@@ -2634,12 +2792,7 @@ export const make = Effect.gen(function* () {
         yield* Effect.gen(function* () {
           const t = yield* task(read.id);
           if (t.status !== "review") return;
-          const delivered =
-            t.deliveredState !== undefined
-              ? t.deliveredState
-              : t.error
-                ? null
-                : p.config.reviewState.trim() || null;
+          const delivered = deliveredState(t, p.config);
           if (acceptedInLinear(state, p.config)) {
             yield* saveTask({
               ...t,
@@ -2665,6 +2818,7 @@ export const make = Effect.gen(function* () {
               since: t.e2e?.at ?? legacyCard ?? t.deployment?.verifiedAt ?? t.updatedAt,
               postedIds: t.linearCommentIds ?? [],
               stateName: state.name,
+              notes: sessionNotes(t.feedback),
             });
             // The loop gives it to a new team with this feedback once the project is free.
             yield* saveTask({ ...t, status: "changes-requested", feedback });
@@ -2845,6 +2999,8 @@ export const make = Effect.gen(function* () {
       );
     }),
   );
+  // Not under the outbox's send lock, so it may take the assistant's locks.
+  yield* outbox.setTeamPrompt(linearReply);
   // Runs under the outbox's send lock, so it only reads: never the assistant's locks.
   yield* outbox.setTaskSync((taskId) =>
     Effect.gen(function* () {

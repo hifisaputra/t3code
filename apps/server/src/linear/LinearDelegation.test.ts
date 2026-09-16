@@ -9,6 +9,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
   EventId,
+  LinearOperationError,
   ThreadId,
   EnvironmentId,
   ProjectId,
@@ -159,7 +160,9 @@ function harness(twoRepos = false, allowedTeamKeys: string[] = []) {
   const createSession = (issueId: string, taskId: string) =>
     Effect.suspend(() => outbox!.createSession(issueId, taskId));
   const send = (sessionId: string) => Effect.suspend(() => outbox!.send(sessionId));
-  return { make, send, createSession, commands, prepared, outgoing, projects };
+  const setTeamPrompt = (handler: Outbox.TeamPromptHandler) =>
+    Effect.suspend(() => outbox!.setTeamPrompt(handler));
+  return { make, send, createSession, setTeamPrompt, commands, prepared, outgoing, projects };
 }
 it.effect(
   "rejects bad signatures, stale timestamps, and the wrong workspace before admission",
@@ -418,38 +421,104 @@ it.effect("acknowledges a delegation at once before processing it", () => {
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
 });
 
-it.effect("ignores the webhooks for sessions the app opened for a team", () => {
+/** A team's session the app opened, and a reply the person wrote on it. */
+const teamReply = (
+  h: ReturnType<typeof harness>,
+  agentActivity: { id: string; content?: { body: string }; signal?: string },
+) =>
+  Effect.gen(function* () {
+    const sessionId = yield* h.createSession("issue-1", "task-1");
+    const team = { ...original, agentSession: { id: sessionId, issue: { id: "issue-1" } } };
+    return { sessionId, team, reply: signed({ ...team, action: "prompted", agentActivity }) };
+  });
+const processedOf = (id: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{
+      processed: number;
+    }>`SELECT processed FROM linear_agent_deliveries WHERE id = ${id}`;
+    return rows[0]?.processed;
+  });
+
+it.effect("hands replies on a team's session to the assistant and never starts a thread", () => {
   const h = harness();
   return Effect.gen(function* () {
     const service = yield* h.make;
-    const sessionId = yield* h.createSession("issue-1", "task-1");
-    const team = { ...original, agentSession: { id: sessionId, issue: { id: "issue-1" } } };
+    const handled: Outbox.TeamPromptInput[] = [];
+    yield* h.setTeamPrompt((input) =>
+      Effect.sync(() => {
+        handled.push(input);
+      }),
+    );
+    const { sessionId, team, reply } = yield* teamReply(h, {
+      id: "reply",
+      content: { body: "Use the other button" },
+    });
     // Linear's echo of our own creation has no creator, like a triage delegation.
     const created = signed(team);
     yield* service.receive(created.body, created.signature, "d1");
     yield* service.acknowledge("d1");
     yield* service.process("d1");
-    const reply = signed({
+    yield* service.receive(reply.body, reply.signature, "d2");
+    yield* service.acknowledge("d2");
+    yield* service.process("d2");
+    const stop = signed({
       ...team,
       action: "prompted",
-      agentActivity: { id: "reply", content: { body: "Use the other button" } },
+      agentActivity: { id: "stop", body: "", signal: "stop" },
     });
-    yield* service.receive(reply.body, reply.signature, "d2");
-    yield* service.process("d2");
-    yield* service.acknowledge("d2");
-    yield* h.send(sessionId);
-    assert.deepEqual(h.outgoing, [
-      "Replies on Linear do not reach the team yet. Answer in T3 Code.",
+    yield* service.receive(stop.body, stop.signature, "d3");
+    yield* service.process("d3");
+    assert.deepEqual(handled, [
+      {
+        deliveryId: "d2",
+        sessionId,
+        taskId: "task-1",
+        body: "Use the other button",
+        signal: null,
+      },
+      { deliveryId: "d3", sessionId, taskId: "task-1", body: "", signal: "stop" },
     ]);
+    yield* h.send(sessionId);
+    assert.deepEqual(h.outgoing, []);
     assert.lengthOf(h.commands, 0);
     assert.lengthOf(h.prepared, 0);
     const sql = yield* SqlClient.SqlClient;
     assert.deepEqual(yield* sql`SELECT id, processed FROM linear_agent_deliveries ORDER BY id`, [
       { id: "d1", processed: 1 },
       { id: "d2", processed: 1 },
+      { id: "d3", processed: 1 },
     ]);
     assert.deepEqual(yield* sql`SELECT thread_id, task_id FROM linear_agent_sessions`, [
       { thread_id: null, task_id: "task-1" },
     ]);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});
+
+it.effect("keeps a team reply pending until the assistant handled it", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const service = yield* h.make;
+    const { reply } = yield* teamReply(h, { id: "reply", content: { body: "Blue, please" } });
+    yield* service.receive(reply.body, reply.signature, "d1");
+    // Before the assistant registered, the delivery waits.
+    assert.isTrue(yield* service.acknowledge("d1").pipe(Effect.isFailure));
+    assert.equal(yield* processedOf("d1"), 0);
+    let fail = true;
+    const handled: string[] = [];
+    yield* h.setTeamPrompt((input) =>
+      fail
+        ? Effect.fail(
+            new LinearOperationError({ operation: "agentSession", detail: "Database busy" }),
+          )
+        : Effect.sync(() => handled.push(input.body)),
+    );
+    assert.isTrue(yield* service.acknowledge("d1").pipe(Effect.isFailure));
+    assert.equal(yield* processedOf("d1"), 0);
+    fail = false;
+    yield* service.acknowledge("d1");
+    assert.equal(yield* processedOf("d1"), 1);
+    assert.deepEqual(handled, ["Blue, please"]);
+    assert.deepEqual(h.outgoing, []);
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
 });
