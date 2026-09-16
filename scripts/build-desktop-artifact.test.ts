@@ -1694,6 +1694,62 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.notInclude(error.message, secret);
   });
 
+  // A distribution build installs next to the official app, so every name the
+  // installer or the OS keys on must differ; the stamped package.json field is
+  // how the runtime learns which names to use.
+  it.effect("renames the app, bundle id, schemes and binary for a distribution build", () =>
+    Effect.gen(function* () {
+      const mac = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+        false,
+        "arm64",
+        "fork",
+      );
+      const linux = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+        false,
+        "x64",
+        "fork",
+      );
+
+      assert.equal(mac.appId, "com.t3tools.t3code.fork");
+      assert.equal(mac.productName, "T3 Code Fork (Alpha)");
+      assert.equal(mac.artifactName, "T3-Code-fork-${version}-${arch}.${ext}");
+      assert.deepStrictEqual((mac.mac as Record<string, unknown>).protocols, [
+        { name: "T3 Code Fork", schemes: ["t3code-fork", "t3code-fork-dev"] },
+      ]);
+      assert.equal(
+        (mac.dmg as Record<string, unknown>).title,
+        "T3 Code Fork (Alpha) 1.2.3 Installer",
+      );
+
+      const linuxConfig = linux.linux as Record<string, unknown>;
+      assert.equal(linuxConfig.executableName, "t3code-fork");
+      assert.deepStrictEqual(linuxConfig.protocols, [
+        { name: "T3 Code Fork", schemes: ["t3code-fork", "t3code-fork-dev"] },
+      ]);
+      assert.deepStrictEqual(linuxConfig.desktop, { entry: { StartupWMClass: "t3code-fork" } });
+
+      assert.equal(resolveDesktopProductName("1.2.3", "fork"), "T3 Code Fork (Alpha)");
+      assert.equal(
+        resolveDesktopProductName("1.2.3-nightly.20260413.42", "fork"),
+        "T3 Code Fork (Nightly)",
+      );
+    }),
+  );
+
   it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
@@ -2077,6 +2133,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         mockUpdates: Option.none(),
         mockUpdateServerPort: Option.none(),
         wslPrebuild: Option.none(),
+        distribution: Option.none(),
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -2117,6 +2174,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             mockUpdates: Option.none(),
             mockUpdateServerPort: Option.none(),
             wslPrebuild: Option.none(),
+            distribution: Option.none(),
           }),
         );
 
@@ -2141,6 +2199,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         mockUpdates: Option.some(false),
         mockUpdateServerPort: Option.none(),
         wslPrebuild: Option.none(),
+        distribution: Option.none(),
       }).pipe(
         Effect.provide(
           ConfigProvider.layer(

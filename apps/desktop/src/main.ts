@@ -79,6 +79,7 @@ const desktopEnvironmentLayer = Layer.unwrap(
       homeDirectory: NodeOS.homedir(),
       platform,
       processArch,
+      distributionId: DesktopPreReadyPlatform.resolveDesktopDistributionIdFromProcess(),
       ...metadata,
     });
   }),

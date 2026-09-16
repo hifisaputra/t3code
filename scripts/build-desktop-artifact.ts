@@ -15,6 +15,11 @@ import {
 
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  desktopDistributionScheme,
+  isDesktopDistributionId,
+  resolveDesktopDistributionNames,
+} from "@t3tools/shared/desktopDistribution";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -163,6 +168,7 @@ interface BuildCliInput {
   readonly mockUpdates: Option.Option<boolean>;
   readonly mockUpdateServerPort: Option.Option<number>;
   readonly wslPrebuild: Option.Option<string>;
+  readonly distribution: Option.Option<string>;
 }
 
 function detectHostBuildPlatform(hostPlatform: string): typeof BuildPlatform.Type | undefined {
@@ -932,6 +938,10 @@ interface ResolvedBuildOptions {
   readonly mockUpdates: boolean;
   readonly mockUpdateServerPort: number | undefined;
   readonly wslPrebuild: string | undefined;
+  // A build that installs next to the official app under its own names and
+  // data directory (see @t3tools/shared/desktopDistribution). Undefined for
+  // the official build.
+  readonly distribution: string | undefined;
 }
 
 interface StagePackageJson {
@@ -939,6 +949,8 @@ interface StagePackageJson {
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
+  // Read by the desktop runtime at startup to pick its names and data paths.
+  readonly t3codeDistribution?: string;
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
@@ -1572,7 +1584,17 @@ const BuildEnvConfig = Config.all({
   // into the staged node-pty so the WSL backend ships a ready binary and never
   // compiles on the user's machine.
   wslPrebuild: Config.string("T3CODE_DESKTOP_WSL_PREBUILD").pipe(Config.option),
+  distribution: Config.string("T3CODE_DESKTOP_DISTRIBUTION").pipe(Config.option),
 });
+
+export class InvalidDesktopDistributionError extends Schema.TaggedErrorClass<InvalidDesktopDistributionError>()(
+  "InvalidDesktopDistributionError",
+  { distribution: Schema.String },
+) {
+  override get message(): string {
+    return `Invalid desktop distribution "${this.distribution}": use lowercase words joined by single dashes, for example "fork".`;
+  }
+}
 
 const MockUpdateServerPortSchema = Schema.NumberFromString.check(
   Schema.isInt(),
@@ -1666,6 +1688,15 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const wslPrebuild =
     Option.getOrUndefined(input.wslPrebuild) ?? Option.getOrUndefined(env.wslPrebuild);
 
+  const rawDistribution =
+    Option.getOrUndefined(input.distribution)?.trim() ||
+    Option.getOrUndefined(env.distribution)?.trim() ||
+    undefined;
+  if (rawDistribution !== undefined && !isDesktopDistributionId(rawDistribution)) {
+    return yield* new InvalidDesktopDistributionError({ distribution: rawDistribution });
+  }
+  const distribution = rawDistribution;
+
   return {
     platform,
     target,
@@ -1679,6 +1710,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     mockUpdates,
     mockUpdateServerPort,
     wslPrebuild,
+    distribution,
   } satisfies ResolvedBuildOptions;
 });
 
@@ -2556,10 +2588,14 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
   return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
 }
 
-export function resolveDesktopProductName(version: string): string {
-  return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+export function resolveDesktopProductName(version: string, distribution?: string): string {
+  const names = resolveDesktopDistributionNames(Option.fromUndefinedOr(distribution));
+  if (resolveDesktopUpdateChannel(version) === "nightly") {
+    return `${names.baseName} (Nightly)`;
+  }
+  return distribution === undefined
+    ? (desktopPackageJson.productName ?? names.baseName)
+    : `${names.baseName} (Alpha)`;
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -2580,11 +2616,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   // whose source file was never written fails the electron-builder step.
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  distribution?: string,
 ) {
+  const distributionId = Option.fromUndefinedOr(distribution);
+  const names = resolveDesktopDistributionNames(distributionId);
+  const rendererSchemes = [
+    desktopDistributionScheme(distributionId, false),
+    desktopDistributionScheme(distributionId, true),
+  ];
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-${version}-${arch}.${ext}",
+    appId: names.appId,
+    productName: resolveDesktopProductName(version, distribution),
+    artifactName: `${names.artifactPrefix}-\${version}-\${arch}.\${ext}`,
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
       ...DESKTOP_FILE_EXCLUSIONS,
@@ -2628,8 +2671,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "public.app-category.developer-tools",
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: names.baseName,
+          schemes: rendererSchemes,
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
@@ -2647,7 +2690,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // Give the themed installer its own Finder volume name. Finder caches
       // DMG window backgrounds by volume name, so reusing a generic name can
       // make a newly built background look unchanged during testing.
-      title: `${resolveDesktopProductName(version)} ${version} Installer`,
+      title: `${resolveDesktopProductName(version, distribution)} ${version} Installer`,
       background: `dmg/dmg-background-${updateChannel}.png`,
       window: {
         width: 540,
@@ -2668,7 +2711,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
-      executableName: "t3code",
+      executableName: names.slug,
       icon: "icons",
       category: "Development",
       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
@@ -2676,13 +2719,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // t3code:// OAuth callbacks to the app.
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: names.baseName,
+          schemes: rendererSchemes,
         },
       ],
       desktop: {
         entry: {
-          StartupWMClass: "t3code",
+          StartupWMClass: names.slug,
         },
       },
     };
@@ -3681,7 +3724,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         : undefined,
       bundlesWslRuntime({ arch: options.arch, prebuildPath: options.wslPrebuild }),
       options.arch,
+      options.distribution,
     ),
+    ...(options.distribution === undefined ? {} : { t3codeDistribution: options.distribution }),
     dependencies: stageDependencies,
     devDependencies: {
       electron: electronVersion,
@@ -3838,7 +3883,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (options.platform === "win") {
     yield* validateWindowsPackagedPayload({
       stageDistDir,
-      appExecutableName: `${resolveDesktopProductName(appVersion)}.exe`,
+      appExecutableName: `${resolveDesktopProductName(appVersion, options.distribution)}.exe`,
       targetArch: options.arch,
       expectWslRuntime: bundlesWslRuntime({
         arch: options.arch,
@@ -3930,6 +3975,12 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   wslPrebuild: Flag.string("wsl-prebuild").pipe(
     Flag.withDescription(
       "Path to a prebuilt Linux node-pty (pty.node) for the target arch, staged for the WSL backend (env: T3CODE_DESKTOP_WSL_PREBUILD).",
+    ),
+    Flag.optional,
+  ),
+  distribution: Flag.string("distribution").pipe(
+    Flag.withDescription(
+      'Build a distribution that installs next to the official app with its own names and data directory, for example "fork" (env: T3CODE_DESKTOP_DISTRIBUTION).',
     ),
     Flag.optional,
   ),

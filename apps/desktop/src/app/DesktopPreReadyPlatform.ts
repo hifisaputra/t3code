@@ -5,8 +5,10 @@ import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as Electron from "electron";
+import { resolveDesktopDistributionId } from "@t3tools/shared/desktopDistribution";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
@@ -29,6 +31,24 @@ function readCommandLineSwitchValue(
   return value.length > 0 ? value : null;
 }
 
+// The build stamps a distribution id into the packaged package.json; the
+// environment variable lets a dev run try one. Read synchronously because the
+// scheme privileges below must be registered before Electron is ready.
+export const resolveDesktopDistributionIdFromProcess = (): Option.Option<string> =>
+  resolveDesktopDistributionId({
+    env: process.env,
+    readPackageJson: () => {
+      try {
+        return NodeFS.readFileSync(
+          NodePath.join(Electron.app.getAppPath(), "package.json"),
+          "utf8",
+        );
+      } catch {
+        return null;
+      }
+    },
+  });
+
 export const resolveEarlyLinuxElectronOptionsFromProcess =
   (): DesktopEarlyElectronStartup.EarlyLinuxElectronOptions =>
     DesktopEarlyElectronStartup.resolveEarlyLinuxElectronOptions({
@@ -36,6 +56,7 @@ export const resolveEarlyLinuxElectronOptionsFromProcess =
       homeDirectory: NodeOS.homedir(),
       joinPath: NodePath.posix.join,
       readFileString: (path) => NodeFS.readFileSync(path, "utf8"),
+      distributionId: resolveDesktopDistributionIdFromProcess(),
     });
 
 export class DesktopPreReadyElectronOptions extends Context.Service<
@@ -69,6 +90,10 @@ export const make = Effect.gen(function* () {
 // Keep Electron's strict pre-ready setup isolated so later runtime layers cannot
 // observe app readiness before scheme privileges and command-line switches exist.
 export const layer = Layer.mergeAll(
-  ElectronProtocol.layerSchemePrivileges,
+  Layer.unwrap(
+    Effect.sync(() =>
+      ElectronProtocol.layerSchemePrivileges(resolveDesktopDistributionIdFromProcess()),
+    ),
+  ),
   Layer.effect(DesktopPreReadyElectronOptions, make),
 );

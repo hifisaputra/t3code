@@ -23,6 +23,8 @@ const makeEnvironment = (overrides: Record<string, unknown> = {}) =>
     isPackaged: true,
     isDevelopment: false,
     displayName: "T3 Code (Alpha)",
+    distributionId: Option.none(),
+    desktopScheme: "t3code",
     linuxWmClass: "t3code",
     linuxApplicationsDir: "/home/alice/.local/share/applications",
     appImagePath: Option.some("/home/alice/Applications/T3-Code.AppImage"),
@@ -103,6 +105,26 @@ const emptyRecording = (): RecordedRegistration => ({
 });
 
 describe("DesktopLinuxUrlHandler", () => {
+  it.effect("registers a distribution build under its own scheme and entry name", () =>
+    Effect.gen(function* () {
+      const recorded = emptyRecording();
+      yield* runRegister(recorded, {
+        environment: {
+          distributionId: Option.some("fork"),
+          desktopScheme: "t3code-fork",
+          displayName: "T3 Code Fork (Alpha)",
+          linuxWmClass: "t3code-fork",
+        },
+      });
+      assert.deepEqual(
+        recorded.files.map((file) => file.path),
+        ["/home/alice/.local/share/applications/t3code-fork-url-handler.desktop"],
+      );
+      assert.include(recorded.files[0]?.content, "MimeType=x-scheme-handler/t3code-fork;");
+      assert.include(recorded.files[0]?.content, "Name=T3 Code Fork (Alpha)");
+    }),
+  );
+
   it("renders a scheme-handler desktop entry with freedesktop Exec quoting", () => {
     const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
       displayName: "T3 Code (Nightly)",

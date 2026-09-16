@@ -40,6 +40,53 @@ const makeEnvironment = (
   DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
 
 describe("DesktopEnvironment", () => {
+  // A distribution build must never share a path, id or scheme with the
+  // official app, and T3CODE_HOME must still be able to point it anywhere.
+  it.effect("renames every per-install artifact for a distribution build", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment(
+        { distributionId: Option.some("fork"), isPackaged: true },
+        {},
+      );
+
+      assert.deepEqual(environment.distributionId, Option.some("fork"));
+      assert.equal(environment.baseDirName, ".t3-fork");
+      assert.equal(environment.baseDir, "/Users/alice/.t3-fork");
+      assert.equal(environment.stateDir, "/Users/alice/.t3-fork/userdata");
+      assert.equal(environment.desktopScheme, "t3code-fork");
+      assert.equal(environment.userDataDirName, "t3code-fork");
+      assert.equal(environment.legacyUserDataDirName, "t3code-fork");
+      assert.equal(environment.appUserModelId, "com.t3tools.t3code.fork");
+      assert.equal(environment.linuxDesktopEntryName, "t3code-fork.desktop");
+      assert.equal(environment.linuxWmClass, "t3code-fork");
+      assert.equal(environment.displayName, "T3 Code Fork (Alpha)");
+      assert.equal(environment.branding.baseName, "T3 Code Fork");
+
+      const development = yield* makeEnvironment(
+        { distributionId: Option.some("fork") },
+        { VITE_DEV_SERVER_URL: "http://localhost:5173", T3CODE_HOME: "/tmp/custom" },
+      );
+      assert.equal(development.baseDir, "/tmp/custom");
+      assert.equal(development.desktopScheme, "t3code-fork-dev");
+      assert.equal(development.userDataDirName, "t3code-fork-dev");
+      assert.equal(development.appUserModelId, "com.t3tools.t3code.fork.dev");
+      assert.equal(development.displayName, "T3 Code Fork (Dev)");
+    }),
+  );
+
+  it.effect("keeps the official names without a distribution", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment({ isPackaged: true }, {});
+      assert.isTrue(Option.isNone(environment.distributionId));
+      assert.equal(environment.baseDir, "/Users/alice/.t3");
+      assert.equal(environment.desktopScheme, "t3code");
+      assert.equal(environment.userDataDirName, "t3code");
+      assert.equal(environment.legacyUserDataDirName, "T3 Code (Alpha)");
+      assert.equal(environment.appUserModelId, "com.t3tools.t3code");
+      assert.equal(environment.displayName, "T3 Code (Alpha)");
+    }),
+  );
+
   it.effect("derives state paths and development identity inside Effect", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(

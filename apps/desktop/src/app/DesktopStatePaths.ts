@@ -10,13 +10,17 @@ function normalizeConfiguredBaseDir(t3Home: Option.Option<string>): Option.Optio
   return trimmed.length > 0 ? Option.some(trimmed) : Option.none();
 }
 
+// baseDirName is ".t3" for the official app and ".t3-<distribution>" for a
+// distribution build (see @t3tools/shared/desktopDistribution). An explicit
+// T3CODE_HOME still wins over both.
 export function resolveDesktopBaseDir(input: {
   readonly homeDirectory: string;
   readonly joinPath: JoinPath;
   readonly t3Home: Option.Option<string>;
+  readonly baseDirName?: string;
 }): string {
   return Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () =>
-    input.joinPath(input.homeDirectory, ".t3"),
+    input.joinPath(input.homeDirectory, input.baseDirName ?? ".t3"),
   );
 }
 

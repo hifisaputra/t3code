@@ -1,3 +1,7 @@
+import {
+  desktopDistributionScheme,
+  resolveDesktopDistributionNames,
+} from "@t3tools/shared/desktopDistribution";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -20,6 +24,7 @@ interface EarlyDesktopSettingsInput {
   readonly homeDirectory: string;
   readonly joinPath: JoinPath;
   readonly readFileString: (path: string) => string;
+  readonly distributionId?: Option.Option<string>;
 }
 
 type EarlyLinuxElectronOptionsInput = EarlyDesktopSettingsInput;
@@ -48,12 +53,14 @@ function resolveEarlyDesktopSettingsPath(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly homeDirectory: string;
   readonly joinPath: JoinPath;
+  readonly distributionId?: Option.Option<string>;
 }): string {
   const t3Home = Option.fromUndefinedOr(input.env.T3CODE_HOME);
   const baseDir = resolveDesktopBaseDir({
     homeDirectory: input.homeDirectory,
     joinPath: input.joinPath,
     t3Home,
+    baseDirName: resolveDesktopDistributionNames(input.distributionId ?? Option.none()).baseDirName,
   });
   const stateDir = resolveDesktopStateDir({
     baseDir,
@@ -81,7 +88,10 @@ export function resolveEarlyLinuxElectronOptions(
 ): EarlyLinuxElectronOptions {
   const preference = resolveEarlyLinuxPasswordStorePreference(input);
   return {
-    linuxWmClass: isDevelopmentEnvironment(input.env) ? "t3code-dev" : "t3code",
+    linuxWmClass: desktopDistributionScheme(
+      input.distributionId ?? Option.none(),
+      isDevelopmentEnvironment(input.env),
+    ),
     passwordStore: resolveLinuxPasswordStoreSwitch({
       preference,
       env: input.env,

@@ -14,6 +14,11 @@ import * as Path from "effect/Path";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
+import {
+  desktopDistributionScheme,
+  resolveDesktopDistributionNames,
+} from "@t3tools/shared/desktopDistribution";
+
 import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
 
 export interface MakeDesktopEnvironmentInput {
@@ -26,6 +31,10 @@ export interface MakeDesktopEnvironmentInput {
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
   readonly runningUnderArm64Translation: boolean;
+  // Set by the build for a distribution that installs next to the official
+  // app (see @t3tools/shared/desktopDistribution). Absent for the official
+  // build and, unless T3CODE_DESKTOP_DISTRIBUTION says otherwise, in dev.
+  readonly distributionId?: Option.Option<string>;
 }
 
 export class DesktopEnvironment extends Context.Service<
@@ -37,6 +46,11 @@ export class DesktopEnvironment extends Context.Service<
     readonly processArch: string;
     readonly isPackaged: boolean;
     readonly isDevelopment: boolean;
+    readonly distributionId: Option.Option<string>;
+    // Renderer origin scheme, t3code or t3code-dev, suffixed for a distribution.
+    readonly desktopScheme: string;
+    // Name of the state directory under the home directory, ".t3" by default.
+    readonly baseDirName: string;
     readonly appVersion: string;
     readonly appPath: string;
     readonly resourcesPath: string;
@@ -85,8 +99,6 @@ export class DesktopEnvironment extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
-const APP_BASE_NAME = "T3 Code";
-
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
@@ -101,12 +113,13 @@ function resolveDesktopAppStageLabel(input: {
 function resolveDesktopAppBranding(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
+  readonly baseName: string;
 }): DesktopAppBranding {
   const stageLabel = resolveDesktopAppStageLabel(input);
   return {
-    baseName: APP_BASE_NAME,
+    baseName: input.baseName,
     stageLabel,
-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
+    displayName: `${input.baseName} (${stageLabel})`,
   };
 }
 
@@ -148,6 +161,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
   const isDevelopment = Option.isSome(devServerUrl);
+  const distributionId = input.distributionId ?? Option.none();
+  const distribution = resolveDesktopDistributionNames(distributionId);
+  // "t3code", "t3code-dev", "t3code-fork", "t3code-fork-dev": the one machine
+  // name every per-install artifact below hangs off.
+  const desktopScheme = desktopDistributionScheme(distributionId, isDevelopment);
   const appDataDirectory =
     input.platform === "win32"
       ? Option.getOrElse(config.appDataDirectory, () =>
@@ -160,6 +178,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     homeDirectory,
     joinPath: path.join,
     t3Home: config.t3Home,
+    baseDirName: distribution.baseDirName,
   });
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -170,6 +189,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const branding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,
+    baseName: distribution.baseName,
   });
   const displayName = branding.displayName;
   const stateDir = resolveDesktopStateDir({
@@ -178,8 +198,14 @@ const make = Effect.fn("desktop.environment.make")(function* (
     joinPath: path.join,
     t3Home: config.t3Home,
   });
-  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
-  const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
+  const userDataDirName = desktopScheme;
+  // Only the official app ever wrote the productName-derived folder; a
+  // distribution has no legacy location to migrate from.
+  const legacyUserDataDirName = Option.isSome(distributionId)
+    ? userDataDirName
+    : isDevelopment
+      ? "T3 Code (Dev)"
+      : "T3 Code (Alpha)";
   const linuxApplicationsDir = path.join(
     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
     "applications",
@@ -193,6 +219,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
     processArch: input.processArch,
     isPackaged: input.isPackaged,
     isDevelopment,
+    distributionId,
+    desktopScheme,
+    baseDirName: distribution.baseDirName,
     appVersion: input.appVersion,
     appPath: input.appPath,
     resourcesPath,
@@ -224,10 +253,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
+      isDevelopment ? `${distribution.appId}.dev` : distribution.appId,
     ),
-    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code.desktop",
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    linuxDesktopEntryName: `${desktopScheme}.desktop`,
+    linuxWmClass: desktopScheme,
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
     userDataDirName,
