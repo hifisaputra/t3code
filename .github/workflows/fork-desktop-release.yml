@@ -1,0 +1,380 @@
+name: Fork Desktop Release
+
+# Builds unsigned desktop installers for this fork on GitHub-hosted runners and
+# publishes them as a GitHub release here. The upstream Release workflow cannot
+# run in a fork: it needs Blacksmith runners, the T3 Connect relay deployment,
+# Apple and Azure signing secrets, and an npm publish of the CLI. This
+# workflow keeps only the desktop build and the release upload.
+#
+# The updater feed is the fork's own releases (GITHUB_REPOSITORY), so an
+# installed build looks here for newer versions, never at upstream.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example 0.0.40). Defaults to <package version>-fork.<date>.<run> and publishes as a prerelease."
+        required: false
+        type: string
+      windows:
+        description: "Also build the Windows x64 installer"
+        required: false
+        default: true
+        type: boolean
+      macos_x64:
+        description: "Also build the macOS Intel DMG"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-desktop-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Resolve release version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            apps/desktop/package.json
+          sparse-checkout-cone-mode: false
+
+      - id: meta
+        name: Resolve release version
+        shell: bash
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+          RUN_STARTED_AT: ${{ github.run_started_at }}
+        run: |
+          set -euo pipefail
+          raw="${DISPATCH_VERSION:-}"
+          if [[ -z "$raw" ]]; then
+            base="$(node -p "require('./apps/desktop/package.json').version")"
+            day="$(date -u -d "$RUN_STARTED_AT" +%Y%m%d)"
+            raw="${base}-fork.${day}.${GITHUB_RUN_NUMBER}"
+          fi
+          version="${raw#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version: $raw" >&2
+            exit 1
+          fi
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            is_prerelease=false
+          else
+            is_prerelease=true
+          fi
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "is_prerelease=$is_prerelease"
+            echo "short_sha=${GITHUB_SHA:0:7}"
+          } >> "$GITHUB_OUTPUT"
+
+      # A job-level `if` cannot read the matrix context, so the platform
+      # toggles shape the matrix here instead.
+      - id: matrix
+        name: Resolve build matrix
+        shell: bash
+        env:
+          WITH_WINDOWS: ${{ inputs.windows }}
+          WITH_MACOS_X64: ${{ inputs.macos_x64 }}
+        run: |
+          set -euo pipefail
+          entries=()
+          entries+=('{"label":"macOS arm64","runner":"macos-15","platform":"mac","target":"dmg","arch":"arm64","rust_target":"aarch64-apple-darwin"}')
+          if [[ "$WITH_MACOS_X64" == "true" ]]; then
+            entries+=('{"label":"macOS x64","runner":"macos-15-intel","platform":"mac","target":"dmg","arch":"x64","rust_target":"x86_64-apple-darwin"}')
+          fi
+          entries+=('{"label":"Linux x64","runner":"ubuntu-24.04","platform":"linux","target":"AppImage","arch":"x64","rust_target":"x86_64-unknown-linux-gnu"}')
+          if [[ "$WITH_WINDOWS" == "true" ]]; then
+            entries+=('{"label":"Windows x64","runner":"windows-2025","platform":"win","target":"nsis","arch":"x64","rust_target":"x86_64-pc-windows-msvc"}')
+          fi
+          matrix="$(printf '%s\n' "${entries[@]}" | jq -c -s '{include: .}')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+
+  # The Windows installer bundles a Linux node-pty for the WSL backend. Without
+  # it the app still runs; only the WSL backend cannot start.
+  wsl_node_pty:
+    name: Build WSL node-pty (linux-x64)
+    if: ${{ inputs.windows }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3...
+
+      - name: Build node-pty linux-x64 prebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          pty_pkg="$(node -e "console.log(require.resolve('node-pty/package.json', { paths: ['$GITHUB_WORKSPACE/apps/server'] }))")"
+          pty_dir="$(dirname "$pty_pkg")"
+          ( cd "$pty_dir" && npx --yes node-gyp rebuild )
+          mkdir -p wsl-prebuild
+          cp "$pty_dir/build/Release/pty.node" wsl-prebuild/pty.node
+          file wsl-prebuild/pty.node
+
+      - name: Upload node-pty linux-x64 prebuild
+        uses: actions/upload-artifact@v7
+        with:
+          name: wsl-node-pty-x64
+          path: wsl-prebuild/pty.node
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: [prepare, wsl_node_pty]
+    # wsl_node_pty is skipped when Windows is off and may fail on its own; only
+    # the Windows leg needs its artifact, and that download fails the leg alone.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: ${{ matrix.platform != 'win' }}
+          run-install: false
+
+      - name: Install desktop dependencies
+        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Cache resource monitor
+        id: resource_monitor_cache
+        uses: actions/cache@v6
+        with:
+          path: native/resource-monitor/target/${{ matrix.rust_target }}/release/t3-resource-monitor${{ matrix.platform == 'win' && '.exe' || '' }}
+          key: resource-monitor-${{ matrix.rust_target }}-${{ hashFiles('native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
+
+      - name: Setup Rust
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Align package versions and public configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/update-release-package-versions.ts "${{ needs.prepare.outputs.version }}"
+          # The public Clerk and relay settings the web build reads. These are
+          # the same published values the upstream preview builds use.
+          cp .env.example .env
+
+      - name: Download WSL node-pty prebuild
+        if: matrix.platform == 'win'
+        uses: actions/download-artifact@v8
+        with:
+          name: wsl-node-pty-x64
+          path: wsl-prebuild
+
+      - name: Install Spectre-mitigated MSVC libs
+        if: matrix.platform == 'win'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      - name: Install Linux desktop build libraries
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config
+          if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
+            sudo apt-get install -y imagemagick
+          fi
+
+      - name: Build unsigned desktop artifact
+        shell: bash
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' }}
+          # No signing identity exists on these runners; stop electron-builder
+          # from searching the keychain for one.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -euo pipefail
+          args=(
+            --platform "${{ matrix.platform }}"
+            --target "${{ matrix.target }}"
+            --arch "${{ matrix.arch }}"
+            --build-version "${{ needs.prepare.outputs.version }}"
+            --verbose
+          )
+          if [[ "${{ matrix.platform }}" == "win" ]]; then
+            args+=(--wsl-prebuild "$GITHUB_WORKSPACE/wsl-prebuild/pty.node")
+          fi
+          vp run dist:desktop:artifact "${args[@]}"
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-publish
+          shopt -s nullglob
+          for pattern in \
+            "release/*.dmg" \
+            "release/*.zip" \
+            "release/*.AppImage" \
+            "release/*.exe" \
+            "release/*.blockmap" \
+            "release/*.yml"; do
+            for file in $pattern; do
+              cp "$file" release-publish/
+            done
+          done
+          # Both macOS legs write the same manifest name; suffix the Intel one
+          # so the release job can merge the two.
+          if [[ "${{ matrix.platform }}" == "mac" && "${{ matrix.arch }}" != "arm64" ]]; then
+            for manifest in release-publish/*-mac.yml; do
+              mv "$manifest" "${manifest%.yml}-${{ matrix.arch }}.yml"
+            done
+          fi
+          ls -la release-publish
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release-publish/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    # Publish whatever legs succeeded; a failed platform is reported by its
+    # own job and can be rebuilt on its own.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'failure') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/scripts...
+
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Merge macOS updater manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for x64_manifest in release-assets/*-mac-x64.yml; do
+            arm64_manifest="${x64_manifest%-x64.yml}.yml"
+            if [[ -f "$arm64_manifest" ]]; then
+              node scripts/merge-update-manifests.ts --platform mac "$arm64_manifest" "$x64_manifest"
+              rm -f "$x64_manifest"
+            else
+              mv "$x64_manifest" "$arm64_manifest"
+            fi
+          done
+          ls -la release-assets
+
+      - name: Write release notes
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Unsigned desktop build of this fork from \`$BRANCH\` at $SHORT_SHA."
+            echo
+            echo "macOS: the DMG is not notarized. After copying the app, run \`xattr -dr com.apple.quarantine \"/Applications/T3 Code (Alpha).app\"\` once, or right-click the app and choose Open."
+            echo
+            echo "Windows: the installer is not signed, so SmartScreen shows a warning on first run."
+            echo
+            echo "Linux: mark the AppImage executable before running it."
+          } > release-notes.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: T3 Code ${{ needs.prepare.outputs.tag }}
+          body_path: release-notes.md
+          prerelease: ${{ needs.prepare.outputs.is_prerelease }}
+          make_latest: ${{ needs.prepare.outputs.is_prerelease == 'false' }}
+          files: |
+            release-assets/*.dmg
+            release-assets/*.zip
+            release-assets/*.AppImage
+            release-assets/*.exe
+            release-assets/*.blockmap
+            release-assets/*.yml
+          fail_on_unmatched_files: false
+          token: ${{ github.token }}
