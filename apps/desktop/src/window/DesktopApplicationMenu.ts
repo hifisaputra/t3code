@@ -40,6 +40,27 @@ type DesktopApplicationMenuRuntimeServices =
 
 const { logInfo: logUpdaterInfo } = makeComponentLogger("desktop-updater");
 
+export type DesktopGoMenuAction =
+  | "open-threads"
+  | "open-assistant"
+  | "open-issues"
+  | "open-pull-requests"
+  | "open-history"
+  | "open-usage";
+
+// Order matches the sidebar's utility row so the two lists read the same.
+export const DESKTOP_GO_MENU_ITEMS: ReadonlyArray<{
+  readonly label: string;
+  readonly action: DesktopGoMenuAction;
+}> = [
+  { label: "Threads", action: "open-threads" },
+  { label: "Developer Assistant", action: "open-assistant" },
+  { label: "Issues", action: "open-issues" },
+  { label: "Pull Requests", action: "open-pull-requests" },
+  { label: "History", action: "open-history" },
+  { label: "Usage", action: "open-usage" },
+];
+
 const { logError: logMenuError } = makeComponentLogger("desktop-menu");
 
 const dispatchMenuAction = Effect.fn("desktop.menu.dispatchMenuAction")(function* (
@@ -137,6 +158,13 @@ export const make = Effect.gen(function* () {
     const zoomClick = (direction: DesktopWindow.MainWindowZoomDirection) => () => {
       runMenuEffect(`zoom-${direction}`, zoomMainWindow(direction));
     };
+    // The renderer owns navigation (AppSidebarLayout listens for these
+    // actions), so the menu only names the page. The pages match the
+    // sidebar's utility row; Issues and the assistant render their own
+    // "connect Linear" state when the server has no Linear key.
+    const goClick = (action: DesktopGoMenuAction) => () => {
+      runMenuEffect(action, dispatchMenuAction(action));
+    };
     const template: Electron.MenuItemConstructorOptions[] = [];
 
     if (environment.platform === "darwin") {
@@ -209,6 +237,13 @@ export const make = Effect.gen(function* () {
           { type: "separator" },
           { role: "togglefullscreen" },
         ],
+      },
+      {
+        label: "Go",
+        submenu: DESKTOP_GO_MENU_ITEMS.map((item) => ({
+          label: item.label,
+          click: goClick(item.action),
+        })),
       },
       { role: "windowMenu" },
       {

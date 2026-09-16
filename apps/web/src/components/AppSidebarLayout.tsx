@@ -23,6 +23,8 @@ import {
 import LegacyThreadSidebar from "./LegacySidebar";
 import ThreadSidebar from "./Sidebar";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
+import { readIssueListPreferences } from "./issues/issueListPreferences";
+import { readPullRequestListPreferences } from "./pullRequest/pullRequestListPreferences";
 import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import {
   resolveSidebarStageFocusRingOffsetClass,
@@ -205,11 +207,36 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
     }
 
     const unsubscribe = onMenuAction((action) => {
-      if (action === "open-settings") {
-        const isSettingsRoute = /^\/settings(\/|$)/.test(pathname);
-        if (!isSettingsRoute) {
-          void navigate({ to: "/settings" });
+      switch (action) {
+        case "open-settings": {
+          const isSettingsRoute = /^\/settings(\/|$)/.test(pathname);
+          if (!isSettingsRoute) {
+            void navigate({ to: "/settings" });
+          }
+          return;
         }
+        case "open-threads":
+          void navigate({ to: "/" });
+          return;
+        case "open-assistant":
+          void navigate({ to: "/assistant" });
+          return;
+        case "open-issues":
+          void navigate({ to: "/issues", search: readIssueListPreferences() });
+          return;
+        case "open-pull-requests":
+          void navigate({ to: "/pull-requests", search: readPullRequestListPreferences() });
+          return;
+        case "open-history":
+          // No project in the search params: the page resolves the active
+          // thread's project itself, which is the one the user is looking at.
+          void navigate({ to: "/history", search: { environment: undefined, project: undefined } });
+          return;
+        case "open-usage":
+          void navigate({ to: "/usage" });
+          return;
+        default:
+          return;
       }
     });
 

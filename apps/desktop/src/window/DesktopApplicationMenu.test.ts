@@ -151,6 +151,37 @@ describe("DesktopApplicationMenu", () => {
     }),
   );
 
+  // The Go menu names the pages the sidebar's utility row reaches; the
+  // renderer maps each action to a route (AppSidebarLayout).
+  it.effect("lists every page in the Go menu and routes it through DesktopWindow", () =>
+    Effect.gen(function* () {
+      const selectedAction = yield* Deferred.make<string>();
+      const applicationMenuTemplate =
+        yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+
+      yield* configureMenu(selectedAction, applicationMenuTemplate);
+
+      const template = yield* Deferred.await(applicationMenuTemplate);
+      const goMenu = template.find((item) => item.label === "Go");
+      assert.isDefined(goMenu);
+      if (!Array.isArray(goMenu.submenu)) {
+        throw new Error("Expected Go menu submenu to be an array.");
+      }
+      assert.deepEqual(
+        goMenu.submenu.map((item) => item.label),
+        DesktopApplicationMenu.DESKTOP_GO_MENU_ITEMS.map((item) => item.label),
+      );
+
+      const historyItem = goMenu.submenu.find((item) => item.label === "History");
+      assert.isDefined(historyItem);
+      if (typeof historyItem.click !== "function") {
+        throw new Error("Expected History menu item to have a click handler.");
+      }
+      historyItem.click({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
+      assert.equal(yield* Deferred.await(selectedAction), "open-history");
+    }),
+  );
+
   // Zoom must route through DesktopWindow.zoomMain instead of the Electron
   // zoom roles: the roles zoom whichever webContents has focus, which breaks
   // app zoom while an embedded preview WebContentsView holds focus.
