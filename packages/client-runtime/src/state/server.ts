@@ -1063,6 +1063,14 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverGetProjectHistory,
       staleTimeMs: 15_000,
     }),
+    // The sidebar badge holds this open for as long as the app is mounted, so
+    // the TTL only covers the gap while a route swaps; scanning processes costs
+    // the server real work, so let it stop shortly after the last reader goes.
+    agentProcesses: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:agent-processes",
+      tag: WS_METHODS.subscribeAgentProcesses,
+      idleTtlMs: 5_000,
+    }),
     configProjection,
     welcome,
     consumeResetCredit: createEnvironmentRpcCommand(runtime, {
@@ -1116,6 +1124,10 @@ export function createServerEnvironmentAtoms<R, E>(
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,
+    }),
+    stopAgentProcess: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:stop-agent-process",
+      tag: WS_METHODS.serverStopAgentProcess,
     }),
     refreshUsageRates: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:refresh-usage-rates",

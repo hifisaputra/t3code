@@ -20,8 +20,10 @@ import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
+import { withAgentProcessMarker } from "@t3tools/shared/agentProcessMarker";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
+import * as ProviderProcessRegistry from "../../agentProcesses/ProviderProcessRegistry.ts";
 import {
   collectSessionConfigOptionValues,
   decideToolCallUpdateEmission,
@@ -79,6 +81,12 @@ export interface AcpSpawnInput {
 
 export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
+  /**
+   * Thread this session serves. One ACP process serves one thread, so its
+   * environment carries the thread marker and anything it leaves running
+   * stays attributable. Probe and text-generation runtimes have no thread.
+   */
+  readonly threadId?: string;
   readonly cwd: string;
   readonly resumeSessionId?: string;
   readonly resumeMethod?: "load" | "resume";
@@ -425,15 +433,21 @@ export const make = (
         ),
       );
 
+    // With no environment of its own the agent inherits the server's, so the
+    // marker becomes the only extra; `extendEnv` keeps the rest.
+    const spawnEnv =
+      options.threadId === undefined
+        ? options.spawn.env
+        : withAgentProcessMarker(options.spawn.env ?? {}, options.threadId);
     const spawnCommand = yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
-      ...(options.spawn.env ? { env: options.spawn.env } : {}),
+      ...(spawnEnv ? { env: spawnEnv } : {}),
       extendEnv: options.spawn.extendEnv ?? true,
     });
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: options.spawn.env } : {}),
+          ...(spawnEnv ? { env: spawnEnv } : {}),
           extendEnv: options.spawn.extendEnv ?? true,
           shell: spawnCommand.shell,
         }),
@@ -448,6 +462,12 @@ export const make = (
             }),
         ),
       );
+
+    // The agent CLI is the provider process itself; the scanner must never
+    // offer it as a leftover.
+    yield* ProviderProcessRegistry.retain(child.pid).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+    );
 
     yield* child.stderr.pipe(
       Stream.decodeText(),

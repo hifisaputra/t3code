@@ -144,6 +144,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
+import * as AgentProcessTracker from "./agentProcesses/AgentProcessTracker.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
@@ -962,6 +963,16 @@ const buildAppUnderTest = (options?: {
             retain: Effect.void,
             registerTerminalProcesses: () => Effect.void,
             unregisterTerminal: () => Effect.void,
+          }),
+          Layer.mock(AgentProcessTracker.AgentProcessTracker)({
+            scan: Effect.succeed({
+              supported: true,
+              generatedAt: "1970-01-01T00:00:00.000Z",
+              processes: [],
+            }),
+            subscribe: () => Effect.void,
+            retain: Effect.void,
+            stop: () => Effect.die("AgentProcessTracker not stubbed in this test"),
           }),
         ),
       ),

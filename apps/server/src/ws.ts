@@ -29,6 +29,7 @@ import {
   ClientSurface,
   ClientWebDeployment,
   CommandId,
+  type AgentProcessesSnapshot,
   type DiscoveredLocalServerList,
   EventId,
   type EditorId,
@@ -121,6 +122,7 @@ import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
+import * as AgentProcessTracker from "./agentProcesses/AgentProcessTracker.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import { readWorkflowScript } from "./orchestration/workflowScriptQuery.ts";
@@ -528,6 +530,7 @@ const makeWsRpcLayer = (
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
+      const agentProcesses = yield* AgentProcessTracker.AgentProcessTracker;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerService = yield* ProviderService.ProviderService;
       const providerSessionDirectory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
@@ -2233,6 +2236,10 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverSignalProcess, processDiagnostics.signal(input), {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.serverStopAgentProcess]: (input) =>
+          observeRpcEffect(WS_METHODS.serverStopAgentProcess, agentProcesses.stop(input), {
+            "rpc.aggregate": "server",
+          }),
         [WS_METHODS.serverReportClientActivity]: (input, metadata) =>
           Ref.update(rpcClientIds, (clientIds) => {
             const next = new Set(clientIds);
@@ -2850,6 +2857,21 @@ const makeWsRpcLayer = (
               }),
             ),
             { "rpc.aggregate": "preview" },
+          ),
+        [WS_METHODS.subscribeAgentProcesses]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.subscribeAgentProcesses,
+            Stream.callback<AgentProcessesSnapshot>((queue) =>
+              Effect.gen(function* () {
+                yield* agentProcesses.retain;
+                const initial = yield* agentProcesses.scan;
+                yield* Queue.offer(queue, initial);
+                yield* agentProcesses.subscribe({ initialSnapshot: initial }, (snapshot) =>
+                  Queue.offer(queue, snapshot),
+                );
+              }),
+            ),
+            { "rpc.aggregate": "server" },
           ),
         [WS_METHODS.subscribeServerConfig]: (input) =>
           observeRpcStreamEffect(

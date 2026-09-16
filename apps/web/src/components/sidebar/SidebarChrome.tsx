@@ -1,4 +1,5 @@
 import {
+  ActivityIcon,
   ArrowLeftIcon,
   BotIcon,
   ChartNoAxesColumnIcon,
@@ -13,6 +14,7 @@ import { Link, useCanGoBack, useLocation, useNavigate } from "@tanstack/react-ro
 
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
+import { useAgentProcessCount } from "../../state/agentProcesses";
 import { useEnvironments } from "../../state/environments";
 import { useAnyEnvironmentHasLinearKey } from "../../state/linear";
 import { T3Wordmark } from "../T3Wordmark";
@@ -117,12 +119,15 @@ function SidebarUtilityItem({
   label,
   onClick,
   count = 0,
+  countDescription = "waiting on you",
 }: {
   icon: ReactNode;
   label: string;
   onClick: () => void;
-  /** Things waiting on the user there, shown on the icon. */
+  /** Things that need the user's attention there, shown on the icon. */
   count?: number;
+  /** What the count counts, for the label and tooltip. */
+  countDescription?: string;
 }) {
   return (
     <SidebarMenuItem className="shrink-0">
@@ -130,7 +135,7 @@ function SidebarUtilityItem({
         <TooltipTrigger
           render={
             <SidebarMenuButton
-              aria-label={count > 0 ? `${label}, ${count} waiting on you` : label}
+              aria-label={count > 0 ? `${label}, ${count} ${countDescription}` : label}
               onClick={onClick}
               size="icon"
               className="relative"
@@ -148,7 +153,7 @@ function SidebarUtilityItem({
           }
         />
         <TooltipPopup side="top">
-          {count > 0 ? `${label} · ${count} waiting on you` : label}
+          {count > 0 ? `${label} · ${count} ${countDescription}` : label}
         </TooltipPopup>
       </Tooltip>
     </SidebarMenuItem>
@@ -169,11 +174,13 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             ? "usage"
             : location.pathname === "/history"
               ? "history"
-              : location.pathname === "/pull-requests"
-                ? "pull-requests"
-                : location.pathname === "/issues"
-                  ? "issues"
-                  : null,
+              : location.pathname === "/processes"
+                ? "processes"
+                : location.pathname === "/pull-requests"
+                  ? "pull-requests"
+                  : location.pathname === "/issues"
+                    ? "issues"
+                    : null,
   });
   const { environments } = useEnvironments();
   // The page reads every connected server, so one of them offering pull requests is enough for
@@ -182,6 +189,9 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     (environment) => environment.serverConfig?.environment.capabilities.pullRequests === true,
   );
   const issuesSupported = useAnyEnvironmentHasLinearKey();
+  // Mounted for the whole session, so this is what keeps the process
+  // subscription open and the page instant when it is opened.
+  const agentProcessCount = useAgentProcessCount();
   // The server the assistant page opens by default.
   const assistantCount = useAssistantBlockingCount(
     environments.find((e) => e.serverConfig?.settings.linear.apiKey)?.environmentId ?? null,
@@ -222,6 +232,11 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const handleHistoryClick = useCallback(() => {
     closeMobileSidebar();
     void navigate({ to: "/history", search: { environment: undefined, project: undefined } });
+  }, [closeMobileSidebar, navigate]);
+
+  const handleProcessesClick = useCallback(() => {
+    closeMobileSidebar();
+    void navigate({ to: "/processes" });
   }, [closeMobileSidebar, navigate]);
 
   const handleBackClick = useCallback(() => {
@@ -275,6 +290,13 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             />
           ) : null}
           <SidebarUtilityItem icon={<HistoryIcon />} label="History" onClick={handleHistoryClick} />
+          <SidebarUtilityItem
+            icon={<ActivityIcon />}
+            label="Processes"
+            count={agentProcessCount}
+            countDescription="running"
+            onClick={handleProcessesClick}
+          />
           <SidebarUtilityItem
             icon={<ChartNoAxesColumnIcon />}
             label="Usage"

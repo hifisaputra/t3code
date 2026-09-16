@@ -17,6 +17,7 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import { withAgentProcessMarker } from "@t3tools/shared/agentProcessMarker";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { normalizeModelSlug } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
@@ -36,6 +37,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
+import * as ProviderProcessRegistry from "../../agentProcesses/ProviderProcessRegistry.ts";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -1210,10 +1212,15 @@ export const makeCodexSessionRuntime = (
     // `child_process.spawn`; `expandHomePath` lets a configured
     // `CODEX_HOME=~/.codex_work` reach codex as an absolute path.
     const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
-    const env = {
-      ...options.environment,
-      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-    };
+    // The marker rides in whether or not the caller passed an environment:
+    // with none, `extendEnv` is true and these are the only extras.
+    const env = withAgentProcessMarker(
+      {
+        ...options.environment,
+        ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+      },
+      options.threadId,
+    );
     const extendEnv = options.environment === undefined;
     const appServerArgs = codexSessionAppServerArgs(options.appServerArgs, options.launchArgs);
     const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, appServerArgs, {
@@ -1240,6 +1247,12 @@ export const makeCodexSessionRuntime = (
             }),
         ),
       );
+
+    // The app-server is the provider CLI itself, never a leftover; registering
+    // its pid lets the scanner exclude it and everything it wraps.
+    yield* ProviderProcessRegistry.retain(child.pid).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+    );
 
     const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
       Layer.build,

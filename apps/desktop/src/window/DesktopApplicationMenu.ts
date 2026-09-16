@@ -46,6 +46,7 @@ export type DesktopGoMenuAction =
   | "open-issues"
   | "open-pull-requests"
   | "open-history"
+  | "open-processes"
   | "open-usage";
 
 // Order matches the sidebar's utility row so the two lists read the same.
@@ -58,6 +59,7 @@ export const DESKTOP_GO_MENU_ITEMS: ReadonlyArray<{
   { label: "Issues", action: "open-issues" },
   { label: "Pull Requests", action: "open-pull-requests" },
   { label: "History", action: "open-history" },
+  { label: "Processes", action: "open-processes" },
   { label: "Usage", action: "open-usage" },
 ];
 

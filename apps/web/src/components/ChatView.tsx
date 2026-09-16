@@ -204,6 +204,7 @@ import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
+  ActivityIcon,
   AlarmClockIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -295,6 +296,9 @@ import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
 import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
+import { useThreadAgentProcesses } from "../state/agentProcesses";
+import { agentProcessStopKey, useStopAgentProcess } from "./processes/useStopAgentProcess";
+import { collectListeningPorts, formatPortSummary } from "./processes/agentProcessesModel";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useEnvironmentQuery } from "../state/query";
 import {
@@ -5681,6 +5685,64 @@ export default function ChatView(props: ChatViewProps) {
     handleStopBackgroundWork,
     isStoppingBackgroundWork,
   ]);
+  // Dev servers and watchers this thread started and never stopped. Reads the
+  // same pushed snapshot as the Processes page, so the banner costs no extra
+  // server work and disappears on its own once the chains are gone.
+  const activeThreadAgentProcesses = useThreadAgentProcesses(
+    activeThreadEnvironmentId === null || activeThreadId === null
+      ? null
+      : { environmentId: activeThreadEnvironmentId, threadId: activeThreadId },
+  );
+  const { statuses: agentProcessStopStatuses, stop: stopAgentProcess } = useStopAgentProcess();
+  const isStoppingThreadAgentProcesses =
+    activeThreadEnvironmentId !== null &&
+    activeThreadAgentProcesses.some(
+      (process) =>
+        agentProcessStopStatuses.get(agentProcessStopKey(activeThreadEnvironmentId, process))
+          ?.kind === "pending",
+    );
+  const handleStopThreadAgentProcesses = useCallback(async () => {
+    if (activeThreadEnvironmentId === null) return;
+    // One at a time: each stop signals a whole process group and waits out a
+    // grace period on the server, so firing them together only buys races.
+    for (const process of activeThreadAgentProcesses) {
+      await stopAgentProcess(activeThreadEnvironmentId, process);
+    }
+  }, [activeThreadAgentProcesses, activeThreadEnvironmentId, stopAgentProcess]);
+  const agentProcessesBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (activeThreadAgentProcesses.length === 0) {
+      return null;
+    }
+    const count = activeThreadAgentProcesses.length;
+    return {
+      id: `agent-processes:${activeThreadId ?? "unknown"}`,
+      variant: "info",
+      icon: <ActivityIcon />,
+      title: `${count} ${count === 1 ? "process" : "processes"} still running from this thread`,
+      description: formatPortSummary(collectListeningPorts(activeThreadAgentProcesses)),
+      actions: (
+        <>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={isStoppingThreadAgentProcesses}
+            onClick={() => void handleStopThreadAgentProcesses()}
+          >
+            {isStoppingThreadAgentProcesses ? "Stopping..." : "Stop"}
+          </Button>
+          <Button size="xs" variant="ghost" onClick={() => void navigate({ to: "/processes" })}>
+            View
+          </Button>
+        </>
+      ),
+    };
+  }, [
+    activeThreadAgentProcesses,
+    activeThreadId,
+    handleStopThreadAgentProcesses,
+    isStoppingThreadAgentProcesses,
+    navigate,
+  ]);
   // A woken thread announces itself in the open view, not just the sidebar
   // pill. Dismissing marks the wake as seen (same acknowledgment as the
   // pill); sending a message clears it as a side effect of the send path.
@@ -5867,6 +5929,7 @@ export default function ChatView(props: ChatViewProps) {
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+    const agentProcessesItems = agentProcessesBannerItem === null ? [] : [agentProcessesBannerItem];
     const resumeCompactionItems =
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
@@ -5879,6 +5942,7 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...systemComposerBannerItems,
         ...backgroundLivenessItems,
+        ...agentProcessesItems,
         ...resumeCompactionItems,
         ...wokeThreadItems,
         ...parkedThreadItems,
@@ -5889,6 +5953,7 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...systemComposerBannerItems,
       ...backgroundLivenessItems,
+      ...agentProcessesItems,
       ...resumeCompactionItems,
       ...wokeThreadItems,
       {
@@ -5933,6 +5998,7 @@ export default function ChatView(props: ChatViewProps) {
     ];
   }, [
     activeBranchMismatchKey,
+    agentProcessesBannerItem,
     backgroundLivenessBannerItem,
     feedbackBannerItems,
     handleRestoreThreadBranch,

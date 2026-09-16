@@ -202,6 +202,12 @@ import {
   TerminalWriteInput,
 } from "./terminal.ts";
 import {
+  AgentProcessesSnapshot,
+  AgentProcessStopError,
+  StopAgentProcessInput,
+  StopAgentProcessResult,
+} from "./agentProcesses.ts";
+import {
   DiscoveredLocalServerList,
   ConfiguredLocalServerUrls,
   PreviewCloseInput,
@@ -383,6 +389,7 @@ export const WS_METHODS = {
   serverGetThreadUsageStats: "server.getThreadUsageStats",
   serverRefreshUsageRates: "server.refreshUsageRates",
   serverGetProjectHistory: "server.getProjectHistory",
+  serverStopAgentProcess: "server.stopAgentProcess",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -449,6 +456,7 @@ export const WS_METHODS = {
   subscribeTerminalMetadata: "subscribeTerminalMetadata",
   subscribePreviewEvents: "subscribePreviewEvents",
   subscribeDiscoveredLocalServers: "subscribeDiscoveredLocalServers",
+  subscribeAgentProcesses: "subscribeAgentProcesses",
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
@@ -679,6 +687,16 @@ const WsServerGetProjectHistoryRpc = Rpc.make(WS_METHODS.serverGetProjectHistory
   payload: ProjectHistoryInput,
   success: ProjectHistory,
   error: Schema.Union([EnvironmentAuthorizationError, ProjectHistoryReadError]),
+});
+
+/**
+ * Stops one agent-launched process chain (a dev server the agent left
+ * running). Powers the Processes page and the thread banner.
+ */
+const WsServerStopAgentProcessRpc = Rpc.make(WS_METHODS.serverStopAgentProcess, {
+  payload: StopAgentProcessInput,
+  success: StopAgentProcessResult,
+  error: Schema.Union([EnvironmentAuthorizationError, AgentProcessStopError]),
 });
 
 const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
@@ -1160,6 +1178,14 @@ const WsSubscribePreviewEventsRpc = Rpc.make(WS_METHODS.subscribePreviewEvents, 
   stream: true,
 });
 
+/** Live list of processes agents started and left running, every few seconds. */
+const WsSubscribeAgentProcessesRpc = Rpc.make(WS_METHODS.subscribeAgentProcesses, {
+  payload: Schema.Struct({}),
+  success: AgentProcessesSnapshot,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
 const WsSubscribeDiscoveredLocalServersRpc = Rpc.make(WS_METHODS.subscribeDiscoveredLocalServers, {
   payload: Schema.Struct({
     configuredUrls: Schema.optional(ConfiguredLocalServerUrls),
@@ -1565,6 +1591,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewAutomationFocusHostRpc,
   WsSubscribePreviewEventsRpc,
   WsSubscribeDiscoveredLocalServersRpc,
+  WsSubscribeAgentProcessesRpc,
+  WsServerStopAgentProcessRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,

@@ -232,6 +232,9 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           // thread's project itself, which is the one the user is looking at.
           void navigate({ to: "/history", search: { environment: undefined, project: undefined } });
           return;
+        case "open-processes":
+          void navigate({ to: "/processes" });
+          return;
         case "open-usage":
           void navigate({ to: "/usage" });
           return;

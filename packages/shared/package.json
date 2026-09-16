@@ -263,6 +263,10 @@
       "types": "./src/desktopAppControl.ts",
       "import": "./src/desktopAppControl.ts"
     },
+    "./agentProcessMarker": {
+      "types": "./src/agentProcessMarker.ts",
+      "import": "./src/agentProcessMarker.ts"
+    },
     "./desktopDistribution": {
       "types": "./src/desktopDistribution.ts",
       "import": "./src/desktopDistribution.ts"

@@ -38,6 +38,7 @@ import {
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import * as Option from "effect/Option";
 import {
+  ActivityIcon,
   ArrowLeftIcon,
   CircleDotIcon,
   CornerLeftUpIcon,
@@ -1664,6 +1665,17 @@ function OpenCommandPaletteDialog(props: {
             ? { environment: currentProjectEnvironmentId, project: currentProjectId }
             : { environment: undefined, project: undefined },
       });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:processes",
+    searchTerms: ["processes", "dev server", "running", "port", "kill", "stop"],
+    title: "Open processes",
+    icon: <ActivityIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/processes" });
     },
   });
 
