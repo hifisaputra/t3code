@@ -1,7 +1,6 @@
 import { forkParked } from "../serverActivation.ts";
 import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
 import * as NodeCrypto from "node:crypto";
-import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -29,7 +28,7 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
 import { LinearOAuth } from "./LinearOAuth.ts";
-import { LinearAgentApi } from "./LinearAgentApi.ts";
+import { LinearAgentOutbox } from "./LinearAgentOutbox.ts";
 import { LinearApi, LinearAppCredential } from "./LinearApi.ts";
 import { LinearThreadService } from "./LinearThreadService.ts";
 
@@ -78,22 +77,10 @@ const Question = Schema.Struct({
   ids: Schema.optional(Schema.Array(Schema.String)),
   questions: Schema.optional(Schema.Array(UserInputQuestion)),
 });
-const Outgoing = Schema.Union([
-  Schema.Struct({
-    type: Schema.Literals(["thought", "response", "error", "elicitation"]),
-    body: Schema.String,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("links"),
-    links: Schema.Array(Schema.Struct({ label: Schema.String, url: Schema.String })),
-  }),
-]);
 
 const encodeEvent = Schema.encodeEffect(Schema.fromJsonString(AgentEvent));
 const encodeQuestion = Schema.encodeEffect(Schema.fromJsonString(Question));
 const decodeQuestion = Schema.decodeUnknownEffect(Schema.fromJsonString(Question));
-const encodeOutgoing = Schema.encodeEffect(Schema.fromJsonString(Outgoing));
-const decodeOutgoing = Schema.decodeUnknownEffect(Schema.fromJsonString(Outgoing));
 const encodeGuidance = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeEnvelope = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ type: Schema.String, webhookTimestamp: Schema.Number })),
@@ -138,46 +125,44 @@ export const LinearDelegationWorkers = Context.Reference<boolean>("t3/linear/wor
 });
 
 export const make = Effect.gen(function* () {
-  const environmentId = yield* (yield* ServerEnvironmentIdentity).getEnvironmentId;
   const sql = yield* SqlClient.SqlClient;
   const settings = yield* ServerSettingsService;
   const oauth = yield* LinearOAuth;
-  const api = yield* LinearAgentApi;
+  const outbox = yield* LinearAgentOutbox;
   const linear = yield* LinearApi;
   const threads = yield* LinearThreadService;
   const engine = yield* OrchestrationEngineService;
   const ingestion = yield* ProviderRuntimeIngestionService;
   const snapshots = yield* ProjectionSnapshotQuery;
   const files = yield* T3ProjectFileLoader;
-  const sendLock = yield* Semaphore.make(1);
   const processLock = yield* Semaphore.make(1);
   const queue = yield* Queue.unbounded<string>();
-  const outgoing = yield* Queue.unbounded<string>();
   const ackQueue = yield* Queue.unbounded<string>();
-  const enqueueOutgoing = Effect.fn("LinearDelegation.enqueueOutgoing")(function* (
-    id: string,
-    sessionId: string,
-    content: typeof Outgoing.Type,
-  ) {
-    yield* sql`INSERT OR IGNORE INTO linear_agent_outbox (id, session_id, payload) VALUES (${id}, ${sessionId}, ${yield* encodeOutgoing(content)})`;
-    yield* Queue.offer(outgoing, id);
-  });
-  const sendOutgoing = Effect.fn("LinearDelegation.sendOutgoing")(function* (id: string) {
-    const rows = yield* sql<{
-      session_id: string;
-      payload: string;
-    }>`SELECT session_id, payload FROM linear_agent_outbox WHERE id = ${id} AND sent = 0`;
-    const row = rows[0];
-    if (!row) return;
-    const content = yield* decodeOutgoing(row.payload);
-    if (content.type === "links") yield* api.links(row.session_id, content.links);
-    else yield* api.activity(row.session_id, content.type, content.body);
-    yield* sql`UPDATE linear_agent_outbox SET sent = 1 WHERE id = ${id}`;
-  }, sendLock.withPermits(1));
+  const enqueueOutgoing = outbox.enqueue;
   const commandId = (id: string, step: string) => CommandId.make(`linear:${id}:${step}`);
-  const threadLink = (url: string, id: string) => ({
-    label: "T3 Code thread",
-    url: `${url.replace(/\/$/, "")}/${encodeURIComponent(environmentId)}/${encodeURIComponent(id)}`,
+  /**
+   * Sessions the assistant created for a team come back as `created` webhooks with no
+   * creator, like a triage delegation. They are settled here and never start a thread.
+   * Returns true when the delivery belonged to such a session.
+   */
+  const settleTeamDelivery = Effect.fn("LinearDelegation.settleTeamDelivery")(function* (
+    deliveryId: string,
+    event: AgentEvent,
+  ) {
+    const rows = yield* outbox.withCreationLock(
+      sql<{
+        id: string;
+      }>`SELECT id FROM linear_agent_sessions WHERE id = ${event.agentSession.id} AND task_id IS NOT NULL`,
+    );
+    if (!rows[0]) return false;
+    // Phase 2 routes replies to the team; until then say where to answer.
+    if (event.action === "prompted")
+      yield* enqueueOutgoing(`${deliveryId}:team`, event.agentSession.id, {
+        type: "thought",
+        body: "Replies on Linear do not reach the team yet. Answer in T3 Code.",
+      });
+    yield* sql`UPDATE linear_agent_deliveries SET processed = 1 WHERE id = ${deliveryId}`;
+    return true;
   });
   const process = Effect.fn("LinearDelegation.process")(
     function* (deliveryId: string) {
@@ -186,6 +171,7 @@ export const make = Effect.gen(function* () {
       }>`SELECT payload FROM linear_agent_deliveries WHERE id = ${deliveryId} AND processed = 0`;
       if (!deliveries[0]) return;
       const event = yield* decodeEvent(deliveries[0].payload);
+      if (yield* settleTeamDelivery(deliveryId, event)) return;
       const sessionId = event.agentSession.id;
       const allSettings = yield* settings.getSettings;
       const c = allSettings.linear.delegation;
@@ -392,10 +378,12 @@ export const make = Effect.gen(function* () {
             });
             yield* sql`UPDATE linear_agent_sessions SET thread_id = ${threadId} WHERE id = ${sessionId}`;
           }
-          yield* enqueueOutgoing(`${deliveryId}:links`, sessionId, {
-            type: "links",
-            links: [threadLink(c.publicUrl, threadId)],
-          });
+          const link = yield* outbox.threadLink(threadId);
+          if (link)
+            yield* enqueueOutgoing(`${deliveryId}:links`, sessionId, {
+              type: "links",
+              links: [link],
+            });
           const text =
             session.status === "pending" || pending?.kind === "repository"
               ? `$linear-work ${issue.identifier}: ${issue.title}\n${issue.url}\nYou were delegated this issue in Linear. Read the current issue description and comments with the get_issue and list_comments MCP tools before starting. Work in this thread's prepared worktree. Ask questions through the provider's user-input tool so replies from Linear can resume you.\n${initial.guidance ? yield* encodeGuidance(initial.guidance) : ""}`
@@ -534,11 +522,11 @@ export const make = Effect.gen(function* () {
         event.type === "thread.meta-updated" &&
         (event.payload.branchPullRequest || event.payload.linkedPullRequest)
       ) {
-        const c = (yield* settings.getSettings).linear.delegation;
+        const link = yield* outbox.threadLink(row.thread_id!);
         yield* enqueueOutgoing(id, row.id, {
           type: "links",
           links: [
-            threadLink(c.publicUrl, row.thread_id!),
+            ...(link ? [link] : []),
             {
               label: "Pull request",
               url: (event.payload.branchPullRequest ?? event.payload.linkedPullRequest)!.url,
@@ -576,8 +564,26 @@ export const make = Effect.gen(function* () {
       }
     }
   });
+  /** Acknowledges a delivery at once (Linear wants a reply within 10 seconds), then processes it. */
+  const acknowledge = Effect.fn("LinearDelegation.acknowledge")(function* (id: string) {
+    const rows = yield* sql<{
+      payload: string;
+    }>`SELECT payload FROM linear_agent_deliveries WHERE id = ${id} AND processed = 0`;
+    if (!rows[0]) return;
+    const event = yield* decodeEvent(rows[0].payload);
+    if (yield* settleTeamDelivery(id, event)) return;
+    yield* enqueueOutgoing(`${id}:ack`, event.agentSession.id, {
+      type: "thought",
+      body:
+        event.action === "created"
+          ? "Picking this up on the T3 Code environment."
+          : "Received your reply. Continuing in T3 Code.",
+    });
+    yield* outbox.send(event.agentSession.id);
+    yield* Queue.offer(queue, id);
+  });
   if (!(yield* LinearDelegationWorkers))
-    return { receive, stop, isActive, process, observe, sendOutgoing };
+    return { receive, stop, isActive, process, observe, acknowledge };
   const events = yield* engine.subscribeDomainEvents;
   const recordEvent = Effect.fn("LinearDelegation.recordEvent")(function* (
     event: OrchestrationEvent,
@@ -609,17 +615,6 @@ export const make = Effect.gen(function* () {
     ),
     forkParked,
   );
-  yield* Queue.take(outgoing).pipe(
-    Effect.flatMap((id) =>
-      sendOutgoing(id).pipe(
-        Effect.catch(() =>
-          Effect.logWarning("Linear update pending; it will be retried automatically."),
-        ),
-      ),
-    ),
-    Effect.forever,
-    forkParked,
-  );
   const processSafely = (id: string) =>
     process(id).pipe(
       Effect.catch((error) =>
@@ -644,22 +639,7 @@ export const make = Effect.gen(function* () {
   yield* Queue.take(queue).pipe(Effect.flatMap(processSafely), Effect.forever, forkParked);
   yield* Queue.take(ackQueue).pipe(
     Effect.flatMap((id) =>
-      Effect.gen(function* () {
-        const rows = yield* sql<{
-          payload: string;
-        }>`SELECT payload FROM linear_agent_deliveries WHERE id = ${id} AND processed = 0`;
-        if (!rows[0]) return;
-        const event = yield* decodeEvent(rows[0].payload);
-        yield* enqueueOutgoing(`${id}:ack`, event.agentSession.id, {
-          type: "thought",
-          body:
-            event.action === "created"
-              ? "Picking this up on the T3 Code environment."
-              : "Received your reply. Continuing in T3 Code.",
-        });
-        yield* sendOutgoing(`${id}:ack`);
-        yield* Queue.offer(queue, id);
-      }).pipe(
+      acknowledge(id).pipe(
         Effect.catch(() =>
           Effect.logWarning("Linear acknowledgement failed; delivery remains pending."),
         ),
@@ -674,10 +654,6 @@ export const make = Effect.gen(function* () {
       id: string;
     }>`SELECT id FROM linear_agent_deliveries WHERE processed = 0 ORDER BY received_at`;
     for (const row of pendingDeliveries) yield* Queue.offer(ackQueue, row.id);
-    const pendingUpdates = yield* sql<{
-      id: string;
-    }>`SELECT id FROM linear_agent_outbox WHERE sent = 0`;
-    for (const row of pendingUpdates) yield* Queue.offer(outgoing, row.id);
   });
   yield* recover;
   yield* recover.pipe(
@@ -685,7 +661,7 @@ export const make = Effect.gen(function* () {
     Effect.catch(() => Effect.logWarning("Linear recovery paused until restart.")),
     forkParked,
   );
-  return { receive, stop, isActive, process, observe, sendOutgoing };
+  return { receive, stop, isActive, process, observe, acknowledge };
 });
 export class LinearDelegation extends Context.Service<
   LinearDelegation,

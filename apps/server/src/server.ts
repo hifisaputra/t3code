@@ -1,5 +1,6 @@
 import * as LinearOAuth from "./linear/LinearOAuth.ts";
 import * as LinearAgentApi from "./linear/LinearAgentApi.ts";
+import * as LinearAgentOutbox from "./linear/LinearAgentOutbox.ts";
 import * as LinearDelegation from "./linear/LinearDelegation.ts";
 import { ProjectionTurnRepositoryLive } from "./persistence/Layers/ProjectionTurns.ts";
 import * as DeveloperAssistant from "./assistant/DeveloperAssistant.ts";
@@ -317,10 +318,15 @@ const ReactorLayerLive = Layer.empty.pipe(
   ),
   Layer.provideMerge(
     LinearDelegation.layer.pipe(
-      Layer.provide(LinearAgentApi.layer),
       Layer.provide(LinearThreadService.layer),
       Layer.provide(LinearApi.layer),
       Layer.provide(T3ProjectFileLoader.layer),
+    ),
+  ),
+  // Shared by the assistant and delegation, so neither depends on the other.
+  Layer.provideMerge(
+    LinearAgentOutbox.layer.pipe(
+      Layer.provide(LinearAgentApi.layer),
       Layer.provide(ServerEnvironment.identityLayer),
     ),
   ),

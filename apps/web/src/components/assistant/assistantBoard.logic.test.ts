@@ -23,7 +23,6 @@ import {
   projectLimitHold,
   projectWaitingReason,
   taskOutcome,
-  taskPipeline,
   teamRoleOrder,
 } from "./assistantBoard.logic";
 
@@ -486,124 +485,6 @@ describe("buildInbox", () => {
     expect(
       buildInbox(board({ setups: [{ ...setup, proposal: project().config, revision: 1 }] })),
     ).toMatchObject([{ kind: "setup" }]);
-  });
-});
-
-describe("taskPipeline", () => {
-  const commit = "a".repeat(40);
-  const at = "2026-09-13T00:00:00.000Z";
-  const states = (t: AssistantTask) =>
-    taskPipeline(t)
-      ?.map((step) => `${step.key}:${step.state}`)
-      .join(" ");
-  const approved = {
-    codeReview: { verdict: "approved", findings: "", summary: "", commit, at },
-  } as const;
-  const merged = { ...approved, merge: { commit, summary: "Fixed", at } };
-  const deployed = {
-    ...merged,
-    deployment: { revision: commit, url: "https://staging.example.com", verifiedAt: at },
-  };
-
-  it("follows the issue from code to e2e", () => {
-    expect(states(task({ stage: "implement" }))).toBe(
-      "take:done code:current review:todo merge:todo staging:todo e2e:todo",
-    );
-    expect(states(task({ stage: "review" }))).toBe(
-      "take:done code:done review:current merge:todo staging:todo e2e:todo",
-    );
-    expect(states(task({ stage: "implement", ...approved }))).toBe(
-      "take:done code:done review:done merge:current staging:todo e2e:todo",
-    );
-    expect(states(task({ stage: "lead", ...merged }))).toBe(
-      "take:done code:done review:done merge:done staging:current e2e:todo",
-    );
-    expect(states(task({ stage: "e2e", ...deployed }))).toBe(
-      "take:done code:done review:done merge:done staging:done e2e:current",
-    );
-  });
-
-  it("marks review findings and a failed e2e run where they send the work", () => {
-    const findings = task({
-      stage: "implement",
-      codeReview: { ...approved.codeReview, verdict: "changes-requested" },
-    });
-    expect(taskPipeline(findings)?.[2]).toMatchObject({ state: "todo", note: "Changes requested" });
-    const e2e = { verdict: "failed", report: "", humanChecks: [], screenshots: [], at } as const;
-    // The fix goes back to the worker while the old merge and deployment stay on record.
-    const fixing = task({ stage: "implement", ...deployed, e2e });
-    expect(states(fixing)).toBe(
-      "take:done code:current review:todo merge:todo staging:todo e2e:todo",
-    );
-    expect(taskPipeline(fixing)?.[1]?.note).toBe("Fixing the e2e failure");
-  });
-
-  it("starts with the team leader taking the issue, and gives it staging", () => {
-    const led = (overrides: Partial<AssistantTask>) => task(overrides);
-    expect(states(led({ stage: "lead", turns: 0 }))).toBe(
-      "take:current code:todo review:todo merge:todo staging:todo e2e:todo",
-    );
-    expect(states(led({ stage: "implement", turns: 1 }))).toBe(
-      "take:done code:current review:todo merge:todo staging:todo e2e:todo",
-    );
-    const staging = taskPipeline(led({ stage: "lead", turns: 1, ...merged }))?.[4];
-    expect(staging).toMatchObject({ key: "staging", state: "current", kind: "lead" });
-    const e2e = { verdict: "failed", report: "", humanChecks: [], screenshots: [], at } as const;
-    expect(taskPipeline(led({ stage: "lead", turns: 1, ...deployed, e2e }))?.[5]).toMatchObject({
-      state: "failed",
-      note: "Failed on staging",
-    });
-  });
-
-  it("puts the e2e check before the merge when the issue runs it in the worktree", () => {
-    const led = (overrides: Partial<AssistantTask>) =>
-      task({ e2eEnvironment: "worktree", turns: 1, ...overrides });
-    const passed = {
-      ...approved,
-      e2e: {
-        verdict: "passed",
-        report: "",
-        humanChecks: [],
-        screenshots: [],
-        at,
-        environment: "worktree",
-        commit,
-      },
-    } as const;
-    expect(states(led({ stage: "review" }))).toBe(
-      "take:done code:done review:current e2e:todo merge:todo staging:todo",
-    );
-    // Code review approves, and the team leader starts the run on that commit.
-    expect(states(led({ stage: "lead", ...approved }))).toBe(
-      "take:done code:done review:done e2e:current merge:todo staging:todo",
-    );
-    expect(states(led({ stage: "implement", ...passed }))).toBe(
-      "take:done code:done review:done e2e:done merge:current staging:todo",
-    );
-    expect(states(led({ stage: "lead", ...passed, merge: { commit, summary: "Fixed", at } }))).toBe(
-      "take:done code:done review:done e2e:done merge:done staging:current",
-    );
-    const failedRun = {
-      verdict: "failed",
-      report: "",
-      humanChecks: [],
-      screenshots: [],
-      at,
-      environment: "worktree",
-      commit,
-    } as const;
-    expect(taskPipeline(led({ stage: "lead", ...approved, e2e: failedRun }))?.[3]).toMatchObject({
-      state: "failed",
-      note: "Failed in the worktree",
-    });
-    // The fix goes back to the worker, before the run it has to pass again.
-    expect(states(led({ stage: "implement", ...approved, e2e: failedRun }))).toBe(
-      "take:done code:current review:todo e2e:todo merge:todo staging:todo",
-    );
-  });
-
-  it("has none for work started before issues had review and e2e threads", () => {
-    expect(taskPipeline(task())).toBeNull();
   });
 });
 

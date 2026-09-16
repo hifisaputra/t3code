@@ -46,7 +46,7 @@ it.effect("refreshes once after a 401 and posts activities as the app", () => {
   );
   return Effect.gen(function* () {
     const api = yield* AgentApi.LinearAgentApi;
-    yield* api.activity("session", "elicitation", "Which repository?");
+    yield* api.activity("session", { type: "elicitation", body: "Which repository?" });
     assert.deepEqual(refreshes, [false, true]);
     assert.equal(requests[1]?.headers.authorization, "Bearer new-token");
     assert.deepEqual(variables(requests[1]!), {
@@ -58,7 +58,7 @@ it.effect("refreshes once after a 401 and posts activities as the app", () => {
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("adds thread and pull request links without replacing existing session links", () => {
+function recording(data: unknown) {
   const requests: HttpClientRequest.HttpClientRequest[] = [];
   const layer = AgentApi.layer.pipe(
     Layer.provide(Layer.mock(LinearOAuth)({ accessToken: () => Effect.succeed("token") })),
@@ -67,26 +67,95 @@ it.effect("adds thread and pull request links without replacing existing session
         HttpClient.HttpClient,
         HttpClient.make((request) => {
           requests.push(request);
-          return Effect.succeed(
-            HttpClientResponse.fromWeb(
-              request,
-              Response.json({ data: { agentSessionUpdate: { success: true } } }),
-            ),
-          );
+          return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ data })));
         }),
       ),
     ),
   );
+  return { requests, layer };
+}
+
+it.effect("adds thread and pull request links without replacing existing session links", () => {
+  const { requests, layer } = recording({ agentSessionUpdate: { success: true } });
   return Effect.gen(function* () {
     const api = yield* AgentApi.LinearAgentApi;
-    yield* api.links("session", [
-      { label: "Pull request", url: "https://github.com/org/repo/pull/1" },
-    ]);
+    yield* api.update("session", {
+      addedExternalUrls: [{ label: "Pull request", url: "https://github.com/org/repo/pull/1" }],
+    });
     assert.deepEqual(variables(requests[0]!), {
       id: "session",
       input: {
         addedExternalUrls: [{ label: "Pull request", url: "https://github.com/org/repo/pull/1" }],
       },
     });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("sends the whole plan as an array of steps", () => {
+  const { requests, layer } = recording({ agentSessionUpdate: { success: true } });
+  return Effect.gen(function* () {
+    const api = yield* AgentApi.LinearAgentApi;
+    yield* api.update("session", {
+      plan: [
+        { content: "Code", status: "completed" },
+        { content: "Code review (round 2)", status: "inProgress" },
+      ],
+    });
+    assert.deepEqual(variables(requests[0]!), {
+      id: "session",
+      input: {
+        plan: [
+          { content: "Code", status: "completed" },
+          { content: "Code review (round 2)", status: "inProgress" },
+        ],
+      },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("posts actions with a result and marks only ephemeral activities", () => {
+  const { requests, layer } = recording({ agentActivityCreate: { success: true } });
+  return Effect.gen(function* () {
+    const api = yield* AgentApi.LinearAgentApi;
+    yield* api.activity(
+      "session",
+      { type: "action", action: "Requested review", parameter: "https://pr", result: "3 findings" },
+      true,
+    );
+    yield* api.activity("session", { type: "thought", body: "x".repeat(13000) }, false);
+    assert.deepEqual(variables(requests[0]!), {
+      input: {
+        agentSessionId: "session",
+        content: {
+          type: "action",
+          action: "Requested review",
+          parameter: "https://pr",
+          result: "3 findings",
+        },
+        ephemeral: true,
+      },
+    });
+    assert.deepEqual(variables(requests[1]!), {
+      input: { agentSessionId: "session", content: { type: "thought", body: "x".repeat(12000) } },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("creates a session on an issue and returns its id", () => {
+  const { requests, layer } = recording({
+    agentSessionCreateOnIssue: { success: true, agentSession: { id: "new-session" } },
+  });
+  return Effect.gen(function* () {
+    const api = yield* AgentApi.LinearAgentApi;
+    assert.equal(yield* api.createOnIssue("issue-1"), "new-session");
+    assert.deepEqual(variables(requests[0]!), { input: { issueId: "issue-1" } });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("fails when Linear creates no session", () => {
+  const { layer } = recording({ agentSessionCreateOnIssue: { success: false } });
+  return Effect.gen(function* () {
+    const api = yield* AgentApi.LinearAgentApi;
+    assert.isTrue(yield* api.createOnIssue("issue-1").pipe(Effect.isFailure));
   }).pipe(Effect.provide(layer));
 });

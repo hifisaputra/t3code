@@ -6,6 +6,35 @@ import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 import { LinearOperationError } from "@t3tools/contracts";
 import { LinearOAuth } from "./LinearOAuth.ts";
 
+export type AgentActivityContent =
+  | { readonly type: "thought" | "elicitation" | "response" | "error"; readonly body: string }
+  | {
+      readonly type: "action";
+      readonly action: string;
+      readonly parameter: string;
+      readonly result?: string | undefined;
+    };
+/** One entry of a session plan. Linear replaces the whole plan on each update. */
+export type PlanStep = {
+  readonly content: string;
+  readonly status: "pending" | "inProgress" | "completed" | "canceled";
+};
+export type ExternalLink = { readonly label: string; readonly url: string };
+
+const MAX_BODY = 12000;
+const MutationResult = Schema.Struct({
+  data: Schema.optional(
+    Schema.Record(
+      Schema.String,
+      Schema.Struct({
+        success: Schema.Boolean,
+        agentSession: Schema.optional(Schema.NullOr(Schema.Struct({ id: Schema.String }))),
+      }),
+    ),
+  ),
+  errors: Schema.optional(Schema.Array(Schema.Unknown)),
+});
+
 export const make = Effect.gen(function* () {
   const oauth = yield* LinearOAuth;
   const http = yield* HttpClient.HttpClient;
@@ -26,16 +55,7 @@ export const make = Effect.gen(function* () {
           detail: `Linear returned HTTP ${response.status}.`,
         });
       const result = yield* response.json.pipe(
-        Effect.flatMap(
-          Schema.decodeUnknownEffect(
-            Schema.Struct({
-              data: Schema.optional(
-                Schema.Record(Schema.String, Schema.Struct({ success: Schema.Boolean })),
-              ),
-              errors: Schema.optional(Schema.Array(Schema.Unknown)),
-            }),
-          ),
-        ),
+        Effect.flatMap(Schema.decodeUnknownEffect(MutationResult)),
       );
       if (
         result.errors?.length ||
@@ -46,8 +66,8 @@ export const make = Effect.gen(function* () {
           operation: "agentSession",
           detail: "Linear rejected the agent session update.",
         });
+      return result.data;
     },
-    Effect.asVoid,
     Effect.timeout("8 seconds"),
     Effect.mapError(
       () =>
@@ -57,21 +77,65 @@ export const make = Effect.gen(function* () {
         }),
     ),
   );
-  const activity = (
-    id: string,
-    type: "thought" | "elicitation" | "response" | "error",
-    body: string,
-  ) =>
+  /** Linear accepts `ephemeral` only on thought and action, so it is sent only when set. */
+  const activity = (id: string, content: AgentActivityContent, ephemeral?: boolean) =>
     request(
       "mutation($input: AgentActivityCreateInput!) { agentActivityCreate(input: $input) { success } }",
-      { input: { agentSessionId: id, content: { type, body: body.slice(0, 12000) } } },
-    );
-  const links = (id: string, externalUrls: ReadonlyArray<{ label: string; url: string }>) =>
+      {
+        input: {
+          agentSessionId: id,
+          content:
+            content.type === "action"
+              ? {
+                  type: "action",
+                  action: content.action,
+                  parameter: content.parameter,
+                  ...(content.result === undefined
+                    ? {}
+                    : { result: content.result.slice(0, MAX_BODY) }),
+                }
+              : { type: content.type, body: content.body.slice(0, MAX_BODY) },
+          ...(ephemeral ? { ephemeral: true } : {}),
+        },
+      },
+    ).pipe(Effect.asVoid);
+  /** `plan` replaces the whole plan; `addedExternalUrls` keeps links already on the session. */
+  const update = (
+    id: string,
+    input: {
+      readonly plan?: ReadonlyArray<PlanStep>;
+      readonly addedExternalUrls?: ReadonlyArray<ExternalLink>;
+    },
+  ) =>
     request(
       "mutation($id: String!, $input: AgentSessionUpdateInput!) { agentSessionUpdate(id: $id, input: $input) { success } }",
-      { id, input: { addedExternalUrls: externalUrls } },
+      {
+        id,
+        input: {
+          ...(input.plan ? { plan: input.plan } : {}),
+          ...(input.addedExternalUrls ? { addedExternalUrls: input.addedExternalUrls } : {}),
+        },
+      },
+    ).pipe(Effect.asVoid);
+  /** Starts a session proactively; Linear sends a `created` webhook for it moments later. */
+  const createOnIssue = (issueId: string) =>
+    request(
+      "mutation($input: AgentSessionCreateOnIssue!) { agentSessionCreateOnIssue(input: $input) { success agentSession { id } } }",
+      { input: { issueId } },
+    ).pipe(
+      Effect.flatMap((data) => {
+        const id = data.agentSessionCreateOnIssue?.agentSession?.id;
+        return id
+          ? Effect.succeed(id)
+          : Effect.fail(
+              new LinearOperationError({
+                operation: "agentSession",
+                detail: "Linear did not return the new agent session.",
+              }),
+            );
+      }),
     );
-  return { activity, links };
+  return { activity, update, createOnIssue };
 });
 export class LinearAgentApi extends Context.Service<LinearAgentApi, Effect.Success<typeof make>>()(
   "t3/linear/LinearAgentApi",

@@ -30,7 +30,13 @@ import {
   type OrchestrationEvent,
   type OrchestrationMessage,
 } from "@t3tools/contracts";
-import { LinearApi } from "../linear/LinearApi.ts";
+import {
+  LinearAgentOutbox,
+  type OutboxContent,
+  type TaskSyncResolver,
+} from "../linear/LinearAgentOutbox.ts";
+import { LinearApi, LinearAppCredential } from "../linear/LinearApi.ts";
+import { LinearOAuth } from "../linear/LinearOAuth.ts";
 import { LinearThreadService } from "../linear/LinearThreadService.ts";
 import {
   OrchestrationCommandInvariantError,
@@ -145,7 +151,49 @@ function harness() {
   const verified: Array<{ expectedRevision?: string; targetIds?: ReadonlyArray<string> }> = [];
   const uploads: string[] = [];
   const stopped: ThreadId[] = [];
+  // The Linear app: whether it is connected, the sessions it opened and the
+  // updates queued for them, and the Linear writes made with its token.
+  const app = {
+    connected: false,
+    sessionsFail: false,
+    sessions: [] as string[],
+    queued: [] as Array<{ id: string; sessionId: string; content: OutboxContent }>,
+    resolver: undefined as TaskSyncResolver | undefined,
+    writes: [] as string[],
+  };
+  const asApp = (operation: string) =>
+    Effect.gen(function* () {
+      if ((yield* LinearAppCredential) !== undefined) app.writes.push(operation);
+    });
   const dependencies = Layer.mergeAll(
+    Layer.mock(LinearOAuth)({ accessToken: () => Effect.succeed("app-token") }),
+    // Like the real outbox, an update's id is its idempotency key; syncs are not.
+    Layer.mock(LinearAgentOutbox)({
+      connected: Effect.sync(() => app.connected),
+      createSession: (_issueId, taskId) =>
+        app.sessionsFail
+          ? Effect.fail(
+              new LinearOperationError({
+                operation: "agentSession",
+                detail: "Linear refused the session.",
+              }),
+            )
+          : Effect.sync(() => {
+              app.sessions.push(taskId);
+              return `session-${app.sessions.length}`;
+            }),
+      enqueue: (id, sessionId, content) =>
+        Effect.sync(() => {
+          if (content.type === "syncTask" || !app.queued.some((item) => item.id === id))
+            app.queued.push({ id, sessionId, content });
+        }),
+      setTaskSync: (resolver) =>
+        Effect.sync(() => {
+          app.resolver = resolver;
+        }),
+      threadLink: (threadId, label = "T3 Code thread") =>
+        Effect.succeed({ label, url: `https://t3.example.com/env/${threadId}` }),
+    }),
     // Like a provider, a stopped session drops the thread's background work.
     Layer.mock(ProviderService)({
       stopSession: ({ threadId }) =>
@@ -250,31 +298,37 @@ function harness() {
           { id: "done", name: "Done", type: "completed", position: 2, color: "#fff" },
         ]),
       updateIssueState: ({ issueId, stateId }) =>
-        Effect.sync(() => {
-          transitions.push(stateId);
-          const index = issues.findIndex((i) => i.id === issueId);
-          const state = [
-            {
-              id: "review",
-              name: "In Review",
-              type: "started" as const,
-              position: 1,
-              color: "#fff",
-            },
-            { id: "done", name: "Done", type: "completed" as const, position: 2, color: "#fff" },
-          ].find((s) => s.id === stateId);
-          if (index >= 0 && state) issues[index] = { ...issues[index]!, state };
-        }),
+        asApp("updateIssueState").pipe(
+          Effect.map(() => {
+            transitions.push(stateId);
+            const index = issues.findIndex((i) => i.id === issueId);
+            const state = [
+              {
+                id: "review",
+                name: "In Review",
+                type: "started" as const,
+                position: 1,
+                color: "#fff",
+              },
+              { id: "done", name: "Done", type: "completed" as const, position: 2, color: "#fff" },
+            ].find((s) => s.id === stateId);
+            if (index >= 0 && state) issues[index] = { ...issues[index]!, state };
+          }),
+        ),
       uploadFile: (input) =>
-        Effect.sync(() => {
-          uploads.push(input.fileName);
-          return { url: `https://uploads.linear.app/${input.fileName}` };
-        }),
+        asApp("uploadFile").pipe(
+          Effect.map(() => {
+            uploads.push(input.fileName);
+            return { url: `https://uploads.linear.app/${input.fileName}` };
+          }),
+        ),
       updateIssue: (input) =>
         descriptionsHealthy
-          ? Effect.sync(() => {
-              descriptions.push({ issueId: input.issueId, description: input.description });
-            })
+          ? asApp("updateIssue").pipe(
+              Effect.map(() => {
+                descriptions.push({ issueId: input.issueId, description: input.description });
+              }),
+            )
           : Effect.fail(
               new LinearOperationError({
                 operation: "updateIssue",
@@ -284,6 +338,7 @@ function harness() {
       createComment: (input) =>
         commentsHealthy
           ? onComment(input.body).pipe(
+              Effect.andThen(asApp("createComment")),
               Effect.map(() => {
                 comments.push(input);
                 return { id: `comment-${comments.length}`, url: "https://linear.app/c" };
@@ -522,6 +577,7 @@ function harness() {
     setCheck: (value: typeof check) => {
       check = value;
     },
+    app,
     setSetupHealthy: (value: boolean) => {
       setupHealthy = value;
     },
@@ -3291,5 +3347,193 @@ it.effect("a role's repository skill is mentioned on that thread's first message
     yield* endTurn(h, service, first.threadId);
     yield* service.deliver();
     assert.notInclude(turnsOf(h, reviewer).at(-1), "$review-it");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+/** What a team's Linear session was sent, in order, without the plan syncs. */
+const sessionLog = (h: Harness) =>
+  h.app.queued.flatMap(({ content }) => {
+    switch (content.type) {
+      case "syncTask":
+      case "links":
+        return [];
+      case "action":
+        return [
+          `action:${content.action}:${content.parameter}${content.result ? `:${content.result}` : ""}${content.ephemeral ? ":ephemeral" : ""}`,
+        ];
+      default:
+        return [`${content.type}:${content.body.split("\n")[0]}`];
+    }
+  });
+
+it.effect("with the Linear app connected a team reports in its own session, not in comments", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    // Opened before the leader's first turn, so Linear hears from the team at once.
+    assert.deepEqual(team.linearSession, { id: "session-1", origin: "created" });
+    assert.deepEqual(h.app.sessions, [team.id]);
+    assert.deepEqual(sessionLog(h), ["thought:Picked up by a team in T3 Code."]);
+    assert.isTrue(h.app.queued.every((item) => item.sessionId === "session-1"));
+    const first = yield* takeIssue(h, service);
+    const worker = h.threads.get(first.threadId)!;
+    h.threads.set(first.threadId, {
+      ...worker,
+      linkedPullRequest: {
+        projectId: config.projectId,
+        repository: "owner/app",
+        number: 7,
+        url: "https://github.com/owner/app/pull/7",
+      },
+    });
+    // The plan and links are read from the task when the sync is sent.
+    const midway = yield* h.app.resolver!(first.id);
+    assert.deepEqual(
+      midway?.plan.map((step) => `${step.content}=${step.status}`),
+      [
+        "Take on=completed",
+        "Code=inProgress",
+        "Code review=pending",
+        "Merge=pending",
+        "Staging=pending",
+        "E2E test=pending",
+        "Your check=pending",
+      ],
+    );
+    assert.deepEqual(midway?.links, [
+      { label: "Team leader thread", url: `https://t3.example.com/env/${leadOf(first)}` },
+      { label: "Pull request #7", url: "https://github.com/owner/app/pull/7" },
+    ]);
+
+    const delivered = yield* deliverIssue(h, service, first);
+    assert.equal(delivered.status, "review");
+    assert.deepEqual(sessionLog(h), [
+      "thought:Picked up by a team in T3 Code.",
+      "thought:Taking this issue. Acceptance criteria:",
+      "action:Requested review:https://github.com/owner/app/pull/7:ephemeral",
+      "action:Reviewer: approved:bbbbbbb",
+      "action:Merged into develop:bbbbbbb",
+      "action:Staging verified:aaaaaaa",
+      "action:E2E test running:staging:ephemeral",
+      "response:**✅ Verified on staging: ready to accept**",
+    ]);
+    const taken = h.app.queued.find((item) => item.id === `${first.id}:taken`)?.content;
+    assert.include(taken?.type === "thought" ? taken.body : "", "1. The page loads");
+    const response = h.app.queued.at(-1)!.content;
+    assert.include(
+      response.type === "response" ? response.body : "",
+      "The result is in the comment on this issue.",
+    );
+    // A finished session drops its plan, so nothing syncs after the final response.
+    assert.equal(h.app.queued.at(-1)?.content.type, "response");
+    // The e2e card is the only comment, and every write speaks as the app.
+    assert.lengthOf(h.comments, 1);
+    assert.match(h.comments[0]!.body, /^\*\*✅ Verified on staging/);
+    assert.deepEqual(h.app.writes, [
+      "uploadFile",
+      "createComment",
+      "updateIssue",
+      "updateIssueState",
+    ]);
+    assert.deepEqual(h.transitions, ["review"]);
+    const done = yield* h.app.resolver!(first.id);
+    assert.deepEqual(done?.plan.at(-1), { content: "Your check", status: "inProgress" });
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("without the Linear app a team posts today's comments with the personal key", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const delivered = yield* deliverIssue(h, service, first);
+    assert.equal(delivered.status, "review");
+    assert.isUndefined(delivered.linearSession);
+    assert.lengthOf(h.comments, 3);
+    assert.lengthOf(h.app.sessions, 0);
+    assert.lengthOf(h.app.queued, 0);
+    assert.lengthOf(h.app.writes, 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a team runs without a session Linear could not open, and says so", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    h.app.sessionsFail = true;
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    assert.equal(team.status, "working");
+    assert.isUndefined(team.linearSession);
+    assert.equal(
+      team.error,
+      "Could not open the Linear agent session: Linear refused the session.",
+    );
+    assert.isTrue(h.threads.has(leadOf(team)));
+    const first = yield* takeIssue(h, service);
+    yield* reachMerge(h, service, first);
+    // With no session the merge is a comment again, written as the app.
+    assert.lengthOf(h.comments, 1);
+    assert.deepEqual(h.app.writes, ["createComment"]);
+    assert.lengthOf(h.app.queued, 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("an issue blocked for the person is an error in its session, once", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    yield* service.deliver();
+    h.finish(first.threadId);
+    yield* service.observe(
+      sessionError(first.threadId, "Claude gave up after repeated API errors."),
+    );
+    assert.equal((yield* taskById(service, first.id)).status, "blocked");
+    // Interrupting an issue that is already blocked adds nothing.
+    yield* service.control({ projectId: config.projectId, action: "interrupt" });
+    assert.deepEqual(
+      sessionLog(h).filter((entry) => entry.startsWith("error:")),
+      ["error:Claude gave up after repeated API errors."],
+    );
+    const error = h.app.queued.find((item) => item.content.type === "error")!.content;
+    assert.include(error.type === "error" ? error.body : "", "Retry or skip the issue");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a team whose worktree could not be prepared reports the failure in its session", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const service = yield* h.initialize;
+    yield* service.configure(config);
+    h.setSetupHealthy(false);
+    const board = yield* service.control({ projectId: config.projectId, action: "start" });
+    assert.equal(board.tasks[0]?.status, "blocked");
+    assert.deepEqual(sessionLog(h), [
+      "thought:Picked up by a team in T3 Code.",
+      "error:Linear operation prepareIssueThread failed: Setup failed",
+    ]);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a declined issue keeps its comment and ends its session with the reason", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    yield* service.deliver();
+    yield* service.declineIssue(leadOf(team), "The issue has no acceptance criteria.");
+    assert.lengthOf(h.comments, 1);
+    assert.deepEqual(h.app.writes, ["createComment"]);
+    assert.deepEqual(sessionLog(h), [
+      "thought:Picked up by a team in T3 Code.",
+      "response:Not taken: The issue has no acceptance criteria.",
+    ]);
+    assert.equal(h.app.queued.at(-1)?.content.type, "response");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );

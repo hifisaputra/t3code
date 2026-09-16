@@ -27,6 +27,7 @@ import {
   ThreadId,
   assistantE2eEnvironment,
   assistantE2eVerdict,
+  assistantLinearPlan,
   assistantParallelIssues,
   assistantPicksIssues,
   assistantTaskE2eEnvironment,
@@ -54,7 +55,9 @@ import {
   type LinearWorkflowStateType,
 } from "@t3tools/contracts";
 import { isStaleRequestFailureDetail } from "../orchestration/decider.ts";
-import { LinearApi } from "../linear/LinearApi.ts";
+import { LinearAgentOutbox, type OutboxContent } from "../linear/LinearAgentOutbox.ts";
+import { LinearApi, LinearAppCredential } from "../linear/LinearApi.ts";
+import { LinearOAuth } from "../linear/LinearOAuth.ts";
 import { LinearThreadService } from "../linear/LinearThreadService.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -150,6 +153,23 @@ const DEPLOY_WATCH_MS = 45 * 60_000;
 /** How much of a passing check run the reviewer is shown. */
 const CHECK_TAIL = 2000;
 const shortSha = (revision: string) => revision.slice(0, 7);
+/** The findings a reviewer listed, counted by their top-level list items. */
+const findingCount = (findings: string) =>
+  findings.split("\n").filter((line) => /^(?:[-*]|\d+[.)])\s+\S/.test(line)).length;
+/** A failed e2e run in a few lines for the Linear session; the team handles the rest. */
+const e2eFailureNote = (t: AssistantTask, e2e: AssistantE2eResult) => {
+  const failed = (e2e.checks ?? []).flatMap((check) =>
+    check.result === "failed"
+      ? [
+          `- ${t.criteria?.[check.criterion - 1] ?? `Criterion ${check.criterion}`}: ${check.evidence.slice(0, 300)}`,
+        ]
+      : [],
+  );
+  return [
+    `E2E test failed ${e2e.environment === "worktree" ? "in the worktree" : "on staging"}. The team is working on it.`,
+    failed.length ? failed.join("\n") : e2e.report.slice(0, 500),
+  ].join("\n\n");
+};
 /**
  * What the team leader's e2e brief should hold. With criteria recorded T3 hands
  * the tester those itself; issues taken before them still ask for the checks.
@@ -233,6 +253,8 @@ export const make = Effect.gen(function* () {
   const evidence = yield* AssistantEvidence;
   const terminals = yield* TerminalManager;
   const providers = yield* ProviderService;
+  const oauth = yield* LinearOAuth;
+  const outbox = yield* LinearAgentOutbox;
   const lock = yield* Semaphore.make(1);
   const deliveryLock = yield* Semaphore.make(1);
   const changes = yield* PubSub.unbounded<void>();
@@ -267,9 +289,56 @@ export const make = Effect.gen(function* () {
     if (!rows[0]) return yield* fail("This managed issue no longer exists.");
     return yield* decodeTask(rows[0].data);
   });
+  /**
+   * Linear writes speak as the T3 Code app while it is connected, so the
+   * team's updates read as the app's and not the person's; otherwise they use
+   * the personal key, as before the app existed.
+   */
+  const asAssistant = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    outbox.connected.pipe(
+      Effect.flatMap((app) =>
+        app
+          ? effect.pipe(Effect.provideService(LinearAppCredential, oauth.accessToken(false)))
+          : effect,
+      ),
+    );
+  /**
+   * Queue an update on the team's Linear agent session, when it has one. The
+   * outbox sends it and retries; `key` makes a repeated call a no-op.
+   */
+  const sessionUpdate = Effect.fn("Assistant.sessionUpdate")(function* (
+    t: AssistantTask,
+    key: string,
+    content: OutboxContent,
+  ) {
+    if (!t.linearSession) return;
+    yield* outbox.enqueue(`${t.id}:${key}`, t.linearSession.id, content).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("Developer assistant could not queue a Linear session update", {
+          task: t.id,
+          error,
+        }),
+      ),
+    );
+  });
   const saveTask = Effect.fn("Assistant.saveTask")(function* (value: AssistantTask) {
     const updated = { ...value, updatedAt: yield* now };
+    const before = updated.linearSession
+      ? yield* sql<{ status: string }>`SELECT status FROM assistant_tasks WHERE id = ${updated.id}`
+      : [];
     yield* sql`UPDATE assistant_tasks SET status = ${updated.status}, data = ${encodeTask(updated)} WHERE id = ${updated.id}`;
+    if (updated.linearSession) {
+      // Every way an issue gets blocked for the person passes here.
+      if (updated.status === "blocked" && before[0]?.status !== "blocked")
+        yield* sessionUpdate(updated, `blocked:${updated.updatedAt}`, {
+          type: "error",
+          body: `${updated.error ?? "The team stopped."}\n\nRetry or skip the issue on the developer assistant board in T3 Code.`,
+        });
+      // The plan is read when the sync is sent, so a save only re-arms it. Linear
+      // drops a finished session's plan, so nothing syncs after the final response.
+      if (assistantTaskHoldsProject(updated.status))
+        yield* sessionUpdate(updated, "sync", { type: "syncTask", taskId: updated.id });
+    }
     yield* changed;
     return updated;
   });
@@ -434,6 +503,13 @@ export const make = Effect.gen(function* () {
     }
     return null;
   });
+  /** The issue's pull request, as the worker's thread knows it. */
+  const taskPullRequest = Effect.fn("Assistant.taskPullRequest")(function* (t: AssistantTask) {
+    const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
+    return Option.isSome(worker)
+      ? (worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null)
+      : null;
+  });
   /**
    * A team is done: settle its threads and remove the worktree. Git keeps a
    * worktree with uncommitted changes, and so do we.
@@ -472,7 +548,7 @@ export const make = Effect.gen(function* () {
   });
   /** Post a phase update on the issue. Delivery never waits on Linear; a failure is noted on the task. */
   const postLinear = Effect.fn("Assistant.postLinear")(function* (t: AssistantTask, body: string) {
-    return yield* linear.createComment({ issueId: t.issue.id, body }).pipe(
+    return yield* asAssistant(linear.createComment({ issueId: t.issue.id, body })).pipe(
       Effect.map((comment): AssistantTask => ({
         ...t,
         linearCommentIds: [...(t.linearCommentIds ?? []), comment.id],
@@ -510,6 +586,7 @@ export const make = Effect.gen(function* () {
           }),
         }),
       ),
+      asAssistant,
       Effect.as(t),
       Effect.catch((error) =>
         Effect.succeed<AssistantTask>({
@@ -965,6 +1042,34 @@ export const make = Effect.gen(function* () {
     return yield* task(t.id);
   });
   /**
+   * Each team gets its own agent session on the issue while the Linear app is
+   * connected, opened before the git work so Linear hears from the team at once.
+   * The team runs without one when Linear cannot open it.
+   */
+  const openSession = Effect.fn("Assistant.openSession")(function* (t: AssistantTask) {
+    if (t.linearSession || !(yield* outbox.connected)) return { task: t, error: null };
+    const created = yield* outbox.createSession(t.issue.id, t.id).pipe(
+      Effect.map((id) => ({ id, error: null })),
+      Effect.catch((error) =>
+        Effect.succeed({
+          id: null,
+          error: `Could not open the Linear agent session: ${linearFailureDetail(error)}`,
+        }),
+      ),
+    );
+    if (created.id === null) return { task: t, error: created.error };
+    const opened = yield* saveTask({
+      ...t,
+      linearSession: { id: created.id, origin: "created" },
+    });
+    yield* sessionUpdate(opened, "picked-up", {
+      type: "thought",
+      body: "Picked up by a team in T3 Code.",
+    });
+    yield* sessionUpdate(opened, "sync", { type: "syncTask", taskId: opened.id });
+    return { task: opened, error: null };
+  });
+  /**
    * Give an issue to a new team. A setup failure leaves the issue blocked for a
    * retry. The team takes the lowest slot the project's other teams leave free,
    * which project instructions derive per-team resources from.
@@ -994,9 +1099,19 @@ export const make = Effect.gen(function* () {
     yield* sql`INSERT INTO assistant_tasks (id, project_id, issue_id, thread_id, status, data) VALUES (${t.id}, ${p.project_id}, ${t.issue.id}, ${t.threadId}, ${t.status}, ${encodeTask(t)})
       ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data`;
     yield* changed;
-    return yield* prepareTeam(p, t).pipe(
-      Effect.catch((error) => saveTask({ ...t, status: "blocked", error: wrap(error).detail })),
+    const opened = yield* openSession(t);
+    const team = yield* prepareTeam(p, opened.task).pipe(
+      Effect.catch((error) =>
+        saveTask({ ...opened.task, status: "blocked", error: wrap(error).detail }),
+      ),
     );
+    // Preparing clears the task's error; a session that could not be opened stays said.
+    return opened.error
+      ? yield* saveTask({
+          ...team,
+          error: [team.error, opened.error].filter(Boolean).join(" "),
+        })
+      : team;
   });
 
   /** Declined issues that someone has changed since, eligible again. */
@@ -1175,7 +1290,7 @@ export const make = Effect.gen(function* () {
         return yield* fail("Wait for the answer to your open question before taking the issue.");
       const worktree = yield* taskWorktree(t);
       if (!worktree) return yield* fail("The issue's worktree could not be found.");
-      yield* linearThreads.moveToStarted(t.issue);
+      yield* asAssistant(linearThreads.moveToStarted(t.issue));
       declineStreak.delete(p.project_id);
       if (Option.isNone(yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true })))
         yield* engine.dispatch({
@@ -1217,6 +1332,11 @@ export const make = Effect.gen(function* () {
           );
         }),
       );
+      // Not ephemeral: this is where the person sees the scope the team took on.
+      yield* sessionUpdate(taken, "taken", {
+        type: "thought",
+        body: `Taking this issue. Acceptance criteria:\n\n${listed.map((criterion, i) => `${i + 1}. ${criterion}`).join("\n")}`,
+      });
       return yield* task(t.id);
     },
     lock.withPermits(1),
@@ -1250,6 +1370,13 @@ export const make = Effect.gen(function* () {
       const ids = taskThreadIds(t);
       yield* sql`UPDATE assistant_decisions SET resolved = 1 WHERE resolved = 0 AND thread_id IN (${ids[0]}, ${ids[1]}, ${ids[2]}, ${ids[3]})`;
       const updated = yield* saveTask({ ...posted, status: "declined", declined });
+      yield* sessionUpdate(updated, "declined", {
+        type: "response",
+        body:
+          reason.length > 300
+            ? `Not taken: ${reason.slice(0, 300)}… The full reason is in the comment on this issue.`
+            : `Not taken: ${reason}`,
+      });
       const streak = [...(declineStreak.get(p.project_id) ?? []), t.issue.identifier];
       if (streak.length < DECLINE_STREAK_LIMIT) declineStreak.set(p.project_id, streak);
       else {
@@ -1464,7 +1591,7 @@ export const make = Effect.gen(function* () {
         `Linear has no state named "${name}" on ${t.issue.team.key}. Update the issue manually and correct the assistant setup.`,
       );
     yield* linear.updateIssueState({ issueId: t.issue.id, stateId: state.id });
-  });
+  }, asAssistant);
 
   /**
    * The project's check command, in the worker's worktree. It is the repository's
@@ -1530,6 +1657,15 @@ export const make = Effect.gen(function* () {
         `${checks ? `T3 ran \`${command}\` at ${shortSha(head)}: passed.\n${checks.output.slice(-CHECK_TAIL)}\n\n` : ""}Review request from the implementer:\n${message}`,
         () => reviewerInstructions(p.config, updated),
       );
+      const pullRequest = yield* taskPullRequest(updated);
+      yield* sessionUpdate(updated, `review-requested:${head}:${updated.updatedAt}`, {
+        type: "action",
+        action: "Requested review",
+        parameter:
+          pullRequest?.url ??
+          (worker.value.branch ? `${worker.value.branch} at ${shortSha(head)}` : shortSha(head)),
+        ephemeral: true,
+      });
       return updated;
     }).pipe(lock.withPermits(1));
   }, Effect.mapError(wrap));
@@ -1560,6 +1696,15 @@ export const make = Effect.gen(function* () {
         commit: head,
         at: yield* now,
       };
+      const findingsListed = findingCount(findings);
+      yield* sessionUpdate(t, `review:${verdict}:${head}:${t.turns}`, {
+        type: "action",
+        action: verdict === "approved" ? "Reviewer: approved" : "Reviewer: changes requested",
+        parameter: shortSha(head),
+        ...(verdict === "changes-requested" && findingsListed
+          ? { result: `${findingsListed} finding${findingsListed === 1 ? "" : "s"}` }
+          : {}),
+      });
       if (verdict === "approved") {
         // In the worktree the e2e check comes before the merge, so the issue
         // goes back to its team leader to start it rather than to the worker.
@@ -1641,6 +1786,15 @@ export const make = Effect.gen(function* () {
       // a retry after a failure here does not put a second card on the issue.
       // An earlier problem the issue has since moved past must not follow it to review.
       const merged = yield* saveTask({ ...t, merge, summary, stage: "lead", error: null });
+      // With a session the merge is one line in it rather than a comment.
+      if (merged.linearSession) {
+        yield* sessionUpdate(merged, `merged:${head}`, {
+          type: "action",
+          action: `Merged into ${p.config.baseBranch}`,
+          parameter: shortSha(head),
+        });
+        return merged;
+      }
       // The team leader hears when this thread's turn ends.
       return yield* saveTask(
         yield* postLinear(
@@ -1679,21 +1833,20 @@ export const make = Effect.gen(function* () {
   ) {
     const deployment = value.deployment;
     if (!deployment) return value;
-    const worker = yield* snapshots.getThreadShellById(value.threadId, { includeArchived: true });
-    const pullRequest = Option.isSome(worker)
-      ? (worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null)
-      : null;
-    let updated = yield* postLinear(
-      value,
-      e2eComment({
-        e2e,
-        merge: value.merge ?? null,
-        deployment,
-        pullRequest,
-        acceptedState: p.config.acceptedState,
-        criteria: value.criteria ?? null,
-      }),
-    );
+    const pullRequest = yield* taskPullRequest(value);
+    // The card stays a comment even with a session: a finished session is one
+    // collapsed row on the issue page, and the person reads the card there.
+    const card = e2eComment({
+      e2e,
+      merge: value.merge ?? null,
+      deployment,
+      pullRequest,
+      acceptedState: p.config.acceptedState,
+      criteria: value.criteria ?? null,
+    });
+    let updated = yield* postLinear(value, card);
+    const cardPosted =
+      (updated.linearCommentIds ?? []).length > (value.linearCommentIds ?? []).length;
     updated = yield* updateDescription(updated, p, e2e);
     const linearError = yield* changeLinearState(updated, p.config.reviewState).pipe(
       Effect.as(null),
@@ -1711,7 +1864,12 @@ export const make = Effect.gen(function* () {
       deliveredState: linearError ? null : p.config.reviewState.trim() || null,
       error: [updated.error, linearError].filter(Boolean).join(" ") || null,
     };
-    return yield* saveTask(updated);
+    const delivered = yield* saveTask(updated);
+    yield* sessionUpdate(delivered, "delivered", {
+      type: "response",
+      body: `${card.split("\n")[0]}\n\n${cardPosted ? "The result is in the comment on this issue." : "The result could not be posted on this issue; it is on the developer assistant board in T3 Code."}`,
+    });
+    return delivered;
   });
 
   /**
@@ -1738,6 +1896,12 @@ export const make = Effect.gen(function* () {
     ...(input.targetIds ? { targetIds: input.targetIds } : {}),
   });
 
+  const stagingNote = (t: AssistantTask, deployment: AssistantDeployment) =>
+    sessionUpdate(t, `staging:${deployment.revision}`, {
+      type: "action",
+      action: "Staging verified",
+      parameter: shortSha(deployment.revision),
+    });
   /**
    * A verified staging deploy: the delivery in worktree mode, where a run in the
    * worktree already proved the change and this deploy is the last gate, and the
@@ -1760,13 +1924,17 @@ export const make = Effect.gen(function* () {
         wait: null,
         deployWait: null,
       });
+      yield* stagingNote(verified, deployment);
       return yield* finishDelivery(p, verified, tested);
     }
-    const posted = yield* postLinear(
-      { ...t, deployment, error: null, wait: null, deployWait: null },
-      deployedComment({ deployment }),
-    );
-    return yield* saveTask(posted);
+    const next: AssistantTask = { ...t, deployment, error: null, wait: null, deployWait: null };
+    // With a session the deploy is one line in it rather than a comment.
+    if (t.linearSession) {
+      const saved = yield* saveTask(next);
+      yield* stagingNote(saved, deployment);
+      return saved;
+    }
+    return yield* saveTask(yield* postLinear(next, deployedComment({ deployment })));
   });
 
   const verifyStaging = Effect.fn("Assistant.verifyStaging")(
@@ -1815,6 +1983,12 @@ export const make = Effect.gen(function* () {
             checks: 1,
             detail: check.detail,
           },
+        });
+        yield* sessionUpdate(watching, `staging-watch:${t.merge.commit}`, {
+          type: "action",
+          action: "Watching staging deploy",
+          parameter: shortSha(t.merge.commit),
+          ephemeral: true,
         });
         return { task: watching, outcome: "watching" as const };
       }
@@ -1869,6 +2043,12 @@ export const make = Effect.gen(function* () {
           : `New e2e run on the deployment of ${t.deployment!.revision.slice(0, 7)}. Save screenshots in ${directory}.\n${run}`,
         () => e2eInstructions(p.config, updated, directory, run),
       );
+      yield* sessionUpdate(updated, `e2e-started:${updated.updatedAt}`, {
+        type: "action",
+        action: "E2E test running",
+        parameter: inWorktree ? "worktree" : "staging",
+        ephemeral: true,
+      });
       return updated;
     },
     lock.withPermits(1),
@@ -1949,7 +2129,7 @@ export const make = Effect.gen(function* () {
         evidence.read(t.id, shot.path).pipe(Effect.map((image) => ({ image, shot }))),
       );
       const screenshots = yield* Effect.forEach(images, ({ image, shot }) =>
-        linear.uploadFile(image).pipe(
+        asAssistant(linear.uploadFile(image)).pipe(
           Effect.map(({ url }) => ({ url, caption: shot.caption })),
           Effect.mapError((error) =>
             fail(`Could not upload ${image.fileName} to Linear: ${linearFailureDetail(error)}`),
@@ -1969,9 +2149,15 @@ export const make = Effect.gen(function* () {
       // A run in the worktree happens before the merge: nothing is on the issue
       // yet, and a pass tells the worker to merge the commit that was tested.
       if (inWorktree) {
-        if (verdict === "failed")
+        if (verdict === "failed") {
           // The team leader hears when this turn ends.
-          return yield* saveTask({ ...t, e2e, stage: "lead" });
+          const failed = yield* saveTask({ ...t, e2e, stage: "lead" });
+          yield* sessionUpdate(failed, `e2e-failed:${e2e.at}`, {
+            type: "thought",
+            body: e2eFailureNote(t, e2e),
+          });
+          return failed;
+        }
         const passed = yield* saveTask({
           ...t,
           e2e,
@@ -1992,10 +2178,11 @@ export const make = Effect.gen(function* () {
       // second card on the issue.
       const updated = yield* saveTask({ ...t, e2e, stage: "lead", error: null });
       if (verdict === "failed") {
-        const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
-        const pullRequest = Option.isSome(worker)
-          ? (worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null)
-          : null;
+        yield* sessionUpdate(updated, `e2e-failed:${e2e.at}`, {
+          type: "thought",
+          body: e2eFailureNote(t, e2e),
+        });
+        const pullRequest = yield* taskPullRequest(t);
         return yield* saveTask(
           yield* postLinear(
             updated,
@@ -2051,7 +2238,13 @@ export const make = Effect.gen(function* () {
           yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${threadId}`;
           yield* sql`UPDATE assistant_decisions SET resolved = 1 WHERE thread_id = ${threadId}`;
         }
-        yield* saveTask({ ...t, status: "skipped", feedback: input.feedback });
+        const skipped = yield* saveTask({ ...t, status: "skipped", feedback: input.feedback });
+        yield* sessionUpdate(skipped, "skipped", {
+          type: "response",
+          body: input.feedback.trim()
+            ? `Skipped in T3 Code: ${input.feedback.trim()}`
+            : "Skipped in T3 Code.",
+        });
       } else {
         if (!assistantTaskHoldsProject(t.status))
           return yield* fail("Only blocked or active work can be retried.");
@@ -2108,9 +2301,13 @@ export const make = Effect.gen(function* () {
       });
       return { outcome: "limit" } satisfies AssistantWaitResult;
     }
-    yield* saveTask({
+    const waiting = yield* saveTask({
       ...t,
       wait: { reason: reason.slice(0, 1000), checks: (t.wait?.checks ?? 0) + 1, notified: false },
+    });
+    yield* sessionUpdate(waiting, `wait:${waiting.wait?.checks}`, {
+      type: "thought",
+      body: `Waiting: ${reason.slice(0, 1000)}`,
     });
     return { outcome: "waiting" } satisfies AssistantWaitResult;
   }, Effect.mapError(wrap));
@@ -2287,6 +2484,10 @@ export const make = Effect.gen(function* () {
       `${threadId}:limit:${until}`,
       "A Claude usage limit stopped your previous turn before it finished. The limit has reset: continue where you left off, and hand off as usual when you are done.",
     );
+    yield* sessionUpdate(t, `limit:${until}`, {
+      type: "thought",
+      body: `Paused until ${until.slice(0, 10)} ${until.slice(11, 16)} UTC (usage limit).`,
+    });
     yield* Effect.logInfo("Developer assistant is waiting for a usage limit to reset", {
       projectId,
       threadId,
@@ -2643,6 +2844,25 @@ export const make = Effect.gen(function* () {
         }),
       );
     }),
+  );
+  // Runs under the outbox's send lock, so it only reads: never the assistant's locks.
+  yield* outbox.setTaskSync((taskId) =>
+    Effect.gen(function* () {
+      const rows = yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE id = ${taskId}`;
+      if (!rows[0]) return null;
+      const t = yield* decodeTask(rows[0].data);
+      const lead = yield* outbox.threadLink(assistantTaskThreadId(t, "lead"), "Team leader thread");
+      const pullRequest = yield* taskPullRequest(t);
+      return {
+        plan: assistantLinearPlan(t),
+        links: [
+          ...(lead ? [lead] : []),
+          ...(pullRequest
+            ? [{ label: `Pull request #${pullRequest.number}`, url: pullRequest.url }]
+            : []),
+        ],
+      };
+    }).pipe(Effect.mapError(wrap)),
   );
   const service = {
     getSetup,

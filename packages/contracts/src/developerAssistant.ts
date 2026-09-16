@@ -437,6 +437,15 @@ export const AssistantTask = Schema.Struct({
   checks: Schema.optionalKey(Schema.NullOr(AssistantCheckRun)),
   /** The staging deploy T3 is watching for the team leader, while it lasts. */
   deployWait: Schema.optionalKey(Schema.NullOr(AssistantDeployWait)),
+  /**
+   * The team's Linear agent session, while the Linear app is connected: one the
+   * team opened itself, or the delegation it was started from.
+   */
+  linearSession: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({ id: Schema.String, origin: Schema.Literals(["delegated", "created"]) }),
+    ),
+  ),
 });
 export type AssistantTask = typeof AssistantTask.Type;
 
@@ -560,3 +569,166 @@ export const AssistantReviewInput = Schema.Struct({
 
 export const assistantTaskHoldsProject = (status: AssistantTaskStatus): boolean =>
   status === "preparing" || status === "working" || status === "waiting" || status === "blocked";
+
+export type PipelineStepKey = "take" | "code" | "review" | "merge" | "staging" | "e2e";
+export type PipelineStepState = "done" | "current" | "failed" | "todo";
+
+export interface PipelineStep {
+  readonly key: PipelineStepKey;
+  readonly label: string;
+  /** The thread that does this step. */
+  readonly kind: AssistantThreadKind;
+  readonly state: PipelineStepState;
+  readonly note: string | null;
+}
+
+export type PipelineStepDef = {
+  readonly key: PipelineStepKey;
+  readonly label: string;
+  readonly kind: AssistantThreadKind;
+};
+
+export const TO_STAGING: ReadonlyArray<PipelineStepDef> = [
+  { key: "code", label: "Code", kind: "implement" },
+  { key: "review", label: "Code review", kind: "review" },
+  { key: "merge", label: "Merge", kind: "implement" },
+  { key: "staging", label: "Staging", kind: "lead" },
+  { key: "e2e", label: "E2E test", kind: "e2e" },
+];
+// With the e2e check in the team's worktree it runs on the approved commit,
+// before the merge; staging is then only the deploy to verify.
+export const TO_STAGING_WORKTREE_E2E: ReadonlyArray<PipelineStepDef> = [
+  { key: "code", label: "Code", kind: "implement" },
+  { key: "review", label: "Code review", kind: "review" },
+  { key: "e2e", label: "E2E test", kind: "e2e" },
+  { key: "merge", label: "Merge", kind: "implement" },
+  { key: "staging", label: "Staging", kind: "lead" },
+];
+export const TAKE_ON: PipelineStepDef = { key: "take", label: "Take on", kind: "lead" };
+export const LED_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING];
+export const LED_WORKTREE_PIPELINE: ReadonlyArray<PipelineStepDef> = [
+  TAKE_ON,
+  ...TO_STAGING_WORKTREE_E2E,
+];
+
+/**
+ * Where an issue is on its way to staging, from what the server recorded.
+ * Work started before issues had review and e2e threads has no pipeline.
+ */
+export function assistantTaskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> | null {
+  if (task.stage === undefined) return null;
+  const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
+  const steps = inWorktree ? LED_WORKTREE_PIPELINE : LED_PIPELINE;
+  const offset = 1;
+  const approved = task.codeReview?.verdict === "approved";
+  const e2eFailed = task.e2e?.verdict === "failed";
+  const e2ePassed = Boolean(task.e2e) && !e2eFailed;
+  const at = (() => {
+    if (task.status === "review" || task.status === "accepted") return steps.length;
+    if (task.stage === "lead" && task.turns === 0) return 0;
+    if (inWorktree)
+      switch (task.stage) {
+        case "review":
+          return offset + 1;
+        case "e2e":
+          return offset + 2;
+        // The worker merges the approved commit once the worktree run passed;
+        // sent back after that, it is coding again.
+        case "implement":
+          return offset + (approved && e2ePassed && !task.merge ? 3 : 0);
+        case "lead":
+          // A failed run keeps the issue on its step while the leader decides.
+          if (e2eFailed) return offset + 2;
+          if (task.deployment) return steps.length;
+          if (task.merge) return offset + 4;
+          if (e2ePassed) return offset + 3;
+          return offset + (approved ? 2 : 0);
+      }
+    switch (task.stage) {
+      case "review":
+        return offset + 1;
+      case "e2e":
+        return offset + 4;
+      // Back with the worker after a failed e2e run, the earlier approval,
+      // merge and deployment are still on record; it is coding again.
+      case "implement":
+        return offset + (approved && !task.merge ? 2 : 0);
+      case "lead":
+        return offset + (task.deployment ? 4 : task.merge ? 3 : approved ? 2 : 0);
+    }
+  })();
+  const stepAt = (key: PipelineStepKey) => steps.findIndex((step) => step.key === key);
+  const codeAt = stepAt("code");
+  const e2eAt = stepAt("e2e");
+  const stagingAt = stepAt("staging");
+  const changesRequested = task.codeReview?.verdict === "changes-requested";
+  const notes: Partial<Record<PipelineStepKey, string>> = {
+    ...(changesRequested && at === codeAt
+      ? { code: "Fixing review findings", review: "Changes requested" }
+      : {}),
+    ...(e2eFailed && at === codeAt ? { code: "Fixing the e2e failure" } : {}),
+    ...(task.deployment && at > stagingAt
+      ? { staging: `${task.deployment.revision.slice(0, 7)} deployed` }
+      : {}),
+    ...(task.e2e && at >= e2eAt && task.stage !== "e2e"
+      ? {
+          e2e: e2eFailed
+            ? inWorktree
+              ? "Failed in the worktree"
+              : "Failed on staging"
+            : task.e2e.verdict === "partial"
+              ? "Passed, with checks for you"
+              : "Passed",
+        }
+      : {}),
+  };
+  return steps.map((step, index) => ({
+    ...step,
+    state:
+      index < at
+        ? "done"
+        : index > at
+          ? "todo"
+          : step.key === "e2e" && e2eFailed && task.stage === "lead"
+            ? "failed"
+            : "current",
+    note: notes[step.key] ?? null,
+  }));
+}
+
+export type AssistantLinearPlanStatus = "pending" | "inProgress" | "completed" | "canceled";
+
+export interface AssistantLinearPlanStep {
+  readonly content: string;
+  readonly status: AssistantLinearPlanStatus;
+}
+
+/** The last step of every plan: the person accepts the work or sends it back. */
+export const ASSISTANT_LINEAR_PLAN_CHECK = "Your check";
+
+/**
+ * The checklist a Linear agent session shows for a managed issue: the steps of
+ * its pipeline, then the person's own check. An issue declined or skipped
+ * cancels the steps it never finished. Empty for work with no pipeline.
+ */
+export function assistantLinearPlan(task: AssistantTask): ReadonlyArray<AssistantLinearPlanStep> {
+  const pipeline = assistantTaskPipeline(task);
+  if (pipeline === null) return [];
+  const ended = task.status === "declined" || task.status === "skipped";
+  const steps = pipeline.map((step): AssistantLinearPlanStep => {
+    const label = step.state === "failed" ? `${step.label} (failed)` : step.label;
+    const content = step.note ? `${label}: ${step.note}` : label;
+    if (step.state === "done") return { content, status: "completed" };
+    if (ended) return { content, status: "canceled" };
+    return { content, status: step.state === "todo" ? "pending" : "inProgress" };
+  });
+  const check: AssistantLinearPlanStatus =
+    task.status === "accepted"
+      ? "completed"
+      : task.status === "review"
+        ? "inProgress"
+        : ended
+          ? "canceled"
+          : "pending";
+  return [...steps, { content: ASSISTANT_LINEAR_PLAN_CHECK, status: check }];
+}

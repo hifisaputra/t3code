@@ -10,7 +10,6 @@ import {
   type AssistantProjectConfig,
   type AssistantSetup,
   type AssistantTask,
-  type AssistantThreadKind,
   type AssistantThreadRole,
   type ProjectId,
 } from "@t3tools/contracts";
@@ -317,124 +316,12 @@ export function describeTaskPhase(input: {
 
 export const taskRoundsExhausted = (task: AssistantTask) => task.turns >= task.turnLimit;
 
-export type PipelineStepKey = "take" | "code" | "review" | "merge" | "staging" | "e2e";
-export type PipelineStepState = "done" | "current" | "failed" | "todo";
-
-export interface PipelineStep {
-  readonly key: PipelineStepKey;
-  readonly label: string;
-  /** The thread that does this step. */
-  readonly kind: AssistantThreadKind;
-  readonly state: PipelineStepState;
-  readonly note: string | null;
-}
-
-type PipelineStepDef = { key: PipelineStepKey; label: string; kind: AssistantThreadKind };
-
-const TO_STAGING: ReadonlyArray<PipelineStepDef> = [
-  { key: "code", label: "Code", kind: "implement" },
-  { key: "review", label: "Code review", kind: "review" },
-  { key: "merge", label: "Merge", kind: "implement" },
-  { key: "staging", label: "Staging", kind: "lead" },
-  { key: "e2e", label: "E2E test", kind: "e2e" },
-];
-// With the e2e check in the team's worktree it runs on the approved commit,
-// before the merge; staging is then only the deploy to verify.
-const TO_STAGING_WORKTREE_E2E: ReadonlyArray<PipelineStepDef> = [
-  { key: "code", label: "Code", kind: "implement" },
-  { key: "review", label: "Code review", kind: "review" },
-  { key: "e2e", label: "E2E test", kind: "e2e" },
-  { key: "merge", label: "Merge", kind: "implement" },
-  { key: "staging", label: "Staging", kind: "lead" },
-];
-const TAKE_ON: PipelineStepDef = { key: "take", label: "Take on", kind: "lead" };
-const LED_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING];
-const LED_WORKTREE_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING_WORKTREE_E2E];
-
-/**
- * Where an issue is on its way to staging, from what the server recorded.
- * Work started before issues had review and e2e threads has no pipeline.
- */
-export function taskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> | null {
-  if (task.stage === undefined) return null;
-  const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
-  const steps = inWorktree ? LED_WORKTREE_PIPELINE : LED_PIPELINE;
-  const offset = 1;
-  const approved = task.codeReview?.verdict === "approved";
-  const e2eFailed = task.e2e?.verdict === "failed";
-  const e2ePassed = Boolean(task.e2e) && !e2eFailed;
-  const at = (() => {
-    if (task.status === "review" || task.status === "accepted") return steps.length;
-    if (task.stage === "lead" && task.turns === 0) return 0;
-    if (inWorktree)
-      switch (task.stage) {
-        case "review":
-          return offset + 1;
-        case "e2e":
-          return offset + 2;
-        // The worker merges the approved commit once the worktree run passed;
-        // sent back after that, it is coding again.
-        case "implement":
-          return offset + (approved && e2ePassed && !task.merge ? 3 : 0);
-        case "lead":
-          // A failed run keeps the issue on its step while the leader decides.
-          if (e2eFailed) return offset + 2;
-          if (task.deployment) return steps.length;
-          if (task.merge) return offset + 4;
-          if (e2ePassed) return offset + 3;
-          return offset + (approved ? 2 : 0);
-      }
-    switch (task.stage) {
-      case "review":
-        return offset + 1;
-      case "e2e":
-        return offset + 4;
-      // Back with the worker after a failed e2e run, the earlier approval,
-      // merge and deployment are still on record; it is coding again.
-      case "implement":
-        return offset + (approved && !task.merge ? 2 : 0);
-      case "lead":
-        return offset + (task.deployment ? 4 : task.merge ? 3 : approved ? 2 : 0);
-    }
-  })();
-  const stepAt = (key: PipelineStepKey) => steps.findIndex((step) => step.key === key);
-  const codeAt = stepAt("code");
-  const e2eAt = stepAt("e2e");
-  const stagingAt = stepAt("staging");
-  const changesRequested = task.codeReview?.verdict === "changes-requested";
-  const notes: Partial<Record<PipelineStepKey, string>> = {
-    ...(changesRequested && at === codeAt
-      ? { code: "Fixing review findings", review: "Changes requested" }
-      : {}),
-    ...(e2eFailed && at === codeAt ? { code: "Fixing the e2e failure" } : {}),
-    ...(task.deployment && at > stagingAt
-      ? { staging: `${task.deployment.revision.slice(0, 7)} deployed` }
-      : {}),
-    ...(task.e2e && at >= e2eAt && task.stage !== "e2e"
-      ? {
-          e2e: e2eFailed
-            ? inWorktree
-              ? "Failed in the worktree"
-              : "Failed on staging"
-            : task.e2e.verdict === "partial"
-              ? "Passed, with checks for you"
-              : "Passed",
-        }
-      : {}),
-  };
-  return steps.map((step, index) => ({
-    ...step,
-    state:
-      index < at
-        ? "done"
-        : index > at
-          ? "todo"
-          : step.key === "e2e" && e2eFailed && task.stage === "lead"
-            ? "failed"
-            : "current",
-    note: notes[step.key] ?? null,
-  }));
-}
+export {
+  assistantTaskPipeline as taskPipeline,
+  type PipelineStep,
+  type PipelineStepKey,
+  type PipelineStepState,
+} from "@t3tools/contracts";
 
 /** The first line of an agent's message as plain text, for a one-line preview. */
 export function previewLine(text: string): string {

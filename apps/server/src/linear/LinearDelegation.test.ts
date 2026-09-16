@@ -26,7 +26,9 @@ import { LinearAgentApi } from "./LinearAgentApi.ts";
 import { LinearApi } from "./LinearApi.ts";
 import { LinearThreadService } from "./LinearThreadService.ts";
 import * as Delegation from "./LinearDelegation.ts";
+import * as Outbox from "./LinearAgentOutbox.ts";
 import Migration from "../persistence/Migrations/051_LinearDelegation.ts";
+import SessionTaskMigration from "../persistence/Migrations/058_LinearAgentSessionTask.ts";
 
 const issue: LinearIssueDetail = {
   id: "issue-1",
@@ -101,11 +103,12 @@ function harness(twoRepos = false, allowedTeamKeys: string[] = []) {
     }),
     Layer.mock(LinearApi)({ getIssue: () => Effect.succeed(issue) }),
     Layer.mock(LinearAgentApi)({
-      activity: (_id, _type, body) =>
+      activity: (_id, content) =>
         Effect.sync(() => {
-          outgoing.push(body);
+          outgoing.push(content.type === "action" ? content.action : content.body);
         }),
-      links: () => Effect.void,
+      update: () => Effect.void,
+      createOnIssue: () => Effect.succeed("team-session"),
     }),
     Layer.mock(LinearThreadService)({
       prepareIssueThread: (input) =>
@@ -141,15 +144,22 @@ function harness(twoRepos = false, allowedTeamKeys: string[] = []) {
       load: () => Effect.succeed(Option.some({ linear: { teams: ["DEL"] } })),
     }),
   );
+  let outbox: Outbox.LinearAgentOutbox["Service"] | undefined;
   const make = Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* sql`CREATE TABLE orchestration_events (sequence INTEGER)`;
     yield* Migration;
+    yield* SessionTaskMigration;
+    outbox = yield* Outbox.make.pipe(Effect.provideService(Outbox.LinearAgentOutboxWorkers, false));
     return yield* Delegation.make.pipe(
       Effect.provideService(Delegation.LinearDelegationWorkers, false),
+      Effect.provideService(Outbox.LinearAgentOutbox, outbox),
     );
   }).pipe(Effect.provide(dependencies));
-  return { make, commands, prepared, outgoing, projects };
+  const createSession = (issueId: string, taskId: string) =>
+    Effect.suspend(() => outbox!.createSession(issueId, taskId));
+  const send = (sessionId: string) => Effect.suspend(() => outbox!.send(sessionId));
+  return { make, send, createSession, commands, prepared, outgoing, projects };
 }
 it.effect(
   "rejects bad signatures, stale timestamps, and the wrong workspace before admission",
@@ -213,7 +223,7 @@ it.effect("asks which repository to use and resumes with the original issue cont
     const initial = signed(original);
     yield* service.receive(initial.body, initial.signature, "d1");
     yield* service.process("d1");
-    yield* service.sendOutgoing("d1:repository");
+    yield* h.send("session-1");
     assert.lengthOf(h.commands, 0);
     assert.include(h.outgoing[0], "1. One\n2. Two");
     h.projects.reverse();
@@ -363,7 +373,7 @@ it.effect(
           },
         },
       });
-      yield* service.sendOutgoing("event:10:session-1");
+      yield* h.send("session-1");
       assert.include(h.outgoing[0], "Which behavior");
       const answer = signed({
         ...original,
@@ -394,5 +404,52 @@ it.effect("refuses teams outside the allowlist before preparing a worktree", () 
     assert.isTrue(yield* service.process("d1").pipe(Effect.isFailure));
     assert.lengthOf(h.prepared, 0);
     assert.lengthOf(h.commands, 0);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});
+
+it.effect("acknowledges a delegation at once before processing it", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const service = yield* h.make;
+    const first = signed(original);
+    yield* service.receive(first.body, first.signature, "d1");
+    yield* service.acknowledge("d1");
+    assert.deepEqual(h.outgoing, ["Picking this up on the T3 Code environment."]);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});
+
+it.effect("ignores the webhooks for sessions the app opened for a team", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const service = yield* h.make;
+    const sessionId = yield* h.createSession("issue-1", "task-1");
+    const team = { ...original, agentSession: { id: sessionId, issue: { id: "issue-1" } } };
+    // Linear's echo of our own creation has no creator, like a triage delegation.
+    const created = signed(team);
+    yield* service.receive(created.body, created.signature, "d1");
+    yield* service.acknowledge("d1");
+    yield* service.process("d1");
+    const reply = signed({
+      ...team,
+      action: "prompted",
+      agentActivity: { id: "reply", content: { body: "Use the other button" } },
+    });
+    yield* service.receive(reply.body, reply.signature, "d2");
+    yield* service.process("d2");
+    yield* service.acknowledge("d2");
+    yield* h.send(sessionId);
+    assert.deepEqual(h.outgoing, [
+      "Replies on Linear do not reach the team yet. Answer in T3 Code.",
+    ]);
+    assert.lengthOf(h.commands, 0);
+    assert.lengthOf(h.prepared, 0);
+    const sql = yield* SqlClient.SqlClient;
+    assert.deepEqual(yield* sql`SELECT id, processed FROM linear_agent_deliveries ORDER BY id`, [
+      { id: "d1", processed: 1 },
+      { id: "d2", processed: 1 },
+    ]);
+    assert.deepEqual(yield* sql`SELECT thread_id, task_id FROM linear_agent_sessions`, [
+      { thread_id: null, task_id: "task-1" },
+    ]);
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
 });
