@@ -342,6 +342,11 @@ export const AssistantE2eResult = Schema.Struct({
   checks: Schema.optionalKey(Schema.Array(AssistantE2eCheck)),
   /** What a person should still check on staging before accepting. */
   humanChecks: Schema.Array(Schema.String),
+  /**
+   * What the tester wants the person to look at that is not a failure: leftover
+   * wording, inconsistencies, odd behavior outside the criteria. Absent when none.
+   */
+  worthALook: Schema.optionalKey(Schema.Array(Schema.String)),
   screenshots: Schema.Array(Schema.Struct({ url: Schema.String, caption: Schema.String })),
   at: IsoDateTime,
   /** Where the run happened; absent on results from before the worktree option. */

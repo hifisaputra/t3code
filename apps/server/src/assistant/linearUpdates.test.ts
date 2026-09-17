@@ -29,7 +29,129 @@ const deployment = {
 };
 
 describe("e2eComment", () => {
-  it("leads with the verdict and ends with what T3 verified", () => {
+  const merge = { commit: deployment.revision, summary: "Blog posts show their body.", at: "" };
+  const footer = [
+    "---",
+    "What shipped is in the issue description.",
+    "To accept, move this issue to Done. To ask for changes, move it back to an earlier state and comment what should change.",
+    [
+      "- Staging: [staging.garibet.id](https://staging.garibet.id)",
+      "- Deployed commit: `641c0f8`",
+      "- Deployments: [dashboard](https://github.com/Spice-Works/garibet/actions/runs/34731319248)",
+      "- Pull request: [#83](https://github.com/Spice-Works/garibet/pull/83)",
+    ].join("\n"),
+  ].join("\n\n");
+  const screenshots = Array.from({ length: 12 }, (_, i) => ({
+    url: `https://uploads.linear.app/shot-${i + 1}.png`,
+    caption: `State ${i + 1}`,
+  }));
+  const withCriteria = {
+    e2e: {
+      verdict: "partial" as const,
+      report: "### Not covered\n- The reminder email could not be read from staging.",
+      checks: [
+        {
+          criterion: 1,
+          result: "passed" as const,
+          evidence: "Opened /blog/hello\nand saw the body.",
+          screenshot: 1,
+        },
+        { criterion: 2, result: "not-checked" as const, evidence: "No test inbox on staging." },
+      ],
+      humanChecks: ["Open the reminder email in the test inbox."],
+      worthALook: ["The footer still says | Read more."],
+      screenshots,
+      at: "2026-09-13T03:00:00.000Z",
+    },
+    merge,
+    deployment,
+    pullRequest: { number: 83, url: "https://github.com/Spice-Works/garibet/pull/83" },
+    acceptedState: "Done",
+    criteria: ["A blog post shows its body", "The author gets a reminder email"],
+  };
+
+  it("puts checks, results, notes and screenshots up top and collapses the evidence and report", () => {
+    expect(e2eComment(withCriteria)).toBe(
+      [
+        "**👀 Verified on staging, with checks for a person**",
+        "**Check before accepting**\n\n1. Open the reminder email in the test inbox.",
+        [
+          "| Criterion | Result |",
+          "| --- | --- |",
+          "| A blog post shows its body | ✅ passed (screenshot 1) |",
+          "| The author gets a reminder email | 👀 not checked |",
+        ].join("\n"),
+        "**Worth a look**\n\n- The footer still says | Read more.",
+        [
+          "**Screenshots**",
+          ...screenshots.map(
+            (shot, i) =>
+              `*Screenshot ${i + 1}: ${shot.caption}*\n\n![${shot.caption}](${shot.url})`,
+          ),
+        ].join("\n\n"),
+        [
+          "+++ Evidence per criterion",
+          [
+            "1. **A blog post shows its body** ✅ passed (screenshot 1): Opened /blog/hello and saw the body.",
+            "2. **The author gets a reminder email** 👀 not checked: No test inbox on staging.",
+          ].join("\n"),
+          "+++",
+        ].join("\n\n"),
+        [
+          "+++ Tester's full report",
+          "### Not covered\n- The reminder email could not be read from staging.",
+          "+++",
+        ].join("\n\n"),
+        footer,
+      ].join("\n\n"),
+    );
+  });
+
+  it("keeps every screenshot, and the evidence out of the table", () => {
+    const body = e2eComment(withCriteria);
+    expect(body.match(/!\[/g)).toHaveLength(12);
+    expect(body).not.toContain("| Evidence |");
+    expect(body.split("+++ Evidence per criterion")[0]).not.toContain("No test inbox on staging.");
+  });
+
+  it("leaves out the notes and screenshots headings when there are none", () => {
+    const body = e2eComment({
+      ...withCriteria,
+      e2e: {
+        ...withCriteria.e2e,
+        worthALook: [" "],
+        screenshots: [],
+        checks: [withCriteria.e2e.checks[1]!],
+      },
+    });
+    expect(body).not.toContain("Worth a look");
+    expect(body).not.toContain("**Screenshots**");
+    expect(body).not.toContain("(screenshot");
+  });
+
+  it("keeps a line of +++ in the report or evidence from closing the collapsed section", () => {
+    const body = e2eComment({
+      ...withCriteria,
+      e2e: {
+        ...withCriteria.e2e,
+        report: "Before\n+++\n  +++ Nested\nAfter",
+        checks: [
+          { ...withCriteria.e2e.checks[0]!, evidence: "+++\nsaw it" },
+          withCriteria.e2e.checks[1]!,
+        ],
+      },
+    });
+    expect(body.split("\n").filter((line) => line.trim().startsWith("+++"))).toEqual([
+      "+++ Evidence per criterion",
+      "+++",
+      "+++ Tester's full report",
+      "+++",
+    ]);
+    expect(body).toContain("Before\n\\+++\n  \\+++ Nested\nAfter");
+    expect(body).toContain("✅ passed (screenshot 1): +++ saw it");
+  });
+
+  it("shows the report open, under its own heading, for an issue with no recorded criteria", () => {
     const body = e2eComment({
       e2e: {
         verdict: "passed",
@@ -38,7 +160,7 @@ describe("e2eComment", () => {
         screenshots: [{ url: "https://uploads.linear.app/post.png", caption: "The post" }],
         at: "2026-09-13T03:00:00.000Z",
       },
-      merge: { commit: deployment.revision, summary: "Blog posts show their body.", at: "" },
+      merge,
       deployment,
       pullRequest: { number: 83, url: "https://github.com/Spice-Works/garibet/pull/83" },
       acceptedState: "Done",
@@ -46,89 +168,42 @@ describe("e2eComment", () => {
     expect(body).toBe(
       [
         "**✅ Verified on staging: ready to accept**",
-        "**What changed**\n\nBlog posts show their body.",
+        "**Screenshots**\n\n*Screenshot 1: The post*\n\n![The post](https://uploads.linear.app/post.png)",
         "**E2E check on staging**\n\n- Blog post shows its body: passed",
-        "*The post*\n\n![The post](https://uploads.linear.app/post.png)",
-        "---",
-        "To accept, move this issue to Done. To ask for changes, move it back to an earlier state and comment what should change.",
-        [
-          "- Staging: [staging.garibet.id](https://staging.garibet.id)",
-          "- Deployed commit: `641c0f8`",
-          "- Deployments: [dashboard](https://github.com/Spice-Works/garibet/actions/runs/34731319248)",
-          "- Pull request: [#83](https://github.com/Spice-Works/garibet/pull/83)",
-        ].join("\n"),
+        footer,
       ].join("\n\n"),
     );
-  });
-
-  it("puts the per-criterion results in a table above the tester's report", () => {
-    const body = e2eComment({
-      e2e: {
-        verdict: "partial",
-        report: "The reminder email could not be read from staging.",
-        checks: [
-          {
-            criterion: 1,
-            result: "passed",
-            evidence: "Opened /blog/hello and saw the body.",
-            screenshot: 1,
-          },
-          { criterion: 2, result: "not-checked", evidence: "No test inbox on staging." },
-        ],
-        humanChecks: ["Open the reminder email in the test inbox."],
-        screenshots: [{ url: "https://uploads.linear.app/post.png", caption: "The post" }],
-        at: "2026-09-13T03:00:00.000Z",
-      },
-      merge: { commit: deployment.revision, summary: "Blog posts show their body.", at: "" },
-      deployment,
-      pullRequest: null,
-      acceptedState: "Done",
-      criteria: ["A blog post shows its body", "The author gets a reminder email"],
-    });
-    expect(body).toContain("| Criterion | Result | Evidence |");
-    expect(body).toContain(
-      "| A blog post shows its body | ✅ passed | Opened /blog/hello and saw the body. *The post* |",
-    );
-    expect(body).toContain(
-      "| The author gets a reminder email | 👀 not checked | No test inbox on staging. |",
-    );
-    // The table sits above the free report, which says what was not covered.
-    expect(body.indexOf("| Criterion |")).toBeLessThan(body.indexOf("**E2E check on staging**"));
-  });
-
-  it("leaves the table out for an issue with no recorded criteria", () => {
-    const body = e2eComment({
-      e2e: {
-        verdict: "passed",
-        report: "- Blog post shows its body: passed",
-        humanChecks: [],
-        screenshots: [],
-        at: "2026-09-13T03:00:00.000Z",
-      },
-      merge: null,
-      deployment,
-      pullRequest: null,
-      acceptedState: "Done",
-    });
+    expect(body).not.toContain("+++");
     expect(body).not.toContain("| Criterion |");
   });
 
-  it("says a worktree run was verified in the development environment and names its commit", () => {
-    const body = e2eComment({
+  it("points at the description only when delivery writes what shipped there", () => {
+    const failed = e2eComment({
+      ...withCriteria,
       e2e: {
-        verdict: "partial",
-        report: "- Blog post shows its body: passed",
-        humanChecks: ["Open the reminder email in the test inbox."],
-        screenshots: [],
-        at: "2026-09-13T03:00:00.000Z",
-        environment: "worktree",
-        commit: deployment.revision,
+        ...withCriteria.e2e,
+        verdict: "failed",
+        checks: [{ ...withCriteria.e2e.checks[0]!, result: "failed" }],
       },
-      merge: { commit: deployment.revision, summary: "Blog posts show their body.", at: "" },
-      deployment,
-      pullRequest: null,
-      acceptedState: "Done",
     });
+    expect(failed.startsWith("**❌ Failed on staging")).toBe(true);
+    expect(failed).not.toContain("What shipped");
+    expect(failed).not.toContain("To accept");
+    // Without an implementer's summary the description has none to point at.
+    expect(e2eComment({ ...withCriteria, merge: null })).not.toContain("What shipped");
+  });
+
+  it("says a worktree run was verified in the development environment and names its commit", () => {
+    const e2e = {
+      verdict: "partial" as const,
+      report: "- Blog post shows its body: passed",
+      humanChecks: ["Open the reminder email in the test inbox."],
+      screenshots: [],
+      at: "2026-09-13T03:00:00.000Z",
+      environment: "worktree" as const,
+      commit: deployment.revision,
+    };
+    const body = e2eComment({ e2e, merge, deployment, pullRequest: null, acceptedState: "Done" });
     expect(
       body.startsWith(
         "**👀 Verified in the development environment and deployed to staging, with checks for a person**",
@@ -136,6 +211,11 @@ describe("e2eComment", () => {
     ).toBe(true);
     expect(body).toContain("**E2E check in the worktree (commit `641c0f8`)**");
     expect(body).not.toContain("**E2E check on staging**");
+    const checked = e2eComment({
+      ...withCriteria,
+      e2e: { ...withCriteria.e2e, environment: "worktree", commit: deployment.revision },
+    });
+    expect(checked).toContain("+++ Tester's full report (tested commit 641c0f8)");
   });
 });
 

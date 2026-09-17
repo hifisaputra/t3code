@@ -113,6 +113,11 @@ describe("acceptance criteria", () => {
       expect(written[audience], audience).toContain("2. Export downloads a CSV of the rows.");
     }
     expect(written.e2e).toContain("one entry per criterion");
+    // Notes that are not failures have their own list; failures stay in checks.
+    expect(written.e2e).toContain(
+      "- worthALook: what the person should look at that is not a failure",
+    );
+    expect(written.e2e).toContain("A failure goes in checks, not here.");
   });
 
   it("leaves an issue taken before criteria existed on the free-text path", () => {

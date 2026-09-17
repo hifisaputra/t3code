@@ -2117,8 +2117,13 @@ export const make = Effect.gen(function* () {
       summary: updated.merge?.summary ?? updated.summary,
       reviewInstructions: [
         ...e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`),
+        e2e.worthALook?.length
+          ? `Worth a look:\n${e2e.worthALook.map((note) => `- ${note}`).join("\n")}`
+          : null,
         e2e.report,
-      ].join("\n\n"),
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
       // Without a successful move there is no delivered state to be moved away from.
       deliveredState: linearError ? null : p.config.reviewState.trim() || null,
       error: [updated.error, linearError].filter(Boolean).join(" ") || null,
@@ -2323,14 +2328,23 @@ export const make = Effect.gen(function* () {
         readonly humanChecks: ReadonlyArray<string>;
         readonly screenshots: ReadonlyArray<{ readonly path: string; readonly caption: string }>;
         readonly checks?: ReadonlyArray<AssistantE2eCheck> | undefined;
+        /** Notes for the person that are not failures. */
+        readonly worthALook?: ReadonlyArray<string> | undefined;
       },
     ) {
       const { p, t } = yield* authorizeRole(caller, "e2e");
       const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
       if (t.stage !== "e2e" || (!inWorktree && !t.deployment))
         return yield* fail("No e2e run is in progress for this issue.");
-      if (input.screenshots.length > 12)
-        return yield* fail("Attach at most 12 screenshots; keep the ones that prove each check.");
+      const worthALook = input.worthALook ?? [];
+      if (worthALook.length > 15)
+        return yield* fail(
+          "List at most 15 items in worthALook; keep the ones the person most needs to see.",
+        );
+      if (worthALook.some((note) => note.length > 400))
+        return yield* fail(
+          "Keep each worthALook item to one short line of at most 400 characters; put the detail in report.",
+        );
       // With criteria recorded the verdict is theirs to add up; a tester's own
       // verdict is not read. Issues taken before them keep the free-text path.
       const criteria = t.criteria ?? [];
@@ -2400,6 +2414,7 @@ export const make = Effect.gen(function* () {
         report: input.report,
         ...(checks ? { checks } : {}),
         humanChecks: input.humanChecks,
+        ...(worthALook.length ? { worthALook } : {}),
         screenshots,
         at: yield* now,
         environment: inWorktree ? "worktree" : "staging",

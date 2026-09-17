@@ -277,6 +277,7 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
         arguments: {
           report: "The email never arrived.",
           humanChecks: [],
+          worthALook: ["  The footer says Read more. ", "   "],
           screenshots: [{ path: "/evidence/task/page.png", caption: "The page" }],
           checks: [
             { criterion: 1, result: "passed", evidence: "Loaded", screenshot: 1 },
@@ -294,6 +295,7 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
           ],
           report: "The email never arrived.",
           humanChecks: [],
+          worthALook: ["The footer says Read more."],
           screenshots: [{ path: "/evidence/task/page.png", caption: "The page" }],
         },
       ]);

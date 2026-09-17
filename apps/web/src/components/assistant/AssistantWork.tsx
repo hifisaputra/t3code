@@ -791,6 +791,18 @@ function HistoryRecord({
               </ul>
             </div>
           ) : null}
+          {task.e2e.worthALook?.length ? (
+            <div className="mt-2">
+              <p className="mb-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
+                Worth a look
+              </p>
+              <ul className="flex list-disc flex-col gap-1 pl-4 text-sm">
+                {task.e2e.worthALook.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {task.e2e.screenshots.length > 0 ? (
             <ul className="mt-2 flex flex-col gap-1">
               {task.e2e.screenshots.map((shot) => (

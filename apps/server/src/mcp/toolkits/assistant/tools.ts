@@ -179,12 +179,18 @@ export const AssistantToolkit = Toolkit.make(
       ),
       report: text.annotate({
         description:
-          "Markdown for the Linear issue, below the table T3 renders from checks: what the run did not cover and why, and for a failure the expected versus actual and the steps to reproduce. For an issue with no acceptance criteria, give one line per criterion marked passed, failed or not checked, with its evidence. No first person or 'you'.",
+          "Markdown for the Linear issue, collapsed below the table T3 renders from checks: what the run covered beyond the criteria, what it did not cover and why, and the test data it created, changed or left behind; for a failure the expected versus actual and the steps to reproduce. For an issue with no acceptance criteria, give one line per criterion marked passed, failed or not checked, with its evidence. No first person or 'you'.",
       }),
       humanChecks: Schema.Array(text).annotate({
         description:
           "Checks a person should still do on staging before accepting, each with exact steps. Empty when passed.",
       }),
+      worthALook: Schema.optionalKey(
+        Schema.Array(Schema.String).annotate({
+          description:
+            "Things the person should look at that are not failures, one short line each (at most 15, 400 characters each): leftover wording, inconsistencies, suspicious behavior outside the criteria. A failure belongs in checks, and coverage, gaps and test data in report. Omit when there is nothing.",
+        }),
+      ),
       screenshots: Schema.Array(
         Schema.Struct({
           path: text.annotate({
@@ -304,6 +310,9 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         ...(input.checks ? { checks: input.checks } : {}),
         report: input.report.trim(),
         humanChecks: input.humanChecks.map((check) => check.trim()).filter(Boolean),
+        ...(input.worthALook
+          ? { worthALook: input.worthALook.map((note) => note.trim()).filter(Boolean) }
+          : {}),
         screenshots: input.screenshots.map((shot) => ({
           path: shot.path.trim(),
           caption: shot.caption.trim(),

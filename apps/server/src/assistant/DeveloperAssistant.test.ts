@@ -1092,19 +1092,24 @@ it.effect("posts a Linear update for each phase, with the e2e card last", () =>
       checks: oneCheck("not-checked", "No test inbox on staging."),
       report: "- The page loads: passed\n- Email: not checked",
       humanChecks: ["Open the reminder email in the test inbox."],
+      worthALook: ["The footer still says Read more."],
       screenshots: [{ path: `/evidence/${first.id}/page.png`, caption: "The page after the fix" }],
     });
     assert.lengthOf(h.comments, 3);
     const card = h.comments[2]!.body;
     assert.match(card, /^\*\*👀 Verified on staging, with checks for a person\*\*/);
     assert.include(card, "1. Open the reminder email in the test inbox.");
-    assert.include(card, "**What changed**\n\nThe page loads again.");
+    // What shipped goes in the description; the card points there instead of repeating it.
+    assert.notInclude(card, "**What changed**");
+    assert.include(card, "What shipped is in the issue description.");
+    assert.include(card, "**Worth a look**\n\n- The footer still says Read more.");
     assert.include(card, "![The page after the fix](https://uploads.linear.app/page.png)");
     assert.include(card, "move this issue to Done");
     assert.deepEqual(h.uploads, ["page.png"]);
     assert.equal(delivered.status, "review");
     assert.deepEqual(delivered.linearCommentIds, ["comment-1", "comment-2", "comment-3"]);
     assert.include(delivered.reviewInstructions, "Open the reminder email");
+    assert.deepEqual(delivered.e2e?.worthALook, ["The footer still says Read more."]);
     // The issue itself says what shipped, above the person's own description.
     assert.deepEqual(
       h.descriptions.map((d) => d.issueId),
@@ -2323,7 +2328,7 @@ it.effect(
     }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-it.effect("screenshots must come from the issue's evidence folder", () =>
+it.effect("screenshots must come from the issue's evidence folder, and notes stay short", () =>
   Effect.gen(function* () {
     const h = harness();
     const { service } = yield* h.setup;
@@ -2356,6 +2361,26 @@ it.effect("screenshots must come from the issue's evidence folder", () =>
         })
         .pipe(Effect.isFailure),
     );
+    const tooMany = yield* service
+      .submitE2e(tester, {
+        checks: oneCheck("passed"),
+        report: "- The page loads: passed",
+        humanChecks: [],
+        worthALook: Array.from({ length: 16 }, (_, i) => `Note ${i + 1}`),
+        screenshots: [],
+      })
+      .pipe(Effect.flip);
+    assert.include(tooMany.detail, "at most 15");
+    const tooLong = yield* service
+      .submitE2e(tester, {
+        checks: oneCheck("passed"),
+        report: "- The page loads: passed",
+        humanChecks: [],
+        worthALook: ["x".repeat(401)],
+        screenshots: [],
+      })
+      .pipe(Effect.flip);
+    assert.include(tooLong.detail, "400 characters");
     assert.equal((yield* taskById(service, first.id)).status, "working");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
@@ -3186,8 +3211,9 @@ it.effect("the tester reports one result per criterion and T3 adds up the verdic
     assert.equal(failed.e2e?.checks?.[1]?.result, "failed");
     assert.equal(failed.status, "working");
     const card = h.comments.at(-1)!.body;
-    assert.include(card, "| The page loads | ✅ passed | Loaded *The page* |");
-    assert.include(card, "| The reminder email arrives | ❌ failed | No email after 10 minutes |");
+    assert.include(card, "| The page loads | ✅ passed (screenshot 1) |");
+    assert.include(card, "| The reminder email arrives | ❌ failed |");
+    assert.include(card, "❌ failed: No email after 10 minutes");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 

@@ -170,17 +170,18 @@ ${
   criteria
     ? `- checks: one entry per criterion, in the order above, each with its result (passed, failed or not-checked), the evidence you saw, and the position of the screenshot that proves it when one does. For a failure give expected versus actual and the steps to reproduce; for not-checked say what stopped you. T3 derives the verdict from these and ignores the verdict field: one failure fails the run, otherwise anything left for a person makes it partial.
 - humanChecks: exact steps for each criterion you marked not-checked, for a person to follow ${worktreeE2e ? "on staging after the deploy" : "on staging"}.
-- report: Markdown for the Linear issue, carrying what the checks do not: what you covered beyond the criteria, and what could not be covered and why.`
+- report: Markdown for the Linear issue, carrying what the checks do not: what you covered beyond the criteria, what could not be covered and why, and the test data you created, changed or left behind.`
     : worktreeE2e
       ? `- passed: every criterion was verified in the development environment.
 - partial: everything you could check passed, but some items need a person. List each in humanChecks with exact steps; they are what a person should check on staging after the deploy.
 - failed: a criterion does not hold in the development environment. Give expected versus actual and the steps to reproduce.
-- report: Markdown for the Linear issue: one line per criterion, marked passed, failed or not checked, with its evidence, then anything not covered and why.`
+- report: Markdown for the Linear issue: one line per criterion, marked passed, failed or not checked, with its evidence, then anything not covered and why, and the test data you created, changed or left behind.`
       : `- passed: every criterion was verified on staging.
 - partial: everything you could check passed, but some items need a person. List each in humanChecks with exact steps on staging.
 - failed: a criterion does not hold on staging. Give expected versus actual and the steps to reproduce.
-- report: Markdown for the Linear issue: one line per criterion, marked passed, failed or not checked, with its evidence, then anything not covered and why.`
+- report: Markdown for the Linear issue: one line per criterion, marked passed, failed or not checked, with its evidence, then anything not covered and why, and the test data you created, changed or left behind.`
 }
+- worthALook: what the person should look at that is not a failure, one short line each: leftover wording, inconsistencies, suspicious behavior outside the criteria. A failure goes in ${criteria ? "checks" : "the verdict and report"}, not here. Leave it out when there is nothing.
 Write the report for the issue's readers without first person or "you". Attach screenshots as absolute paths with a one-line caption each. End your turn after submitting. If ${worktreeE2e ? "the application will not run here" : "staging access"} or a test account fails, use assistant_ask_decision rather than guessing.
 ${skillNote(config, "e2e")}Project instructions:
 ${projectInstructions(config, "e2e")}

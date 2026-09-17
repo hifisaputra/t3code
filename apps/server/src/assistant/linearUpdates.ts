@@ -106,28 +106,55 @@ const RESULTS: Record<NonNullable<AssistantE2eResult["checks"]>[number]["result"
   "not-checked": "👀 not checked",
 };
 
+/** One line of text, for a table cell or a list item. */
+const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
+
 /** A table cell: one line, and no pipe that would end the column early. */
-const cell = (text: string) => text.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
+const cell = (text: string) => oneLine(text).replace(/\|/g, "\\|");
 
 /**
- * One row per acceptance criterion, as the tester reported it, with the caption
- * of the screenshot that proves it. The free report stays below for what the
- * run did not cover.
+ * A section Linear shows collapsed under its title. A line starting with `+++`
+ * inside would end it (or open another), so such a line is escaped.
  */
+const collapsed = (title: string, content: string) =>
+  `+++ ${title}\n\n${content.trim().replace(/^(\s*)\+\+\+/gm, "$1\\+++")}\n\n+++`;
+
+type E2eCheck = NonNullable<AssistantE2eResult["checks"]>[number];
+
+/** Where a check's screenshot sits in the card's numbered screenshots, when it has one. */
+const screenshotRef = (check: E2eCheck, screenshots: AssistantE2eResult["screenshots"]) =>
+  check.screenshot && screenshots[check.screenshot - 1] ? ` (screenshot ${check.screenshot})` : "";
+
+const criterionName = (check: E2eCheck, criteria: ReadonlyArray<string>) =>
+  criteria[check.criterion - 1] ?? `Criterion ${check.criterion}`;
+
+/** One row per acceptance criterion with its result; the evidence sits collapsed below. */
 const checksTable = (
-  checks: NonNullable<AssistantE2eResult["checks"]>,
+  checks: ReadonlyArray<E2eCheck>,
   criteria: ReadonlyArray<string>,
   screenshots: AssistantE2eResult["screenshots"],
 ) =>
   [
-    "| Criterion | Result | Evidence |",
-    "| --- | --- | --- |",
-    ...checks.map((check) => {
-      const shot = check.screenshot ? screenshots[check.screenshot - 1] : undefined;
-      const evidence = [check.evidence, shot ? `*${shot.caption}*` : ""].filter(Boolean).join(" ");
-      return `| ${cell(criteria[check.criterion - 1] ?? `Criterion ${check.criterion}`)} | ${RESULTS[check.result]} | ${cell(evidence)} |`;
-    }),
+    "| Criterion | Result |",
+    "| --- | --- |",
+    ...checks.map(
+      (check) =>
+        `| ${cell(criterionName(check, criteria))} | ${RESULTS[check.result]}${screenshotRef(check, screenshots)} |`,
+    ),
   ].join("\n");
+
+/** What the tester saw for each criterion, for a reader who opens it. */
+const evidenceList = (
+  checks: ReadonlyArray<E2eCheck>,
+  criteria: ReadonlyArray<string>,
+  screenshots: AssistantE2eResult["screenshots"],
+) =>
+  checks
+    .map((check) => {
+      const evidence = oneLine(check.evidence);
+      return `${check.criterion}. **${oneLine(criterionName(check, criteria))}** ${RESULTS[check.result]}${screenshotRef(check, screenshots)}${evidence ? `: ${evidence}` : ""}`;
+    })
+    .join("\n");
 
 /** Why the issue's team leader did not take it, and what brings it back. */
 export function declinedComment(reason: string): string {
@@ -174,6 +201,12 @@ export function issueFingerprint(
   return NodeCrypto.createHash("sha256").update(JSON.stringify(content)).digest("hex");
 }
 
+/**
+ * The card a person decides from, written for someone reading the issue rather
+ * than the engineering: what to check, the result per criterion, what the
+ * tester flagged and every screenshot up top, with the evidence and the
+ * tester's full report collapsed below. What shipped is in the description.
+ */
 export function e2eComment(input: {
   readonly e2e: AssistantE2eResult;
   readonly merge: AssistantMerge | null;
@@ -187,21 +220,40 @@ export function e2eComment(input: {
   const delivered = e2e.verdict !== "failed";
   const accept = input.acceptedState.trim() || "a completed state";
   const worktree = e2e.environment === "worktree";
-  const checkTitle = worktree
-    ? `**E2E check in the worktree${e2e.commit ? ` (commit \`${e2e.commit.slice(0, 7)}\`)` : ""}**`
-    : "**E2E check on staging**";
+  const criteria = input.criteria ?? [];
+  const checks = e2e.checks?.length && criteria.length ? e2e.checks : null;
+  const report = e2e.report.trim();
+  const commit = worktree && e2e.commit ? e2e.commit.slice(0, 7) : null;
+  const notes = (e2e.worthALook ?? []).map(oneLine).filter(Boolean);
   return sections(
     HEADLINES[worktree ? "worktree" : "staging"][e2e.verdict],
     e2e.humanChecks.length
       ? `**Check before accepting**\n\n${e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
       : null,
-    delivered && input.merge ? `**What changed**\n\n${input.merge.summary}` : null,
-    e2e.checks?.length && input.criteria?.length
-      ? checksTable(e2e.checks, input.criteria, e2e.screenshots)
+    checks ? checksTable(checks, criteria, e2e.screenshots) : null,
+    notes.length ? `**Worth a look**\n\n${bullets(notes)}` : null,
+    e2e.screenshots.length
+      ? [
+          "**Screenshots**",
+          ...e2e.screenshots.map(
+            (shot, i) =>
+              `*Screenshot ${i + 1}: ${shot.caption}*\n\n![${shot.caption}](${shot.url})`,
+          ),
+        ].join("\n\n")
       : null,
-    `${checkTitle}\n\n${e2e.report}`,
-    ...e2e.screenshots.map((shot) => `*${shot.caption}*\n\n![${shot.caption}](${shot.url})`),
+    checks
+      ? collapsed("Evidence per criterion", evidenceList(checks, criteria, e2e.screenshots))
+      : null,
+    // Without criteria the report is the only record of what was checked, so it stays open.
+    report && checks
+      ? collapsed(`Tester's full report${commit ? ` (tested commit ${commit})` : ""}`, report)
+      : null,
+    report && !checks
+      ? `${worktree ? `**E2E check in the worktree${commit ? ` (commit \`${commit}\`)` : ""}**` : "**E2E check on staging**"}\n\n${report}`
+      : null,
     "---",
+    // Delivery writes the implementer's summary into the description's "What shipped".
+    delivered && input.merge?.summary.trim() ? "What shipped is in the issue description." : null,
     delivered
       ? `To accept, move this issue to ${accept}. To ask for changes, move it back to an earlier state and comment what should change.`
       : null,
