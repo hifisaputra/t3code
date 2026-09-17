@@ -244,11 +244,19 @@ export function e2eComment(input: {
   const worktree = e2e.environment === "worktree";
   const criteria = input.criteria ?? [];
   const checks = e2e.checks?.length && criteria.length ? e2e.checks : null;
-  const report = e2e.report.trim();
+  // The engineering checks and how the team settled them are for the record,
+  // so they sit with the tester's report rather than in the person's checks.
+  const engineering = e2e.engineeringChecks?.length
+    ? `**Engineering checks**\n\n${e2e.engineeringChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}${e2e.engineeringSettled?.trim() ? `\n\n**Settled by the team**\n\n${e2e.engineeringSettled.trim()}` : ""}`
+    : null;
+  const report = sections(e2e.report, engineering);
   const commit = worktree && e2e.commit ? e2e.commit.slice(0, 7) : null;
   const notes = (e2e.worthALook ?? []).map(oneLine).filter(Boolean);
   return sections(
-    (input.smoke ? SMOKE_HEADLINES : HEADLINES)[worktree ? "worktree" : "staging"][e2e.verdict],
+    // A partial run whose open criteria were all engineering checks leaves the person nothing to check.
+    (input.smoke ? SMOKE_HEADLINES : HEADLINES)[worktree ? "worktree" : "staging"][
+      e2e.verdict === "partial" && !e2e.humanChecks.length ? "passed" : e2e.verdict
+    ],
     e2e.humanChecks.length
       ? `**Check before accepting**\n\n${e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
       : null,

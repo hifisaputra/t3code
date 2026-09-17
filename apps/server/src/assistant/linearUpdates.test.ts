@@ -152,6 +152,35 @@ describe("e2eComment", () => {
     expect(body).toContain("✅ passed (screenshot 1): +++ saw it");
   });
 
+  it("puts the engineering checks and how the team settled them in the collapsed report", () => {
+    const body = e2eComment({
+      ...withCriteria,
+      e2e: {
+        ...withCriteria.e2e,
+        engineeringChecks: ["No hydration warning in the dev console on /blog/hello"],
+        engineeringSettled: "The reviewer ran the dev build and the console stayed clean.",
+      },
+    });
+    expect(body.split("+++ Tester's full report")[0]).not.toContain("Engineering checks");
+    // With the open criteria all settled by the team, the person has nothing to check.
+    const settledOnly = e2eComment({
+      ...withCriteria,
+      e2e: { ...withCriteria.e2e, humanChecks: [], engineeringChecks: ["Logs"] },
+    });
+    expect(settledOnly.split("\n")[0]).toBe("**✅ Verified on staging: ready to accept**");
+    expect(body).toContain(
+      [
+        "+++ Tester's full report",
+        [
+          "### Not covered\n- The reminder email could not be read from staging.",
+          "**Engineering checks**\n\n1. No hydration warning in the dev console on /blog/hello",
+          "**Settled by the team**\n\nThe reviewer ran the dev build and the console stayed clean.",
+        ].join("\n\n"),
+        "+++",
+      ].join("\n\n"),
+    );
+  });
+
   it("shows the report open, under its own heading, for an issue with no recorded criteria", () => {
     const body = e2eComment({
       e2e: {

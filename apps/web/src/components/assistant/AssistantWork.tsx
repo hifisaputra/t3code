@@ -48,6 +48,7 @@ import {
   describeTaskPhase,
   e2eDepthChange,
   e2eDepthLabel,
+  engineeringChecksLine,
   previewLine,
   taskOutcome,
   taskPipeline,
@@ -468,6 +469,7 @@ export function ActiveTaskCard({
     waitingOn,
   });
   const pipeline = taskPipeline(task);
+  const confirming = engineeringChecksLine(task);
   const asking = openDecision ? assistantThreadKind(openDecision.threadId) : null;
   const pullRequest = worker?.linkedPullRequest ?? worker?.branchPullRequest ?? null;
   const moreRounds = project?.config.maxWorkerTurns ?? 6;
@@ -570,6 +572,9 @@ export function ActiveTaskCard({
           <p className="font-medium text-sm">{phase.label}</p>
           {phaseDetail ? (
             <p className="mt-0.5 line-clamp-2 text-xs opacity-90">{phaseDetail}</p>
+          ) : null}
+          {confirming ? (
+            <p className="mt-0.5 line-clamp-2 text-xs opacity-90">{confirming}</p>
           ) : null}
           {task.deployWait ? (
             <p className="mt-0.5 line-clamp-2 text-xs opacity-90">

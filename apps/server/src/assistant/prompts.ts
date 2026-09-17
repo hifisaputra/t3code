@@ -70,15 +70,30 @@ const projectInstructions = (
   "Read AGENTS.md and the repository's development and deployment documentation.";
 
 /** The project notes a thread's first message lists. */
-export type PromptNotes = ReadonlyArray<Pick<AssistantProjectNote, "text">>;
+export type PromptNotes = ReadonlyArray<
+  Pick<AssistantProjectNote, "text" | "role" | "issueIdentifier">
+>;
+
+const noteAuthors: Record<AssistantProjectNote["role"], string> = {
+  lead: "leader",
+  implement: "implementer",
+  e2e: "tester",
+  person: "added by the person",
+};
 
 /**
- * What earlier teams wrote down about the project, placed after the project
- * instructions. Empty when there are no open notes.
+ * What teams, this one included, wrote down about the project, placed after the
+ * project instructions. Each note names where it came from. Empty when there are
+ * no open notes.
  */
 const knownNotes = (notes: PromptNotes) =>
   notes.length
-    ? `Known about this project (from earlier teams):\n${notes.map((note) => `- ${note.text}`).join("\n")}\n`
+    ? `Known about this project:\n${notes
+        .map(
+          (note) =>
+            `- ${note.text} (${[note.issueIdentifier, noteAuthors[note.role]].filter(Boolean).join(", ")})`,
+        )
+        .join("\n")}\n`
     : "";
 
 /** When a thread writes a project note, for the roles that have assistant_add_note. */
@@ -150,6 +165,10 @@ const reviewerCheckNote = (config: AssistantProjectConfig) =>
     ? " T3 ran the project's check command before this request and its result is in the request; do not re-run it unless a finding needs a different check."
     : "";
 
+/** What the team leader does with a passed or partial run that lists engineering checks. */
+const engineeringChecksLead = (worktreeE2e: boolean) =>
+  `When the tester lists engineering checks, things only an engineer can confirm such as console warnings in a development build, logs or database state, T3 holds the ${worktreeE2e ? "merge" : "delivery"} and messages you the list instead. Settle each with the code reviewer: send the checks with assistant_message_worker and thread "review" (it can run the app in this worktree), and read its answer with assistant_read_thread. When a check shows a defect, send it to the worker as after a failure. Once they are settled, call assistant_deliver with how each was settled; T3 then ${worktreeE2e ? "tells the worker to merge" : "puts the issue in review"}.`;
+
 const issueHeader = (
   task: AssistantTask,
 ) => `Linear issue ${task.issue.identifier}: ${task.issue.title}
@@ -172,10 +191,10 @@ Follow the project instructions on which issues need the person first.
 Once you take it, the worker asks the code reviewer for review itself. The two trade rounds until the reviewer approves a commit${worktreeE2e ? `; the worker merges it into ${config.baseBranch} with a merge commit after the e2e check` : ` and the worker merges it into ${config.baseBranch} with a merge commit`}; do not relay messages between them.
 ${
   worktreeE2e
-    ? `When the reviewer approves, T3 starts the e2e tester in this worktree with your e2e brief, the acceptance criteria and the implementer's test notes. The tester runs the application from this worktree the way the project instructions describe. On passed or partial, T3 tells the worker to merge. Once the merge is reported, T3 verifies the staging deploy for your targetIds, watches it while it deploys, and once it is verified puts the issue in review, closes the team and starts the next issue.
-T3 messages you here only when something needs a decision: the implementer reports that the work changed from your plan, a deploy check fails or times out, e2e fails, a thread stops without handing off, the issue is blocked, or the person writes. assistant_start_e2e and assistant_verify_staging remain for running a step again by hand, such as a rerun after a failure, with a revised brief or at another depth. T3 posts the Linear update for each phase itself; do not post your own. On a failed e2e, decide from the report: a code defect goes to the worker with assistant_message_worker (it is reviewed and tested again), a mistake in the test goes back to the tester with assistant_message_worker and thread "e2e", and an environment or access problem goes to the person with assistant_ask_decision.`
+    ? `When the reviewer approves, T3 starts the e2e tester in this worktree with your e2e brief, the acceptance criteria and the implementer's test notes. The tester runs the application from this worktree the way the project instructions describe. On passed or partial, T3 tells the worker to merge. ${engineeringChecksLead(true)} Once the merge is reported, T3 verifies the staging deploy for your targetIds, watches it while it deploys, and once it is verified puts the issue in review, closes the team and starts the next issue.
+T3 messages you here only when something needs a decision: the implementer reports that the work changed from your plan, a deploy check fails or times out, e2e fails or lists engineering checks, a thread stops without handing off, the issue is blocked, or the person writes. assistant_start_e2e and assistant_verify_staging remain for running a step again by hand, such as a rerun after a failure, with a revised brief or at another depth. T3 posts the Linear update for each phase itself; do not post your own. On a failed e2e, decide from the report: a code defect goes to the worker with assistant_message_worker (it is reviewed and tested again), a mistake in the test goes back to the tester with assistant_message_worker and thread "e2e", and an environment or access problem goes to the person with assistant_ask_decision.`
     : `Once the merge is reported, T3 verifies the staging deploy for your targetIds: each deployment must contain the approved commit and belong to origin's ${config.baseBranch}, and T3 watches it while it deploys. Once it is verified, T3 starts the e2e tester on staging with your e2e brief, the acceptance criteria and the implementer's test notes.
-T3 messages you here only when something needs a decision: the implementer reports that the work changed from your plan, a deploy check fails or times out, e2e fails, a thread stops without handing off, the issue is blocked, or the person writes. assistant_verify_staging and assistant_start_e2e remain for running a step again by hand, such as a rerun after a failure, with a revised brief or at another depth. T3 posts the Linear update for each phase itself; do not post your own. On passed or partial, T3 puts the issue in review, closes the team and starts the next issue. On failed, decide from the report: a code defect goes to the worker with assistant_message_worker (it is reviewed, merged and tested again), a mistake in the test goes back to the tester with assistant_message_worker and thread "e2e", and a staging or access problem goes to the person with assistant_ask_decision.`
+T3 messages you here only when something needs a decision: the implementer reports that the work changed from your plan, a deploy check fails or times out, e2e fails or lists engineering checks, a thread stops without handing off, the issue is blocked, or the person writes. assistant_verify_staging and assistant_start_e2e remain for running a step again by hand, such as a rerun after a failure, with a revised brief or at another depth. T3 posts the Linear update for each phase itself; do not post your own. On passed or partial, T3 puts the issue in review, closes the team and starts the next issue. ${engineeringChecksLead(false)} On failed, decide from the report: a code defect goes to the worker with assistant_message_worker (it is reviewed, merged and tested again), a mistake in the test goes back to the tester with assistant_message_worker and thread "e2e", and a staging or access problem goes to the person with assistant_ask_decision.`
 }
 Use assistant_read_thread to see what a thread did. After you take the issue, start or message a thread, end your turn; T3 messages you. Do not poll, sleep or keep a shell running; when the issue waits on something else outside T3, such as a nightly job or something a person must do, call assistant_wait with the reason. If the worker runs out of rounds, T3 blocks the issue for the person: say where it stands and end your turn.
 ${notes.length ? 'Check "Known about this project" below before asking the person: an earlier team may already have the answer.\n' : ""}${addNoteLine}${skillNote(config, "lead")}Project instructions:
@@ -208,10 +227,11 @@ export const reviewerInstructions = (
   task: AssistantTask,
   notes: PromptNotes = [],
 ) => `${issueHeader(task)}
-You are the code reviewer for this issue, on the team its team leader runs. You share the implementation worker's worktree and branch. Do not edit, commit, push, merge, switch branches or rewrite history; read, inspect and run the project's tests and checks only. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team: the handoffs go through the assistant tools, and T3 posts the updates.${teamLine(config, task)}
-Read AGENTS.md and the full issue with Linear tools. Review git diff origin/${config.baseBranch}...HEAD against the issue's acceptance criteria, the task brief and the project's rules, and check the PR's CI status.${reviewerCheckNote(config)} Block on correctness, security, data loss or migration risk, missing acceptance criteria, missing tests for risky logic, and broken project rules. Do not block on taste; mention it as a non-blocking note. When the request carries the implementer's test notes for the e2e tester, check them against the diff: T3 starts the tester with the notes of the request you approve. Notes that are wrong or leave out a page, flow or data the change touches are a blocking finding, and so is planChanged set wrong against the team leader's plan for the e2e test.
+You are the code reviewer for this issue, on the team its team leader runs. You share the implementation worker's worktree and branch. Do not edit, commit, push, merge, switch branches or rewrite history; read, inspect, and run the project's tests, checks and application only. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team: the handoffs go through the assistant tools, and T3 posts the updates.${teamLine(config, task)}
+Read AGENTS.md and the full issue with Linear tools. Review git diff origin/${config.baseBranch}...HEAD against the issue's acceptance criteria, the task brief and the project's rules, and check the PR's CI status.${reviewerCheckNote(config)} Block on correctness, security, data loss or migration risk, missing acceptance criteria, missing tests for risky logic, and broken project rules. Do not block on taste; mention it as a non-blocking note. When the diff changes UI code, run the app from this worktree the way the project instructions describe for your team's slot and confirm the changed pages load without console errors or warnings; errors or warnings the change brings are a blocking finding. Stop what you started before submitting. When the request carries the implementer's test notes for the e2e tester, check them against the diff: T3 starts the tester with the notes of the request you approve. Notes that are wrong or leave out a page, flow or data the change touches are a blocking finding, and so is planChanged set wrong against the team leader's plan for the e2e test.
 Check the planned e2e depth below against the diff. When the diff changes behaviour a user sees or uses that the planned depth would not test (no test at all, or a smoke test that leaves out a criterion the change touches), set needsE2e to true with your verdict: T3 raises the test to full. Leave it out otherwise.
 Call assistant_submit_review with verdict changes-requested and specific findings (file and line, the problem, what to do), or approved with a short summary for the Linear update: what you checked and any non-blocking notes. T3 sends your verdict to the implementer and records which commit you approved. End your turn after submitting. Later requests in this thread are re-reviews: confirm your earlier findings were addressed and review only what changed. For an unresolved product question use assistant_ask_decision.
+The team leader may also send you engineering checks from the e2e run, such as console warnings in a development build, logs or database state. Settle each in this worktree the way the project instructions allow, answer with what you checked and what it showed, stop what you started and end your turn. That answer is not a review: do not call assistant_submit_review for it.
 ${skillNote(config, "review")}Project instructions:
 ${projectInstructions(config, "review")}
 ${knownNotes(notes)}Task brief:
@@ -239,20 +259,22 @@ ${worktreeE2e ? "Stop every server and background process you started and close 
 ${
   criteria
     ? `- checks: one entry per criterion${smoke ? " listed above" : ""}, in the order above, each with its result (passed, failed or not-checked; never skipped, which T3 records itself), the evidence you saw, and the position of the screenshot that proves it when one does. For a failure give expected versus actual and the steps to reproduce; for not-checked say what stopped you. T3 derives the verdict from these and ignores the verdict field: one failure fails the run, otherwise anything left for a person makes it partial.
-- humanChecks: exact steps for each criterion you marked not-checked, for a person to follow ${worktreeE2e ? "on staging after the deploy" : "on staging"}.
+- humanChecks: exact steps for a person to follow ${worktreeE2e ? "on staging after the deploy" : "on staging"}, for each criterion you marked not-checked that they can check in the product. Each criterion you mark not-checked needs an entry in humanChecks or engineeringChecks.
 - report: Markdown for the Linear issue, carrying what the checks do not: what you covered beyond the criteria, what could not be covered and why, and the test data you created, changed or left behind.`
     : worktreeE2e
       ? `- passed: every criterion was verified in the development environment.
-- partial: everything you could check passed, but some items need a person. List each in humanChecks with exact steps; they are what a person should check on staging after the deploy.
+- partial: everything you could check passed, but some items need a person or an engineer. List each in humanChecks with exact steps a person follows on staging after the deploy, or in engineeringChecks.
 - failed: a criterion does not hold in the development environment. Give expected versus actual and the steps to reproduce.
 - report: Markdown for the Linear issue: one line per criterion, marked passed, failed or not checked, with its evidence, then anything not covered and why, and the test data you created, changed or left behind.`
       : `- passed: every criterion was verified on staging.
-- partial: everything you could check passed, but some items need a person. List each in humanChecks with exact steps on staging.
+- partial: everything you could check passed, but some items need a person or an engineer. List each in humanChecks with exact steps on staging, or in engineeringChecks.
 - failed: a criterion does not hold on staging. Give expected versus actual and the steps to reproduce.
 - report: Markdown for the Linear issue: one line per criterion, marked passed, failed or not checked, with its evidence, then anything not covered and why, and the test data you created, changed or left behind.`
 }
+- engineeringChecks: what only an engineer can check, each with what to look at: console warnings in a development build, server logs, database state, a job's output. On passed or partial they hold the ${worktreeE2e ? "merge" : "delivery"} while the team leader settles them with the team. Leave it out when there is nothing.
 - worthALook: what the person should look at that is not a failure, one short line each: leftover wording, inconsistencies, suspicious behavior outside the criteria. A failure goes in ${criteria ? "checks" : "the verdict and report"}, not here. Leave it out when there is nothing.
-Write the report for the issue's readers without first person or "you". Attach screenshots as absolute paths with a one-line caption each. End your turn after submitting. If ${worktreeE2e ? "the application will not run here" : "staging access"} or a test account fails, use assistant_ask_decision rather than guessing.
+humanChecks are read by someone who uses the product: a product manager on staging or production, with a browser and a normal login, and no terminal, database, local development server or admin console. Keep each check to about 5 steps. A check that needs setup that person cannot do, such as a data binding, a second account or a database change, is not a humanCheck: add a project note about the gap with assistant_add_note and name the setup in the report, and list the check in engineeringChecks when an engineer can do that setup.
+Write the report for the issue's readers without first person or "you". Attach screenshots as absolute paths with a one-line caption each. There is no limit on screenshots; attach every one that proves a check or shows something in the report. End your turn after submitting. If ${worktreeE2e ? "the application will not run here" : "staging access"} or a test account fails, use assistant_ask_decision rather than guessing.
 ${notes.length ? 'Check "Known about this project" below before writing humanChecks or asking the person: an earlier team may already have found the way to check it, or found that it cannot be checked here.\n' : ""}${addNoteLine}${skillNote(config, "e2e")}Project instructions:
 ${projectInstructions(config, "e2e")}
 ${knownNotes(notes)}Brief from the team leader:

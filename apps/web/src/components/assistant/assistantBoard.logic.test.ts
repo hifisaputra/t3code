@@ -18,6 +18,7 @@ import {
   describeProjectActivity,
   describeTaskPhase,
   e2eDepthChange,
+  engineeringChecksLine,
   historyTasks,
   instructionSections,
   previewLine,
@@ -480,6 +481,45 @@ describe("e2e depth", () => {
     expect(describeTaskPhase({ ...base, task: merged }).detail).toBe(
       "Merged after code review. The team leader is checking the staging deploy.",
     );
+  });
+});
+
+describe("engineeringChecksLine", () => {
+  const at = "2026-09-13T00:00:00.000Z";
+  const run = (engineeringChecks: ReadonlyArray<string>, extra = {}) =>
+    ({
+      verdict: "passed",
+      report: "",
+      humanChecks: [],
+      engineeringChecks,
+      screenshots: [],
+      at,
+      ...extra,
+    }) as const;
+
+  it("counts the checks while the leader or the reviewer settles them", () => {
+    expect(engineeringChecksLine(task({ stage: "lead", e2e: run(["Console is clean"]) }))).toBe(
+      "Team is confirming 1 engineering check",
+    );
+    expect(engineeringChecksLine(task({ stage: "review", e2e: run(["Logs", "Job output"]) }))).toBe(
+      "Team is confirming 2 engineering checks",
+    );
+  });
+
+  it("says nothing once they are settled, for a failed run, or with the worker fixing a defect", () => {
+    expect(
+      engineeringChecksLine(
+        task({ stage: "lead", e2e: run(["Logs"], { engineeringSettled: "Clean." }) }),
+      ),
+    ).toBeNull();
+    expect(
+      engineeringChecksLine(task({ stage: "lead", e2e: run(["Logs"], { verdict: "failed" }) })),
+    ).toBeNull();
+    expect(engineeringChecksLine(task({ stage: "implement", e2e: run(["Logs"]) }))).toBeNull();
+    expect(engineeringChecksLine(task({ stage: "lead", e2e: run([]) }))).toBeNull();
+    expect(
+      engineeringChecksLine(task({ status: "review", stage: "lead", e2e: run(["Logs"]) })),
+    ).toBeNull();
   });
 });
 

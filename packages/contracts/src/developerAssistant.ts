@@ -397,6 +397,14 @@ export const AssistantE2eResult = Schema.Struct({
   /** What a person should still check on staging before accepting. */
   humanChecks: Schema.Array(Schema.String),
   /**
+   * What only an engineer can check (console warnings in a dev build, logs,
+   * database state, a job's output). On a passed or partial run they hold the
+   * delivery until the team leader settles them. Absent when none.
+   */
+  engineeringChecks: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** How the team settled the engineering checks, from the leader's assistant_deliver. */
+  engineeringSettled: Schema.optionalKey(Schema.String),
+  /**
    * What the tester wants the person to look at that is not a failure: leftover
    * wording, inconsistencies, odd behavior outside the criteria. Absent when none.
    */
@@ -409,6 +417,18 @@ export const AssistantE2eResult = Schema.Struct({
   commit: Schema.optionalKey(CommitSha),
 });
 export type AssistantE2eResult = typeof AssistantE2eResult.Type;
+
+/**
+ * The engineering checks a passed or partial run left for the team to settle
+ * before delivery: 0 once the leader settled them, and for a failed run, which
+ * goes back to the leader anyway.
+ */
+export const assistantE2ePendingEngineeringChecks = (
+  e2e: AssistantE2eResult | null | undefined,
+): number =>
+  e2e && e2e.verdict !== "failed" && e2e.engineeringSettled === undefined
+    ? (e2e.engineeringChecks?.length ?? 0)
+    : 0;
 
 /**
  * A team leader's assistant_wait: what it waits for, how many checks so far,
@@ -684,6 +704,18 @@ export const AssistantReviewInput = Schema.Struct({
 export const assistantTaskHoldsProject = (status: AssistantTaskStatus): boolean =>
   status === "preparing" || status === "working" || status === "waiting" || status === "blocked";
 
+/**
+ * How many engineering checks the team is settling before it delivers: while
+ * the issue is with its team leader, or with the code reviewer it asked. Once
+ * a defect goes back to the worker, the issue is coding again.
+ */
+export const assistantTaskEngineeringChecksPending = (
+  task: Pick<AssistantTask, "status" | "stage" | "e2e">,
+): number =>
+  assistantTaskHoldsProject(task.status) && (task.stage === "lead" || task.stage === "review")
+    ? assistantE2ePendingEngineeringChecks(task.e2e)
+    : 0;
+
 export type PipelineStepKey = "take" | "code" | "review" | "merge" | "staging" | "e2e";
 /** skipped: a step the issue does not run, such as the e2e test at depth none. */
 export type PipelineStepState = "done" | "current" | "failed" | "todo" | "skipped";
@@ -745,10 +777,15 @@ export function assistantTaskPipeline(task: AssistantTask): ReadonlyArray<Pipeli
   const offset = 1;
   const approved = task.codeReview?.verdict === "approved";
   const e2eFailed = task.e2e?.verdict === "failed";
-  const e2ePassed = Boolean(task.e2e) && !e2eFailed;
+  // A run whose engineering checks are still open has not passed yet.
+  const e2ePassed =
+    Boolean(task.e2e) && !e2eFailed && assistantE2ePendingEngineeringChecks(task.e2e) === 0;
+  const confirming = !skipsE2e && assistantTaskEngineeringChecksPending(task) > 0;
   const at = (() => {
     if (task.status === "review" || task.status === "accepted") return steps.length;
     if (task.stage === "lead" && task.turns === 0) return 0;
+    // The team settles the checks before the merge (worktree) or the delivery (staging).
+    if (confirming) return offset + (inWorktree ? 2 : 4);
     if (skipsE2e) {
       // Both modes run code, review, merge, staging. An approval older than a
       // failed run from before the depth changed is not one to merge.
@@ -819,17 +856,19 @@ export function assistantTaskPipeline(task: AssistantTask): ReadonlyArray<Pipeli
               ? `No e2e test: ${reason}`
               : "No e2e test",
         }
-      : task.e2e && at >= e2eAt && task.stage !== "e2e"
-        ? {
-            e2e: e2eFailed
-              ? inWorktree
-                ? "Failed in the worktree"
-                : "Failed on staging"
-              : task.e2e.verdict === "partial"
-                ? "Passed, with checks for you"
-                : "Passed",
-          }
-        : {}),
+      : confirming
+        ? { e2e: "Team is confirming engineering checks" }
+        : task.e2e && at >= e2eAt && task.stage !== "e2e"
+          ? {
+              e2e: e2eFailed
+                ? inWorktree
+                  ? "Failed in the worktree"
+                  : "Failed on staging"
+                : task.e2e.verdict === "partial"
+                  ? "Passed, with checks for you"
+                  : "Passed",
+            }
+          : {}),
   };
   return allSteps.map((step): PipelineStep => {
     const note = notes[step.key] ?? null;

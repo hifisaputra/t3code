@@ -158,6 +158,53 @@ describe("assistantTaskPipeline", () => {
     );
   });
 
+  it("keeps the e2e step current while the team confirms engineering checks, in both modes", () => {
+    const run = {
+      verdict: "passed",
+      report: "",
+      humanChecks: [],
+      engineeringChecks: ["No hydration warning in the dev console"],
+      screenshots: [],
+      at,
+    } as const;
+    const staging = task({ stage: "lead", ...deployed, e2e: run });
+    expect(states(staging)).toBe(
+      "take:done code:done review:done merge:done staging:done e2e:current",
+    );
+    expect(assistantTaskPipeline(staging)?.[5]?.note).toBe("Team is confirming engineering checks");
+    // The leader asks the reviewer; the issue is still settling the checks.
+    expect(states(task({ stage: "review", ...deployed, e2e: run }))).toBe(
+      "take:done code:done review:done merge:done staging:done e2e:current",
+    );
+    const worktreeRun = { ...run, environment: "worktree", commit } as const;
+    const worktree = task({
+      e2eEnvironment: "worktree",
+      stage: "lead",
+      ...approved,
+      e2e: worktreeRun,
+    });
+    expect(states(worktree)).toBe(
+      "take:done code:done review:done e2e:current merge:todo staging:todo",
+    );
+    // A defect sent to the worker is coding again, not a merge.
+    expect(
+      states(
+        task({ e2eEnvironment: "worktree", stage: "implement", ...approved, e2e: worktreeRun }),
+      ),
+    ).toBe("take:done code:current review:todo e2e:todo merge:todo staging:todo");
+    // Settled, the worker merges.
+    expect(
+      states(
+        task({
+          e2eEnvironment: "worktree",
+          stage: "implement",
+          ...approved,
+          e2e: { ...worktreeRun, engineeringSettled: "The reviewer saw no warning." },
+        }),
+      ),
+    ).toBe("take:done code:done review:done e2e:done merge:current staging:todo");
+  });
+
   it("labels a smoke test", () => {
     const smoke = task({ stage: "review", e2ePlan: { brief: "", depth: "smoke" } });
     expect(assistantTaskPipeline(smoke)?.[5]).toMatchObject({

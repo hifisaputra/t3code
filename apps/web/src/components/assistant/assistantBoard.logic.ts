@@ -3,6 +3,7 @@ import {
   assistantPicksIssues,
   assistantTaskE2eDepth,
   assistantTaskE2eEnvironment,
+  assistantTaskEngineeringChecksPending,
   assistantTaskHoldsProject,
   type AssistantBoard,
   type AssistantDecision,
@@ -317,6 +318,16 @@ export function describeTaskPhase(input: {
       }
     }
   }
+}
+
+/**
+ * What the board says while the team settles the engineering checks an e2e run
+ * listed before delivery; null otherwise. The person's own checks come later.
+ */
+export function engineeringChecksLine(task: AssistantTask): string | null {
+  const count = assistantTaskEngineeringChecksPending(task);
+  if (!count) return null;
+  return `Team is confirming ${count} engineering check${count === 1 ? "" : "s"}`;
 }
 
 export const taskRoundsExhausted = (task: AssistantTask) => task.turns >= task.turnLimit;

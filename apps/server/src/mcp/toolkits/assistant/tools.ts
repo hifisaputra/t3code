@@ -226,12 +226,12 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_submit_e2e", {
     description:
-      "E2E thread only: report your test, on staging or in the team's worktree, wherever you ran it. T3 uploads the screenshots and records the result; on passed or partial the issue moves on (in staging mode straight to review, in worktree mode to the merge and the staging deploy), and on failed the team leader decides the fix. End your turn after submitting.",
+      "E2E thread only: report your test, on staging or in the team's worktree, wherever you ran it. T3 uploads the screenshots and records the result; on passed or partial the issue moves on (in staging mode straight to review, in worktree mode to the merge and the staging deploy), unless you list engineeringChecks, which the team leader settles first. On failed the team leader decides the fix. End your turn after submitting.",
     parameters: Schema.Struct({
       checks: Schema.optionalKey(
         Schema.Array(AssistantE2eCheck).annotate({
           description:
-            "checks is required when the issue has acceptance criteria (the brief lists them numbered): one entry per criterion, in order; in a smoke test, one per criterion the brief lists. Never report skipped: T3 records the criteria outside a smoke test itself. T3 derives the verdict from them: one failed criterion fails the run, otherwise any not-checked criterion makes it partial, and each not-checked criterion needs a matching entry in humanChecks. screenshot is the 1-based position in screenshots of the one that proves the check.",
+            "checks is required when the issue has acceptance criteria (the brief lists them numbered): one entry per criterion, in order; in a smoke test, one per criterion the brief lists. Never report skipped: T3 records the criteria outside a smoke test itself. T3 derives the verdict from them: one failed criterion fails the run, otherwise any not-checked criterion makes it partial, and each not-checked criterion needs a matching entry in humanChecks or engineeringChecks. screenshot is the 1-based position in screenshots of the one that proves the check.",
         }),
       ),
       verdict: Schema.optionalKey(
@@ -246,8 +246,14 @@ export const AssistantToolkit = Toolkit.make(
       }),
       humanChecks: Schema.Array(text).annotate({
         description:
-          "Checks a person should still do on staging before accepting, each with exact steps. Empty when passed.",
+          "Checks a person should still do before accepting, each with exact steps. The reader uses the product: someone like a product manager on staging or production, with a browser and a normal login, and no terminal, database, local dev server or admin console. At most about 5 steps each. A check that needs setup that person cannot do (a data binding, a second account, a database change) does not belong here: add a project note about the gap with assistant_add_note and name the setup in report. The project notes in your first message may already say how to check something. Empty when passed.",
       }),
+      engineeringChecks: Schema.optionalKey(
+        Schema.Array(text).annotate({
+          description:
+            "Checks only an engineer can do, each with what to look at: console warnings in a development build, server logs, database state, a job's output. On passed or partial they hold the delivery: the team leader settles each with the team before the issue moves on. Omit when there are none.",
+        }),
+      ),
       worthALook: Schema.optionalKey(
         Schema.Array(Schema.String).annotate({
           description:
@@ -263,6 +269,19 @@ export const AssistantToolkit = Toolkit.make(
           caption: text.annotate({ description: "One line: what the screenshot shows." }),
         }),
       ),
+    }),
+    success: AssistantTask,
+    failure,
+    dependencies,
+  }),
+  Tool.make("assistant_deliver", {
+    description:
+      'Team leader only: move the issue on once you have settled the engineering checks an e2e run listed. T3 holds a passed or partial run with engineeringChecks until you call this; settle each check first with the code reviewer (assistant_message_worker, thread "review") and read its answer with assistant_read_thread, or send a defect to the worker instead. In staging mode T3 then puts the issue in review with the tester\'s result; in worktree mode it tells the worker to merge the tested commit. Fails when no engineering checks are waiting. End your turn afterward.',
+    parameters: Schema.Struct({
+      settled: text.annotate({
+        description:
+          "How each engineering check was settled: what was checked, by whom, and what it showed. It goes on the Linear issue with the tester's report. No first person.",
+      }),
     }),
     success: AssistantTask,
     failure,
@@ -409,6 +428,13 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         ...(input.checks ? { checks: input.checks } : {}),
         report: input.report.trim(),
         humanChecks: input.humanChecks.map((check) => check.trim()).filter(Boolean),
+        ...(input.engineeringChecks
+          ? {
+              engineeringChecks: input.engineeringChecks
+                .map((check) => check.trim())
+                .filter(Boolean),
+            }
+          : {}),
         ...(input.worthALook
           ? { worthALook: input.worthALook.map((note) => note.trim()).filter(Boolean) }
           : {}),
@@ -417,6 +443,11 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
           caption: shot.caption.trim(),
         })),
       });
+    }),
+  assistant_deliver: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.deliverChecked(caller, input.settled.trim());
     }),
   assistant_add_note: (input) =>
     Effect.gen(function* () {

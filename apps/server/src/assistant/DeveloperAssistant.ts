@@ -27,12 +27,14 @@ import {
   ProjectId,
   ThreadId,
   assistantE2eEnvironment,
+  assistantE2ePendingEngineeringChecks,
   assistantE2eVerdict,
   assistantLinearPlan,
   assistantParallelIssues,
   assistantPicksIssues,
   assistantTaskE2eDepth,
   assistantTaskE2eEnvironment,
+  assistantTaskEngineeringChecksPending,
   assistantTaskHoldsProject,
   assistantTaskThreadId,
   assistantThreadKind,
@@ -200,6 +202,17 @@ const e2eFailureNote = (t: AssistantTask, e2e: AssistantE2eResult) => {
     `E2E test failed ${e2e.environment === "worktree" ? "in the worktree" : "on staging"}. The team is working on it.`,
     failed.length ? failed.join("\n") : e2e.report.slice(0, 500),
   ].join("\n\n");
+};
+/** A run's engineering checks as a numbered list. */
+const numbered = (items: ReadonlyArray<string>) =>
+  items.map((item, index) => `${index + 1}. ${item}`).join("\n");
+/** What the team leader hears when a passed or partial run left engineering checks to settle. */
+const engineeringNotice = (t: AssistantTask, e2e: AssistantE2eResult) => {
+  const inWorktree = e2e.environment === "worktree";
+  const count = e2e.engineeringChecks?.length ?? 0;
+  return `${t.issue.identifier} ${e2e.verdict === "partial" ? "passed its e2e check with checks left for the person" : "passed its e2e check"} ${inWorktree ? "in the worktree" : "on staging"}, and the tester listed ${count === 1 ? "an engineering check" : `${count} engineering checks`} that only an engineer can do. T3 holds the ${inWorktree ? "merge" : "delivery"} until you settle ${count === 1 ? "it" : "them"}:
+${numbered(e2e.engineeringChecks ?? [])}
+Settle each with the code reviewer: send the checks with assistant_message_worker and thread "review" (it can run the app in this worktree), and read its answer with assistant_read_thread (thread "review"). When a check shows a defect, send it to the worker with assistant_message_worker, as after a failed run. Once every check is settled, call assistant_deliver with what was checked and what it showed; T3 then ${inWorktree ? "tells the worker to merge" : "puts the issue in review"}.`;
 };
 /**
  * What the team leader's e2e brief should hold. With criteria recorded T3 hands
@@ -2090,6 +2103,8 @@ export const make = Effect.gen(function* () {
         deployWait: null,
         testNotes,
         error: null,
+        // A run still waiting on its engineering checks tested the old code.
+        ...(assistantE2ePendingEngineeringChecks(recorded.e2e) ? { e2e: null } : {}),
       });
       yield* queueRoleTurn(
         p,
@@ -2230,7 +2245,14 @@ export const make = Effect.gen(function* () {
       // In the worktree the e2e check runs before the merge, on this very commit.
       const worktreeE2e = assistantTaskE2eEnvironment(t) === "worktree";
       const noE2e = assistantTaskE2eDepth(t) === "none";
-      if (worktreeE2e && !noE2e && (!t.e2e || t.e2e.verdict === "failed" || t.e2e.commit !== head))
+      if (
+        worktreeE2e &&
+        !noE2e &&
+        (!t.e2e ||
+          t.e2e.verdict === "failed" ||
+          t.e2e.commit !== head ||
+          assistantE2ePendingEngineeringChecks(t.e2e) > 0)
+      )
         return yield* fail(
           "The e2e check has not passed on this commit. Wait for T3 to tell you it passed before merging.",
         );
@@ -2692,6 +2714,44 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  /**
+   * A passed or partial run in the worktree: the worker merges the commit that
+   * was tested. From the tester's result, or from the team leader settling the
+   * run's engineering checks.
+   */
+  const mergeAfterE2e = Effect.fn("Assistant.mergeAfterE2e")(function* (
+    p: AwaitedProject,
+    t: AssistantTask,
+    e2e: AssistantE2eResult,
+  ) {
+    const passed = yield* saveTask({ ...t, e2e, stage: "implement", error: null, wait: null });
+    yield* queueMessage(
+      p.project_id,
+      t.threadId,
+      `${t.id}:e2e-passed:${newId()}`,
+      `The e2e check ${e2e.verdict === "partial" ? "passed (with checks left for the person)" : "passed"} on commit ${shortSha(e2e.commit ?? "")} in the worktree. Merge the PR into ${p.config.baseBranch} with a merge commit once its required checks pass, then call assistant_report_merged. If anything changes before the merge, push and request review again.`,
+    );
+    return passed;
+  });
+
+  /**
+   * A passed or partial run with engineering checks does not deliver (or, in
+   * the worktree, merge): the issue goes to the team leader, which hears the
+   * checks when the tester's turn ends and settles them before assistant_deliver.
+   */
+  const holdForEngineering = Effect.fn("Assistant.holdForEngineering")(function* (
+    t: AssistantTask,
+    e2e: AssistantE2eResult,
+  ) {
+    const held = yield* saveTask({ ...t, e2e, stage: "lead", error: null, wait: null });
+    const count = e2e.engineeringChecks?.length ?? 0;
+    yield* sessionUpdate(held, `e2e-engineering:${e2e.at}`, {
+      type: "thought",
+      body: `E2E test passed. The team is confirming ${count === 1 ? "1 engineering check" : `${count} engineering checks`} before ${e2e.environment === "worktree" ? "the merge" : "delivery"}.`,
+    });
+    return held;
+  });
+
   const submitE2e = Effect.fn("Assistant.submitE2e")(
     function* (
       caller: ThreadId,
@@ -2699,6 +2759,8 @@ export const make = Effect.gen(function* () {
         readonly verdict?: AssistantE2eResult["verdict"] | undefined;
         readonly report: string;
         readonly humanChecks: ReadonlyArray<string>;
+        /** What only an engineer can check; on a pass they hold the delivery for the team leader. */
+        readonly engineeringChecks?: ReadonlyArray<string> | undefined;
         readonly screenshots: ReadonlyArray<{ readonly path: string; readonly caption: string }>;
         readonly checks?: ReadonlyArray<AssistantE2eCheck> | undefined;
         /** Notes for the person that are not failures. */
@@ -2710,6 +2772,7 @@ export const make = Effect.gen(function* () {
       if (t.stage !== "e2e" || (!inWorktree && !t.deployment))
         return yield* fail("No e2e run is in progress for this issue.");
       const worthALook = input.worthALook ?? [];
+      const engineeringChecks = input.engineeringChecks ?? [];
       if (worthALook.length > 15)
         return yield* fail(
           "List at most 15 items in worthALook; keep the ones the person most needs to see.",
@@ -2775,9 +2838,13 @@ export const make = Effect.gen(function* () {
           return yield* fail(
             `Criterion ${stray.criterion} points at screenshot ${stray.screenshot}, and you attached ${input.screenshots.length}. Number each screenshot by its position in screenshots.`,
           );
-        if (reported.some((check) => check.result === "not-checked") && !input.humanChecks.length)
+        if (
+          reported.some((check) => check.result === "not-checked") &&
+          !input.humanChecks.length &&
+          !engineeringChecks.length
+        )
           return yield* fail(
-            "Each criterion you could not check needs an entry in humanChecks saying what a person should do.",
+            "Each criterion you could not check needs an entry in humanChecks saying what a person should do in the product, or in engineeringChecks when only an engineer can check it.",
           );
         if (smoke)
           checks = criteria.map(
@@ -2792,8 +2859,10 @@ export const make = Effect.gen(function* () {
       if (!checks && !input.verdict)
         return yield* fail("Give a verdict: this issue has no recorded criteria.");
       const verdict = checks ? assistantE2eVerdict(checks) : input.verdict!;
-      if (verdict === "partial" && !input.humanChecks.length)
-        return yield* fail("A partial result lists what a person should check in humanChecks.");
+      if (verdict === "partial" && !input.humanChecks.length && !engineeringChecks.length)
+        return yield* fail(
+          "A partial result lists what a person should check in humanChecks, or what only an engineer can check in engineeringChecks.",
+        );
       // The result covers the commit the reviewer approved; the merge is of it.
       const head = inWorktree ? yield* workerRevision(t) : null;
       if (inWorktree && head !== t.codeReview?.commit)
@@ -2817,6 +2886,7 @@ export const make = Effect.gen(function* () {
         report: input.report,
         ...(checks ? { checks } : {}),
         humanChecks: input.humanChecks,
+        ...(engineeringChecks.length ? { engineeringChecks } : {}),
         ...(worthALook.length ? { worthALook } : {}),
         screenshots,
         at: yield* now,
@@ -2835,20 +2905,8 @@ export const make = Effect.gen(function* () {
           });
           return failed;
         }
-        const passed = yield* saveTask({
-          ...t,
-          e2e,
-          stage: "implement",
-          error: null,
-          wait: null,
-        });
-        yield* queueMessage(
-          p.project_id,
-          t.threadId,
-          `${t.id}:e2e-passed:${newId()}`,
-          `The e2e check ${verdict === "partial" ? "passed (with checks left for the person)" : "passed"} on commit ${shortSha(head!)} in the worktree. Merge the PR into ${p.config.baseBranch} with a merge commit once its required checks pass, then call assistant_report_merged. If anything changes before the merge, push and request review again.`,
-        );
-        return passed;
+        if (assistantE2ePendingEngineeringChecks(e2e)) return yield* holdForEngineering(t, e2e);
+        return yield* mergeAfterE2e(p, t, e2e);
       }
       // The stage leaving e2e is what stops a second run reporting again, so it
       // is saved before the comment: a retry after a failure here posts no
@@ -2875,8 +2933,60 @@ export const make = Effect.gen(function* () {
           ),
         );
       }
+      if (assistantE2ePendingEngineeringChecks(e2e)) return yield* holdForEngineering(updated, e2e);
       // The team is closed when this turn ends, and the loop moves on.
       return yield* finishDelivery(p, updated, e2e);
+    },
+    lock.withPermits(1),
+    Effect.mapError(wrap),
+  );
+
+  /**
+   * The team leader settled the engineering checks of a passed or partial run:
+   * the issue goes on as the run would have taken it without them, delivered
+   * with the stored result on staging, or merged in the worktree. What was
+   * settled goes on the result, and on the Linear card with the tester's report.
+   */
+  const deliverChecked = Effect.fn("Assistant.deliverChecked")(
+    function* (caller: ThreadId, settled: string) {
+      const { p, t } = yield* authorizeLead(caller);
+      if (p.status === "stopped") return yield* fail("The assistant is stopped.");
+      if (!assistantTaskHoldsProject(t.status))
+        return yield* fail("This issue is no longer active.");
+      const e2e = t.e2e;
+      if (!e2e || !assistantE2ePendingEngineeringChecks(e2e))
+        return yield* fail(
+          "No engineering checks are waiting to be settled on this issue. assistant_deliver is only for an e2e run whose tester listed engineeringChecks; T3 moves every other passed run on by itself.",
+        );
+      if (t.stage !== "lead")
+        return yield* fail(
+          `The issue is with the ${ROLE_NAMES[t.stage ?? "implement"]}. Wait for its turn to end before delivering.`,
+        );
+      const text = settled.trim();
+      if (!text)
+        return yield* fail(
+          "Say how each engineering check was settled: what was checked and what it showed.",
+        );
+      if (yield* taskDecisionsPending(t))
+        return yield* fail("Resolve the issue's pending decisions before delivering.");
+      if ((yield* taskBusy(t, caller)) || (yield* taskQueued(t, caller)))
+        return yield* fail("Wait for the issue's threads to finish before delivering.");
+      const record: AssistantE2eResult = { ...e2e, engineeringSettled: text };
+      if (assistantTaskE2eEnvironment(t) === "worktree") {
+        // The merge must be of the commit the run tested.
+        const head = yield* workerRevision(t);
+        if (head !== e2e.commit)
+          return yield* fail(
+            `The worktree moved past the tested commit ${shortSha(e2e.commit ?? "")}. A change needs code review and a new e2e run: send it to the worker with assistant_message_worker.`,
+          );
+        return yield* mergeAfterE2e(p, t, record);
+      }
+      if (!t.deployment)
+        return yield* fail(
+          "Staging is not verified for this issue, so there is nothing to deliver.",
+        );
+      // The team is closed when this turn ends, and the loop moves on.
+      return yield* finishDelivery(p, yield* saveTask({ ...t, e2e: record, error: null }), record);
     },
     lock.withPermits(1),
     Effect.mapError(wrap),
@@ -3272,7 +3382,9 @@ export const make = Effect.gen(function* () {
       t.projectId,
       lead,
       `${t.id}:lead:nudge:${newId()}`,
-      `You ended your turn with the issue still yours and nothing handed on. Take the next step (${t.dispatched ? "take" : "take or decline"} the issue, verify staging, start e2e, or message a thread), ask the person with assistant_ask_decision, or use assistant_wait while staging deploys.`,
+      assistantTaskEngineeringChecksPending(t)
+        ? `You ended your turn with the e2e run's engineering checks unsettled and nothing handed on. Send them to the code reviewer with assistant_message_worker and thread "review", send a defect to the worker, call assistant_deliver once they are settled, or ask the person with assistant_ask_decision.`
+        : `You ended your turn with the issue still yours and nothing handed on. Take the next step (${t.dispatched ? "take" : "take or decline"} the issue, verify staging, start e2e, or message a thread), ask the person with assistant_ask_decision, or use assistant_wait while staging deploys.`,
     );
     yield* changed;
   });
@@ -3335,6 +3447,12 @@ export const make = Effect.gen(function* () {
     if (role === "lead") return t.stage === "lead" ? yield* leadIdle(t) : undefined;
     if (t.stage === role) {
       yield* saveTask({ ...t, stage: "lead" });
+      // The leader asked the reviewer to settle a run's engineering checks.
+      if (role === "review" && assistantE2ePendingEngineeringChecks(t.e2e))
+        return yield* notifyLead(
+          t,
+          `The code reviewer for ${id} ended its turn on the engineering checks. Read its answer with assistant_read_thread (thread "review"), then call assistant_deliver with how each check was settled, send a defect to the worker with assistant_message_worker, or ask the reviewer again.`,
+        );
       return yield* notifyLead(
         t,
         `The ${ROLE_NAMES[role]} for ${id} ended its turn without handing off. Read it with assistant_read_thread (thread "${role}") and decide the next step.`,
@@ -3344,6 +3462,8 @@ export const make = Effect.gen(function* () {
     if (t.status === "blocked")
       return yield* notifyLead(t, `${id} is blocked: ${t.error ?? "see its threads"}`);
     const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
+    if (t.e2e && assistantE2ePendingEngineeringChecks(t.e2e) && role === "e2e")
+      return yield* notifyLead(t, engineeringNotice(t, t.e2e));
     if (t.e2e?.verdict === "failed" && role === "e2e")
       return yield* notifyLead(
         t,
@@ -3796,6 +3916,7 @@ export const make = Effect.gen(function* () {
     verifyStaging,
     startE2e,
     submitE2e,
+    deliverChecked,
     waitForExternal,
     deliver,
     observe,

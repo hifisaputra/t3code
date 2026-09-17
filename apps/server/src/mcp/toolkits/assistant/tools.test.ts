@@ -223,6 +223,7 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
     const reported: Array<unknown> = [];
     const reviewed: Array<unknown> = [];
     const started: Array<unknown> = [];
+    const settled: Array<string> = [];
     const layer = McpServer.toolkit(AssistantToolkit).pipe(
       Layer.provide(AssistantToolkitHandlers),
       Layer.provideMerge(
@@ -251,6 +252,11 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
           submitE2e: (_caller, input) =>
             Effect.sync(() => {
               reported.push(input);
+              return managedTask;
+            }),
+          deliverChecked: (_caller, text) =>
+            Effect.sync(() => {
+              settled.push(text);
               return managedTask;
             }),
           verifyStaging: () =>
@@ -396,6 +402,30 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
           screenshots: [{ path: "/evidence/task/page.png", caption: "The page" }],
         },
       ]);
+      // Engineering checks go through trimmed, and the leader's settlement with them.
+      yield* call({
+        name: "assistant_submit_e2e",
+        arguments: {
+          report: "Passed.",
+          humanChecks: [],
+          engineeringChecks: [" No hydration warning in the dev console. ", " "],
+          screenshots: [],
+          checks: [{ criterion: 1, result: "passed", evidence: "Loaded" }],
+        },
+      });
+      assert.deepEqual(reported.at(-1), {
+        checks: [{ criterion: 1, result: "passed", evidence: "Loaded" }],
+        report: "Passed.",
+        humanChecks: [],
+        engineeringChecks: ["No hydration warning in the dev console."],
+        screenshots: [],
+      });
+      const delivered = yield* call({
+        name: "assistant_deliver",
+        arguments: { settled: " The reviewer saw a clean console. " },
+      });
+      assert.isFalse(delivered.isError);
+      assert.deepEqual(settled, ["The reviewer saw a clean console."]);
       const bad = yield* call({
         name: "assistant_submit_e2e",
         arguments: {

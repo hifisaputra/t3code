@@ -315,8 +315,16 @@ describe("e2e depth", () => {
 
 describe("project notes", () => {
   const notes = [
-    { text: "Staging has no Search Console data; use local project 9585662." },
-    { text: "The admin account on staging is admin@example.test." },
+    {
+      text: "Staging has no Search Console data; use local project 9585662.",
+      role: "e2e" as const,
+      issueIdentifier: "APP-1",
+    },
+    {
+      text: "The admin account on staging is admin@example.test.",
+      role: "person" as const,
+      issueIdentifier: null,
+    },
   ];
   const prompts = {
     lead: leadInstructions(config, task, notes),
@@ -325,10 +333,16 @@ describe("project notes", () => {
     e2e: e2eInstructions(config, task, "/evidence/task", "Open the report.", notes),
   };
 
+  it("tells the tester there is no screenshot limit", () => {
+    expect(prompts.e2e).toContain(
+      "There is no limit on screenshots; attach every one that proves a check or shows something in the report.",
+    );
+  });
+
   it("lists the open notes after the project instructions in every role's first message", () => {
     for (const [role, prompt] of Object.entries(prompts)) {
       const section = prompt.indexOf(
-        "Known about this project (from earlier teams):\n- Staging has no Search Console data; use local project 9585662.\n- The admin account on staging is admin@example.test.",
+        "Known about this project:\n- Staging has no Search Console data; use local project 9585662. (APP-1, tester)\n- The admin account on staging is admin@example.test. (added by the person)",
       );
       expect(section, role).toBeGreaterThan(prompt.indexOf("Project instructions:"));
       expect(section, role).toBeGreaterThan(prompt.indexOf(`${role.toUpperCase()} SECTION`));
@@ -357,5 +371,54 @@ describe("project notes", () => {
     ]) {
       expect(prompt).not.toContain("Known about this project");
     }
+  });
+});
+
+describe("checks for the person", () => {
+  const criteriaTask: AssistantTask = { ...task, criteria: ["The report downloads"] };
+  const worktreeTask: AssistantTask = { ...criteriaTask, e2eEnvironment: "worktree" };
+
+  it("writes humanChecks for someone who uses the product, in both modes", () => {
+    for (const t of [criteriaTask, worktreeTask, task]) {
+      const tester = e2eInstructions(config, t, "/evidence/task", "Open the report.");
+      expect(tester).toContain(
+        "humanChecks are read by someone who uses the product: a product manager on staging or production, with a browser and a normal login, and no terminal, database, local development server or admin console. Keep each check to about 5 steps.",
+      );
+      expect(tester).toContain(
+        "is not a humanCheck: add a project note about the gap with assistant_add_note and name the setup in the report",
+      );
+      expect(tester).toContain("- engineeringChecks: what only an engineer can check");
+    }
+    expect(e2eInstructions(config, criteriaTask, "/evidence/task", "Open the report.")).toContain(
+      "Each criterion you mark not-checked needs an entry in humanChecks or engineeringChecks.",
+    );
+  });
+
+  it("says what engineering checks hold, in each mode", () => {
+    expect(e2eInstructions(config, criteriaTask, "/evidence/task", "Brief")).toContain(
+      "On passed or partial they hold the delivery while the team leader settles them",
+    );
+    expect(e2eInstructions(config, worktreeTask, "/evidence/task", "Brief")).toContain(
+      "On passed or partial they hold the merge while the team leader settles them",
+    );
+  });
+
+  it("has the reviewer run the app for a UI change and answer engineering checks without a review", () => {
+    const reviewer = reviewerInstructions(config, criteriaTask);
+    expect(reviewer).toContain(
+      "When the diff changes UI code, run the app from this worktree the way the project instructions describe for your team's slot and confirm the changed pages load without console errors or warnings",
+    );
+    expect(reviewer).toContain("do not call assistant_submit_review for it");
+  });
+
+  it("tells the team leader to settle engineering checks and call assistant_deliver", () => {
+    expect(leadInstructions(config, criteriaTask)).toContain(
+      'T3 holds the delivery and messages you the list instead. Settle each with the code reviewer: send the checks with assistant_message_worker and thread "review"',
+    );
+    const worktree = leadInstructions(config, worktreeTask);
+    expect(worktree).toContain("T3 holds the merge and messages you the list instead.");
+    expect(worktree).toContain(
+      "call assistant_deliver with how each was settled; T3 then tells the worker to merge.",
+    );
   });
 });

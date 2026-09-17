@@ -4970,7 +4970,7 @@ it.effect(
       yield* service.deliver();
       assert.include(
         turnsOf(h, leadOf(team))[0],
-        "Known about this project (from earlier teams):\n- Staging has no Search Console data; use local project 9585662.",
+        "Known about this project:\n- Staging has no Search Console data; use local project 9585662. (added by the person)",
       );
       // A note the leader writes reaches the threads started after it.
       const added = yield* service.addProjectNoteFromThread(
@@ -4983,8 +4983,7 @@ it.effect(
         taskId: team.id,
         issueIdentifier: team.issue.identifier,
       });
-      const both =
-        "- Staging has no Search Console data; use local project 9585662.\n- Sign in on staging as qa@example.test.";
+      const both = `- Staging has no Search Console data; use local project 9585662. (added by the person)\n- Sign in on staging as qa@example.test. (${team.issue.identifier}, leader)`;
       const taken = yield* takeTask(h, service, team);
       yield* service.deliver();
       assert.include(turnsOf(h, taken.threadId)[0], both);
@@ -5029,7 +5028,7 @@ it.effect(
       const lead = turnsOf(h, leadOf(next))[0];
       assert.include(
         lead,
-        "Known about this project (from earlier teams):\n- The nightly import runs at 02:00 UTC.",
+        "Known about this project:\n- The nightly import runs at 02:00 UTC. (added by the person)",
       );
       assert.notInclude(lead, "Search Console");
     }).pipe(Effect.provide(database()), Effect.scoped),
@@ -5094,4 +5093,129 @@ it.effect(
       assert.isTrue(added.added);
       assert.equal(noteTexts(yield* service.board(null)).at(-1), "One fact too many.");
     }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("engineering checks hold a staging delivery until the leader settles them", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+    const tester = assistantTaskThreadId(first, "e2e");
+    const reviewer = assistantTaskThreadId(first, "review");
+    yield* reachMerge(h, service, first);
+    yield* service.scan();
+    yield* service.deliver();
+    // Nothing waits to be settled yet, and only the leader may settle it.
+    const early = yield* service.deliverChecked(lead, "Checked.").pipe(Effect.flip);
+    assert.include(early.detail, "No engineering checks are waiting");
+    const notLead = yield* service.deliverChecked(first.threadId, "Checked.").pipe(Effect.flip);
+    assert.include(notLead.detail, "Only the issue's team leader");
+    const cards = h.comments.length;
+
+    // A criterion only an engineer can check is covered by an engineering check.
+    const held = yield* service.submitE2e(tester, {
+      checks: oneCheck("not-checked", "The warning shows only in a development build."),
+      report: "- The page loads: not checked",
+      humanChecks: [],
+      engineeringChecks: ["No hydration warning in the dev console on /report."],
+      screenshots: [],
+    });
+    assert.equal(held.e2e?.verdict, "partial");
+    assert.equal(held.stage, "lead");
+    assert.equal(held.status, "working");
+    assert.lengthOf(h.comments, cards);
+    assert.notInclude(h.transitions, "review");
+    yield* endTurn(h, service, tester);
+    yield* service.deliver();
+    const notice = turnsOf(h, lead).at(-1)!;
+    assert.include(notice, "T3 holds the delivery until you settle it:");
+    assert.include(notice, "1. No hydration warning in the dev console on /report.");
+    assert.include(notice, "call assistant_deliver");
+
+    // A leader that ends its turn without a step is nudged toward settling them.
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    assert.include(turnsOf(h, lead).at(-1), "engineering checks unsettled");
+
+    // The leader asks the reviewer, and hears when its answer is in.
+    yield* service.messageWorker(
+      lead,
+      "Run the dev build and read the console on /report.",
+      "review",
+    );
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    assert.include(turnsOf(h, reviewer).at(-1), "read the console on /report");
+    const reviewing = yield* service.deliverChecked(lead, "Checked.").pipe(Effect.flip);
+    assert.include(reviewing.detail, "Wait for its turn to end");
+    yield* endTurn(h, service, reviewer);
+    yield* service.deliver();
+    assert.include(turnsOf(h, lead).at(-1), "ended its turn on the engineering checks");
+
+    const delivered = yield* service.deliverChecked(
+      lead,
+      "The reviewer ran the dev build; the console on /report is clean.",
+    );
+    assert.equal(delivered.status, "review");
+    assert.equal(
+      delivered.e2e?.engineeringSettled,
+      "The reviewer ran the dev build; the console on /report is clean.",
+    );
+    assert.deepEqual(h.transitions, ["review"]);
+    const card = h.comments.at(-1)!.body;
+    assert.include(
+      card,
+      "**Engineering checks**\n\n1. No hydration warning in the dev console on /report.\n\n**Settled by the team**\n\nThe reviewer ran the dev build; the console on /report is clean.",
+    );
+    assert.isBelow(
+      card.indexOf("+++ Tester's full report"),
+      card.indexOf("**Engineering checks**"),
+    );
+    const again = yield* service.deliverChecked(lead, "Checked.").pipe(Effect.flip);
+    assert.include(again.detail, "no longer active");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("engineering checks hold the worktree merge until the leader settles them", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setupWith({ e2eEnvironment: "worktree" });
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+    const tester = assistantTaskThreadId(first, "e2e");
+    yield* approveReview(h, service, first);
+    const held = yield* service.submitE2e(tester, {
+      checks: oneCheck("passed"),
+      report: "- The page loads: passed",
+      humanChecks: [],
+      engineeringChecks: ["The export job logs no error."],
+      screenshots: [],
+    });
+    assert.equal(held.stage, "lead");
+    const early = yield* service.reportMerged(first.threadId, "Merged").pipe(Effect.flip);
+    assert.include(early.detail, "e2e check has not passed");
+    yield* endTurn(h, service, tester);
+    yield* service.deliver();
+    assert.include(turnsOf(h, lead).at(-1), "T3 holds the merge until you settle it:");
+    assert.isFalse(turnsOf(h, first.threadId).some((text) => text.includes("Merge the PR")));
+
+    const merging = yield* service.deliverChecked(lead, "The reviewer read the job log: no error.");
+    assert.equal(merging.stage, "implement");
+    assert.equal(merging.e2e?.engineeringSettled, "The reviewer read the job log: no error.");
+    const again = yield* service.deliverChecked(lead, "Checked.").pipe(Effect.flip);
+    assert.include(again.detail, "No engineering checks are waiting");
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    assert.include(turnsOf(h, first.threadId).at(-1), "Merge the PR into develop");
+
+    yield* service.reportMerged(first.threadId, "The page loads again.");
+    yield* endTurn(h, service, first.threadId);
+    yield* service.scan();
+    const delivered = yield* taskById(service, first.id);
+    assert.equal(delivered.status, "review");
+    assert.include(h.comments.at(-1)!.body, "The reviewer read the job log: no error.");
+  }).pipe(Effect.provide(database()), Effect.scoped),
 );
