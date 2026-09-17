@@ -162,7 +162,19 @@ function harness(twoRepos = false, allowedTeamKeys: string[] = []) {
   const send = (sessionId: string) => Effect.suspend(() => outbox!.send(sessionId));
   const setTeamPrompt = (handler: Outbox.TeamPromptHandler) =>
     Effect.suspend(() => outbox!.setTeamPrompt(handler));
-  return { make, send, createSession, setTeamPrompt, commands, prepared, outgoing, projects };
+  const setTeamDispatch = (handler: Outbox.TeamDispatchHandler) =>
+    Effect.suspend(() => outbox!.setTeamDispatch(handler));
+  return {
+    make,
+    send,
+    createSession,
+    setTeamPrompt,
+    setTeamDispatch,
+    commands,
+    prepared,
+    outgoing,
+    projects,
+  };
 }
 it.effect(
   "rejects bad signatures, stale timestamps, and the wrong workspace before admission",
@@ -520,5 +532,160 @@ it.effect("keeps a team reply pending until the assistant handled it", () => {
     assert.equal(yield* processedOf("d1"), 1);
     assert.deepEqual(handled, ["Blue, please"]);
     assert.deepEqual(h.outgoing, []);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});
+
+it("keeps what the person wrote when delegating, without the app's mention", () => {
+  assert.equal(
+    Delegation.delegationNote("  @t3code please keep the old URL "),
+    "please keep the old URL",
+  );
+  assert.equal(
+    Delegation.delegationNote(
+      "[@T3 Code](https://linear.app/org/profiles/t3code), start with the footer",
+    ),
+    "start with the footer",
+  );
+  assert.equal(Delegation.delegationNote("No mention here"), "No mention here");
+  assert.equal(Delegation.delegationNote("@t3code"), "");
+});
+
+it.effect("a delegated issue an assistant takes goes to its team, not a thread", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const service = yield* h.make;
+    const dispatched: Outbox.TeamDispatchInput[] = [];
+    yield* h.setTeamDispatch((input) =>
+      Effect.sync(() => {
+        dispatched.push(input);
+        return { taskId: "task-1", queuedBehind: 0, attached: true };
+      }),
+    );
+    const created = signed({
+      ...original,
+      agentSession: {
+        ...original.agentSession,
+        comment: { body: "@t3code Start with the footer" },
+      },
+    });
+    yield* service.receive(created.body, created.signature, "d1");
+    yield* service.acknowledge("d1");
+    yield* service.process("d1");
+    assert.deepEqual(dispatched, [
+      {
+        deliveryId: "d1",
+        sessionId: "session-1",
+        issueId: "issue-1",
+        note: "Start with the footer",
+      },
+    ]);
+    // The acknowledgement still went out first.
+    assert.deepEqual(h.outgoing, ["Picking this up on the T3 Code environment."]);
+    assert.lengthOf(h.commands, 0);
+    assert.lengthOf(h.prepared, 0);
+    assert.equal(yield* processedOf("d1"), 1);
+    const sql = yield* SqlClient.SqlClient;
+    assert.deepEqual(yield* sql`SELECT id, thread_id, task_id FROM linear_agent_sessions`, [
+      { id: "session-1", thread_id: null, task_id: "task-1" },
+    ]);
+    // A later reply is the team's.
+    const handled: string[] = [];
+    yield* h.setTeamPrompt((input) => Effect.sync(() => handled.push(input.body)));
+    const reply = signed({
+      ...original,
+      action: "prompted",
+      agentActivity: { id: "r1", content: { body: "Also the header" } },
+    });
+    yield* service.receive(reply.body, reply.signature, "d2");
+    yield* service.acknowledge("d2");
+    assert.deepEqual(handled, ["Also the header"]);
+    assert.lengthOf(dispatched, 1);
+    assert.lengthOf(h.commands, 0);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});
+
+it.effect("a delegated issue no assistant takes starts today's thread", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const service = yield* h.make;
+    let asked = 0;
+    yield* h.setTeamDispatch(() =>
+      Effect.sync(() => {
+        asked += 1;
+        return null;
+      }),
+    );
+    const created = signed(original);
+    yield* service.receive(created.body, created.signature, "d1");
+    yield* service.process("d1");
+    assert.equal(asked, 1);
+    assert.deepEqual(
+      h.commands.map((c) => c.type),
+      ["thread.create", "thread.turn.start"],
+    );
+    // A session with its thread is not offered to the assistant again.
+    const reply = signed({
+      ...original,
+      action: "prompted",
+      agentActivity: { id: "r1", content: { body: "More" } },
+    });
+    yield* service.receive(reply.body, reply.signature, "d2");
+    yield* service.process("d2");
+    assert.equal(asked, 1);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});
+
+it.effect("an assistant refusing a delegated issue fails it with the reason and no thread", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const service = yield* h.make;
+    yield* h.setTeamDispatch(() =>
+      Effect.fail(
+        new LinearOperationError({
+          operation: "delegation",
+          detail: "This issue is waiting for the person's review.",
+        }),
+      ),
+    );
+    const created = signed(original);
+    yield* service.receive(created.body, created.signature, "d1");
+    const error = yield* service.process("d1").pipe(Effect.flip);
+    assert.equal(
+      Schema.is(LinearOperationError)(error) ? error.detail : "",
+      "This issue is waiting for the person's review.",
+    );
+    assert.lengthOf(h.commands, 0);
+    const sql = yield* SqlClient.SqlClient;
+    assert.lengthOf(yield* sql`SELECT * FROM linear_agent_sessions`, 0);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});
+
+it.effect("a delegated session that only points at another team's session is not a team's", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const service = yield* h.make;
+    yield* h.setTeamDispatch(() =>
+      Effect.succeed({ taskId: "task-1", queuedBehind: 0, attached: false }),
+    );
+    const created = signed(original);
+    yield* service.receive(created.body, created.signature, "d1");
+    yield* service.process("d1");
+    assert.equal(yield* processedOf("d1"), 1);
+    assert.lengthOf(h.commands, 0);
+    const sql = yield* SqlClient.SqlClient;
+    assert.lengthOf(yield* sql`SELECT * FROM linear_agent_sessions WHERE task_id IS NOT NULL`, 0);
+    // A reply is not handed to the team that does not own the session.
+    let prompted = 0;
+    yield* h.setTeamPrompt(() => Effect.sync(() => (prompted += 1)));
+    const reply = signed({
+      ...original,
+      action: "prompted",
+      agentActivity: { id: "r1", content: { body: "Hello?" } },
+    });
+    yield* service.receive(reply.body, reply.signature, "d2");
+    yield* service.acknowledge("d2");
+    yield* service.process("d2");
+    assert.equal(prompted, 0);
+    assert.lengthOf(h.commands, 0);
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
 });

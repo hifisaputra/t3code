@@ -104,6 +104,17 @@ export function validLinearSignature(body: Uint8Array, signature: string, secret
   );
 }
 
+/**
+ * What the person wrote when delegating, for the team leader. A comment that
+ * delegates starts with the app's mention, as plain `@handle` or a mention link.
+ */
+export function delegationNote(body: string): string {
+  return body
+    .trim()
+    .replace(/^(?:\[@[^\]]*\]\([^)]*\)|@[\w.-]+)[\s,:]*/, "")
+    .trim();
+}
+
 function isRelevantEvent(event: OrchestrationEvent): boolean {
   return (
     event.type === "thread.session-set" ||
@@ -209,6 +220,31 @@ export const make = Effect.gen(function* () {
         issue.state.type === "triage"
       )
         return yield* fail("A person must delegate this triage issue before T3 starts work.");
+      // An issue of a Linear project with a developer assistant goes to its loop, with
+      // this session as the team's; a reply on a session that has no thread yet
+      // (say after the assistant refused the issue) is offered to it again.
+      const said =
+        event.action === "created"
+          ? (event.agentSession.comment?.body ?? "")
+          : (event.agentActivity?.content?.body ?? event.agentActivity?.body ?? "");
+      if (
+        !session?.thread_id &&
+        event.agentActivity?.signal !== "stop" &&
+        said.trim().toLowerCase() !== "stop delegation"
+      ) {
+        const dispatched = yield* outbox.teamDispatch({
+          deliveryId,
+          sessionId,
+          issueId: issue.id,
+          note: delegationNote(said),
+        });
+        if (dispatched) {
+          if (dispatched.attached)
+            yield* outbox.adoptSession(sessionId, issue.id, dispatched.taskId);
+          yield* sql`UPDATE linear_agent_deliveries SET processed = 1 WHERE id = ${deliveryId}`;
+          return;
+        }
+      }
       if (!session) {
         const previous =
           yield* sql<Session>`SELECT * FROM linear_agent_sessions WHERE issue_id = ${issueId} AND thread_id IS NOT NULL AND status != 'stopped' ORDER BY updated_at DESC LIMIT 1`;

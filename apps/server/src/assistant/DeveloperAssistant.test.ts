@@ -34,6 +34,7 @@ import {
   LinearAgentOutbox,
   type OutboxContent,
   type TaskSyncResolver,
+  type TeamDispatchHandler,
   type TeamPromptHandler,
 } from "../linear/LinearAgentOutbox.ts";
 import { LinearApi, LinearAppCredential } from "../linear/LinearApi.ts";
@@ -162,6 +163,9 @@ function harness() {
     queued: [] as Array<{ id: string; sessionId: string; content: OutboxContent }>,
     resolver: undefined as TaskSyncResolver | undefined,
     teamPrompt: undefined as TeamPromptHandler | undefined,
+    teamDispatch: undefined as TeamDispatchHandler | undefined,
+    // Delegated sessions recorded as a team's: session id to task id.
+    adopted: [] as Array<{ sessionId: string; taskId: string }>,
     writes: [] as string[],
   };
   const asApp = (operation: string) =>
@@ -197,6 +201,14 @@ function harness() {
       setTeamPrompt: (handler) =>
         Effect.sync(() => {
           app.teamPrompt = handler;
+        }),
+      setTeamDispatch: (handler) =>
+        Effect.sync(() => {
+          app.teamDispatch = handler;
+        }),
+      adoptSession: (sessionId, _issueId, taskId) =>
+        Effect.sync(() => {
+          app.adopted.push({ sessionId, taskId });
         }),
       threadLink: (threadId, label = "T3 Code thread") =>
         Effect.succeed({ label, url: `https://t3.example.com/env/${threadId}` }),
@@ -3802,5 +3814,184 @@ it.effect("without a Linear session questions and answers stay in T3", () =>
     );
     yield* service.answer({ decisionId: decision.id, answer: "Keep it." });
     assert.lengthOf(h.app.queued, 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+/** A person delegates an issue to the T3 Code app in Linear, as delegation hands it on. */
+const delegate = (h: Harness, issueId: string, sessionId: string, note = "") =>
+  h.app.teamDispatch!({ deliveryId: `delivery-${sessionId}`, sessionId, issueId, note });
+const updatesOn = (h: Harness, sessionId: string) =>
+  h.app.queued.filter((item) => item.sessionId === sessionId);
+
+it.effect("a delegated issue goes to a team that speaks in the delegated session", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const service = yield* h.initialize;
+    yield* service.configure(config);
+    // Paused: the loop picks nothing itself, while dispatched issues still run.
+    yield* service.control({ projectId: config.projectId, action: "pause" });
+    const result = yield* delegate(h, "issue-2", "delegated", "Start with the footer");
+    const team = yield* taskById(service, result!.taskId);
+    assert.deepEqual(result, { taskId: team.id, queuedBehind: 0, attached: true });
+    assert.equal(team.issue.identifier, "APP-2");
+    assert.equal(team.status, "working");
+    assert.isTrue(team.dispatched);
+    assert.equal(team.brief, "Start with the footer");
+    assert.deepEqual(team.linearSession, { id: "delegated", origin: "delegated" });
+    // No second session: the team adopted the delegated one.
+    assert.lengthOf(h.app.sessions, 0);
+    assert.deepEqual(h.app.adopted, [{ sessionId: "delegated", taskId: team.id }]);
+    assert.deepEqual(sessionLog(h), ["thought:Picked up by a team in T3 Code."]);
+    assert.isTrue(h.app.queued.every((item) => item.sessionId === "delegated"));
+    assert.isTrue(h.app.queued.some((item) => item.content.type === "syncTask"));
+    yield* service.deliver();
+    assert.include(
+      turnsOf(h, leadOf(team))[0],
+      "The person's note on this issue:\nStart with the footer",
+    );
+    // A retried delivery finds the same team and says nothing twice.
+    const queued = sessionLog(h).length;
+    assert.deepEqual(yield* delegate(h, "issue-2", "delegated", "Start with the footer"), result);
+    assert.lengthOf(sessionLog(h), queued);
+    assert.lengthOf((yield* service.board(null)).tasks, 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a delegated issue outside every assistant's Linear project is left to a thread", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    h.issues[1] = { ...h.issues[1]!, project: { id: "other", name: "Other", url: "https://l/p" } };
+    assert.isNull(yield* delegate(h, "issue-2", "delegated"));
+    h.issues[2] = { ...h.issues[2]!, project: null };
+    assert.isNull(yield* delegate(h, "issue-3", "delegated-3"));
+    assert.lengthOf((yield* service.board(null)).tasks, 1);
+    assert.lengthOf(updatesOn(h, "delegated"), 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a delegated issue waiting for a free team says how many are ahead of it", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const first = yield* delegate(h, "issue-2", "second");
+    assert.equal(first?.queuedBehind, 1);
+    assert.equal((yield* taskById(service, first!.taskId)).status, "queued");
+    assert.deepEqual(
+      updatesOn(h, "second").map((item) => item.content),
+      [
+        {
+          type: "thought",
+          body: "Queued behind 1 issue in T3 Code. A team starts it as soon as one is free.",
+        },
+      ],
+    );
+    const next = yield* delegate(h, "issue-3", "third");
+    assert.equal(next?.queuedBehind, 2);
+    const later = updatesOn(h, "third")[0]?.content;
+    assert.equal(
+      later?.type === "thought" ? later.body : "",
+      "Queued behind 2 issues in T3 Code. A team starts it as soon as one is free.",
+    );
+    // No session is opened or picked up while it waits.
+    assert.lengthOf(h.app.sessions, 1);
+    assert.lengthOf(updatesOn(h, "second"), 1);
+
+    // A reply while queued joins the note the team leader starts with.
+    const queued = yield* taskById(service, first!.taskId);
+    yield* linearReply(h, queued, "r1", "Mind the footer.");
+    assert.equal((yield* taskById(service, queued.id)).brief, "Mind the footer.");
+    assert.equal(
+      queuedBody(h, `${queued.id}:linear-reply:r1`),
+      "Queued. The team leader gets this note when the team starts.",
+    );
+    // Stop takes it out of the queue.
+    const third = yield* taskById(service, next!.taskId);
+    yield* linearReply(h, third, "r2", "", "stop");
+    assert.equal((yield* taskById(service, third.id)).status, "skipped");
+    const removed = h.app.queued.find((item) => item.id === `${third.id}:linear-reply:r2`);
+    assert.deepEqual(removed?.content, { type: "response", body: "Removed from the queue." });
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a delegated issue for a stopped assistant says it waits for the assistant", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const service = yield* h.initialize;
+    yield* service.configure(config);
+    const result = yield* delegate(h, "issue-2", "delegated");
+    assert.equal((yield* taskById(service, result!.taskId)).status, "queued");
+    assert.deepEqual(sessionLog(h), [
+      "thought:Queued in T3 Code. The developer assistant is stopped, so a team starts it once the assistant is started again.",
+    ]);
+    // Starting it gives the issue a team in the same session.
+    yield* service.control({ projectId: config.projectId, action: "pause" });
+    const team = yield* taskById(service, result!.taskId);
+    assert.equal(team.status, "working");
+    assert.lengthOf(h.app.sessions, 0);
+    assert.equal(sessionLog(h).at(-1), "thought:Picked up by a team in T3 Code.");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("delegating an issue a team already works in its own session only points there", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    assert.equal(team.linearSession?.id, "session-1");
+    const result = yield* delegate(h, team.issue.id, "delegated");
+    assert.deepEqual(result, { taskId: team.id, queuedBehind: 0, attached: false });
+    assert.deepEqual(
+      updatesOn(h, "delegated").map((item) => item.content),
+      [
+        {
+          type: "response",
+          body: "A team is already working on this issue in T3 Code. Follow its session on this issue.",
+        },
+      ],
+    );
+    assert.equal((yield* taskById(service, team.id)).linearSession?.id, "session-1");
+    assert.lengthOf(h.app.adopted, 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("delegating an issue a team works without a session gives the team that session", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    assert.isUndefined(team.linearSession);
+    h.app.connected = true;
+    const result = yield* delegate(h, team.issue.id, "delegated");
+    assert.deepEqual(result, { taskId: team.id, queuedBehind: 0, attached: true });
+    assert.deepEqual((yield* taskById(service, team.id)).linearSession, {
+      id: "delegated",
+      origin: "delegated",
+    });
+    assert.deepEqual(h.app.adopted, [{ sessionId: "delegated", taskId: team.id }]);
+    assert.deepEqual(sessionLog(h), ["thought:Picked up by a team in T3 Code."]);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("delegating an issue waiting for the person's review fails with the reason", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const delivered = yield* deliverIssue(h, service, first);
+    assert.equal(delivered.status, "review");
+    const error = yield* delegate(h, first.issue.id, "delegated").pipe(Effect.flip);
+    assert.instanceOf(error, LinearOperationError);
+    assert.equal(
+      Schema.is(LinearOperationError)(error) ? error.detail : "",
+      "This issue is waiting for the person's review. Moving it back in Linear gives it to a new team with their feedback.",
+    );
+    assert.lengthOf(updatesOn(h, "delegated"), 0);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );

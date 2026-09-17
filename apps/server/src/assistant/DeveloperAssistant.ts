@@ -58,6 +58,7 @@ import { isStaleRequestFailureDetail } from "../orchestration/decider.ts";
 import {
   LinearAgentOutbox,
   type OutboxContent,
+  type TeamDispatchInput,
   type TeamPromptInput,
 } from "../linear/LinearAgentOutbox.ts";
 import { LinearApi, LinearAppCredential } from "../linear/LinearApi.ts";
@@ -985,7 +986,9 @@ export const make = Effect.gen(function* () {
   const newTask = Effect.fn("Assistant.newTask")(function* (
     p: AwaitedProject,
     issue: LinearIssueSummary,
-    fields: Partial<Pick<AssistantTask, "status" | "brief" | "feedback" | "dispatched">>,
+    fields: Partial<
+      Pick<AssistantTask, "status" | "brief" | "feedback" | "dispatched" | "linearSession">
+    >,
   ) {
     const timestamp = yield* now;
     const id = newId();
@@ -1081,6 +1084,24 @@ export const make = Effect.gen(function* () {
    * The team runs without one when Linear cannot open it.
    */
   const openSession = Effect.fn("Assistant.openSession")(function* (t: AssistantTask) {
+    // A person delegated the issue in Linear: the team speaks in that session.
+    if (t.linearSession?.origin === "delegated") {
+      // Delegation records it too, so a failure here only waits for that.
+      yield* outbox.adoptSession(t.linearSession.id, t.issue.id, t.id).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("Developer assistant could not record its delegated session", {
+            task: t.id,
+            error,
+          }),
+        ),
+      );
+      yield* sessionUpdate(t, "picked-up", {
+        type: "thought",
+        body: "Picked up by a team in T3 Code.",
+      });
+      yield* sessionUpdate(t, "sync", { type: "syncTask", taskId: t.id });
+      return { task: t, error: null };
+    }
     if (t.linearSession || !(yield* outbox.connected)) return { task: t, error: null };
     const created = yield* outbox.createSession(t.issue.id, t.id).pipe(
       Effect.map((id) => ({ id, error: null })),
@@ -1263,6 +1284,7 @@ export const make = Effect.gen(function* () {
     p: AwaitedProject,
     reference: string,
     note: string,
+    linearSession?: AssistantTask["linearSession"],
   ) {
     const issue = yield* linear.getIssue({ reference });
     if (issue.project?.id !== p.config.linearProjectId)
@@ -1285,6 +1307,8 @@ export const make = Effect.gen(function* () {
       dispatched: true,
       brief: note,
       feedback: previous?.status === "changes-requested" ? previous.feedback : "",
+      // Carried from the start, so a team started below speaks in it and opens none.
+      ...(linearSession ? { linearSession } : {}),
     });
     yield* sql`INSERT INTO assistant_tasks (id, project_id, issue_id, thread_id, status, data) VALUES (${value.id}, ${p.project_id}, ${issue.id}, ${value.threadId}, ${value.status}, ${encodeTask(value)})`;
     yield* changed;
@@ -1298,6 +1322,74 @@ export const make = Effect.gen(function* () {
     );
     return yield* task(value.id);
   });
+  /**
+   * A person delegated an issue to the T3 Code app in Linear. The assistant whose
+   * Linear project holds it dispatches it, as from the board, with the delegated
+   * session as its team's; null leaves it to a plain delegated thread. A retried
+   * delivery finds the task it already made, so it dispatches once.
+   */
+  const delegated = Effect.fn("Assistant.delegated")(
+    function* (input: TeamDispatchInput) {
+      const issue = yield* linear.getIssue({ reference: input.issueId });
+      if (!issue.project) return null;
+      const rows = yield* sql<ProjectRow>`SELECT * FROM assistant_projects ORDER BY rowid`;
+      const matches: AwaitedProject[] = [];
+      for (const row of rows) {
+        const config = yield* decodeConfig(row.config);
+        if (config.linearProjectId === issue.project.id) matches.push({ ...row, config });
+      }
+      // Two T3 projects on one Linear project: the one that is not stopped takes it.
+      const p = matches.find((match) => match.status !== "stopped") ?? matches[0];
+      if (!p) return null;
+      const session = { id: input.sessionId, origin: "delegated" as const };
+      let t = yield* dispatchIssue(p, issue.id, input.note, session);
+      const say = (key: string, content: OutboxContent) =>
+        outbox.enqueue(`${t.id}:${key}:${input.deliveryId}`, input.sessionId, content);
+      if (t.linearSession && t.linearSession.id !== input.sessionId) {
+        // The team speaks in its own session; this one only points there.
+        yield* say("elsewhere", {
+          type: "response",
+          body:
+            t.status === "queued"
+              ? "This issue is already queued in T3 Code. Follow its session on this issue."
+              : "A team is already working on this issue in T3 Code. Follow its session on this issue.",
+        });
+        return { taskId: t.id, queuedBehind: 0, attached: false };
+      }
+      if (!t.linearSession) {
+        // Queued or held before the delegation, without a session of its own.
+        t = yield* saveTask({ ...t, linearSession: session });
+        if (assistantTaskHoldsProject(t.status)) yield* openSession(t);
+      }
+      if (t.status !== "queued") return { taskId: t.id, queuedBehind: 0, attached: true };
+      // What starts before it, the way advance picks: earlier dispatched issues
+      // first, and every team when the project is at its limit.
+      const current = yield* project(p.project_id);
+      const held = (yield* heldTasks(p.project_id)).length;
+      const earlier = yield* sql<{
+        n: number;
+      }>`SELECT COUNT(*) AS n FROM assistant_tasks WHERE project_id = ${p.project_id} AND status = 'queued' AND rowid < (SELECT rowid FROM assistant_tasks WHERE id = ${t.id})`;
+      const queuedBehind =
+        (held >= assistantParallelIssues(current.config) ? held : 0) + (earlier[0]?.n ?? 0);
+      yield* say("queued", {
+        type: "thought",
+        body:
+          current.status === "stopped"
+            ? "Queued in T3 Code. The developer assistant is stopped, so a team starts it once the assistant is started again."
+            : (yield* limited(current))
+              ? `Queued in T3 Code. The project waits for a usage limit to reset (${current.limited_until}); a team starts it after that.`
+              : queuedBehind > 0
+                ? `Queued behind ${queuedBehind} ${queuedBehind === 1 ? "issue" : "issues"} in T3 Code. A team starts it as soon as one is free.`
+                : "Queued in T3 Code. A team starts it as soon as one is free.",
+      });
+      return { taskId: t.id, queuedBehind, attached: true };
+    },
+    lock.withPermits(1),
+    // Its detail is what the person reads in the session.
+    Effect.mapError(
+      (error) => new LinearOperationError({ operation: "delegation", detail: wrap(error).detail }),
+    ),
+  );
   const dispatch = Effect.fn("Assistant.dispatch")(
     function* (input: typeof AssistantDispatchInput.Type) {
       yield* dispatchIssue(yield* project(input.projectId), input.reference, input.note.trim());
@@ -1709,6 +1801,20 @@ export const make = Effect.gen(function* () {
             );
             yield* changed;
             return yield* reply("Passed to the team leader.");
+          }
+          if (t.status === "queued") {
+            if (stop) {
+              // Like the board's skip; no thread exists yet to interrupt.
+              yield* saveTask({ ...t, status: "skipped" });
+              return yield* outbox.enqueue(
+                `${t.id}:linear-reply:${input.deliveryId}`,
+                input.sessionId,
+                { type: "response", body: "Removed from the queue." },
+              );
+            }
+            // The brief is the dispatch note the team leader starts with.
+            yield* saveTask({ ...t, brief: [t.brief.trim(), body].filter(Boolean).join("\n\n") });
+            return yield* reply("Queued. The team leader gets this note when the team starts.");
           }
           if (!stop && t.status === "review") {
             const p = yield* project(t.projectId);
@@ -3001,6 +3107,7 @@ export const make = Effect.gen(function* () {
   );
   // Not under the outbox's send lock, so it may take the assistant's locks.
   yield* outbox.setTeamPrompt(linearReply);
+  yield* outbox.setTeamDispatch(delegated);
   // Runs under the outbox's send lock, so it only reads: never the assistant's locks.
   yield* outbox.setTaskSync((taskId) =>
     Effect.gen(function* () {

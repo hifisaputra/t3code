@@ -164,3 +164,50 @@ it.effect("hands a team reply to the registered handler and fails without one", 
     assert.isTrue(yield* outbox.teamPrompt(input).pipe(Effect.isFailure));
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
 });
+
+it.effect("hands a delegated issue to the registered assistant, and to none without one", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const outbox = yield* h.make;
+    const input = { deliveryId: "d1", sessionId: "s", issueId: "issue-1", note: "Soon" };
+    assert.isNull(yield* outbox.teamDispatch(input));
+    const handled: Outbox.TeamDispatchInput[] = [];
+    yield* outbox.setTeamDispatch((next) =>
+      Effect.sync(() => {
+        handled.push(next);
+        return { taskId: "task", queuedBehind: 1, attached: true };
+      }),
+    );
+    assert.deepEqual(yield* outbox.teamDispatch(input), {
+      taskId: "task",
+      queuedBehind: 1,
+      attached: true,
+    });
+    assert.deepEqual(handled, [input]);
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});
+
+it.effect("adopts a delegated session for its team, whichever side records it first", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const outbox = yield* h.make;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO linear_agent_sessions (id, issue_id, context, updated_at) VALUES ('delegated', 'issue-1', '{"a":1}', 1)`;
+    yield* outbox.adoptSession("delegated", "issue-1", "task-1");
+    yield* outbox.adoptSession("delegated", "issue-1", "task-1");
+    yield* outbox.adoptSession("fresh", "issue-2", "task-2");
+    assert.deepEqual(
+      yield* sql`SELECT id, thread_id, status, context, task_id FROM linear_agent_sessions ORDER BY id`,
+      [
+        {
+          id: "delegated",
+          thread_id: null,
+          status: "active",
+          context: '{"a":1}',
+          task_id: "task-1",
+        },
+        { id: "fresh", thread_id: null, status: "active", context: "{}", task_id: "task-2" },
+      ],
+    );
+  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+});

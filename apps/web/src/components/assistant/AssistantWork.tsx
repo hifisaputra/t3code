@@ -184,8 +184,8 @@ function PipelineStepButton({
   );
 }
 
-/** An issue the person handed over, rather than one the loop picked. */
-function DispatchedChip() {
+/** An issue the person handed over, rather than one the loop picked: from the board or Linear. */
+function DispatchedChip({ fromLinear }: { fromLinear: boolean }) {
   return (
     <Tooltip>
       <TooltipTrigger
@@ -193,11 +193,12 @@ function DispatchedChip() {
           <span className="shrink-0 rounded-md border border-border/60 px-1.5 py-0.5 text-[11px] text-muted-foreground" />
         }
       >
-        Dispatched by you
+        {fromLinear ? "From Linear" : "Dispatched by you"}
       </TooltipTrigger>
       <TooltipPopup className="max-w-64">
-        You picked this issue for the assistant. Its team leader takes it or asks you about it, and
-        never declines it.
+        {fromLinear
+          ? "Delegated to the T3 Code app in Linear. Its team reports in that session, and its team leader takes it or asks about it, never declining it."
+          : "You picked this issue for the assistant. Its team leader takes it or asks you about it, and never declines it."}
       </TooltipPopup>
     </Tooltip>
   );
@@ -355,7 +356,9 @@ export function ActiveTaskCard({
     <article className="flex flex-col gap-3 rounded-xl border border-border/70 bg-card p-4 shadow-xs/5">
       <div className="flex min-w-0 items-center gap-2 text-xs">
         <IssueLink issue={task.issue} />
-        {task.dispatched ? <DispatchedChip /> : null}
+        {task.dispatched ? (
+          <DispatchedChip fromLinear={task.linearSession?.origin === "delegated"} />
+        ) : null}
         {projectLabel ? (
           <span className="truncate text-muted-foreground">· {projectLabel}</span>
         ) : null}
@@ -739,7 +742,9 @@ function HistoryRecord({
             <CommitChip revision={task.deployment.revision} />
           </>
         ) : null}
-        {task.dispatched ? <DispatchedChip /> : null}
+        {task.dispatched ? (
+          <DispatchedChip fromLinear={task.linearSession?.origin === "delegated"} />
+        ) : null}
         {task.e2e ? <span>{inWorktree ? "E2E in the worktree" : "E2E on staging"}</span> : null}
         {task.slot !== undefined ? (
           <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[11px]">

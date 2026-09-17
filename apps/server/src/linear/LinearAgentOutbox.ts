@@ -50,6 +50,26 @@ export type TeamPromptInput = {
   readonly signal: string | null;
 };
 export type TeamPromptHandler = (input: TeamPromptInput) => Effect.Effect<void, Error>;
+/** A person delegated an issue to the app; `note` is what they wrote with it. */
+export type TeamDispatchInput = {
+  readonly deliveryId: string;
+  readonly sessionId: string;
+  readonly issueId: string;
+  readonly note: string;
+};
+/**
+ * The team task the issue went to. `attached` is false when that task already has
+ * its own session: the delegated session only points there and is no team session.
+ */
+export type TeamDispatchResult = {
+  readonly taskId: string;
+  readonly queuedBehind: number;
+  readonly attached: boolean;
+};
+/** Returns null when no developer assistant takes the issue. */
+export type TeamDispatchHandler = (
+  input: TeamDispatchInput,
+) => Effect.Effect<TeamDispatchResult | null, LinearOperationError | Error>;
 
 const encodeContent = Schema.encodeEffect(Schema.fromJsonString(OutboxContent));
 const decodeContent = Schema.decodeUnknownEffect(Schema.fromJsonString(OutboxContent));
@@ -71,6 +91,7 @@ export const make = Effect.gen(function* () {
   const sessions = yield* Queue.unbounded<string>();
   let resolver: TaskSyncResolver | undefined;
   let teamPromptHandler: TeamPromptHandler | undefined;
+  let teamDispatchHandler: TeamDispatchHandler | undefined;
 
   /**
    * Stores an update and returns without waiting for Linear. `id` is an idempotency key;
@@ -161,6 +182,15 @@ export const make = Effect.gen(function* () {
         : Effect.fail(failure("Replies to teams are not ready yet.")),
     );
 
+  /** The assistant takes delegated issues of its Linear projects, registered like the replies. */
+  const setTeamDispatch = (next: TeamDispatchHandler) =>
+    Effect.sync(() => {
+      teamDispatchHandler = next;
+    });
+  /** Null until the assistant registered: with no assistant running, delegation starts a thread. */
+  const teamDispatch = (input: TeamDispatchInput) =>
+    Effect.suspend(() => (teamDispatchHandler ? teamDispatchHandler(input) : Effect.succeed(null)));
+
   /** The app is connected and delegation is on, so session updates can be sent. */
   const connected = Effect.all([oauth.status, settings.getSettings]).pipe(
     Effect.map(([status, all]) => status.connected && all.linear.delegation.enabled),
@@ -186,6 +216,19 @@ export const make = Effect.gen(function* () {
     return id;
   }, withCreationLock);
 
+  /**
+   * Records a delegated session as a team's, so its later webhooks go to the assistant.
+   * Either side may record it first; both end with the one row carrying the task.
+   */
+  const adoptSession = Effect.fn("LinearAgentOutbox.adoptSession")(
+    function* (sessionId: string, issueId: string, taskId: string) {
+      yield* sql`INSERT INTO linear_agent_sessions (id, issue_id, thread_id, status, context, task_id, updated_at) VALUES (${sessionId}, ${issueId}, NULL, 'active', '{}', ${taskId}, ${yield* Clock.currentTimeMillis})
+        ON CONFLICT(id) DO UPDATE SET task_id = excluded.task_id, thread_id = NULL, status = 'active', updated_at = excluded.updated_at`;
+    },
+    withCreationLock,
+    Effect.mapError(() => failure("Could not record the Linear agent session for its team.")),
+  );
+
   const threadLink = (threadId: string, label = "T3 Code thread") =>
     settings.getSettings.pipe(
       Effect.map((all): ExternalLink | null => {
@@ -206,8 +249,11 @@ export const make = Effect.gen(function* () {
     setTaskSync,
     setTeamPrompt,
     teamPrompt,
+    setTeamDispatch,
+    teamDispatch,
     connected,
     createSession,
+    adoptSession,
     withCreationLock,
     threadLink,
   };
