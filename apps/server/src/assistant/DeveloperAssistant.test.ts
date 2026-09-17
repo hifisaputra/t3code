@@ -2727,6 +2727,127 @@ it.effect("a delivered team is closed once its threads are all finished, and onl
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
+/**
+ * An issue delivered while its tester's turn still runs, and the other threads
+ * settled meanwhile by the PR settlement reactor, as it does once the PR merged.
+ */
+const deliverWhileTesting = (h: Harness, service: Service) =>
+  Effect.gen(function* () {
+    const task = yield* takeIssue(h, service);
+    const tester = assistantTaskThreadId(task, "e2e");
+    yield* reachMerge(h, service, task);
+    yield* leadToE2e(h, service, task);
+    yield* service.submitE2e(tester, {
+      checks: oneCheck("passed"),
+      report: "- The page loads: passed",
+      humanChecks: [],
+      screenshots: [],
+    });
+    for (const role of ["lead", "implement", "review"] as const) {
+      const id = assistantTaskThreadId(task, role);
+      h.threads.set(id, {
+        ...h.threads.get(id)!,
+        settledOverride: "settled",
+        settledAt: timestamp,
+      });
+    }
+    return { task, tester };
+  });
+
+it.effect("a team whose threads the PR reactor settled first still closes on delivery", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const { task, tester } = yield* deliverWhileTesting(h, service);
+    assert.lengthOf(h.removed, 0);
+    yield* endTurn(h, service, tester);
+    assert.equal(h.threads.get(tester)?.settledOverride, "settled");
+    assert.deepEqual(h.removed, [`/worktrees/${task.threadId}`]);
+    assert.isString((yield* taskById(service, task.id)).teamClosedAt);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a finished team a settle was refused for closes from a later scan", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const { task, tester } = yield* deliverWhileTesting(h, service);
+    // A turn starts on the tester while the team closes, once the reviewer
+    // has settled: the tester's settle is refused.
+    let raced = false;
+    const reviewer = assistantTaskThreadId(task, "review");
+    h.threads.set(reviewer, {
+      ...h.threads.get(reviewer)!,
+      settledOverride: null,
+      settledAt: null,
+    });
+    h.onDispatch((command) =>
+      Effect.sync(() => {
+        if (raced || command.type !== "thread.settle" || command.threadId !== reviewer) return;
+        raced = true;
+        const thread = h.threads.get(tester)!;
+        h.threads.set(tester, {
+          ...thread,
+          settledOverride: null,
+          session: {
+            threadId: tester,
+            status: "running",
+            providerName: "test",
+            activeTurnId: TurnId.make("raced"),
+            runtimeMode: "approval-required",
+            lastError: null,
+            updatedAt: timestamp,
+          },
+        });
+      }),
+    );
+    yield* endTurn(h, service, tester);
+    assert.isTrue(raced);
+    assert.lengthOf(h.removed, 0);
+    assert.isUndefined((yield* taskById(service, task.id)).teamClosedAt);
+    // Nothing closes a team while one of its threads runs.
+    yield* service.scan();
+    assert.lengthOf(h.removed, 0);
+    h.finish(tester);
+    yield* service.scan();
+    assert.equal(h.threads.get(tester)?.settledOverride, "settled");
+    assert.deepEqual(h.removed, [`/worktrees/${task.threadId}`]);
+    assert.isString((yield* taskById(service, task.id)).teamClosedAt);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a closed team is not closed again when the person reopens a thread", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const { task, tester } = yield* deliverWhileTesting(h, service);
+    yield* endTurn(h, service, tester);
+    assert.lengthOf(h.removed, 1);
+    const lead = leadOf(task);
+    h.threads.set(lead, { ...h.threads.get(lead)!, settledOverride: "active", settledAt: null });
+    yield* service.scan();
+    yield* endTurn(h, service, tester);
+    assert.equal(h.threads.get(lead)?.settledOverride, "active");
+    assert.lengthOf(h.removed, 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the scan leaves a team delivered more than a day ago alone", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const { task, tester } = yield* deliverWhileTesting(h, service);
+    // Like an issue delivered before T3 recorded closing teams: no teamClosedAt,
+    // and a thread left open.
+    h.finish(tester);
+    yield* TestClock.adjust("25 hours");
+    yield* service.scan();
+    assert.isNull(h.threads.get(tester)?.settledOverride ?? null);
+    assert.lengthOf(h.removed, 0);
+    assert.isUndefined((yield* taskById(service, task.id)).teamClosedAt);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 it.effect("the tester cannot be messaged before its run is started", () =>
   Effect.gen(function* () {
     const h = harness();

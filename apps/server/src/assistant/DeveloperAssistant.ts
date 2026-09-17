@@ -145,6 +145,8 @@ const busy = (status: string | undefined) => status === "running" || status === 
 const ROLES = ["lead", "implement", "review", "e2e"] as const;
 /** How long a released session gets to report itself stopped before it is asked again. */
 const RELEASE_RETRY_MS = 30_000;
+/** How long after an issue last changed the scan still closes its finished team. */
+const CLOSE_RETRY_WINDOW_MS = 24 * 60 * 60_000;
 const ROLE_THREAD = /^assistant-(lead|review|e2e)-(.+)$/;
 const ROLE_TITLES = { lead: "team leader", review: "code review", e2e: "e2e on staging" } as const;
 const ROLE_NAMES = {
@@ -528,6 +530,13 @@ export const make = Effect.gen(function* () {
             OrchestrationThreadSettleBlockedError: () => Effect.void,
           }),
         );
+    // Whether the thread is out of the way now: settled, archived, or never created.
+    const after = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
+    return (
+      Option.isNone(after) ||
+      after.value.archivedAt !== null ||
+      after.value.settledOverride === "settled"
+    );
   });
   /** The issue's shared worktree; the leader's thread holds it from the start. */
   const taskWorktree = Effect.fn("Assistant.taskWorktree")(function* (t: AssistantTask) {
@@ -550,36 +559,66 @@ export const make = Effect.gen(function* () {
    * worktree with uncommitted changes, and so do we.
    * Settled rather than archived, so a finished issue's conversations stay
    * reachable from the assistant page and from the sidebar's Settled shelf.
+   * The task's teamClosedAt says the close happened. A thread settled by
+   * someone else (the PR settlement reactor, the person) does not: its
+   * teammates may still be open. A settle that is refused leaves the team
+   * open, and the scan tries again. Callers hold the assistant lock.
    */
-  const closeTeam = Effect.fn("Assistant.closeTeam")(function* (t: AssistantTask) {
-    // Several threads can finish after a delivery; the first close is the one
-    // that counts, and its settled primary thread says the team is closed
-    // already. An archived one was closed before settling, or by the person.
-    const held = yield* snapshots.getThreadShellById(assistantTaskThreadId(t, "lead"), {
-      includeArchived: true,
-    });
-    if (
-      Option.isSome(held) &&
-      (held.value.settledOverride === "settled" || held.value.archivedAt !== null)
-    )
-      return;
+  const closeTeam = Effect.fn("Assistant.closeTeam")(function* (value: AssistantTask) {
+    // Several threads can finish after a delivery; the first close is the one that counts.
+    const t = yield* task(value.id);
+    if (t.teamClosedAt) return;
     const worktree = yield* taskWorktree(t);
+    let settled = true;
     for (const threadId of taskThreadIds(t)) {
       yield* terminals.close({ threadId });
-      yield* settleThread(threadId);
+      if (!(yield* settleThread(threadId))) settled = false;
+    }
+    if (!settled) {
+      yield* Effect.logDebug("Developer assistant left a finished team open to close later", {
+        task: t.id,
+      });
+      return;
     }
     const root = yield* snapshots.getProjectShellById(t.projectId);
-    if (!worktree || Option.isNone(root)) return;
-    yield* verifier
-      .removeWorktree({ cwd: root.value.workspaceRoot, worktreePath: worktree.path })
-      .pipe(
+    if (worktree && Option.isSome(root))
+      yield* verifier
+        .removeWorktree({ cwd: root.value.workspaceRoot, worktreePath: worktree.path })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Developer assistant kept a finished issue's worktree", {
+              worktree: worktree.path,
+              error,
+            }),
+          ),
+        );
+    yield* saveTask({ ...t, teamClosedAt: yield* now });
+  });
+  /**
+   * Delivered and declined issues whose team did not close when its last turn
+   * ended, because a thread could not be settled then. Only recent ones: an
+   * issue closed before teamClosedAt was recorded has none, and closing it
+   * again would settle threads the person has reopened since.
+   */
+  const closeFinishedTeams = Effect.fn("Assistant.closeFinishedTeams")(function* (
+    projectId: string,
+  ) {
+    const since = (yield* Clock.currentTimeMillis) - CLOSE_RETRY_WINDOW_MS;
+    const rows =
+      yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE project_id = ${projectId} AND status IN ('review','declined')`;
+    for (const row of rows) {
+      const t = yield* decodeTask(row.data);
+      if (t.teamClosedAt || Date.parse(t.updatedAt) < since) continue;
+      if ((yield* taskBusy(t)) || (yield* taskQueued(t))) continue;
+      yield* closeTeam(t).pipe(
         Effect.catch((error) =>
-          Effect.logWarning("Developer assistant kept a finished issue's worktree", {
-            worktree: worktree.path,
+          Effect.logWarning("Developer assistant could not close a finished team", {
+            task: t.id,
             error,
           }),
         ),
       );
+    }
   });
   /** Post a phase update on the issue. Delivery never waits on Linear; a failure is noted on the task. */
   const postLinear = Effect.fn("Assistant.postLinear")(function* (t: AssistantTask, body: string) {
@@ -3258,6 +3297,7 @@ export const make = Effect.gen(function* () {
           }
         }).pipe(lock.withPermits(1));
         yield* watchDeploys(row.project_id);
+        yield* closeFinishedTeams(row.project_id).pipe(lock.withPermits(1));
         // A paused loop keeps the reason it paused until the person starts it again.
         if (row.error !== null && row.status === "running") {
           yield* sql`UPDATE assistant_projects SET error = NULL WHERE project_id = ${row.project_id} AND error = ${row.error}`;

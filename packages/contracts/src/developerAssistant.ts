@@ -478,6 +478,12 @@ export const AssistantTask = Schema.Struct({
   /** The implementer's test notes from its latest review request. */
   testNotes: Schema.optionalKey(Schema.NullOr(AssistantTestNotes)),
   /**
+   * When T3 closed the team: every thread settled and the worktree removed (or
+   * kept by git for uncommitted changes). Absent while a delivered or declined
+   * issue's team is still open, and on issues closed before this was recorded.
+   */
+  teamClosedAt: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
+  /**
    * The team's Linear agent session, while the Linear app is connected: one the
    * team opened itself, or the delegation it was started from.
    */

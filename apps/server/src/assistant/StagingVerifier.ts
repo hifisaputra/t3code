@@ -79,7 +79,10 @@ export class StagingVerifier extends Context.Service<
       worktreePath: string;
       command: string;
     }) => Effect.Effect<{ exitCode: number; output: string }, DeveloperAssistantError>;
-    /** Remove a finished issue's worktree. Git refuses one with uncommitted changes; so does this. */
+    /**
+     * Remove a finished issue's worktree. Git refuses one with uncommitted
+     * changes; so does this. One that is already gone counts as removed.
+     */
     readonly removeWorktree: (input: {
       cwd: string;
       worktreePath: string;
@@ -335,8 +338,22 @@ export const layer = Layer.effect(
         ),
       ),
       // Deleting installed dependencies can outlast the usual git timeout.
-      removeWorktree: (input) =>
-        git(input.cwd, ["worktree", "remove", input.worktreePath], "5 minutes").pipe(Effect.asVoid),
+      removeWorktree: Effect.fn("Assistant.removeWorktree")(function* (input) {
+        const removed = yield* gitRun(
+          input.cwd,
+          ["worktree", "remove", input.worktreePath],
+          "5 minutes",
+        );
+        if (removed.code === 0) return;
+        // A worktree someone already removed is as good as removed: prune its
+        // stale registration, and it is gone once git no longer lists it.
+        yield* gitRun(input.cwd, ["worktree", "prune"]);
+        const listed = yield* git(input.cwd, ["worktree", "list", "--porcelain"]);
+        if (!listed.split("\n").some((line) => line === `worktree ${input.worktreePath}`)) return;
+        return yield* new DeveloperAssistantError({
+          detail: `Git kept the worktree ${input.worktreePath}; it may have uncommitted changes.`,
+        });
+      }),
     };
   }),
 );
