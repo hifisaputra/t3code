@@ -218,15 +218,23 @@ const managedTask = {
 it.effect("carries acceptance criteria, per-criterion checks and the deploy note", () =>
   Effect.gen(function* () {
     const taken: Array<ReadonlyArray<string>> = [];
+    const planned: Array<unknown> = [];
+    const requested: Array<unknown> = [];
     const reported: Array<unknown> = [];
     const layer = McpServer.toolkit(AssistantToolkit).pipe(
       Layer.provide(AssistantToolkitHandlers),
       Layer.provideMerge(
         Layer.mock(DeveloperAssistant)({
-          acceptIssue: (_caller, _brief, criteria) =>
+          acceptIssue: (_caller, _brief, criteria, e2e) =>
             Effect.sync(() => {
               taken.push(criteria);
+              planned.push(e2e);
               return { ...managedTask, criteria };
+            }),
+          requestReview: (_caller, message, input) =>
+            Effect.sync(() => {
+              requested.push({ message, ...input });
+              return managedTask;
             }),
           submitE2e: (_caller, input) =>
             Effect.sync(() => {
@@ -265,12 +273,34 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
         arguments: { brief: "Fix it", criteria: [] },
       }).pipe(Effect.flip);
       assert.equal(empty._tag, "InvalidParams");
+      // The e2e test is planned when the issue is taken.
+      const unplanned = yield* call({
+        name: "assistant_accept_issue",
+        arguments: { brief: "Fix it", criteria: ["The page loads"] },
+      }).pipe(Effect.flip);
+      assert.equal(unplanned._tag, "InvalidParams");
       const accepted = yield* call({
         name: "assistant_accept_issue",
-        arguments: { brief: "Fix it", criteria: [" The page loads ", "The email arrives"] },
+        arguments: {
+          brief: "Fix it",
+          criteria: [" The page loads ", "The email arrives"],
+          e2e: { brief: " Open the page. ", targetIds: [" web ", ""] },
+        },
       });
       assert.isFalse(accepted.isError);
       assert.deepEqual(taken, [["The page loads", "The email arrives"]]);
+      assert.deepEqual(planned, [{ brief: "Open the page.", targetIds: ["web"] }]);
+
+      // A worker whose tool list predates test notes can still call it; T3 decides.
+      yield* call({ name: "assistant_request_review", arguments: { message: "Ready" } });
+      yield* call({
+        name: "assistant_request_review",
+        arguments: { message: "Ready", testNotes: " Open /report. ", planChanged: true },
+      });
+      assert.deepEqual(requested, [
+        { message: "Ready" },
+        { message: "Ready", testNotes: "Open /report.", planChanged: true },
+      ]);
 
       const submitted = yield* call({
         name: "assistant_submit_e2e",

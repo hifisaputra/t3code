@@ -1401,7 +1401,12 @@ export const make = Effect.gen(function* () {
 
   /** The team leader takes its issue: Linear moves to started and the worker gets the brief. */
   const acceptIssue = Effect.fn("Assistant.acceptIssue")(
-    function* (caller: ThreadId, brief: string, criteria: ReadonlyArray<string>) {
+    function* (
+      caller: ThreadId,
+      brief: string,
+      criteria: ReadonlyArray<string>,
+      e2e: { readonly brief: string; readonly targetIds?: ReadonlyArray<string> | undefined },
+    ) {
       const { p, t } = yield* authorizeRole(caller, "lead");
       if (t.turns > 0)
         return yield* fail(
@@ -1412,6 +1417,12 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           "List 1 to 12 acceptance criteria, each one a check a person could perform on the product. T3 gives them to the worker, the reviewer and the tester.",
         );
+      const testBrief = e2e.brief.trim();
+      if (!testBrief)
+        return yield* fail(
+          "Give the e2e plan a brief for the tester: the pages or endpoints affected, the data it needs and what to clean up. T3 starts the tester with it once the change is ready to test.",
+        );
+      const targetIds = (e2e.targetIds ?? []).map((id) => id.trim()).filter(Boolean);
       if (yield* taskDecisionsPending(t))
         return yield* fail("Wait for the answer to your open question before taking the issue.");
       const worktree = yield* taskWorktree(t);
@@ -1442,6 +1453,7 @@ export const make = Effect.gen(function* () {
         ...t,
         brief,
         criteria: listed,
+        e2ePlan: { brief: testBrief, ...(targetIds.length ? { targetIds } : {}) },
         turns: 1,
         stage: "implement",
         status: "working",
@@ -1521,7 +1533,13 @@ export const make = Effect.gen(function* () {
     role: AssistantThreadRole = "implement",
   ) {
     const { t } = yield* authorizeLead(caller);
-    const detail = yield* snapshots.getThreadDetailById(assistantTaskThreadId(t, role));
+    const threadId = assistantTaskThreadId(t, role);
+    const detail = yield* snapshots.getThreadDetailById(threadId);
+    // Queued messages are not in the conversation until their turn starts.
+    const queued = yield* sql<{
+      text: string;
+      created_at: string;
+    }>`SELECT text, created_at FROM assistant_messages WHERE thread_id = ${threadId} AND delivered = 0 ORDER BY rowid`;
     // The recent end of the conversation; a whole transcript would crowd the reader's context.
     return {
       task: t,
@@ -1534,6 +1552,7 @@ export const make = Effect.gen(function* () {
         ? (detail.value.session?.status ?? "idle")
         : "archived or not started",
       worktreePath: Option.isSome(detail) ? detail.value.worktreePath : null,
+      queued: queued.map((m) => ({ queuedAt: m.created_at, preview: m.text.slice(0, 300) })),
     };
   }, Effect.mapError(wrap));
 
@@ -1589,7 +1608,17 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           "One of the issue's threads is still running. End your turn and wait for its result.",
         );
-      if (yield* taskQueued(t, caller)) return t;
+      // Nothing is sent twice, and a leader that could not see the queued
+      // message must hear that it is there rather than a silent success.
+      const queued = yield* sql<{
+        thread_id: string;
+      }>`SELECT thread_id FROM assistant_messages WHERE delivered = 0 AND thread_id != ${caller} AND thread_id IN (${assistantTaskThreadId(t, "implement")}, ${assistantTaskThreadId(t, "review")}, ${assistantTaskThreadId(t, "e2e")}) ORDER BY rowid LIMIT 1`;
+      if (queued[0]) {
+        const waiting = ROLES.find((r) => assistantTaskThreadId(t, r) === queued[0]!.thread_id);
+        return yield* fail(
+          `A message to the ${ROLE_NAMES[waiting ?? "implement"]} is already queued; it starts when the current turn ends.`,
+        );
+      }
       if (role !== "implement") {
         // Creating the review thread dispatches to the engine, which stays outside SQL transactions.
         // A tester is only messaged once its run started, so it already has its instructions.
@@ -1874,8 +1903,19 @@ export const make = Effect.gen(function* () {
   const requestReview = Effect.fn("Assistant.requestReview")(function* (
     caller: ThreadId,
     message: string,
+    input: {
+      readonly testNotes?: string | undefined;
+      readonly planChanged?: boolean | undefined;
+    } = {},
   ) {
     const { p, t } = yield* authorizeRole(caller, "implement");
+    const notes = input.testNotes?.trim() ?? "";
+    // The tester is started with these notes and no leader in between, so a
+    // task with a planned e2e test cannot go to review without them.
+    if (t.e2ePlan && (!notes || typeof input.planChanged !== "boolean"))
+      return yield* fail(
+        "Pass testNotes and planChanged with assistant_request_review. testNotes: what the change does now for a user, the pages, endpoints and flows to test, and the data they need. planChanged: true when the work differs from the team leader's brief in a way the e2e test depends on, otherwise false. T3 starts the e2e tester with them.",
+      );
     const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
     if (Option.isNone(worker) || !worker.value.worktreePath)
       return yield* fail("The worker's worktree could not be found.");
@@ -1900,6 +1940,9 @@ export const make = Effect.gen(function* () {
       }
       // New code voids the last approval and anything that was verified with
       // it, including a staging deploy T3 was still watching for the leader.
+      const testNotes = notes
+        ? { notes, planChanged: input.planChanged === true, commit: head, at: yield* now }
+        : null;
       const updated = yield* saveTask({
         ...recorded,
         status: "working",
@@ -1907,13 +1950,14 @@ export const make = Effect.gen(function* () {
         merge: null,
         deployment: null,
         deployWait: null,
+        testNotes,
         error: null,
       });
       yield* queueRoleTurn(
         p,
         updated,
         "review",
-        `${checks ? `T3 ran \`${command}\` at ${shortSha(head)}: passed.\n${checks.output.slice(-CHECK_TAIL)}\n\n` : ""}Review request from the implementer:\n${message}`,
+        `${checks ? `T3 ran \`${command}\` at ${shortSha(head)}: passed.\n${checks.output.slice(-CHECK_TAIL)}\n\n` : ""}Review request from the implementer:\n${message}${testNotes ? `\n\nTest notes for the e2e tester (plan changed: ${testNotes.planChanged ? "yes" : "no"}):\n${testNotes.notes}` : ""}`,
         () => reviewerInstructions(p.config, updated),
       );
       const pullRequest = yield* taskPullRequest(updated);
@@ -1969,6 +2013,12 @@ export const make = Effect.gen(function* () {
         // goes back to its team leader to start it rather than to the worker.
         if (assistantTaskE2eEnvironment(t) === "worktree") {
           const tested = yield* saveTask({ ...t, codeReview, stage: "lead" });
+          // With a planned test T3 starts the tester itself; this reviewer's
+          // turn is still running, so it does not count as the team being busy.
+          if (tested.e2ePlan) {
+            yield* autoStartE2e(p, tested, caller);
+            return yield* task(t.id);
+          }
           yield* notifyLead(
             tested,
             `Code review approved commit ${shortSha(head)} for ${t.issue.identifier}. Start the e2e check in the worktree with assistant_start_e2e: ${briefAsk(t)}. T3 tells the worker to merge once it passes.`,
@@ -2201,6 +2251,64 @@ export const make = Effect.gen(function* () {
     return yield* saveTask(yield* postLinear(next, deployedComment({ deployment })));
   });
 
+  /**
+   * Check the staging deploy of the issue's merge: from the team leader's call,
+   * and by T3 itself once the worker's merge turn ends. A deploy still rolling
+   * out is watched from the scan. Callers hold the assistant lock.
+   */
+  const verifyStagingFor = Effect.fn("Assistant.verifyStagingFor")(function* (
+    p: AwaitedProject,
+    t: AssistantTask,
+    targetIds: ReadonlyArray<string> | undefined,
+  ) {
+    if (t.deployment) return { task: t, outcome: "verified" as const };
+    if (!t.merge || t.codeReview?.verdict !== "approved" || t.merge.commit !== t.codeReview.commit)
+      return yield* fail(
+        "Staging is verified after the implementer merges the approved commit and reports it.",
+      );
+    // An archived worker still owns its worktree.
+    const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
+    const root = yield* snapshots.getProjectShellById(t.projectId);
+    if (Option.isNone(worker) || Option.isNone(root) || !worker.value.worktreePath)
+      return yield* fail("The worker's worktree could not be found.");
+    const check = yield* verifier.checkDeploy(
+      deployInput(p, {
+        cwd: root.value.workspaceRoot,
+        worktreePath: worker.value.worktreePath,
+        commit: t.merge.commit,
+        targetIds,
+      }),
+    );
+    // A deployment that will not arrive by itself is the team leader's call.
+    if (check.outcome === "failed")
+      return { task: t, outcome: "failed" as const, detail: check.detail };
+    // T3 watches the deploy from the scan instead of the leader polling it.
+    if (check.outcome === "pending") {
+      const watching = yield* saveTask({
+        ...t,
+        wait: null,
+        deployWait: {
+          targetIds: targetIds ? [...targetIds] : null,
+          commit: t.merge.commit,
+          since: yield* now,
+          checks: 1,
+          detail: check.detail,
+        },
+      });
+      yield* sessionUpdate(watching, `staging-watch:${t.merge.commit}`, {
+        type: "action",
+        action: "Watching staging deploy",
+        parameter: shortSha(t.merge.commit),
+        ephemeral: true,
+      });
+      return { task: watching, outcome: "watching" as const };
+    }
+    return {
+      task: yield* stagingVerified(p, t, check.deployment),
+      outcome: "verified" as const,
+    };
+  });
+
   const verifyStaging = Effect.fn("Assistant.verifyStaging")(
     function* (caller: ThreadId, targetIds?: ReadonlyArray<string>) {
       const { p, t } = yield* authorizeLead(caller);
@@ -2216,54 +2324,73 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           "Staging is verified after the implementer merges the approved commit and reports it.",
         );
-      // An archived worker still owns its worktree.
-      const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
-      const root = yield* snapshots.getProjectShellById(t.projectId);
-      if (Option.isNone(worker) || Option.isNone(root) || !worker.value.worktreePath)
-        return yield* fail("The worker's worktree could not be found.");
       if ((yield* taskBusy(t, caller)) || (yield* taskQueued(t, caller)))
         return yield* fail("Wait for the issue's threads to finish before verifying staging.");
       if (yield* taskDecisionsPending(t))
         return yield* fail("Resolve the issue's pending decisions before verifying staging.");
-      const check = yield* verifier.checkDeploy(
-        deployInput(p, {
-          cwd: root.value.workspaceRoot,
-          worktreePath: worker.value.worktreePath,
-          commit: t.merge.commit,
-          targetIds,
-        }),
-      );
-      // A deployment that will not arrive by itself is the team leader's call.
-      if (check.outcome === "failed") return yield* fail(check.detail);
-      // T3 watches the deploy from the scan instead of the leader polling it.
-      if (check.outcome === "pending") {
-        const watching = yield* saveTask({
-          ...t,
-          wait: null,
-          deployWait: {
-            targetIds: targetIds ? [...targetIds] : null,
-            commit: t.merge.commit,
-            since: yield* now,
-            checks: 1,
-            detail: check.detail,
-          },
-        });
-        yield* sessionUpdate(watching, `staging-watch:${t.merge.commit}`, {
-          type: "action",
-          action: "Watching staging deploy",
-          parameter: shortSha(t.merge.commit),
-          ephemeral: true,
-        });
-        return { task: watching, outcome: "watching" as const };
+      const result = yield* verifyStagingFor(p, t, targetIds);
+      if (result.outcome === "failed") return yield* fail(result.detail);
+      // A deploy that verifies at once goes on to the planned test, as the watch does.
+      if (
+        result.outcome === "verified" &&
+        result.task.e2ePlan &&
+        result.task.status !== "review" &&
+        result.task.stage !== "e2e" &&
+        assistantTaskE2eEnvironment(result.task) !== "worktree"
+      ) {
+        yield* autoStartE2e(p, result.task, caller);
+        return { task: yield* task(t.id), outcome: result.outcome };
       }
-      return {
-        task: yield* stagingVerified(p, t, check.deployment),
-        outcome: "verified" as const,
-      };
+      return { task: result.task, outcome: result.outcome };
     },
     lock.withPermits(1),
     Effect.mapError(wrap),
   );
+
+  /**
+   * Queue the issue's e2e run: from the team leader's call, and by T3 itself
+   * with the brief the leader planned on taking the issue. Callers hold the
+   * assistant lock and have checked that the team is free to test.
+   */
+  const startE2eFor = Effect.fn("Assistant.startE2eFor")(function* (
+    p: AwaitedProject,
+    t: AssistantTask,
+    brief: string,
+  ) {
+    const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
+    // The tester runs the application from the team's worktree, so the run is
+    // pinned to the commit the reviewer approved.
+    const head = inWorktree ? yield* workerRevision(t) : null;
+    if (inWorktree && head !== t.codeReview?.commit)
+      return yield* fail(
+        `The worktree moved past the approved commit ${t.codeReview?.commit.slice(0, 7) ?? ""}. Commit what changed, push and request review again before the e2e check.`,
+      );
+    const directory = yield* evidence.directory(t.id);
+    const run = e2eBrief(t, brief);
+    const updated = yield* saveTask({
+      ...t,
+      stage: "e2e",
+      status: "working",
+      error: null,
+      wait: null,
+    });
+    yield* queueRoleTurn(
+      p,
+      updated,
+      "e2e",
+      head
+        ? `New e2e run on commit ${head.slice(0, 7)} in the worktree. Save screenshots in ${directory}.\n${run}`
+        : `New e2e run on the deployment of ${t.deployment!.revision.slice(0, 7)}. Save screenshots in ${directory}.\n${run}`,
+      () => e2eInstructions(p.config, updated, directory, run),
+    );
+    yield* sessionUpdate(updated, `e2e-started:${updated.updatedAt}`, {
+      type: "action",
+      action: "E2E test running",
+      parameter: inWorktree ? "worktree" : "staging",
+      ephemeral: true,
+    });
+    return updated;
+  });
 
   const startE2e = Effect.fn("Assistant.startE2e")(
     function* (caller: ThreadId, brief: string) {
@@ -2271,10 +2398,8 @@ export const make = Effect.gen(function* () {
       if (p.status === "stopped") return yield* fail("The assistant is stopped.");
       if (!assistantTaskHoldsProject(t.status))
         return yield* fail("Only the active issue can be tested.");
-      const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
-      const review = t.codeReview;
-      if (inWorktree) {
-        if (review?.verdict !== "approved")
+      if (assistantTaskE2eEnvironment(t) === "worktree") {
+        if (t.codeReview?.verdict !== "approved")
           return yield* fail("Start e2e after code review approves a commit.");
       } else if (!t.deployment)
         return yield* fail("Verify the staging deployment with assistant_verify_staging first.");
@@ -2282,42 +2407,59 @@ export const make = Effect.gen(function* () {
         return yield* fail("Resolve the issue's pending decisions first.");
       if ((yield* taskBusy(t, caller)) || (yield* taskQueued(t, caller)))
         return yield* fail("Wait for the issue's threads to finish before starting e2e.");
-      // The tester runs the application from the team's worktree, so the run is
-      // pinned to the commit the reviewer approved.
-      const head = inWorktree ? yield* workerRevision(t) : null;
-      if (inWorktree && head !== review!.commit)
-        return yield* fail(
-          `The worktree moved past the approved commit ${review!.commit.slice(0, 7)}. Commit what changed, push and request review again before the e2e check.`,
-        );
-      const directory = yield* evidence.directory(t.id);
-      const run = e2eBrief(t, brief);
-      const updated = yield* saveTask({
-        ...t,
-        stage: "e2e",
-        status: "working",
-        error: null,
-        wait: null,
-      });
-      yield* queueRoleTurn(
+      // The leader's latest brief is the plan: a later automatic run uses it.
+      return yield* startE2eFor(
         p,
-        updated,
-        "e2e",
-        head
-          ? `New e2e run on commit ${head.slice(0, 7)} in the worktree. Save screenshots in ${directory}.\n${run}`
-          : `New e2e run on the deployment of ${t.deployment!.revision.slice(0, 7)}. Save screenshots in ${directory}.\n${run}`,
-        () => e2eInstructions(p.config, updated, directory, run),
+        t.e2ePlan ? { ...t, e2ePlan: { ...t.e2ePlan, brief } } : t,
+        brief,
       );
-      yield* sessionUpdate(updated, `e2e-started:${updated.updatedAt}`, {
-        type: "action",
-        action: "E2E test running",
-        parameter: inWorktree ? "worktree" : "staging",
-        ephemeral: true,
-      });
-      return updated;
     },
     lock.withPermits(1),
     Effect.mapError(wrap),
   );
+
+  /**
+   * The change is ready to test: staging verified its merge, or, in the
+   * worktree, code review approved it. T3 starts the tester with the brief the
+   * team leader planned on taking the issue, unless the implementer reports
+   * that the work moved away from that plan or the team is not free to test;
+   * then the leader decides. `except` is the thread whose turn is ending.
+   * Callers hold the assistant lock.
+   */
+  const autoStartE2e = Effect.fn("Assistant.autoStartE2e")(function* (
+    p: AwaitedProject,
+    t: AssistantTask,
+    except?: ThreadId,
+  ) {
+    const plan = t.e2ePlan;
+    if (!plan) return;
+    const id = t.issue.identifier;
+    const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
+    const ready = inWorktree
+      ? `Code review approved commit ${shortSha(t.codeReview?.commit ?? "")} for ${id}.`
+      : `Staging verified for ${id} at ${shortSha(t.merge?.commit ?? t.deployment?.revision ?? "")}.`;
+    const where = inWorktree ? "in the worktree" : "on staging";
+    const after = inWorktree ? " T3 tells the worker to merge once it passes." : "";
+    if (t.testNotes?.planChanged)
+      return yield* notifyLead(
+        t,
+        `${ready} The implementer reports that the work changed from your plan, so T3 did not start the e2e check ${where}.\nThe implementer's test notes:\n${t.testNotes.notes}\nYour e2e brief from taking the issue:\n${plan.brief}\nStart the e2e check with assistant_start_e2e, with a revised brief or your original one. T3 gives the tester the acceptance criteria and these notes.${after}`,
+      );
+    const reason = (yield* taskDecisionsPending(t))
+      ? "the issue has a question open for the person"
+      : (yield* taskBusy(t, except)) || (yield* taskQueued(t, except))
+        ? "another of the issue's threads is still running or has work queued"
+        : null;
+    const handBack = (why: string) =>
+      notifyLead(
+        t,
+        `${ready} T3 did not start the e2e check ${where} because ${why}. Start it with assistant_start_e2e once the team is free, with the brief you planned or a revised one:\n${plan.brief}${after}`,
+      );
+    if (reason) return yield* handBack(reason);
+    yield* startE2eFor(p, t, plan.brief).pipe(
+      Effect.catch((error) => handBack(`it could not be started: ${wrap(error).detail}`)),
+    );
+  });
 
   const submitE2e = Effect.fn("Assistant.submitE2e")(
     function* (
@@ -2599,10 +2741,33 @@ export const make = Effect.gen(function* () {
         text: string;
         created_at: string;
       }>`SELECT m.* FROM assistant_messages m JOIN assistant_projects p ON p.project_id = m.project_id WHERE m.delivered = 0 AND p.status != 'stopped' ORDER BY m.rowid`;
-      for (const m of messages) {
+      const owners = new Map<string, Effect.Success<ReturnType<typeof threadTask>>>();
+      for (const m of messages)
+        if (!owners.has(m.thread_id)) owners.set(m.thread_id, yield* threadTask(m.thread_id));
+      // The threads of an issue share a worktree, so whichever turn starts first
+      // holds the others. The handoff to the thread the issue's stage names goes
+      // first: a leader notice queued earlier must not hold up a review request.
+      const onStage = (threadId: string) => {
+        const owner = owners.get(threadId);
+        return owner ? owner.task.stage === owner.role : false;
+      };
+      const ordered = messages.toSorted(
+        (a, b) => Number(onStage(b.thread_id)) - Number(onStage(a.thread_id)),
+      );
+      for (const m of ordered) {
         const threadId = ThreadId.make(m.thread_id);
         const current = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
         if (Option.isNone(current)) continue;
+        const owner = owners.get(m.thread_id) ?? null;
+        // A nudge is only right while the issue is still the leader's to move on.
+        if (
+          m.id.includes(":nudge:") &&
+          owner &&
+          (owner.task.stage !== "lead" || !assistantTaskHoldsProject(owner.task.status))
+        ) {
+          yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE id = ${m.id}`;
+          continue;
+        }
         const p = yield* project(m.project_id);
         // A turn sent while the usage limit holds would fail the same way; the
         // message keeps until the limit resets.
@@ -2620,7 +2785,6 @@ export const make = Effect.gen(function* () {
         }
         if (yield* threadBusy(current.value)) continue;
         // An issue's threads share one worktree: a handoff waits for the sender's turn to end.
-        const owner = yield* threadTask(threadId);
         if (owner && (yield* taskBusy(owner.task))) {
           yield* releaseHandedOff(owner.task);
           continue;
@@ -2643,7 +2807,9 @@ export const make = Effect.gen(function* () {
             owner?.role === "lead" ? p.config.modelSelection : p.config.workerModelSelection,
           runtimeMode: p.config.runtimeMode,
           interactionMode: "default",
-          createdAt: m.created_at,
+          // The turn starts now; a message that waited in the queue must not
+          // make the turn look as long as the wait.
+          createdAt: yield* now,
         });
         yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE id = ${m.id}`;
       }
@@ -2662,6 +2828,9 @@ export const make = Effect.gen(function* () {
     // staging deploy T3 watches for it — ended its turn for the right reason.
     if (t.status === "blocked" || t.wait || t.deployWait) return;
     const lead = assistantTaskThreadId(t, "lead");
+    // Another thread still at work (the worker it just handed to) carries the
+    // issue on; its turn ending is what brings the issue back.
+    if (yield* taskBusy(t, lead)) return;
     const detail = yield* snapshots.getThreadDetailById(lead);
     const asked = Option.isSome(detail)
       ? detail.value.messages.findLast((m) => m.role === "user")
@@ -2682,6 +2851,36 @@ export const make = Effect.gen(function* () {
       `You ended your turn with the issue still yours and nothing handed on. Take the next step (${t.dispatched ? "take" : "take or decline"} the issue, verify staging, start e2e, or message a thread), ask the person with assistant_ask_decision, or use assistant_wait while staging deploys.`,
     );
     yield* changed;
+  });
+
+  /**
+   * The worker's merge turn ended on an issue with a planned e2e test: T3
+   * watches the staging deploy itself instead of waking the team leader. The
+   * deployment CLIs are slow, so they do not run here, under the assistant lock
+   * and inside event handling: the scan's watchDeploy makes the first check and
+   * starts the tester once it verifies (in the worktree it delivers the issue).
+   */
+  const watchAfterMerge = Effect.fn("Assistant.watchAfterMerge")(function* (
+    t: AssistantTask,
+    merge: NonNullable<AssistantTask["merge"]>,
+  ) {
+    const watching = yield* saveTask({
+      ...t,
+      wait: null,
+      deployWait: {
+        targetIds: t.e2ePlan?.targetIds ? [...t.e2ePlan.targetIds] : null,
+        commit: merge.commit,
+        since: yield* now,
+        checks: 0,
+        detail: "Waiting for the first check",
+      },
+    });
+    yield* sessionUpdate(watching, `staging-watch:${merge.commit}`, {
+      type: "action",
+      action: "Watching staging deploy",
+      parameter: shortSha(merge.commit),
+      ephemeral: true,
+    });
   });
 
   /**
@@ -2726,6 +2925,8 @@ export const make = Effect.gen(function* () {
         t,
         `${id} failed its e2e check ${inWorktree ? "in the worktree" : "on staging"}:\n${t.e2e.report.slice(0, 4000)}\nDecide whether this goes to the worker, back to the tester, or to the person.`,
       );
+    if (t.merge && !t.deployment && role === "implement" && t.e2ePlan)
+      return yield* watchAfterMerge(t, t.merge);
     if (t.merge && !t.deployment && role === "implement")
       return yield* notifyLead(
         t,
@@ -2998,6 +3199,8 @@ export const make = Effect.gen(function* () {
           if (!(yield* taskBusy(verified))) yield* closeTeam(verified);
           return;
         }
+        if (verified.e2ePlan && assistantTaskE2eEnvironment(verified) !== "worktree")
+          return yield* autoStartE2e(p, verified);
         return yield* notifyLead(
           verified,
           `Staging verified for ${current.issue.identifier} at ${shortSha(wait.commit)}. Start the e2e check with assistant_start_e2e: ${briefAsk(current)}.`,

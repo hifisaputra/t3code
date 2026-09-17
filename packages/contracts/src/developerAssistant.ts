@@ -297,6 +297,34 @@ export const AssistantMerge = Schema.Struct({
 export type AssistantMerge = typeof AssistantMerge.Type;
 
 /**
+ * The e2e test the team leader planned on taking the issue. T3 starts the
+ * tester with it once staging verifies (or, in the worktree, once review
+ * approves), so the leader is not woken for the handoff.
+ */
+export const AssistantE2ePlan = Schema.Struct({
+  /** The tester brief: pages or endpoints affected, data it needs, what to clean up. */
+  brief: Schema.String,
+  /** The deployment targets the change affects; absent means all. */
+  targetIds: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+export type AssistantE2ePlan = typeof AssistantE2ePlan.Type;
+
+/**
+ * What the implementer says the tester should test, given with its latest
+ * review request. The approved commit's notes join the leader's plan in the
+ * tester's brief; planChanged sends the start of e2e back to the leader.
+ */
+export const AssistantTestNotes = Schema.Struct({
+  notes: Schema.String,
+  /** The work differs from the leader's brief in a way the test depends on. */
+  planChanged: Schema.Boolean,
+  /** The commit the review request was for. */
+  commit: CommitSha,
+  at: IsoDateTime,
+});
+export type AssistantTestNotes = typeof AssistantTestNotes.Type;
+
+/**
  * The issue's acceptance criteria as its team leader listed them when taking
  * it: each one a check a person could perform on the product. The worker and
  * reviewer see them numbered; the tester reports one result per criterion.
@@ -442,6 +470,13 @@ export const AssistantTask = Schema.Struct({
   checks: Schema.optionalKey(Schema.NullOr(AssistantCheckRun)),
   /** The staging deploy T3 is watching for the team leader, while it lasts. */
   deployWait: Schema.optionalKey(Schema.NullOr(AssistantDeployWait)),
+  /**
+   * The e2e test planned when the issue was taken. Absent on issues taken
+   * before then: their leader is woken to verify staging and start e2e itself.
+   */
+  e2ePlan: Schema.optionalKey(Schema.NullOr(AssistantE2ePlan)),
+  /** The implementer's test notes from its latest review request. */
+  testNotes: Schema.optionalKey(Schema.NullOr(AssistantTestNotes)),
   /**
    * The team's Linear agent session, while the Linear app is connected: one the
    * team opened itself, or the delegation it was started from.

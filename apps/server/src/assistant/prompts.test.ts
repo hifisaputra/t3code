@@ -161,8 +161,79 @@ describe("role skills", () => {
 describe("the team leader and the staging deploy", () => {
   it("hands the deploy to T3 and keeps assistant_wait for other waits", () => {
     const lead = leadInstructions(config, task);
-    expect(lead).toContain("watches it and messages you when it is verified or fails");
+    expect(lead).toContain("T3 verifies the staging deploy for your targetIds");
+    expect(lead).toContain("T3 watches it while it deploys");
     expect(lead).not.toContain("call assistant_wait with the reason while staging");
     expect(lead.match(/assistant_wait/g)).toHaveLength(1);
+  });
+});
+
+describe("the e2e plan and the implementer's test notes", () => {
+  const worktree: AssistantTask = { ...withCriteria, e2eEnvironment: "worktree" };
+  const planned: AssistantTask = {
+    ...withCriteria,
+    e2ePlan: { brief: "Open the report page as the test admin." },
+  };
+
+  it("has the team leader plan the test when it takes the issue, in both modes", () => {
+    for (const issue of [task, worktree]) {
+      const lead = leadInstructions(config, issue);
+      expect(lead).toContain("and the e2e plan: a brief for the tester");
+      expect(lead).toContain("T3 starts the tester with this brief later without asking you");
+      expect(lead).toContain("T3 messages you here only when something needs a decision");
+      expect(lead).toContain("the implementer reports that the work changed from your plan");
+      expect(lead).not.toContain("When the merge is reported, call assistant_verify_staging");
+    }
+    expect(leadInstructions(config, worktree)).toContain(
+      "When the reviewer approves, T3 starts the e2e tester in this worktree",
+    );
+    // Target ids are only asked for when there is a choice of targets.
+    expect(leadInstructions(config, task)).not.toContain("targetIds of the configured");
+    const targets = leadInstructions(
+      {
+        ...config,
+        deploymentTargets: [
+          { kind: "github-actions", id: "web", repository: "owner/app", workflow: "web.yml" },
+          { kind: "github-actions", id: "api", repository: "owner/app", workflow: "api.yml" },
+        ],
+      },
+      task,
+    );
+    expect(targets).toContain(
+      "targetIds of the configured deployment targets this change affects (web, api",
+    );
+  });
+
+  it("asks the worker for notes and the reviewer to check them against the plan", () => {
+    const written = prompts(config, planned);
+    expect(written.implement).toContain("Give it testNotes for the e2e tester");
+    expect(written.implement).toContain("Send updated notes with every request");
+    expect(written.review).toContain("check them against the diff");
+    for (const audience of ["implement", "review"])
+      expect(written[audience], audience).toContain(
+        "The team leader's plan for the e2e test:\nOpen the report page as the test admin.",
+      );
+  });
+
+  it("gives the tester the implementer's notes after the leader's brief", () => {
+    const noted: AssistantTask = {
+      ...task,
+      testNotes: {
+        notes: "Export lives in the report menu now.",
+        planChanged: false,
+        commit: "b".repeat(40),
+        at: timestamp,
+      },
+    };
+    expect(e2eBrief(noted, "Test the export.")).toBe(
+      "Test the export.\nWhat the implementer says to test:\nExport lives in the report menu now.",
+    );
+    const changed = e2eBrief(
+      { ...noted, testNotes: { ...noted.testNotes!, planChanged: true } },
+      "Test the export.",
+    );
+    expect(changed).toContain(
+      "What the implementer says to test:\nThe implementer reported that the work moved away from the team leader's plan.\nExport lives in the report menu now.",
+    );
   });
 });

@@ -671,17 +671,35 @@ const heldTasks = (service: Service) =>
       ),
     );
 
-/** One team takes its issue; the worker's first turn is queued. */
+/**
+ * An issue taken before the leader planned its e2e test at take: T3 wakes the
+ * leader to verify staging and start e2e rather than doing either itself.
+ */
+const dropE2ePlan = (id: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`UPDATE assistant_tasks SET data = json_remove(data, '$.e2ePlan') WHERE id = ${id}`;
+  });
+
+/** The e2e test the leader plans when it takes an issue. */
+type E2ePlan = { readonly brief: string; readonly targetIds?: ReadonlyArray<string> };
+
+/**
+ * One team takes its issue; the worker's first turn is queued. Without an e2e
+ * plan the issue is one taken before plans existed.
+ */
 const takeTask = (
   h: Harness,
   service: Service,
   t: AssistantTask,
   brief = "Fix it",
   criteria: ReadonlyArray<string> = ["The page loads"],
+  e2e: E2ePlan | null = null,
 ) =>
   Effect.gen(function* () {
     yield* service.deliver();
-    yield* service.acceptIssue(leadOf(t), brief, criteria);
+    yield* service.acceptIssue(leadOf(t), brief, criteria, e2e ?? { brief: "Open the page." });
+    if (!e2e) yield* dropE2ePlan(t.id);
     yield* endTurn(h, service, leadOf(t));
     return yield* taskById(service, t.id);
   });
@@ -693,12 +711,15 @@ const takeIssue = (h: Harness, service: Service, brief = "Fix it") =>
     return yield* takeTask(h, service, t, brief);
   });
 
+/** What the implementer tells the tester with its review request. */
+const testNotes = { testNotes: "Open /report and export a CSV.", planChanged: false };
+
 /** The code reviewer approves the worker's commit. */
-const approveReview = (h: Harness, service: Service, t: AssistantTask) =>
+const approveReview = (h: Harness, service: Service, t: AssistantTask, notes = testNotes) =>
   Effect.gen(function* () {
     const reviewer = assistantTaskThreadId(t, "review");
     yield* service.deliver();
-    yield* service.requestReview(t.threadId, "Ready for review: PR #1");
+    yield* service.requestReview(t.threadId, "Ready for review: PR #1", notes);
     yield* endTurn(h, service, t.threadId);
     yield* service.deliver();
     yield* service.submitReview(reviewer, "approved", "Looks right.", "Covered the fix.");
@@ -707,11 +728,11 @@ const approveReview = (h: Harness, service: Service, t: AssistantTask) =>
   });
 
 /** Carry a taken issue through review and merge, ready for staging. */
-const reachMerge = (h: Harness, service: Service, t: AssistantTask) =>
+const reachMerge = (h: Harness, service: Service, t: AssistantTask, notes = testNotes) =>
   Effect.gen(function* () {
     const reviewer = assistantTaskThreadId(t, "review");
     yield* service.deliver();
-    yield* service.requestReview(t.threadId, "Ready for review: PR #1");
+    yield* service.requestReview(t.threadId, "Ready for review: PR #1", notes);
     yield* endTurn(h, service, t.threadId);
     yield* service.deliver();
     yield* service.submitReview(
@@ -1291,7 +1312,9 @@ it.effect("a paused loop takes no new issue, while its team and dispatched issue
     // The team at work carries on.
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, leadOf(team)), 1);
-    yield* service.acceptIssue(leadOf(team), "Fix it", ["The page loads"]);
+    yield* service.acceptIssue(leadOf(team), "Fix it", ["The page loads"], {
+      brief: "Open the page.",
+    });
     yield* endTurn(h, service, leadOf(team));
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, team.threadId), 1);
@@ -2999,6 +3022,367 @@ it.effect("a failed worktree e2e run goes to the team leader with nothing posted
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
+const plan = { brief: "Open the report page as the test admin.", targetIds: ["web"] };
+
+it.effect("with an e2e plan T3 verifies staging after the merge and starts the tester", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setupWith({ checkCommand: "pnpm check" });
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+    assert.deepEqual(first.e2ePlan, plan);
+    // The tester is started from the notes, so a request without them is refused
+    // before the project's checks run.
+    yield* service.deliver();
+    const bare = yield* service.requestReview(first.threadId, "Ready").pipe(Effect.flip);
+    assert.include(bare.detail, "Pass testNotes and planChanged");
+    const unanswered = yield* service
+      .requestReview(first.threadId, "Ready", { testNotes: "Open /report." })
+      .pipe(Effect.flip);
+    assert.include(unanswered.detail, "planChanged");
+    assert.lengthOf(h.checkRuns, 0);
+    const leaderTurns = turnsOf(h, lead).length;
+
+    yield* reachMerge(h, service, first);
+    // The reviewer saw the notes it approved.
+    assert.include(
+      turnsOf(h, assistantTaskThreadId(first, "review")).at(-1),
+      "Test notes for the e2e tester (plan changed: no):\nOpen /report and export a CSV.",
+    );
+    // The merge turn only records the watch; the scan runs the deployment CLIs.
+    const watching = yield* taskById(service, first.id);
+    assert.equal(watching.deployWait?.checks, 0);
+    assert.equal(watching.deployWait?.detail, "Waiting for the first check");
+    assert.lengthOf(h.verified, 0);
+    yield* service.scan();
+    const testing = yield* taskById(service, first.id);
+    assert.isNull(testing.deployWait ?? null);
+    assert.deepEqual(h.verified.at(-1)?.targetIds, ["web"]);
+    assert.equal(testing.deployment?.revision, "a".repeat(40));
+    assert.equal(testing.stage, "e2e");
+    assert.equal(testing.testNotes?.notes, "Open /report and export a CSV.");
+    assert.equal(testing.testNotes?.commit, h.git.head);
+    yield* service.deliver();
+    const tester = assistantTaskThreadId(first, "e2e");
+    const run = turnsOf(h, tester).at(-1);
+    assert.include(run, "New e2e run on the deployment of aaaaaaa");
+    assert.include(run, "Open the report page as the test admin.");
+    assert.include(run, "What the implementer says to test:\nOpen /report and export a CSV.");
+    // The leader was not woken for any of it.
+    assert.lengthOf(turnsOf(h, lead), leaderTurns);
+
+    const delivered = yield* service.submitE2e(tester, {
+      checks: oneCheck("passed"),
+      report: "- The page loads: passed",
+      humanChecks: [],
+      screenshots: [],
+    });
+    assert.equal(delivered.status, "review");
+    assert.lengthOf(turnsOf(h, lead), leaderTurns);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("with an e2e plan a deploy T3 watches starts the tester when it lands", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const tester = assistantTaskThreadId(team, "e2e");
+    const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+    yield* service.deliver();
+    const leaderTurns = turnsOf(h, lead).length;
+    h.setStaging("pending");
+    yield* reachMerge(h, service, first);
+    const watching = yield* taskById(service, first.id);
+    assert.deepEqual(watching.deployWait?.targetIds, ["web"]);
+    assert.equal(watching.stage, "lead");
+    assert.isFalse(h.threads.has(tester));
+    yield* service.scan();
+    yield* service.scan();
+    assert.equal((yield* taskById(service, first.id)).deployWait?.checks, 2);
+    h.setStaging("healthy");
+    yield* service.scan();
+    const testing = yield* taskById(service, first.id);
+    assert.isNull(testing.deployWait ?? null);
+    assert.equal(testing.stage, "e2e");
+    assert.include(turnsOf(h, tester).at(-1), "Open the report page as the test admin.");
+    assert.lengthOf(turnsOf(h, lead), leaderTurns);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("with an e2e plan a failed deploy check goes to the team leader once", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+    yield* service.deliver();
+    const leaderTurns = turnsOf(h, lead).length;
+    h.setStaging("failed");
+    yield* reachMerge(h, service, first);
+    yield* service.scan();
+    yield* service.deliver();
+    const told = turnsOf(h, lead).slice(leaderTurns);
+    assert.lengthOf(told, 1);
+    assert.include(told[0], "web deployed a failed build.");
+    assert.include(told[0], "call assistant_verify_staging again once the deployment is fixed");
+    const stuck = yield* taskById(service, first.id);
+    assert.isNull(stuck.deployment);
+    assert.isNull(stuck.deployWait ?? null);
+    assert.isFalse(h.threads.has(assistantTaskThreadId(first, "e2e")));
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("an implementer that reports the plan changed sends the e2e start to the leader", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+    yield* service.deliver();
+    const leaderTurns = turnsOf(h, lead).length;
+    yield* reachMerge(h, service, first, {
+      testNotes: "Export moved to the report menu.",
+      planChanged: true,
+    });
+    yield* service.scan();
+    yield* service.deliver();
+    const told = turnsOf(h, lead).slice(leaderTurns);
+    assert.lengthOf(told, 1);
+    assert.include(told[0], "Staging verified for APP-1");
+    assert.include(told[0], "the work changed from your plan");
+    assert.include(told[0], "Export moved to the report menu.");
+    assert.include(told[0], "Open the report page as the test admin.");
+    const verified = yield* taskById(service, first.id);
+    assert.equal(verified.deployment?.revision, "a".repeat(40));
+    assert.isFalse(h.threads.has(assistantTaskThreadId(first, "e2e")));
+    // The leader starts it with a revised brief; the notes still reach the tester.
+    yield* service.startE2e(lead, "Open the report menu and export.");
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    const run = turnsOf(h, assistantTaskThreadId(first, "e2e")).at(-1);
+    assert.include(run, "Open the report menu and export.");
+    assert.include(run, "The implementer reported that the work moved away");
+    // The brief the leader gave by hand is the plan from now on.
+    assert.equal(
+      (yield* taskById(service, first.id)).e2ePlan?.brief,
+      "Open the report menu and export.",
+    );
+    const tester = assistantTaskThreadId(first, "e2e");
+    yield* service.submitE2e(tester, {
+      checks: oneCheck("failed", "The export is empty."),
+      report: "- The page loads: failed, the export is empty",
+      humanChecks: [],
+      screenshots: [],
+    });
+    yield* endTurn(h, service, tester);
+    yield* service.deliver();
+    yield* service.messageWorker(lead, "Fix the empty export.");
+    yield* endTurn(h, service, lead);
+    yield* reachMerge(h, service, first);
+    yield* service.scan();
+    yield* service.deliver();
+    const rerun = turnsOf(h, tester).at(-1);
+    assert.include(rerun, "Open the report menu and export.");
+    assert.notInclude(rerun, "Open the report page as the test admin.");
+    assert.include(rerun, "Your previous run failed");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a deploy the leader verifies by hand goes straight on to the planned test", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+    yield* reachMerge(h, service, first);
+    const verified = yield* service.verifyStaging(lead);
+    assert.equal(verified.outcome, "verified");
+    assert.equal(verified.task.stage, "e2e");
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    assert.include(
+      turnsOf(h, assistantTaskThreadId(first, "e2e")).at(-1),
+      "Open the report page as the test admin.",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+/** The ids of the messages T3 queued for a thread, and whether each was delivered. */
+const queuedFor = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    return yield* sql<{
+      id: string;
+      delivered: number;
+    }>`SELECT id, delivered FROM assistant_messages WHERE thread_id = ${threadId} ORDER BY rowid`;
+  });
+
+it.effect("a leader is not nudged while another of its issue's threads is still running", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const lead = leadOf(first);
+    yield* reachMerge(h, service, first);
+    yield* service.deliver();
+    assert.include(turnsOf(h, lead).at(-1), "merged into its integration branch");
+    // The worker is back at work (a follow-up the person sent in its thread).
+    const worker = h.threads.get(first.threadId)!;
+    h.threads.set(first.threadId, {
+      ...worker,
+      session: {
+        threadId: first.threadId,
+        status: "running",
+        providerName: "test",
+        activeTurnId: null,
+        runtimeMode: "approval-required",
+        lastError: null,
+        updatedAt: timestamp,
+      },
+    });
+    yield* endTurn(h, service, lead);
+    const nudges = (yield* queuedFor(lead)).filter((m) => m.id.includes(":nudge:"));
+    assert.lengthOf(nudges, 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a queued nudge is dropped once the issue has moved on from its leader", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    yield* service.deliver();
+    yield* endTurn(h, service, lead);
+    assert.lengthOf(
+      (yield* queuedFor(lead)).filter((m) => m.id.includes(":nudge:")),
+      1,
+    );
+    // The leader took the issue before the nudge went out.
+    yield* service.acceptIssue(lead, "Fix it", ["The page loads"], plan);
+    yield* service.deliver();
+    const nudge = (yield* queuedFor(lead)).find((m) => m.id.includes(":nudge:"));
+    assert.equal(nudge?.delivered, 1);
+    yield* endTurn(h, service, team.threadId);
+    yield* service.deliver();
+    assert.isFalse(turnsOf(h, lead).some((text) => text.includes("You ended your turn")));
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a queued turn is dispatched with the time it starts, not the time it was queued", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    yield* TestClock.adjust(Duration.minutes(15));
+    yield* service.deliver();
+    const start = h.commands.find(
+      (c) => c.type === "thread.turn.start" && c.threadId === leadOf(team),
+    );
+    const queuedAt = (yield* SqlClient.SqlClient)<{
+      created_at: string;
+    }>`SELECT created_at FROM assistant_messages WHERE thread_id = ${leadOf(team)}`;
+    const createdAt = start?.type === "thread.turn.start" ? start.createdAt : "";
+    assert.equal(Date.parse(createdAt) - Date.parse((yield* queuedAt)[0]!.created_at), 15 * 60_000);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the handoff for the issue's stage goes before an older notice to its leader", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const lead = leadOf(first);
+    const reviewer = assistantTaskThreadId(first, "review");
+    yield* service.deliver();
+    const leaderTurns = turnsOf(h, lead).length;
+    // The person allows more rounds while the worker runs: a notice for the leader.
+    yield* service.review({ taskId: first.id, action: "retry", feedback: "Carry on." });
+    yield* service.requestReview(first.threadId, "Ready for review: PR #1", testNotes);
+    yield* endTurn(h, service, first.threadId);
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, reviewer), 1);
+    assert.lengthOf(turnsOf(h, lead), leaderTurns);
+    // The notice waits for the team's handoffs, and is not lost.
+    assert.lengthOf(
+      (yield* queuedFor(lead)).filter((m) => m.delivered === 0),
+      1,
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a leader messaging a thread with a turn already queued is told, and can see it", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const lead = leadOf(first);
+    yield* service.deliver();
+    yield* service.requestReview(first.threadId, "Ready for review: PR #1", testNotes);
+    yield* endTurn(h, service, first.threadId);
+    const read = yield* service.readThread(lead, "review");
+    assert.lengthOf(read.transcript, 0);
+    assert.lengthOf(read.queued, 1);
+    assert.include(read.queued[0]!.preview, "Linear issue APP-1");
+    assert.isTrue(Date.parse(read.queued[0]!.queuedAt) >= 0);
+    const refused = yield* service
+      .messageWorker(lead, "Please review the PR.", "review")
+      .pipe(Effect.flip);
+    assert.equal(
+      refused.detail,
+      "A message to the code review thread is already queued; it starts when the current turn ends.",
+    );
+    yield* service.deliver();
+    assert.lengthOf((yield* service.readThread(lead, "review")).queued, 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect(
+  "with an e2e plan in the worktree T3 tests on approval and delivers after the merge",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      const { service } = yield* h.setupWith({ e2eEnvironment: "worktree" });
+      const team = yield* activeTask(service);
+      const lead = leadOf(team);
+      const tester = assistantTaskThreadId(team, "e2e");
+      const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+      yield* service.deliver();
+      const leaderTurns = turnsOf(h, lead).length;
+      yield* approveReview(h, service, first);
+      const run = turnsOf(h, tester).at(-1);
+      assert.include(run, "in the worktree");
+      assert.include(run, "Open the report page as the test admin.");
+      assert.include(run, "What the implementer says to test:");
+      yield* service.submitE2e(tester, {
+        checks: oneCheck("passed"),
+        report: "- The page loads: passed",
+        humanChecks: [],
+        screenshots: [],
+      });
+      yield* endTurn(h, service, tester);
+      yield* service.deliver();
+      assert.include(turnsOf(h, first.threadId).at(-1), "Merge the PR into develop");
+      yield* service.reportMerged(first.threadId, "The page loads again.");
+      yield* endTurn(h, service, first.threadId);
+      yield* service.scan();
+      const delivered = yield* taskById(service, first.id);
+      assert.equal(delivered.status, "review");
+      assert.deepEqual(h.verified.at(-1)?.targetIds, ["web"]);
+      assert.deepEqual(h.transitions, ["review"]);
+      for (const role of ["lead", "implement", "review", "e2e"] as const)
+        assert.equal(h.threads.get(assistantTaskThreadId(first, role))?.settledOverride, "settled");
+      yield* service.deliver();
+      assert.lengthOf(turnsOf(h, lead), leaderTurns);
+    }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 /** A thread's turn failed the way the provider reports it. */
 const sessionError = (threadId: ThreadId, lastError: string) =>
   ({
@@ -3123,8 +3507,15 @@ it.effect("the team leader lists the acceptance criteria when it takes the issue
     const { service } = yield* h.setup;
     const team = yield* activeTask(service);
     yield* service.deliver();
-    const empty = yield* service.acceptIssue(leadOf(team), "Fix it", []).pipe(Effect.flip);
+    const empty = yield* service
+      .acceptIssue(leadOf(team), "Fix it", [], { brief: "Open the page." })
+      .pipe(Effect.flip);
     assert.include(empty.detail, "acceptance criteria");
+    // The e2e test is planned at take, since T3 starts the tester without the leader.
+    const unplanned = yield* service
+      .acceptIssue(leadOf(team), "Fix it", ["The page loads"], { brief: "   " })
+      .pipe(Effect.flip);
+    assert.include(unplanned.detail, "brief for the tester");
     assert.lengthOf(h.started, 0);
     const taken = yield* takeTask(h, service, team, "Fix the page", [
       " The page loads ",

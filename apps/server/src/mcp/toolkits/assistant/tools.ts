@@ -43,7 +43,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_accept_issue", {
     description:
-      "Team leader only: take your issue. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own. End your turn afterward; T3 messages you when the issue needs you.",
+      "Team leader only: take your issue, with the acceptance criteria and the plan for its e2e test. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own, and T3 verifies staging and starts the tester with your e2e brief. End your turn afterward; T3 messages you when the issue needs a decision.",
     parameters: Schema.Struct({
       brief: text.annotate({
         description:
@@ -52,6 +52,18 @@ export const AssistantToolkit = Toolkit.make(
       criteria: AssistantCriteria.annotate({
         description:
           "Each criterion is one check a person could perform on the product, not a diff. T3 gives them, numbered, to the worker, the reviewer and the tester.",
+      }),
+      e2e: Schema.Struct({
+        brief: text.annotate({
+          description:
+            "For the tester: the pages or endpoints affected, the data it needs and what to clean up. T3 starts the tester with it, plus the criteria and the implementer's test notes, once staging verifies the merge (or, when the project tests in the worktree, once review approves).",
+        }),
+        targetIds: Schema.optionalKey(
+          Schema.Array(Schema.String).annotate({
+            description:
+              "The configured deployment target ids this change affects; omit to check all.",
+          }),
+        ),
       }),
     }),
     success: AssistantTask,
@@ -73,13 +85,19 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_read_thread", {
     description:
-      "Team leader: read one of a managed issue's threads (lead, implement, review or e2e): the end of its conversation, its session status, the shared worktree path and the issue's recorded review, merge, deployment and e2e results.",
+      "Team leader: read one of a managed issue's threads (lead, implement, review or e2e): the end of its conversation, its session status, the shared worktree path, the messages queued for it that have not started yet, and the issue's recorded review, merge, deployment and e2e results.",
     parameters: Schema.Struct({ thread }),
     success: Schema.Struct({
       task: AssistantTask,
       transcript: Schema.Array(Schema.Struct({ role: Schema.String, text: Schema.String })),
       sessionStatus: Schema.String,
       worktreePath: Schema.NullOr(Schema.String),
+      queued: Schema.Array(
+        Schema.Struct({ queuedAt: Schema.String, preview: Schema.String }),
+      ).annotate({
+        description:
+          "Messages T3 queued for this thread that have not started a turn yet, oldest first: each starts once the issue's running turn ends.",
+      }),
     }),
     failure,
     dependencies,
@@ -102,8 +120,22 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_request_review", {
     description:
-      "Implementation thread only: hand your committed, pushed work to the issue's code reviewer. Say what changed, how you verified it, the PR, and what deserves a close look. The reviewer works in this worktree, so end your turn and do not edit files until its verdict arrives here.",
-    parameters: Schema.Struct({ message: text }),
+      "Implementation thread only: hand your committed, pushed work to the issue's code reviewer. Say what changed, how you verified it, the PR, and what deserves a close look, and give testNotes and planChanged for the e2e tester on every request. The reviewer works in this worktree, so end your turn and do not edit files until its verdict arrives here.",
+    parameters: Schema.Struct({
+      message: text,
+      testNotes: Schema.optionalKey(
+        text.annotate({
+          description:
+            "For the e2e tester: what the change does now for a user, the pages, endpoints and flows to test, and the data they need. Required.",
+        }),
+      ),
+      planChanged: Schema.optionalKey(
+        Schema.Boolean.annotate({
+          description:
+            "true when the work differs from the team leader's brief in a way the e2e test depends on (a different page, flow or data). The leader then revises the test plan.",
+        }),
+      ),
+    }),
     success: AssistantTask,
     failure,
     dependencies,
@@ -141,7 +173,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_verify_staging", {
     description:
-      "Team leader, after the implementer reports the merge: check the saved deployment targets or custom check. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts the update on the Linear issue; in staging mode call assistant_start_e2e next, and in worktree mode this is the delivery: T3 then puts the issue in review. While staging is still deploying T3 watches it for you and messages you when it is verified or fails, so end your turn; a deployment that failed comes back here for you to decide.",
+      "Team leader, after the implementer reports the merge: check the saved deployment targets or custom check. T3 runs this check itself when the merge is reported on an issue taken with an e2e plan, and messages you when it fails; call it by hand to check again, for example once a failed deployment is fixed. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts the update on the Linear issue; in staging mode T3 then starts the tester with your planned brief (call assistant_start_e2e yourself for an issue taken without an e2e plan), and in worktree mode this is the delivery: T3 then puts the issue in review. While staging is still deploying T3 watches it for you and messages you when it fails (or, for an issue taken without an e2e plan, when it is verified), so end your turn; a deployment that failed comes back here for you to decide.",
     parameters: Schema.Struct({
       targetIds: Schema.optionalKey(Schema.Array(text)),
     }),
@@ -155,7 +187,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_start_e2e", {
     description:
-      "Team leader: start (or rerun) the issue's e2e tester, on staging after assistant_verify_staging succeeds, or in the team's worktree on the approved commit before the merge when the project is set up that way. The brief gives the tester the pages or endpoints affected, the data it needs and what to clean up; T3 gives it the acceptance criteria you listed when you took the issue. The tester reports one result per criterion with screenshots. End your turn afterward.",
+      "Team leader: start (or rerun) the issue's e2e tester, on staging once the deploy is verified, or in the team's worktree on the approved commit before the merge when the project is set up that way. T3 starts the tester itself with the e2e brief you planned when taking the issue; use this to rerun it after a failure, or when the implementer reports the plan changed, with a revised brief or the original one. The brief gives the tester the pages or endpoints affected, the data it needs and what to clean up; T3 adds the acceptance criteria you listed and the implementer's test notes. The tester reports one result per criterion with screenshots. End your turn afterward.",
     parameters: Schema.Struct({ brief: text }),
     success: AssistantTask,
     failure,
@@ -222,9 +254,13 @@ const verifyNote = (result: {
 }) => {
   if (result.outcome === "watching")
     return `Staging is still deploying: ${result.task.deployWait?.detail ?? "the deploy has not landed yet"}. T3 checks every minute for up to 45 minutes and messages you when it is verified or fails. End your turn.`;
-  return assistantTaskE2eEnvironment(result.task) === "worktree"
-    ? "Verified: the issue is delivered and in review. End your turn."
-    : "Verified. Start the e2e check with assistant_start_e2e.";
+  if (assistantTaskE2eEnvironment(result.task) === "worktree")
+    return "Verified: the issue is delivered and in review. End your turn.";
+  if (result.task.e2ePlan && result.task.stage === "e2e")
+    return "Verified. T3 started the e2e tester with the brief you planned. End your turn.";
+  if (result.task.e2ePlan)
+    return "Verified, but T3 did not start the e2e tester: its message to you says why, and arrives when you end your turn. Then start it with assistant_start_e2e.";
+  return "Verified. Start the e2e check with assistant_start_e2e.";
 };
 
 const scope = Effect.gen(function* () {
@@ -249,6 +285,12 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         caller,
         input.brief.trim(),
         input.criteria.map((criterion) => criterion.trim()),
+        {
+          brief: input.e2e.brief.trim(),
+          ...(input.e2e.targetIds
+            ? { targetIds: input.e2e.targetIds.map((id) => id.trim()).filter(Boolean) }
+            : {}),
+        },
       );
     }),
   assistant_decline_issue: (input) =>
@@ -274,7 +316,10 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_request_review: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.requestReview(caller, input.message.trim());
+      return yield* service.requestReview(caller, input.message.trim(), {
+        ...(input.testNotes !== undefined ? { testNotes: input.testNotes.trim() } : {}),
+        ...(input.planChanged !== undefined ? { planChanged: input.planChanged } : {}),
+      });
     }),
   assistant_submit_review: (input) =>
     Effect.gen(function* () {
