@@ -441,3 +441,64 @@ const invocation = {
   capabilities: new Set(["linear"] as const),
   issuedAt: 1,
 };
+
+it.effect("adding a project note answers whether it was new, and refuses a long one", () =>
+  Effect.gen(function* () {
+    const notes: string[] = [];
+    const layer = McpServer.toolkit(AssistantToolkit).pipe(
+      Layer.provide(AssistantToolkitHandlers),
+      Layer.provideMerge(
+        Layer.mock(DeveloperAssistant)({
+          addProjectNoteFromThread: (_caller, text) =>
+            Effect.sync(() => {
+              const added = !notes.includes(text);
+              if (added) notes.push(text);
+              return {
+                added,
+                note: {
+                  id: "note",
+                  projectId: ProjectId.make("project"),
+                  text,
+                  role: "e2e" as const,
+                  taskId: "task",
+                  issueIdentifier: "APP-1",
+                  createdAt: "2026-09-17T00:00:00.000Z",
+                },
+              };
+            }),
+        }),
+      ),
+      Layer.provideMerge(McpServer.McpServer.layer),
+    );
+    yield* Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (text: string) =>
+        server
+          .callTool({ name: "assistant_add_note", arguments: { text } })
+          .pipe(Effect.provideService(McpInvocationContext, invocation));
+      const textOf = (result: McpSchema.CallToolResult) =>
+        result.content[0]?.type === "text" ? result.content[0].text : "";
+      const fact = "Staging has no Search Console data.";
+      assert.include(textOf(yield* call(fact)), "Later teams of this project see it");
+      assert.include(textOf(yield* call(fact)), "Already noted, so nothing was added");
+      const long = yield* call("x".repeat(301)).pipe(Effect.flip);
+      assert.equal(long._tag, "InvalidParams");
+      assert.deepEqual(notes, [fact]);
+    }).pipe(
+      Effect.provide(layer),
+      Effect.provideService(
+        McpSchema.McpServerClient,
+        McpSchema.McpServerClient.of({
+          clientId: 1,
+          protocolVersion: "2025-06-18",
+          initializePayload: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "assistant-test", version: "1" },
+          },
+          getClient: Effect.die("unused"),
+        }),
+      ),
+    );
+  }).pipe(Effect.scoped),
+);

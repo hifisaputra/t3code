@@ -23,6 +23,7 @@ import {
   assistantTaskHoldsProject,
   assistantTaskThreadId,
   type AssistantE2eCheck,
+  type AssistantProject,
   type AssistantProjectConfig,
   type AssistantTask,
   type LinearIssueDetail,
@@ -60,6 +61,7 @@ import ParallelMigration from "../persistence/Migrations/055_AssistantParallelIs
 import UsageLimitMigration from "../persistence/Migrations/056_AssistantUsageLimit.ts";
 import RetireChatMigration from "../persistence/Migrations/057_RetireAssistantCoordinator.ts";
 import LinearRepliesMigration from "../persistence/Migrations/059_AssistantLinearReplies.ts";
+import ProjectNotesMigration from "../persistence/Migrations/060_AssistantProjectNotes.ts";
 import * as Assistant from "./DeveloperAssistant.ts";
 import { AssistantEvidence } from "./AssistantEvidence.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
@@ -542,6 +544,7 @@ function harness() {
     yield* UsageLimitMigration;
     yield* RetireChatMigration;
     yield* LinearRepliesMigration;
+    yield* ProjectNotesMigration;
     return yield* make;
   });
   /** A configured, running project; overrides change the setup it runs with. */
@@ -4946,4 +4949,149 @@ it.effect("choosing no test after a failed run on staging delivers while the lea
     assert.include(delivered.reviewInstructions, "No e2e test ran");
     assert.deepEqual(h.transitions, ["review"]);
   }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+const noteTexts = (board: { readonly projects: ReadonlyArray<AssistantProject> }) =>
+  (board.projects[0]?.notes ?? []).map((note) => note.text);
+
+it.effect(
+  "project notes reach every role's first message, until a saved revision absorbs them",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      const service = yield* h.initialize;
+      yield* service.configure(config);
+      yield* service.addProjectNote({
+        projectId: config.projectId,
+        text: "Staging has no Search Console data; use local project 9585662.",
+      });
+      yield* service.control({ projectId: config.projectId, action: "start" });
+      const team = yield* activeTask(service);
+      yield* service.deliver();
+      assert.include(
+        turnsOf(h, leadOf(team))[0],
+        "Known about this project (from earlier teams):\n- Staging has no Search Console data; use local project 9585662.",
+      );
+      // A note the leader writes reaches the threads started after it.
+      const added = yield* service.addProjectNoteFromThread(
+        leadOf(team),
+        "Sign in on staging as qa@example.test.",
+      );
+      assert.isTrue(added.added);
+      assert.deepInclude(added.note, {
+        role: "lead",
+        taskId: team.id,
+        issueIdentifier: team.issue.identifier,
+      });
+      const both =
+        "- Staging has no Search Console data; use local project 9585662.\n- Sign in on staging as qa@example.test.";
+      const taken = yield* takeTask(h, service, team);
+      yield* service.deliver();
+      assert.include(turnsOf(h, taken.threadId)[0], both);
+      yield* reachMerge(h, service, taken);
+      assert.include(turnsOf(h, assistantTaskThreadId(taken, "review"))[0], both);
+      yield* leadToE2e(h, service, taken);
+      const tester = assistantTaskThreadId(taken, "e2e");
+      assert.include(turnsOf(h, tester)[0], both);
+      // Later turns of a thread carry no notes: its first message had them.
+      assert.notInclude(turnsOf(h, leadOf(taken)).at(-1), "Known about this project");
+
+      // A revision is shown the open notes; saving it absorbs exactly those.
+      yield* service.review({ taskId: taken.id, action: "skip", feedback: "" });
+      yield* service.control({ projectId: config.projectId, action: "pause" });
+      const draft = yield* service.beginSetup(setupInput);
+      const read = (yield* service.getSetup(draft.threadId)).instructions;
+      assert.include(read, "Project notes from earlier teams:");
+      assert.include(read, "- Sign in on staging as qa@example.test. (APP-1, lead, ");
+      assert.include(read, "(added by the person, ");
+      h.finish(draft.threadId);
+      const proposed = yield* service.proposeSetup(
+        draft.threadId,
+        setupPlan,
+        "Folded the notes in",
+      );
+      // Written after the proposal was made, so the save leaves it open.
+      yield* service.addProjectNote({
+        projectId: config.projectId,
+        text: "The nightly import runs at 02:00 UTC.",
+      });
+      const saved = yield* service.resolveSetup({
+        threadId: draft.threadId,
+        action: "save",
+        revision: proposed.revision,
+      });
+      assert.deepEqual(noteTexts(saved), ["The nightly import runs at 02:00 UTC."]);
+      yield* service.control({ projectId: config.projectId, action: "start" });
+      yield* service.scan();
+      const next = yield* activeTask(service);
+      assert.notEqual(next.id, taken.id);
+      yield* service.deliver();
+      const lead = turnsOf(h, leadOf(next))[0];
+      assert.include(
+        lead,
+        "Known about this project (from earlier teams):\n- The nightly import runs at 02:00 UTC.",
+      );
+      assert.notInclude(lead, "Search Console");
+    }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect(
+  "notes are short, not repeated, capped at 20, and only for leader, worker and tester",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      const { service } = yield* h.setup;
+      const team = yield* activeTask(service);
+      const first = yield* service.addProjectNoteFromThread(
+        assistantTaskThreadId(team, "e2e"),
+        "Staging  has no Search Console data.",
+      );
+      assert.equal(first.note.role, "e2e");
+      // The same fact in other case and spacing comes back as the open note.
+      const again = yield* service.addProjectNoteFromThread(
+        team.threadId,
+        "staging has no\nsearch console data.",
+      );
+      assert.isFalse(again.added);
+      assert.equal(again.note.id, first.note.id);
+      const repeated = yield* service
+        .addProjectNote({
+          projectId: config.projectId,
+          text: "STAGING HAS NO SEARCH CONSOLE DATA.",
+        })
+        .pipe(Effect.flip);
+      assert.equal(repeated.detail, "The project already has this note.");
+      const long = yield* service
+        .addProjectNoteFromThread(leadOf(team), "x".repeat(301))
+        .pipe(Effect.flip);
+      assert.include(long.detail, "at most 300 characters; this one is 301");
+      for (const caller of [assistantTaskThreadId(team, "review"), ThreadId.make("unrelated")]) {
+        const refused = yield* service
+          .addProjectNoteFromThread(caller, "The reviewer found a fact.")
+          .pipe(Effect.flip);
+        assert.include(refused.detail, "Only a team's leader, implementation worker or e2e tester");
+      }
+      for (let n = 2; n <= 20; n++)
+        yield* service.addProjectNote({ projectId: config.projectId, text: `Fact number ${n}.` });
+      const full = yield* service
+        .addProjectNoteFromThread(leadOf(team), "One fact too many.")
+        .pipe(Effect.flip);
+      assert.include(full.detail, "Name this fact in your report or final message instead");
+      const fullForPerson = yield* service
+        .addProjectNote({ projectId: config.projectId, text: "One fact too many." })
+        .pipe(Effect.flip);
+      assert.include(fullForPerson.detail, "Delete one");
+      // A repeat of an open note is still not an error once the list is full.
+      assert.isFalse(
+        (yield* service.addProjectNoteFromThread(leadOf(team), "Fact number 2.")).added,
+      );
+      // Deleting one makes room again; deleting it twice is not an error.
+      const board = yield* service.deleteProjectNote({ noteId: first.note.id });
+      assert.lengthOf(board.projects[0]?.notes ?? [], 19);
+      assert.notInclude(noteTexts(board), "Staging  has no Search Console data.");
+      yield* service.deleteProjectNote({ noteId: first.note.id });
+      const added = yield* service.addProjectNoteFromThread(leadOf(team), "One fact too many.");
+      assert.isTrue(added.added);
+      assert.equal(noteTexts(yield* service.board(null)).at(-1), "One fact too many.");
+    }).pipe(Effect.provide(database()), Effect.scoped),
 );

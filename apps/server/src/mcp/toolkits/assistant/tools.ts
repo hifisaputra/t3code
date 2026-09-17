@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
 import {
+  ASSISTANT_PROJECT_NOTES,
   AssistantCriteria,
   AssistantDecision,
   AssistantE2eCheck,
@@ -267,6 +268,22 @@ export const AssistantToolkit = Toolkit.make(
     failure,
     dependencies,
   }),
+  Tool.make("assistant_add_note", {
+    description:
+      'Team leader, implementation worker or e2e tester: write down a fact about this project or its environments that a later team would otherwise have to rediscover, for example "staging has no Search Console data, so Search Visibility cannot be checked there; use local projects 9585662 or 10137794". Not issue progress (that goes in your report or handoff) and not code style (that belongs in the repository\'s docs). Every later team of the project sees the open notes in its first message, until a setup revision folds them into the project instructions. One fact per note, at most 300 characters. A note that repeats an open one is not added again. A project keeps at most 20 open notes: when the list is full the call fails, and the fact goes in your report or final message instead.',
+    parameters: Schema.Struct({
+      text: Schema.String.check(
+        Schema.isNonEmpty(),
+        Schema.isMaxLength(ASSISTANT_PROJECT_NOTES.maxLength),
+      ).annotate({
+        description:
+          "The fact, in one or two sentences a later team can act on: what holds, where, and what to do about it.",
+      }),
+    }),
+    success: Schema.String,
+    failure,
+    dependencies,
+  }),
   Tool.make("assistant_wait", {
     description:
       "Team leader: wait for external progress, such as CI or a staging deployment, without polling in the agent. Supply a concrete reason and end your turn. T3 wakes you in about a minute. Use assistant_ask_decision instead for a lasting blocker requiring a person.",
@@ -400,6 +417,14 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
           caption: shot.caption.trim(),
         })),
       });
+    }),
+  assistant_add_note: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      const { note, added } = yield* service.addProjectNoteFromThread(caller, input.text);
+      return added
+        ? "Noted. Later teams of this project see it in their first message."
+        : `Already noted, so nothing was added. The open note reads: ${note.text}`;
     }),
   assistant_wait: (input) =>
     Effect.gen(function* () {

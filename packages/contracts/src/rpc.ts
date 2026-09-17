@@ -4,6 +4,8 @@ import {
   AssistantBoard,
   AssistantControlInput,
   AssistantSetE2eDepthInput,
+  AssistantAddProjectNoteInput,
+  AssistantDeleteProjectNoteInput,
   AssistantProjectConfig,
   AssistantReviewInput,
   AssistantDispatchInput,
@@ -450,6 +452,8 @@ export const WS_METHODS = {
   assistantReview: "assistant.review",
   assistantDispatch: "assistant.dispatch",
   assistantSetE2eDepth: "assistant.setE2eDepth",
+  assistantAddProjectNote: "assistant.addProjectNote",
+  assistantDeleteProjectNote: "assistant.deleteProjectNote",
   assistantSubscribe: "assistant.subscribe",
 
   // Streaming subscriptions
@@ -1462,6 +1466,16 @@ export const WsRpcGroup = RpcGroup.make(
   }),
   Rpc.make(WS_METHODS.assistantSetE2eDepth, {
     payload: AssistantSetE2eDepthInput,
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantAddProjectNote, {
+    payload: AssistantAddProjectNoteInput,
+    success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantDeleteProjectNote, {
+    payload: AssistantDeleteProjectNoteInput,
     success: AssistantBoard,
     error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
   }),

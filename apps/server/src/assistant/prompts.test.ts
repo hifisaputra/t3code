@@ -312,3 +312,50 @@ describe("e2e depth", () => {
     expect(brief).toContain("3. The CSV names each column.");
   });
 });
+
+describe("project notes", () => {
+  const notes = [
+    { text: "Staging has no Search Console data; use local project 9585662." },
+    { text: "The admin account on staging is admin@example.test." },
+  ];
+  const prompts = {
+    lead: leadInstructions(config, task, notes),
+    implement: workerInstructions(config, task, notes),
+    review: reviewerInstructions(config, task, notes),
+    e2e: e2eInstructions(config, task, "/evidence/task", "Open the report.", notes),
+  };
+
+  it("lists the open notes after the project instructions in every role's first message", () => {
+    for (const [role, prompt] of Object.entries(prompts)) {
+      const section = prompt.indexOf(
+        "Known about this project (from earlier teams):\n- Staging has no Search Console data; use local project 9585662.\n- The admin account on staging is admin@example.test.",
+      );
+      expect(section, role).toBeGreaterThan(prompt.indexOf("Project instructions:"));
+      expect(section, role).toBeGreaterThan(prompt.indexOf(`${role.toUpperCase()} SECTION`));
+    }
+  });
+
+  it("has the leader and tester check the notes first, and the writing roles add them", () => {
+    expect(prompts.lead).toContain(
+      'Check "Known about this project" below before asking the person',
+    );
+    expect(prompts.e2e).toContain(
+      'Check "Known about this project" below before writing humanChecks or asking the person',
+    );
+    for (const prompt of [prompts.lead, prompts.implement, prompts.e2e])
+      expect(prompt).toContain("add it with assistant_add_note");
+    // The reviewer reads the notes but has no tool to write one.
+    expect(prompts.review).not.toContain("assistant_add_note");
+  });
+
+  it("leaves the section and the check out when the project has no notes", () => {
+    for (const prompt of [
+      leadInstructions(config, task),
+      workerInstructions(config, task),
+      reviewerInstructions(config, task),
+      e2eInstructions(config, task, "/evidence/task", "Open the report."),
+    ]) {
+      expect(prompt).not.toContain("Known about this project");
+    }
+  });
+});

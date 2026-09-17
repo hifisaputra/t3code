@@ -27,6 +27,7 @@ import Migration from "../persistence/Migrations/052_DeveloperAssistant.ts";
 import SetupMigration from "../persistence/Migrations/053_AssistantSetup.ts";
 import UsageLimitMigration from "../persistence/Migrations/056_AssistantUsageLimit.ts";
 import RetireChatMigration from "../persistence/Migrations/057_RetireAssistantCoordinator.ts";
+import ProjectNotesMigration from "../persistence/Migrations/060_AssistantProjectNotes.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 import { isValidBranchName, makeSetup, validateSetupPlan } from "./AssistantSetup.ts";
 
@@ -235,6 +236,7 @@ const harness = (options?: { workspaceRoot?: string; claudeHome?: string }) =>
     yield* SetupMigration;
     yield* UsageLimitMigration;
     yield* RetireChatMigration;
+    yield* ProjectNotesMigration;
     const commands: OrchestrationCommand[] = [];
     const seen = new Set<string>();
     const threads = new Map<ThreadId, OrchestrationThreadShell>();
@@ -402,5 +404,49 @@ it.effect("shows a revision what recent deliveries left for a person to check", 
     assert.include(instructions, "- Check the welcome email arrives.");
     // Newest first, so the setup reads the latest delivery's checks at the top.
     assert.isBelow(instructions.indexOf("APP-2:"), instructions.indexOf("APP-1:"));
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("saving a revision absorbs the notes its proposal was made from, and no others", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const h = yield* harness();
+    const addNote = (id: string, text: string) =>
+      sql`INSERT INTO assistant_project_notes (id, project_id, text, role, task_id, issue_identifier, created_at)
+        VALUES (${id}, ${project.id}, ${text}, 'e2e', 'task-1', 'APP-1', ${timestamp})`;
+    const open = () =>
+      sql<{
+        id: string;
+      }>`SELECT id FROM assistant_project_notes WHERE absorbed_at IS NULL ORDER BY id`.pipe(
+        Effect.map((rows) => rows.map((row) => row.id)),
+      );
+    const draft = yield* h.setup.begin(preferences);
+    assert.notInclude(
+      (yield* h.setup.read(draft.threadId)).instructions,
+      "Project notes from earlier teams",
+    );
+    yield* addNote("a", "Staging has no Search Console data.");
+    const instructions = (yield* h.setup.read(draft.threadId)).instructions;
+    assert.include(
+      instructions,
+      "Project notes from earlier teams:\n- Staging has no Search Console data. (APP-1, e2e, 2026-09-12)",
+    );
+    assert.include(instructions, "Fold each one that still holds into the instruction section");
+    // Added after the conversation last read the notes: the proposal never saw it.
+    yield* addNote("b", "The nightly import runs at 02:00 UTC.");
+    const proposed = yield* h.setup.propose(
+      draft.threadId,
+      plan,
+      "Folded in the Search Console gap.",
+    );
+    // Read again after the proposal, without proposing again: still not the proposal's.
+    yield* addNote("c", "Sign in as qa@example.test.");
+    yield* h.setup.read(draft.threadId);
+    yield* h.setup.resolve({
+      threadId: draft.threadId,
+      action: "save",
+      revision: proposed.revision,
+    });
+    assert.deepEqual(yield* open(), ["b", "c"]);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );

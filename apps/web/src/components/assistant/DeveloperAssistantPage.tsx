@@ -36,6 +36,7 @@ import { SidebarInset, SidebarTrigger } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { AssistantProjectCard, AssistantSetupCard } from "./AssistantProjectCard";
+import { AssistantProjectNotes } from "./AssistantProjectNotes";
 import { AssistantSetupDialog } from "./AssistantSetupDialog";
 import { AssistantSetupSheet } from "./AssistantSetupReview";
 import { inboxElementId, InboxItemCard, type InboxContext } from "./AssistantInbox";
@@ -291,6 +292,22 @@ function AssistantEnvironment({ environment }: { environment: EnvironmentPresent
                 />
               </section>
             ) : null}
+
+            {data.projects.map((project) => {
+              const label = projectLabel(project.config.projectId);
+              return (
+                <section
+                  key={project.config.projectId}
+                  aria-label={label ? `Project notes for ${label}` : "Project notes"}
+                  className="flex flex-col gap-2"
+                >
+                  <SectionHeading count={project.notes?.length ?? 0}>
+                    {label ? `Project notes · ${label}` : "Project notes"}
+                  </SectionHeading>
+                  <AssistantProjectNotes environmentId={environmentId} project={project} />
+                </section>
+              );
+            })}
 
             {history.length > 0 ? (
               <section aria-label="History" className="flex flex-col gap-2">

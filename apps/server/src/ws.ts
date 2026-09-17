@@ -2153,6 +2153,16 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.assistantDispatch, developerAssistant.dispatch(input)),
         [WS_METHODS.assistantSetE2eDepth]: (input) =>
           observeRpcEffect(WS_METHODS.assistantSetE2eDepth, developerAssistant.setE2eDepth(input)),
+        [WS_METHODS.assistantAddProjectNote]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.assistantAddProjectNote,
+            developerAssistant.addProjectNote(input),
+          ),
+        [WS_METHODS.assistantDeleteProjectNote]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.assistantDeleteProjectNote,
+            developerAssistant.deleteProjectNote(input),
+          ),
         [WS_METHODS.assistantSubscribe]: () =>
           observeRpcStream(WS_METHODS.assistantSubscribe, developerAssistant.stream),
         [WS_METHODS.linearWorkspace]: (_input) =>

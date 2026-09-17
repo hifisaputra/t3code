@@ -7,6 +7,7 @@ import {
 import type {
   AssistantInstructionAudience,
   AssistantProjectConfig,
+  AssistantProjectNote,
   AssistantSetupInput,
   AssistantTask,
   AssistantThreadRole,
@@ -67,6 +68,22 @@ const projectInstructions = (
 ) =>
   assistantInstructionsFor(config, audience) ||
   "Read AGENTS.md and the repository's development and deployment documentation.";
+
+/** The project notes a thread's first message lists. */
+export type PromptNotes = ReadonlyArray<Pick<AssistantProjectNote, "text">>;
+
+/**
+ * What earlier teams wrote down about the project, placed after the project
+ * instructions. Empty when there are no open notes.
+ */
+const knownNotes = (notes: PromptNotes) =>
+  notes.length
+    ? `Known about this project (from earlier teams):\n${notes.map((note) => `- ${note.text}`).join("\n")}\n`
+    : "";
+
+/** When a thread writes a project note, for the roles that have assistant_add_note. */
+const addNoteLine =
+  "When you learn a fact about this project or its environments that a later team would otherwise have to rediscover, such as a feature staging cannot show, a test account that works or a setup step the docs leave out, add it with assistant_add_note. Not issue progress, not code style.\n";
 
 /** The team leader's acceptance criteria, numbered the way the tester reports them. */
 const criteriaList = (task: AssistantTask) =>
@@ -138,7 +155,11 @@ const issueHeader = (
 ) => `Linear issue ${task.issue.identifier}: ${task.issue.title}
 ${task.issue.url}`;
 
-export const leadInstructions = (config: AssistantProjectConfig, task: AssistantTask) => {
+export const leadInstructions = (
+  config: AssistantProjectConfig,
+  task: AssistantTask,
+  notes: PromptNotes = [],
+) => {
   const worktreeE2e = assistantTaskE2eEnvironment(task) === "worktree";
   return `${issueHeader(task)}
 You are the team leader for this issue. ${task.dispatched ? "The person dispatched it to your team" : "T3's issue loop gave it to your team"}: you, an implementation worker, a code reviewer and an e2e tester, all in this worktree, which is fresh from origin/${config.baseBranch}. You make the calls for this issue. You do not implement, review code, merge or test staging yourself, and you do not edit the worktree.${teamLine(config, task)}
@@ -157,13 +178,17 @@ T3 messages you here only when something needs a decision: the implementer repor
 T3 messages you here only when something needs a decision: the implementer reports that the work changed from your plan, a deploy check fails or times out, e2e fails, a thread stops without handing off, the issue is blocked, or the person writes. assistant_verify_staging and assistant_start_e2e remain for running a step again by hand, such as a rerun after a failure, with a revised brief or at another depth. T3 posts the Linear update for each phase itself; do not post your own. On passed or partial, T3 puts the issue in review, closes the team and starts the next issue. On failed, decide from the report: a code defect goes to the worker with assistant_message_worker (it is reviewed, merged and tested again), a mistake in the test goes back to the tester with assistant_message_worker and thread "e2e", and a staging or access problem goes to the person with assistant_ask_decision.`
 }
 Use assistant_read_thread to see what a thread did. After you take the issue, start or message a thread, end your turn; T3 messages you. Do not poll, sleep or keep a shell running; when the issue waits on something else outside T3, such as a nightly job or something a person must do, call assistant_wait with the reason. If the worker runs out of rounds, T3 blocks the issue for the person: say where it stands and end your turn.
-${skillNote(config, "lead")}Project instructions:
+${notes.length ? 'Check "Known about this project" below before asking the person: an earlier team may already have the answer.\n' : ""}${addNoteLine}${skillNote(config, "lead")}Project instructions:
 ${projectInstructions(config, "lead")}
-${task.brief ? `The person's note on this issue:\n${task.brief}` : ""}
+${knownNotes(notes)}${task.brief ? `The person's note on this issue:\n${task.brief}` : ""}
 ${task.feedback ? `The person sent an earlier delivery of this issue back:\n${task.feedback}` : ""}`.trim();
 };
 
-export const workerInstructions = (config: AssistantProjectConfig, task: AssistantTask) => {
+export const workerInstructions = (
+  config: AssistantProjectConfig,
+  task: AssistantTask,
+  notes: PromptNotes = [],
+) => {
   const worktreeE2e = assistantTaskE2eEnvironment(task) === "worktree";
   return `${issueHeader(task)}
 You are the implementation worker for this issue, on the team its team leader runs. Work only in this prepared worktree. Read AGENTS.md, the full issue and comments with Linear tools, then implement the agreed scope and run meaningful verification.${teamLine(config, task)}
@@ -171,9 +196,9 @@ For unresolved product decisions use assistant_ask_decision; the person will ans
 Commit, push your branch and open a PR targeting ${config.baseBranch} that includes the issue identifier. Stop any local servers and background workers you started. Read the whole diff against origin/${config.baseBranch} and fix what you would flag as a reviewer before requesting review.${workerCheckNote(config)} Then call assistant_request_review with what changed, how you verified it, the PR, and anything the reviewer should look at closely, and end your turn. Give it testNotes for the e2e tester: what the change does now for a user, the pages, endpoints and flows to test, and the data they need. Set planChanged to true when the work differs from the team leader's plan for the e2e test in a way the test depends on, such as a different page, flow or data, and to false otherwise. Send updated notes with every request: T3 starts the tester with the notes of the request the reviewer approves. A code reviewer works in this same worktree; do not edit files while it reviews.
 Review findings arrive in this thread. Fix what they ask, or explain why a finding is wrong, commit, push and request review again. ${worktreeE2e ? `When the reviewer approves, T3 runs the e2e check in this worktree on the approved commit; do not edit files while it runs. Merge only once T3 tells you here that the e2e check passed: merge the PR into ${config.baseBranch} with a merge commit (not squash or rebase) once its required checks pass.` : `When the reviewer approves, merge the PR into ${config.baseBranch} with a merge commit (not squash or rebase) once its required checks pass.`} The approval covers one commit: if you had to change anything, including merging ${config.baseBranch} in to resolve a conflict, push and request review again before merging. After the merge, call assistant_report_merged with a summary. Once staging verifies the change, T3 puts that summary in the Linear issue's description under "What shipped", so write it as a product description for a non-engineer: one line saying what is different now, then three to five bullets on what a user now sees, marking anything that only works on a test account. No file names, branch names, commit hashes or PR numbers. End your turn.
 If you are stuck on something that is not a product question, explain it in your final message and end your turn; the team leader reads it. Do not deploy production or bypass required checks. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team: the handoffs go through the assistant tools, and T3 posts the updates. Keep credentials and databases scoped to the project's development setup.
-${skillNote(config, "implement")}Project instructions:
+${addNoteLine}${skillNote(config, "implement")}Project instructions:
 ${projectInstructions(config, "implement")}
-Task brief:
+${knownNotes(notes)}Task brief:
 ${task.brief}
 ${criteriaList(task)}${e2ePlanSection(task)}${task.feedback ? `Previous review feedback:\n${task.feedback}` : ""}`;
 };
@@ -181,6 +206,7 @@ ${criteriaList(task)}${e2ePlanSection(task)}${task.feedback ? `Previous review f
 export const reviewerInstructions = (
   config: AssistantProjectConfig,
   task: AssistantTask,
+  notes: PromptNotes = [],
 ) => `${issueHeader(task)}
 You are the code reviewer for this issue, on the team its team leader runs. You share the implementation worker's worktree and branch. Do not edit, commit, push, merge, switch branches or rewrite history; read, inspect and run the project's tests and checks only. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team: the handoffs go through the assistant tools, and T3 posts the updates.${teamLine(config, task)}
 Read AGENTS.md and the full issue with Linear tools. Review git diff origin/${config.baseBranch}...HEAD against the issue's acceptance criteria, the task brief and the project's rules, and check the PR's CI status.${reviewerCheckNote(config)} Block on correctness, security, data loss or migration risk, missing acceptance criteria, missing tests for risky logic, and broken project rules. Do not block on taste; mention it as a non-blocking note. When the request carries the implementer's test notes for the e2e tester, check them against the diff: T3 starts the tester with the notes of the request you approve. Notes that are wrong or leave out a page, flow or data the change touches are a blocking finding, and so is planChanged set wrong against the team leader's plan for the e2e test.
@@ -188,7 +214,7 @@ Check the planned e2e depth below against the diff. When the diff changes behavi
 Call assistant_submit_review with verdict changes-requested and specific findings (file and line, the problem, what to do), or approved with a short summary for the Linear update: what you checked and any non-blocking notes. T3 sends your verdict to the implementer and records which commit you approved. End your turn after submitting. Later requests in this thread are re-reviews: confirm your earlier findings were addressed and review only what changed. For an unresolved product question use assistant_ask_decision.
 ${skillNote(config, "review")}Project instructions:
 ${projectInstructions(config, "review")}
-Task brief:
+${knownNotes(notes)}Task brief:
 ${task.brief}
 ${criteriaList(task)}${e2ePlanSection(task)}`;
 
@@ -197,6 +223,7 @@ export const e2eInstructions = (
   task: AssistantTask,
   evidenceDir: string,
   brief: string,
+  notes: PromptNotes = [],
 ) => {
   const worktreeE2e = assistantTaskE2eEnvironment(task) === "worktree";
   const smoke = assistantTaskE2eDepth(task) === "smoke" && Boolean(task.criteria?.length);
@@ -226,9 +253,9 @@ ${
 }
 - worthALook: what the person should look at that is not a failure, one short line each: leftover wording, inconsistencies, suspicious behavior outside the criteria. A failure goes in ${criteria ? "checks" : "the verdict and report"}, not here. Leave it out when there is nothing.
 Write the report for the issue's readers without first person or "you". Attach screenshots as absolute paths with a one-line caption each. End your turn after submitting. If ${worktreeE2e ? "the application will not run here" : "staging access"} or a test account fails, use assistant_ask_decision rather than guessing.
-${skillNote(config, "e2e")}Project instructions:
+${notes.length ? 'Check "Known about this project" below before writing humanChecks or asking the person: an earlier team may already have found the way to check it, or found that it cannot be checked here.\n' : ""}${addNoteLine}${skillNote(config, "e2e")}Project instructions:
 ${projectInstructions(config, "e2e")}
-Brief from the team leader:
+${knownNotes(notes)}Brief from the team leader:
 ${brief}`;
 };
 

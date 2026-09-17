@@ -13,6 +13,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
+  ASSISTANT_PROJECT_NOTES,
   AssistantBoard,
   AssistantDecision,
   AssistantProjectConfig,
@@ -35,13 +36,16 @@ import {
   assistantTaskHoldsProject,
   assistantTaskThreadId,
   assistantThreadKind,
+  type AssistantAddProjectNoteInput,
   type AssistantAnswerInput,
   type AssistantCodeReview,
+  type AssistantDeleteProjectNoteInput,
   type AssistantDeployment,
   type AssistantE2eCheck,
   type AssistantE2eDepth,
   type AssistantE2ePlan,
   type AssistantE2eResult,
+  type AssistantProjectNote,
   type AssistantSetE2eDepthInput,
   type AssistantThreadRole,
   type AssistantControlInput,
@@ -99,6 +103,7 @@ import {
   workerInstructions,
 } from "./prompts.ts";
 import { makeSetup, validateSetupPlan } from "./AssistantSetup.ts";
+import { openProjectNotes, projectNoteKey } from "./projectNotes.ts";
 
 type ProjectRow = {
   project_id: string;
@@ -752,12 +757,13 @@ export const make = Effect.gen(function* () {
     return {
       setups: yield* setup.list(projectId),
       projects: yield* Effect.forEach(projects, (p) =>
-        decodeConfig(p.config).pipe(
-          Effect.map((config) => ({
+        Effect.all([decodeConfig(p.config), openProjectNotes(sql, p.project_id)]).pipe(
+          Effect.map(([config, notes]) => ({
             config,
             status: p.status,
             error: p.error,
             limitedUntil: p.limited_until,
+            notes,
           })),
         ),
       ),
@@ -1033,7 +1039,7 @@ export const make = Effect.gen(function* () {
     t: AssistantTask,
     role: AssistantThreadRole,
     message: string,
-    instructions: () => string,
+    instructions: (notes: ReadonlyArray<AssistantProjectNote>) => string,
   ) {
     const threadId = assistantTaskThreadId(t, role);
     if (role === "review" || role === "e2e") {
@@ -1077,7 +1083,13 @@ export const make = Effect.gen(function* () {
       p.project_id,
       threadId,
       `${t.id}:${role}:${newId()}`,
-      sent.length ? message : withRoleSkill(p.config, role, `${instructions()}\n\n${message}`),
+      sent.length
+        ? message
+        : withRoleSkill(
+            p.config,
+            role,
+            `${instructions(yield* openProjectNotes(sql, p.project_id))}\n\n${message}`,
+          ),
     );
   });
 
@@ -1163,6 +1175,7 @@ export const make = Effect.gen(function* () {
       },
       createdAt: yield* now,
     });
+    const notes = yield* openProjectNotes(sql, p.project_id);
     yield* sql.withTransaction(
       Effect.gen(function* () {
         yield* saveTask({ ...t, status: "working", error: null });
@@ -1170,7 +1183,7 @@ export const make = Effect.gen(function* () {
           t.projectId,
           assistantTaskThreadId(t, "lead"),
           `${t.id}:lead:start`,
-          withRoleSkill(p.config, "lead", leadInstructions(p.config, t)),
+          withRoleSkill(p.config, "lead", leadInstructions(p.config, t, notes)),
         );
       }),
     );
@@ -1581,6 +1594,7 @@ export const make = Effect.gen(function* () {
         status: "working",
         error: null,
       };
+      const notes = yield* openProjectNotes(sql, p.project_id);
       yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* saveTask(taken);
@@ -1588,7 +1602,7 @@ export const make = Effect.gen(function* () {
             t.projectId,
             t.threadId,
             `${t.id}:turn:1`,
-            withRoleSkill(p.config, "implement", workerInstructions(p.config, taken)),
+            withRoleSkill(p.config, "implement", workerInstructions(p.config, taken, notes)),
           );
         }),
       );
@@ -1744,7 +1758,9 @@ export const make = Effect.gen(function* () {
       if (role !== "implement") {
         // Creating the review thread dispatches to the engine, which stays outside SQL transactions.
         // A tester is only messaged once its run started, so it already has its instructions.
-        yield* queueRoleTurn(p, t, role, message, () => reviewerInstructions(p.config, t));
+        yield* queueRoleTurn(p, t, role, message, (notes) =>
+          reviewerInstructions(p.config, t, notes),
+        );
         return yield* saveTask({ ...t, status: "working", error: null, stage: role });
       }
       yield* sql.withTransaction(
@@ -2080,7 +2096,7 @@ export const make = Effect.gen(function* () {
         updated,
         "review",
         `${checks ? `T3 ran \`${command}\` at ${shortSha(head)}: passed.\n${checks.output.slice(-CHECK_TAIL)}\n\n` : ""}Review request from the implementer:\n${message}${testNotes ? `\n\nTest notes for the e2e tester (plan changed: ${testNotes.planChanged ? "yes" : "no"}):\n${testNotes.notes}` : ""}`,
-        () => reviewerInstructions(p.config, updated),
+        (notes) => reviewerInstructions(p.config, updated, notes),
       );
       const pullRequest = yield* taskPullRequest(updated);
       yield* sessionUpdate(updated, `review-requested:${head}:${updated.updatedAt}`, {
@@ -2543,7 +2559,7 @@ export const make = Effect.gen(function* () {
       head
         ? `New e2e run on commit ${head.slice(0, 7)} in the worktree. Save screenshots in ${directory}.\n${run}`
         : `New e2e run on the deployment of ${t.deployment!.revision.slice(0, 7)}. Save screenshots in ${directory}.\n${run}`,
-      () => e2eInstructions(p.config, updated, directory, run),
+      (notes) => e2eInstructions(p.config, updated, directory, run, notes),
     );
     yield* sessionUpdate(updated, `e2e-started:${updated.updatedAt}`, {
       type: "action",
@@ -2945,6 +2961,88 @@ export const make = Effect.gen(function* () {
     lock.withPermits(1),
     Effect.mapError(wrap),
   );
+
+  /**
+   * Record a fact about the project for later teams. A note that says what an
+   * open one already says (ignoring case and whitespace) is not added again;
+   * the open one comes back with added false. A project keeps at most 20 open
+   * notes, until a setup revision absorbs them or the person deletes some.
+   */
+  const addNote = Effect.fn("Assistant.addNote")(function* (
+    projectId: string,
+    text: string,
+    author: {
+      readonly role: AssistantProjectNote["role"];
+      readonly task: AssistantTask | null;
+    },
+  ) {
+    const trimmed = text.trim();
+    if (!trimmed) return yield* fail("Write the note: one fact a later team needs.");
+    if (trimmed.length > ASSISTANT_PROJECT_NOTES.maxLength)
+      return yield* fail(
+        `A note is at most ${ASSISTANT_PROJECT_NOTES.maxLength} characters; this one is ${trimmed.length}. Keep it to the one fact a later team needs.`,
+      );
+    return yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const open = yield* openProjectNotes(sql, projectId);
+          const key = projectNoteKey(trimmed);
+          const existing = open.find((note) => projectNoteKey(note.text) === key);
+          if (existing) return { note: existing, added: false };
+          if (open.length >= ASSISTANT_PROJECT_NOTES.maxOpen)
+            return yield* fail(
+              author.role === "person"
+                ? `The project already has ${ASSISTANT_PROJECT_NOTES.maxOpen} notes. Delete one, or revise the setup to fold them into the instructions.`
+                : `The project already has ${ASSISTANT_PROJECT_NOTES.maxOpen} notes, the most it keeps. Name this fact in your report or final message instead, so the person can add it to the project setup.`,
+            );
+          const note: AssistantProjectNote = {
+            id: newId(),
+            projectId: ProjectId.make(projectId),
+            text: trimmed,
+            role: author.role,
+            taskId: author.task?.id ?? null,
+            issueIdentifier: author.task?.issue.identifier ?? null,
+            createdAt: yield* now,
+          };
+          yield* sql`INSERT INTO assistant_project_notes (id, project_id, text, role, task_id, issue_identifier, created_at)
+          VALUES (${note.id}, ${projectId}, ${note.text}, ${note.role}, ${note.taskId}, ${note.issueIdentifier}, ${note.createdAt})`;
+          return { note, added: true };
+        }),
+      )
+      .pipe(Effect.tap(({ added }) => (added ? changed : Effect.void)));
+  });
+
+  /** A team's leader, worker or tester writes down a fact about the project for later teams. */
+  const addProjectNoteFromThread = Effect.fn("Assistant.addProjectNoteFromThread")(function* (
+    caller: ThreadId,
+    text: string,
+  ) {
+    const owner = yield* threadTask(caller);
+    if (!owner || owner.role === "review")
+      return yield* fail(
+        "Only a team's leader, implementation worker or e2e tester can add a project note.",
+      );
+    return yield* addNote(owner.task.projectId, text, { role: owner.role, task: owner.task });
+  }, Effect.mapError(wrap));
+
+  /** The person adds a project note on the board. */
+  const addProjectNote = Effect.fn("Assistant.addProjectNote")(function* (
+    input: typeof AssistantAddProjectNoteInput.Type,
+  ) {
+    const p = yield* project(input.projectId);
+    const { added } = yield* addNote(p.project_id, input.text, { role: "person", task: null });
+    if (!added) return yield* fail("The project already has this note.");
+    return yield* board(null);
+  }, Effect.mapError(wrap));
+
+  /** The person deletes a project note; one already gone is not an error. */
+  const deleteProjectNote = Effect.fn("Assistant.deleteProjectNote")(function* (
+    input: typeof AssistantDeleteProjectNoteInput.Type,
+  ) {
+    yield* sql`DELETE FROM assistant_project_notes WHERE id = ${input.noteId}`;
+    yield* changed;
+    return yield* board(null);
+  }, Effect.mapError(wrap));
 
   const review = Effect.fn("Assistant.review")(
     function* (input: typeof AssistantReviewInput.Type) {
@@ -3684,6 +3782,9 @@ export const make = Effect.gen(function* () {
     review,
     dispatch,
     setE2eDepth,
+    addProjectNote,
+    deleteProjectNote,
+    addProjectNoteFromThread,
     acceptIssue,
     declineIssue,
     readThread,

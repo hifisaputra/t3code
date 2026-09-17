@@ -23,6 +23,7 @@ import {
   previewLine,
   projectFailure,
   projectLimitHold,
+  projectNoteSource,
   projectWaitingReason,
   taskOutcome,
   teamRoleOrder,
@@ -743,5 +744,30 @@ describe("instructionSections", () => {
       ["implement", true],
       ["review", false],
     ]);
+  });
+});
+
+describe("projectNoteSource", () => {
+  const note = {
+    id: "note-1",
+    projectId,
+    text: "Staging has no Search Console data.",
+    role: "e2e" as const,
+    taskId: "task-1",
+    issueIdentifier: "SPI-141",
+    createdAt: "2026-09-17T00:00:00.000Z",
+  };
+
+  it("names the issue and the thread that wrote a team's note", () => {
+    expect(projectNoteSource(note)).toBe("SPI-141 · e2e tester");
+    expect(projectNoteSource({ ...note, role: "lead", issueIdentifier: null })).toBe(
+      "By the team leader",
+    );
+  });
+
+  it("marks the person's own notes", () => {
+    expect(
+      projectNoteSource({ ...note, role: "person", taskId: null, issueIdentifier: null }),
+    ).toBe("Added by you");
   });
 });

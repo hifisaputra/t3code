@@ -26,6 +26,7 @@ import { discoverClaudeSkills } from "../provider/Drivers/ClaudeSkills.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 import { setupInstructions } from "./prompts.ts";
+import { openProjectNotes } from "./projectNotes.ts";
 
 type SetupRow = {
   project_id: string;
@@ -35,6 +36,10 @@ type SetupRow = {
   summary: string;
   revision: number;
   proposed_after: string | null;
+  /** JSON array: the ids of every project note this conversation was shown. */
+  notes_read: string | null;
+  /** JSON array: the note ids read when the current proposal was made; a save absorbs them. */
+  proposal_notes: string | null;
 };
 const decodePreferences = Schema.decodeUnknownEffect(Schema.fromJsonString(AssistantSetupInput));
 const decodeConfig = Schema.decodeUnknownEffect(Schema.fromJsonString(AssistantProjectConfig));
@@ -43,6 +48,10 @@ const encodePreferences = Schema.encodeSync(Schema.fromJsonString(AssistantSetup
 const encodeConfig = Schema.encodeSync(Schema.fromJsonString(AssistantProjectConfig));
 const fail = (detail: string) => new DeveloperAssistantError({ detail });
 const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+const decodeNoteIds = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(Schema.String)),
+);
+const encodeNoteIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 
 /**
  * A branch name git itself would accept. The setup plan is agent-proposed and the
@@ -206,6 +215,25 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
       .join("\n");
     return `\nHuman checks from recent deliveries:\n${listed}\nEach of these is something the tester could not check itself. Turn each into a fixture, a test account, or a documented coverage gap in the e2e section.`;
   });
+  /**
+   * The notes teams wrote about the project, so a revision can fold the lasting
+   * ones into the instructions. The conversation remembers which it was shown:
+   * saving a proposal made after reading them absorbs exactly those.
+   */
+  const projectNotes = Effect.fn("Assistant.setupProjectNotes")(function* (row: SetupRow) {
+    const notes = yield* openProjectNotes(sql, row.project_id);
+    if (!notes.length) return "";
+    const read = row.notes_read ? yield* decodeNoteIds(row.notes_read) : [];
+    const ids = [...new Set([...read, ...notes.map((note) => note.id)])];
+    yield* sql`UPDATE assistant_setups SET notes_read = ${encodeNoteIds(ids)} WHERE thread_id = ${row.thread_id}`;
+    const listed = notes
+      .map(
+        (note) =>
+          `- ${note.text} (${[note.issueIdentifier, note.role === "person" ? "added by the person" : note.role, note.createdAt.slice(0, 10)].filter(Boolean).join(", ")})`,
+      )
+      .join("\n");
+    return `\nProject notes from earlier teams:\n${listed}\nEvery team's first message lists these until this revision is saved; saving it retires them. Fold each one that still holds into the instruction section of the role that needs it (a coverage gap or test account into e2e, a deploy fact into lead, a setup step into implement), or name the repository document that should carry it. Leave out the ones that no longer hold, and say in the summary what you did with each.`;
+  });
   const get = Effect.fn(function* (threadId: ThreadId) {
     const rows = yield* sql<SetupRow>`SELECT * FROM assistant_setups WHERE thread_id = ${threadId}`;
     if (!rows[0]) return yield* fail("This setup conversation is no longer active.");
@@ -217,7 +245,8 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     return yield* Effect.forEach(rows, decode);
   });
   const read = Effect.fn(function* (caller: ThreadId) {
-    const setup = yield* decode(yield* get(caller));
+    const row = yield* get(caller);
+    const setup = yield* decode(row);
     const projectId = setup.preferences.projectId;
     const configured = yield* sql<{
       config: string;
@@ -234,6 +263,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const existing = configured[0] ? yield* decodeConfig(configured[0].config) : null;
     // A revision is where the checks a person had to run become test data.
     const checks = existing ? yield* humanChecks(projectId) : "";
+    const notes = yield* projectNotes(row);
     return {
       setup,
       instructions: `${setupInstructions(
@@ -241,7 +271,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
         existing,
         inProgress.length ? inProgress.join(", ") : null,
         skills,
-      )}${checks}`,
+      )}${checks}${notes}`,
     };
   });
   const begin = Effect.fn(function* (input: AssistantSetupInput) {
@@ -296,7 +326,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
           "Wait for the setup conversation's turn to finish before changing its brief.",
         );
       yield* sql`UPDATE assistant_setups SET preferences = ${encoded}, proposal = NULL, summary = '',
-        proposed_after = NULL, revision = revision + 1 WHERE project_id = ${input.projectId}`;
+        proposed_after = NULL, proposal_notes = NULL, revision = revision + 1 WHERE project_id = ${input.projectId}`;
       row = yield* get(ThreadId.make(row.thread_id));
       revised = true;
     }
@@ -361,7 +391,8 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const thread = yield* snapshots.getThreadShellById(caller);
     if (Option.isNone(thread)) return yield* fail("The setup thread no longer exists.");
     yield* sql`UPDATE assistant_setups SET proposal = ${encodeConfig(proposal)}, summary = ${summary},
-      revision = revision + 1, proposed_after = ${thread.value.latestUserMessageAt} WHERE thread_id = ${caller}`;
+      revision = revision + 1, proposed_after = ${thread.value.latestUserMessageAt},
+      proposal_notes = notes_read WHERE thread_id = ${caller}`;
     yield* options.changed;
     return yield* decode(yield* get(caller));
   });
@@ -386,6 +417,12 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
           "The conversation continued after this proposal. Ask the assistant to update its proposal before saving.",
         );
       yield* options.configure(yield* decodeConfig(row.proposal));
+      // The proposal was written from these notes, so they stop reaching prompts.
+      // A note added after the setup last read them stays open.
+      const absorbed = row.proposal_notes ? yield* decodeNoteIds(row.proposal_notes) : [];
+      if (absorbed.length)
+        yield* sql`UPDATE assistant_project_notes SET absorbed_at = ${yield* now}
+          WHERE project_id = ${row.project_id} AND absorbed_at IS NULL AND ${sql.in("id", absorbed)}`;
     } else {
       yield* engine
         .dispatch({

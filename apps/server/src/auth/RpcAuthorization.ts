@@ -32,6 +32,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.assistantReview]: AuthOrchestrationOperateScope,
   [WS_METHODS.assistantDispatch]: AuthOrchestrationOperateScope,
   [WS_METHODS.assistantSetE2eDepth]: AuthOrchestrationOperateScope,
+  [WS_METHODS.assistantAddProjectNote]: AuthOrchestrationOperateScope,
+  [WS_METHODS.assistantDeleteProjectNote]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,

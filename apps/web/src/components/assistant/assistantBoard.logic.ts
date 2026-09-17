@@ -10,6 +10,7 @@ import {
   type AssistantInstructionAudience,
   type AssistantProject,
   type AssistantProjectConfig,
+  type AssistantProjectNote,
   type AssistantSetup,
   type AssistantTask,
   type AssistantThreadRole,
@@ -713,4 +714,18 @@ export function instructionSections(
     ),
     ...sections,
   ];
+}
+
+const NOTE_AUTHOR: Record<AssistantProjectNote["role"], string> = {
+  lead: "team leader",
+  implement: "worker",
+  e2e: "e2e tester",
+  person: "you",
+};
+
+/** Who wrote a project note, and on which issue: "SPI-141 · e2e tester", or "Added by you". */
+export function projectNoteSource(note: AssistantProjectNote): string {
+  if (note.role === "person") return "Added by you";
+  const author = NOTE_AUTHOR[note.role];
+  return note.issueIdentifier ? `${note.issueIdentifier} · ${author}` : `By the ${author}`;
 }

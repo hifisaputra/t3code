@@ -68,5 +68,13 @@ export function createDeveloperAssistantAtoms<R, E>(
       label: "assistant:set-e2e-depth",
       tag: WS_METHODS.assistantSetE2eDepth,
     }),
+    addProjectNote: createEnvironmentRpcCommand(runtime, {
+      label: "assistant:add-project-note",
+      tag: WS_METHODS.assistantAddProjectNote,
+    }),
+    deleteProjectNote: createEnvironmentRpcCommand(runtime, {
+      label: "assistant:delete-project-note",
+      tag: WS_METHODS.assistantDeleteProjectNote,
+    }),
   };
 }

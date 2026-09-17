@@ -584,6 +584,31 @@ export type AssistantDecision = typeof AssistantDecision.Type;
 export const AssistantProjectStatus = Schema.Literals(["running", "paused", "stopped"]);
 export type AssistantProjectStatus = typeof AssistantProjectStatus.Type;
 
+/** How long a project note may be, and how many open notes a project keeps. */
+export const ASSISTANT_PROJECT_NOTES = { maxLength: 300, maxOpen: 20 } as const;
+
+/** Who wrote a project note: the thread of a team that found the fact, or the person on the board. */
+export const AssistantProjectNoteRole = Schema.Literals(["lead", "implement", "e2e", "person"]);
+export type AssistantProjectNoteRole = typeof AssistantProjectNoteRole.Type;
+
+/**
+ * A fact about the project or its environments that a later team would
+ * otherwise rediscover, such as a coverage gap on staging. Every team's first
+ * message lists the open notes until a setup revision folds them into the
+ * instructions.
+ */
+export const AssistantProjectNote = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  projectId: ProjectId,
+  text: Schema.String,
+  role: AssistantProjectNoteRole,
+  /** The team that wrote it; null for the person's. */
+  taskId: Schema.NullOr(Schema.String),
+  issueIdentifier: Schema.NullOr(Schema.String),
+  createdAt: IsoDateTime,
+});
+export type AssistantProjectNote = typeof AssistantProjectNote.Type;
+
 export const AssistantProject = Schema.Struct({
   config: AssistantProjectConfig,
   status: AssistantProjectStatus,
@@ -594,6 +619,8 @@ export const AssistantProject = Schema.Struct({
    * threads are told to continue. Absent or null when no limit is in force.
    */
   limitedUntil: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
+  /** The project's open notes, oldest first; absent from servers without notes. */
+  notes: Schema.optionalKey(Schema.Array(AssistantProjectNote)),
 });
 export type AssistantProject = typeof AssistantProject.Type;
 
@@ -635,6 +662,14 @@ export const AssistantSetE2eDepthInput = Schema.Struct({
   depth: AssistantE2eDepth,
   /** For smoke: the 1-based criterion numbers to test; absent keeps the plan's, or all criteria. */
   smokeCriteria: Schema.optionalKey(Schema.Array(Schema.Int)),
+});
+/** The person adds a note about the project by hand, for later teams. */
+export const AssistantAddProjectNoteInput = Schema.Struct({
+  projectId: ProjectId,
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSISTANT_PROJECT_NOTES.maxLength)),
+});
+export const AssistantDeleteProjectNoteInput = Schema.Struct({
+  noteId: TrimmedNonEmptyString,
 });
 export const AssistantAnswerInput = Schema.Struct({
   decisionId: TrimmedNonEmptyString,
