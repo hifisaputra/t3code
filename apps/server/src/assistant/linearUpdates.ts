@@ -57,6 +57,8 @@ export function mergedComment(input: {
   readonly baseBranch: string;
   /** A worktree e2e run that already passed on the merged commit, when there was one. */
   readonly e2e?: AssistantE2eResult | null;
+  /** The issue runs no e2e test, so staging is the last step before review. */
+  readonly noE2e?: boolean;
 }): string {
   const tested = input.e2e?.environment === "worktree" && input.e2e.verdict !== "failed";
   return sections(
@@ -72,7 +74,7 @@ export function mergedComment(input: {
       pullRequestLine(input.pullRequest),
       `Reviewed commit: \`${input.merge.commit.slice(0, 7)}\``,
     ]),
-    tested
+    tested || input.noE2e
       ? "Next: staging deploy. The issue moves to review once it is verified there."
       : "Next: staging deploy, then an e2e check on staging.",
   );
@@ -100,10 +102,29 @@ const HEADLINES: Record<"staging" | "worktree", Record<AssistantE2eResult["verdi
   },
 };
 
+const SMOKE_HEADLINES: Record<
+  "staging" | "worktree",
+  Record<AssistantE2eResult["verdict"], string>
+> = {
+  staging: {
+    passed: "**✅ Smoke test passed on staging: ready to accept**",
+    partial: "**👀 Smoke test passed on staging, with checks for a person**",
+    failed: "**❌ Smoke test failed on staging: back with the team for a fix**",
+  },
+  worktree: {
+    passed:
+      "**✅ Smoke test passed in the development environment and deployed to staging: ready to accept**",
+    partial:
+      "**👀 Smoke test passed in the development environment and deployed to staging, with checks for a person**",
+    failed: "**❌ Smoke test failed in the development environment: back with the team for a fix**",
+  },
+};
+
 const RESULTS: Record<NonNullable<AssistantE2eResult["checks"]>[number]["result"], string> = {
   passed: "✅ passed",
   failed: "❌ failed",
   "not-checked": "👀 not checked",
+  skipped: "➖ not in the smoke test",
 };
 
 /** One line of text, for a table cell or a list item. */
@@ -215,10 +236,11 @@ export function e2eComment(input: {
   readonly acceptedState: string;
   /** The issue's acceptance criteria, to name the rows of the checks table. */
   readonly criteria?: ReadonlyArray<string> | null;
+  /** The run was a smoke test of some criteria rather than the full test. */
+  readonly smoke?: boolean;
 }): string {
   const { e2e } = input;
   const delivered = e2e.verdict !== "failed";
-  const accept = input.acceptedState.trim() || "a completed state";
   const worktree = e2e.environment === "worktree";
   const criteria = input.criteria ?? [];
   const checks = e2e.checks?.length && criteria.length ? e2e.checks : null;
@@ -226,7 +248,7 @@ export function e2eComment(input: {
   const commit = worktree && e2e.commit ? e2e.commit.slice(0, 7) : null;
   const notes = (e2e.worthALook ?? []).map(oneLine).filter(Boolean);
   return sections(
-    HEADLINES[worktree ? "worktree" : "staging"][e2e.verdict],
+    (input.smoke ? SMOKE_HEADLINES : HEADLINES)[worktree ? "worktree" : "staging"][e2e.verdict],
     e2e.humanChecks.length
       ? `**Check before accepting**\n\n${e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
       : null,
@@ -249,15 +271,54 @@ export function e2eComment(input: {
       ? collapsed(`Tester's full report${commit ? ` (tested commit ${commit})` : ""}`, report)
       : null,
     report && !checks
-      ? `${worktree ? `**E2E check in the worktree${commit ? ` (commit \`${commit}\`)` : ""}**` : "**E2E check on staging**"}\n\n${report}`
+      ? `${worktree ? `**${input.smoke ? "Smoke test" : "E2E check"} in the worktree${commit ? ` (commit \`${commit}\`)` : ""}**` : `**${input.smoke ? "Smoke test" : "E2E check"} on staging**`}\n\n${report}`
       : null,
+    ...deliveryFooter({ ...input, delivered }),
+  );
+}
+
+/** What closes a delivery card: where to read what shipped, how to accept, and where it runs. */
+const deliveryFooter = (input: {
+  readonly delivered: boolean;
+  readonly merge: AssistantMerge | null;
+  readonly deployment: AssistantDeployment;
+  readonly pullRequest: PullRequest;
+  readonly acceptedState: string;
+}) => {
+  const accept = input.acceptedState.trim() || "a completed state";
+  return [
     "---",
     // Delivery writes the implementer's summary into the description's "What shipped".
-    delivered && input.merge?.summary.trim() ? "What shipped is in the issue description." : null,
-    delivered
+    input.delivered && input.merge?.summary.trim()
+      ? "What shipped is in the issue description."
+      : null,
+    input.delivered
       ? `To accept, move this issue to ${accept}. To ask for changes, move it back to an earlier state and comment what should change.`
       : null,
     bullets([...deploymentLines(input.deployment), pullRequestLine(input.pullRequest)]),
+  ];
+};
+
+/**
+ * The card for an issue delivered without an e2e test, because nothing a user
+ * sees or does changed. Its first line is the verdict and says who decided.
+ */
+export function noE2eComment(input: {
+  /** Why no test ran, as the team leader or the board recorded it. */
+  readonly reason: string;
+  /** Who set the depth to none. */
+  readonly decidedBy: "lead" | "review" | "person" | undefined;
+  readonly merge: AssistantMerge | null;
+  readonly deployment: AssistantDeployment;
+  readonly pullRequest: PullRequest;
+  readonly acceptedState: string;
+}): string {
+  const reason = oneLine(input.reason).replace(/[.\s]+$/, "");
+  return sections(
+    input.decidedBy === "person"
+      ? "**No e2e test: set by the person on the board**"
+      : `**No e2e test: ${reason || "nothing a user sees changed"}** (decided by the team leader)`,
+    ...deliveryFooter({ ...input, delivered: true }),
   );
 }
 
@@ -275,7 +336,8 @@ const DELIVERED_BLOCK = /<!-- t3:delivered -->[\s\S]*?<!-- \/t3:delivered -->/;
 export function deliveredDescription(input: {
   readonly current: string | null;
   readonly merge: AssistantMerge | null;
-  readonly e2e: AssistantE2eResult;
+  /** Null when the issue was delivered without an e2e test. */
+  readonly e2e: AssistantE2eResult | null;
   readonly deployment: AssistantDeployment;
   readonly acceptedState: string;
 }): string {
@@ -287,7 +349,7 @@ export function deliveredDescription(input: {
       `Delivered to staging and waiting to be accepted. Move this issue to ${accept} to accept it.`,
       input.merge?.summary.trim() ||
         "See the developer assistant's comments below for what changed.",
-      input.e2e.humanChecks.length
+      input.e2e?.humanChecks.length
         ? `**Check before accepting**\n\n${input.e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
         : null,
       `Staging: ${link(host(input.deployment.url), input.deployment.url)}`,

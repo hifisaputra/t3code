@@ -2151,6 +2151,8 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.assistantReview, developerAssistant.review(input)),
         [WS_METHODS.assistantDispatch]: (input) =>
           observeRpcEffect(WS_METHODS.assistantDispatch, developerAssistant.dispatch(input)),
+        [WS_METHODS.assistantSetE2eDepth]: (input) =>
+          observeRpcEffect(WS_METHODS.assistantSetE2eDepth, developerAssistant.setE2eDepth(input)),
         [WS_METHODS.assistantSubscribe]: () =>
           observeRpcStream(WS_METHODS.assistantSubscribe, developerAssistant.stream),
         [WS_METHODS.linearWorkspace]: (_input) =>

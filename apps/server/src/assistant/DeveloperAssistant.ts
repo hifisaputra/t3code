@@ -30,6 +30,7 @@ import {
   assistantLinearPlan,
   assistantParallelIssues,
   assistantPicksIssues,
+  assistantTaskE2eDepth,
   assistantTaskE2eEnvironment,
   assistantTaskHoldsProject,
   assistantTaskThreadId,
@@ -38,7 +39,10 @@ import {
   type AssistantCodeReview,
   type AssistantDeployment,
   type AssistantE2eCheck,
+  type AssistantE2eDepth,
+  type AssistantE2ePlan,
   type AssistantE2eResult,
+  type AssistantSetE2eDepthInput,
   type AssistantThreadRole,
   type AssistantControlInput,
   type AssistantDispatchInput,
@@ -82,6 +86,7 @@ import {
   linearFailureDetail,
   linearFeedback,
   mergedComment,
+  noE2eComment,
   sessionNotes,
   withSessionNote,
 } from "./linearUpdates.ts";
@@ -197,6 +202,43 @@ const briefAsk = (t: AssistantTask) =>
   t.criteria?.length
     ? "a brief for the tester with the pages or endpoints affected, the data it needs and what to clean up; T3 gives the tester the acceptance criteria you listed"
     : "a brief with each acceptance criterion as a check a person could follow, the pages or endpoints affected, the data it needs and what to clean up";
+/**
+ * Why a smoke test's criterion numbers are wrong, or null when they are right:
+ * at least one, no repeats, each an acceptance criterion of the issue.
+ */
+const smokeCriteriaError = (numbers: ReadonlyArray<number>, criteriaCount: number) => {
+  if (!numbers.length)
+    return "A smoke test lists at least one acceptance criterion in smokeCriteria.";
+  if (new Set(numbers).size !== numbers.length) return "List each criterion in smokeCriteria once.";
+  const unknown = numbers.filter((n) => !Number.isInteger(n) || n < 1 || n > criteriaCount);
+  return unknown.length
+    ? `smokeCriteria are the 1-based numbers of the issue's ${criteriaCount} acceptance criteria; there is no criterion ${unknown.join(", ")}.`
+    : null;
+};
+/** A plan at another depth, keeping only the fields that depth uses. */
+const planAtDepth = (
+  plan: AssistantE2ePlan,
+  depth: AssistantE2eDepth,
+  depthSetBy: NonNullable<AssistantE2ePlan["depthSetBy"]>,
+  extra: { readonly reason?: string; readonly smokeCriteria?: ReadonlyArray<number> } = {},
+): AssistantE2ePlan => {
+  const { reason: _reason, smokeCriteria: _smoke, ...rest } = plan;
+  return {
+    ...rest,
+    depth,
+    depthSetBy,
+    ...(depth === "none" && extra.reason !== undefined ? { reason: extra.reason } : {}),
+    ...(depth === "smoke" && extra.smokeCriteria
+      ? { smokeCriteria: [...extra.smokeCriteria].toSorted((a, b) => a - b) }
+      : {}),
+  };
+};
+/** Who set an issue's e2e depth, as the team leader reads it. */
+const DEPTH_SETTERS = {
+  lead: "You",
+  review: "The code reviewer",
+  person: "The person, on the board,",
+} as const;
 /**
  * The Claude adapter fails a turn the account's usage limit stopped with
  * "Claude usage limit reached. Send the message again once the 5-hour limit
@@ -643,7 +685,7 @@ export const make = Effect.gen(function* () {
   const updateDescription = Effect.fn("Assistant.updateDescription")(function* (
     t: AssistantTask,
     p: AwaitedProject,
-    e2e: AssistantE2eResult,
+    e2e: AssistantE2eResult | null,
   ) {
     const deployment = t.deployment;
     if (!deployment) return t;
@@ -1444,7 +1486,13 @@ export const make = Effect.gen(function* () {
       caller: ThreadId,
       brief: string,
       criteria: ReadonlyArray<string>,
-      e2e: { readonly brief: string; readonly targetIds?: ReadonlyArray<string> | undefined },
+      e2e: {
+        readonly depth: AssistantE2eDepth;
+        readonly brief: string;
+        readonly reason?: string | undefined;
+        readonly smokeCriteria?: ReadonlyArray<number> | undefined;
+        readonly targetIds?: ReadonlyArray<string> | undefined;
+      },
     ) {
       const { p, t } = yield* authorizeRole(caller, "lead");
       if (t.turns > 0)
@@ -1457,10 +1505,19 @@ export const make = Effect.gen(function* () {
           "List 1 to 12 acceptance criteria, each one a check a person could perform on the product. T3 gives them to the worker, the reviewer and the tester.",
         );
       const testBrief = e2e.brief.trim();
-      if (!testBrief)
+      if (!testBrief && e2e.depth !== "none")
         return yield* fail(
           "Give the e2e plan a brief for the tester: the pages or endpoints affected, the data it needs and what to clean up. T3 starts the tester with it once the change is ready to test.",
         );
+      const reason = e2e.reason?.trim() ?? "";
+      if (e2e.depth === "none" && !reason)
+        return yield* fail(
+          "Give a reason for e2e depth none: what makes this change one no user sees or does anything with. When in doubt, plan a full test.",
+        );
+      if (e2e.depth === "smoke") {
+        const error = smokeCriteriaError(e2e.smokeCriteria ?? [], listed.length);
+        if (error) return yield* fail(error);
+      }
       const targetIds = (e2e.targetIds ?? []).map((id) => id.trim()).filter(Boolean);
       if (yield* taskDecisionsPending(t))
         return yield* fail("Wait for the answer to your open question before taking the issue.");
@@ -1492,7 +1549,16 @@ export const make = Effect.gen(function* () {
         ...t,
         brief,
         criteria: listed,
-        e2ePlan: { brief: testBrief, ...(targetIds.length ? { targetIds } : {}) },
+        e2ePlan: {
+          brief: testBrief,
+          ...(targetIds.length ? { targetIds } : {}),
+          depth: e2e.depth,
+          depthSetBy: "lead",
+          ...(e2e.depth === "none" ? { reason } : {}),
+          ...(e2e.depth === "smoke"
+            ? { smokeCriteria: [...(e2e.smokeCriteria ?? [])].toSorted((a, b) => a - b) }
+            : {}),
+        },
         turns: 1,
         stage: "implement",
         status: "working",
@@ -2018,8 +2084,20 @@ export const make = Effect.gen(function* () {
       verdict: AssistantCodeReview["verdict"],
       findings: string,
       summary: string,
+      needsE2e?: boolean,
     ) {
-      const { p, t } = yield* authorizeRole(caller, "review");
+      const { p, t: current } = yield* authorizeRole(caller, "review");
+      // A reviewer who sees user-facing changes the planned depth would not
+      // test raises it to full, with either verdict.
+      const raise =
+        needsE2e === true &&
+        current.e2ePlan !== undefined &&
+        current.stage === "review" &&
+        assistantTaskE2eDepth(current) !== "full";
+      const t: AssistantTask =
+        raise && current.e2ePlan
+          ? { ...current, e2ePlan: planAtDepth(current.e2ePlan, "full", "review") }
+          : current;
       if (t.stage !== "review")
         return yield* fail(
           "No review is requested. End your turn; the implementer asks when ready.",
@@ -2038,6 +2116,11 @@ export const make = Effect.gen(function* () {
         commit: head,
         at: yield* now,
       };
+      if (raise)
+        yield* sessionUpdate(t, `depth-review:${head}:${t.turns}`, {
+          type: "thought",
+          body: "Reviewer asked for a full e2e test",
+        });
       const findingsListed = findingCount(findings);
       yield* sessionUpdate(t, `review:${verdict}:${head}:${t.turns}`, {
         type: "action",
@@ -2113,7 +2196,8 @@ export const make = Effect.gen(function* () {
         );
       // In the worktree the e2e check runs before the merge, on this very commit.
       const worktreeE2e = assistantTaskE2eEnvironment(t) === "worktree";
-      if (worktreeE2e && (!t.e2e || t.e2e.verdict === "failed" || t.e2e.commit !== head))
+      const noE2e = assistantTaskE2eDepth(t) === "none";
+      if (worktreeE2e && !noE2e && (!t.e2e || t.e2e.verdict === "failed" || t.e2e.commit !== head))
         return yield* fail(
           "The e2e check has not passed on this commit. Wait for T3 to tell you it passed before merging.",
         );
@@ -2152,7 +2236,8 @@ export const make = Effect.gen(function* () {
             review,
             pullRequest,
             baseBranch: p.config.baseBranch,
-            e2e: worktreeE2e ? (t.e2e ?? null) : null,
+            e2e: worktreeE2e && !noE2e ? (t.e2e ?? null) : null,
+            noE2e,
           }),
         ),
       );
@@ -2172,26 +2257,38 @@ export const make = Effect.gen(function* () {
    * The issue is delivered: the e2e card goes on the issue, its description
    * says what shipped, and Linear moves it to the review state for the person.
    * Staging runs reach this from the e2e result, worktree runs from the staging
-   * deploy that follows their merge.
+   * deploy that follows their merge. An issue planned with no e2e test is
+   * delivered with a null result once staging verifies it.
    */
   const finishDelivery = Effect.fn("Assistant.finishDelivery")(function* (
     p: AwaitedProject,
     value: AssistantTask,
-    e2e: AssistantE2eResult,
+    e2e: AssistantE2eResult | null,
   ) {
     const deployment = value.deployment;
     if (!deployment) return value;
     const pullRequest = yield* taskPullRequest(value);
+    const noTestReason = value.e2ePlan?.reason?.trim() || "nothing a user sees changed";
     // The card stays a comment even with a session: a finished session is one
     // collapsed row on the issue page, and the person reads the card there.
-    const card = e2eComment({
-      e2e,
-      merge: value.merge ?? null,
-      deployment,
-      pullRequest,
-      acceptedState: p.config.acceptedState,
-      criteria: value.criteria ?? null,
-    });
+    const card = e2e
+      ? e2eComment({
+          e2e,
+          merge: value.merge ?? null,
+          deployment,
+          pullRequest,
+          acceptedState: p.config.acceptedState,
+          criteria: value.criteria ?? null,
+          smoke: assistantTaskE2eDepth(value) === "smoke",
+        })
+      : noE2eComment({
+          reason: noTestReason,
+          decidedBy: value.e2ePlan?.depthSetBy,
+          merge: value.merge ?? null,
+          deployment,
+          pullRequest,
+          acceptedState: p.config.acceptedState,
+        });
     let updated = yield* postLinear(value, card);
     const cardPosted =
       (updated.linearCommentIds ?? []).length > (value.linearCommentIds ?? []).length;
@@ -2204,15 +2301,19 @@ export const make = Effect.gen(function* () {
       ...updated,
       status: "review",
       summary: updated.merge?.summary ?? updated.summary,
-      reviewInstructions: [
-        ...e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`),
-        e2e.worthALook?.length
-          ? `Worth a look:\n${e2e.worthALook.map((note) => `- ${note}`).join("\n")}`
-          : null,
-        e2e.report,
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
+      reviewInstructions: e2e
+        ? [
+            ...e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`),
+            e2e.worthALook?.length
+              ? `Worth a look:\n${e2e.worthALook.map((note) => `- ${note}`).join("\n")}`
+              : null,
+            e2e.report,
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+        : value.e2ePlan?.depthSetBy === "person"
+          ? "No e2e test ran: the person set the depth to none on the board."
+          : `No e2e test ran. The team leader decided none was needed: ${noTestReason}`,
       // Without a successful move there is no delivered state to be moved away from.
       deliveredState: linearError ? null : p.config.reviewState.trim() || null,
       error: [updated.error, linearError].filter(Boolean).join(" ") || null,
@@ -2269,7 +2370,11 @@ export const make = Effect.gen(function* () {
     yield* terminals.close({ threadId: t.threadId });
     // The deployment is saved first: it guards re-entry, so a retry posts no second card.
     const tested = t.e2e;
-    if (assistantTaskE2eEnvironment(t) === "worktree" && tested && tested.verdict !== "failed") {
+    const noE2e = t.e2ePlan !== undefined && assistantTaskE2eDepth(t) === "none";
+    if (
+      assistantTaskE2eEnvironment(t) === "worktree" &&
+      (noE2e || (tested && tested.verdict !== "failed"))
+    ) {
       const verified = yield* saveTask({
         ...t,
         deployment,
@@ -2278,11 +2383,12 @@ export const make = Effect.gen(function* () {
         deployWait: null,
       });
       yield* stagingNote(verified, deployment);
-      return yield* finishDelivery(p, verified, tested);
+      return yield* finishDelivery(p, verified, noE2e ? null : (tested ?? null));
     }
     const next: AssistantTask = { ...t, deployment, error: null, wait: null, deployWait: null };
-    // With a session the deploy is one line in it rather than a comment.
-    if (t.linearSession) {
+    // With a session the deploy is one line in it rather than a comment. With
+    // no e2e test planned the delivery card follows at once, so neither is posted.
+    if (t.linearSession || noE2e) {
       const saved = yield* saveTask(next);
       yield* stagingNote(saved, deployment);
       return saved;
@@ -2432,7 +2538,14 @@ export const make = Effect.gen(function* () {
   });
 
   const startE2e = Effect.fn("Assistant.startE2e")(
-    function* (caller: ThreadId, brief: string) {
+    function* (
+      caller: ThreadId,
+      brief: string,
+      options: {
+        readonly depth?: "full" | "smoke" | undefined;
+        readonly smokeCriteria?: ReadonlyArray<number> | undefined;
+      } = {},
+    ) {
       const { p, t } = yield* authorizeLead(caller);
       if (p.status === "stopped") return yield* fail("The assistant is stopped.");
       if (!assistantTaskHoldsProject(t.status))
@@ -2446,12 +2559,23 @@ export const make = Effect.gen(function* () {
         return yield* fail("Resolve the issue's pending decisions first.");
       if ((yield* taskBusy(t, caller)) || (yield* taskQueued(t, caller)))
         return yield* fail("Wait for the issue's threads to finish before starting e2e.");
-      // The leader's latest brief is the plan: a later automatic run uses it.
-      return yield* startE2eFor(
-        p,
-        t.e2ePlan ? { ...t, e2ePlan: { ...t.e2ePlan, brief } } : t,
-        brief,
-      );
+      if (options.depth === "smoke") {
+        const error = smokeCriteriaError(options.smokeCriteria ?? [], t.criteria?.length ?? 0);
+        if (error) return yield* fail(error);
+      }
+      // The leader's latest brief and depth are the plan: a later automatic run uses them.
+      const briefed: AssistantE2ePlan | undefined = t.e2ePlan
+        ? { ...t.e2ePlan, brief }
+        : options.depth
+          ? { brief }
+          : undefined;
+      const e2ePlan =
+        briefed && options.depth
+          ? planAtDepth(briefed, options.depth, "lead", {
+              ...(options.smokeCriteria ? { smokeCriteria: options.smokeCriteria } : {}),
+            })
+          : briefed;
+      return yield* startE2eFor(p, e2ePlan ? { ...t, e2ePlan } : t, brief);
     },
     lock.withPermits(1),
     Effect.mapError(wrap),
@@ -2474,16 +2598,51 @@ export const make = Effect.gen(function* () {
     if (!plan) return;
     const id = t.issue.identifier;
     const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
+    const depth = assistantTaskE2eDepth(t);
     const ready = inWorktree
       ? `Code review approved commit ${shortSha(t.codeReview?.commit ?? "")} for ${id}.`
       : `Staging verified for ${id} at ${shortSha(t.merge?.commit ?? t.deployment?.revision ?? "")}.`;
     const where = inWorktree ? "in the worktree" : "on staging";
     const after = inWorktree ? " T3 tells the worker to merge once it passes." : "";
-    if (t.testNotes?.planChanged)
+    // The person choosing no test on the board has already answered what a
+    // changed plan would ask the leader.
+    if (t.testNotes?.planChanged && !(depth === "none" && plan.depthSetBy === "person"))
       return yield* notifyLead(
         t,
-        `${ready} The implementer reports that the work changed from your plan, so T3 did not start the e2e check ${where}.\nThe implementer's test notes:\n${t.testNotes.notes}\nYour e2e brief from taking the issue:\n${plan.brief}\nStart the e2e check with assistant_start_e2e, with a revised brief or your original one. T3 gives the tester the acceptance criteria and these notes.${after}`,
+        depth === "none"
+          ? `${ready} The implementer reports that the work changed from your plan, so T3 did not go on without an e2e test (you planned none: ${plan.reason ?? "no reason given"}).\nThe implementer's test notes:\n${t.testNotes.notes}\nIf the change now affects what a user sees, start the e2e check ${where} with assistant_start_e2e, a depth and a brief. To keep no test, ask the person with assistant_ask_decision; they can set the depth to none on the board.${after}`
+          : `${ready} The implementer reports that the work changed from your plan, so T3 did not start the e2e check ${where}.\nThe implementer's test notes:\n${t.testNotes.notes}\nYour e2e brief from taking the issue:\n${plan.brief}\nStart the e2e check with assistant_start_e2e, with a revised brief or your original one. T3 gives the tester the acceptance criteria and these notes.${after}`,
       );
+    if (depth === "none") {
+      const reason = plan.reason ?? "nothing a user sees changes";
+      if (inWorktree) {
+        // No tester runs before the merge: the approved commit goes straight to the worker.
+        const commit = t.codeReview?.commit ?? "";
+        yield* saveTask({ ...t, stage: "implement", status: "working", error: null, wait: null });
+        yield* queueMessage(
+          p.project_id,
+          t.threadId,
+          `${t.id}:no-e2e-merge:${newId()}`,
+          `Code review approved commit ${commit}. No e2e test is planned for this issue (${plan.depthSetBy === "person" ? "the person set the depth to none on the board" : `reason: ${reason}`}). Merge the PR into ${p.config.baseBranch} with a merge commit once its required checks pass, then call assistant_report_merged. If anything changes before the merge, push and request review again.`,
+        );
+        return;
+      }
+      if (!t.deployment) return;
+      const delivered = yield* finishDelivery(p, t, null);
+      // A thread whose turn is ending closes the team when it ends; otherwise nothing will.
+      if (except === undefined && delivered.status === "review" && !(yield* taskBusy(delivered)))
+        yield* closeTeam(delivered);
+      return;
+    }
+    // A reviewer or the person raised the depth of an issue planned with no
+    // test, so there is no brief for the tester yet.
+    if (!plan.brief.trim()) {
+      const who = DEPTH_SETTERS[plan.depthSetBy ?? "lead"];
+      return yield* notifyLead(
+        t,
+        `${ready} ${who} set the e2e test to ${depth}${depth === "smoke" && plan.smokeCriteria?.length ? ` (criteria ${plan.smokeCriteria.join(", ")})` : ""}, and the plan has no brief for the tester, so T3 did not start it. Start the e2e check ${where} with assistant_start_e2e and a brief: the pages or endpoints affected, the data it needs and what to clean up. T3 gives the tester the acceptance criteria and the implementer's test notes.${after}`,
+      );
+    }
     const reason = (yield* taskDecisionsPending(t))
       ? "the issue has a question open for the person"
       : (yield* taskBusy(t, except)) || (yield* taskQueued(t, except))
@@ -2529,25 +2688,46 @@ export const make = Effect.gen(function* () {
       // With criteria recorded the verdict is theirs to add up; a tester's own
       // verdict is not read. Issues taken before them keep the free-text path.
       const criteria = t.criteria ?? [];
-      const checks = criteria.length ? (input.checks ?? []) : null;
-      if (checks && !checks.length)
-        return yield* fail("List one check per acceptance criterion in checks.");
-      if (checks) {
+      const reported = criteria.length ? (input.checks ?? []) : null;
+      // A smoke test covers only the criteria its plan lists; T3 records the rest.
+      const smoke =
+        criteria.length && assistantTaskE2eDepth(t) === "smoke"
+          ? new Set(t.e2ePlan?.smokeCriteria ?? [])
+          : null;
+      const required = (criterion: number) => smoke === null || smoke.has(criterion);
+      if (reported && !reported.length)
+        return yield* fail(
+          smoke
+            ? `List one check per criterion in the smoke test (${[...smoke].join(", ")}) in checks.`
+            : "List one check per acceptance criterion in checks.",
+        );
+      if (reported?.some((check) => check.result === "skipped"))
+        return yield* fail(
+          "Do not report a criterion as skipped: T3 records skipped itself for the criteria outside a smoke test. Report passed, failed or not-checked for each criterion you were asked to check.",
+        );
+      let checks: ReadonlyArray<AssistantE2eCheck> | null = reported;
+      if (reported) {
         const missing = criteria.flatMap((_, index) =>
-          checks.some((check) => check.criterion === index + 1) ? [] : [index + 1],
+          !required(index + 1) || reported.some((check) => check.criterion === index + 1)
+            ? []
+            : [index + 1],
         );
         const repeated = criteria.flatMap((_, index) =>
-          checks.filter((check) => check.criterion === index + 1).length > 1 ? [index + 1] : [],
+          reported.filter((check) => check.criterion === index + 1).length > 1 ? [index + 1] : [],
         );
         const unknown = [
           ...new Set(
-            checks.flatMap((check) => (check.criterion > criteria.length ? [check.criterion] : [])),
+            reported.flatMap((check) =>
+              check.criterion > criteria.length ? [check.criterion] : [],
+            ),
           ),
         ];
         if (missing.length || repeated.length || unknown.length)
           return yield* fail(
             [
-              `This issue has ${criteria.length} acceptance criteria; list one check for each, in order.`,
+              smoke
+                ? `This smoke test covers criteria ${[...smoke].join(", ")}; list one check for each, in order.`
+                : `This issue has ${criteria.length} acceptance criteria; list one check for each, in order.`,
               missing.length ? `No check for ${missing.join(", ")}.` : "",
               repeated.length ? `More than one check for ${repeated.join(", ")}.` : "",
               unknown.length ? `No such criterion: ${unknown.join(", ")}.` : "",
@@ -2555,16 +2735,25 @@ export const make = Effect.gen(function* () {
               .filter(Boolean)
               .join(" "),
           );
-        const stray = checks.find(
+        const stray = reported.find(
           (check) => check.screenshot !== undefined && check.screenshot > input.screenshots.length,
         );
         if (stray)
           return yield* fail(
             `Criterion ${stray.criterion} points at screenshot ${stray.screenshot}, and you attached ${input.screenshots.length}. Number each screenshot by its position in screenshots.`,
           );
-        if (checks.some((check) => check.result === "not-checked") && !input.humanChecks.length)
+        if (reported.some((check) => check.result === "not-checked") && !input.humanChecks.length)
           return yield* fail(
             "Each criterion you could not check needs an entry in humanChecks saying what a person should do.",
+          );
+        if (smoke)
+          checks = criteria.map(
+            (_, index): AssistantE2eCheck =>
+              reported.find((check) => check.criterion === index + 1) ?? {
+                criterion: index + 1,
+                result: "skipped",
+                evidence: "Not in the smoke test",
+              },
           );
       }
       if (!checks && !input.verdict)
@@ -2648,12 +2837,93 @@ export const make = Effect.gen(function* () {
               pullRequest,
               acceptedState: p.config.acceptedState,
               criteria: t.criteria ?? null,
+              smoke: assistantTaskE2eDepth(t) === "smoke",
             }),
           ),
         );
       }
       // The team is closed when this turn ends, and the loop moves on.
       return yield* finishDelivery(p, updated, e2e);
+    },
+    lock.withPermits(1),
+    Effect.mapError(wrap),
+  );
+
+  /**
+   * The person changes how deep an issue's e2e test goes, from the board, until
+   * the test starts. An issue already waiting for the step after its review or
+   * staging deploy goes on at the new depth at once, without waking anyone.
+   */
+  const setE2eDepth = Effect.fn("Assistant.setE2eDepth")(
+    function* (input: typeof AssistantSetE2eDepthInput.Type) {
+      const t = yield* task(input.taskId);
+      const p = yield* project(t.projectId);
+      const plan = t.e2ePlan;
+      if (!plan) return yield* fail("The team leader plans the test when it takes the issue.");
+      if (!assistantTaskHoldsProject(t.status))
+        return yield* fail("Only an active issue's e2e test can be changed.");
+      if (t.stage === "e2e")
+        return yield* fail(
+          "The e2e test is already running. Change the depth for a rerun once it reports.",
+        );
+      if (t.e2e && t.e2e.verdict !== "failed")
+        return yield* fail("The e2e test already ran for this issue.");
+      const inWorktree = assistantTaskE2eEnvironment(t) === "worktree";
+      // In the worktree the test runs before the merge, so once the worker is
+      // merging without one there is no test left to run.
+      if (
+        inWorktree &&
+        (t.merge ||
+          (assistantTaskE2eDepth(t) === "none" &&
+            t.stage === "implement" &&
+            t.codeReview?.verdict === "approved"))
+      )
+        return yield* fail("The approved commit is already being merged without an e2e test.");
+      const criteriaCount = t.criteria?.length ?? 0;
+      const smokeCriteria =
+        input.depth === "smoke"
+          ? (input.smokeCriteria ??
+            plan.smokeCriteria ??
+            Array.from({ length: criteriaCount }, (_, i) => i + 1))
+          : undefined;
+      if (smokeCriteria) {
+        const error = smokeCriteriaError(smokeCriteria, criteriaCount);
+        if (error) return yield* fail(error);
+      }
+      const saved = yield* saveTask({
+        ...t,
+        e2ePlan: planAtDepth(plan, input.depth, "person", {
+          reason: "Set by the person on the board.",
+          ...(smokeCriteria ? { smokeCriteria } : {}),
+        }),
+      });
+      yield* sessionUpdate(saved, `depth-person:${saved.updatedAt}`, {
+        type: "thought",
+        body: `Depth set to ${input.depth} by the person`,
+      });
+      const ready =
+        saved.stage === "lead" &&
+        (inWorktree
+          ? saved.codeReview?.verdict === "approved" && !saved.merge
+          : saved.deployment !== null && !saved.deployWait);
+      const waiting = ready && !saved.e2e;
+      // After a failed run the leader is deciding; choosing no test decides it,
+      // unless the leader already handed the failure on to a thread.
+      const failedRunSettled =
+        ready &&
+        input.depth === "none" &&
+        saved.e2e?.verdict === "failed" &&
+        !(yield* taskBusy(saved)) &&
+        // A notice or nudge waiting for the leader is not work handed on.
+        !(yield* taskQueued(saved, assistantTaskThreadId(saved, "lead")));
+      // A leader already told the plan changed decides the test itself.
+      if (waiting && !(saved.testNotes?.planChanged && input.depth !== "none"))
+        yield* autoStartE2e(p, saved);
+      // In the worktree the worker merges next; the failed run no longer
+      // applies, so it is cleared for the board to show the merge.
+      else if (failedRunSettled)
+        yield* autoStartE2e(p, inWorktree ? yield* saveTask({ ...saved, e2e: null }) : saved);
+      return yield* board(null);
     },
     lock.withPermits(1),
     Effect.mapError(wrap),
@@ -3396,6 +3666,7 @@ export const make = Effect.gen(function* () {
     answer,
     review,
     dispatch,
+    setE2eDepth,
     acceptIssue,
     declineIssue,
     readThread,

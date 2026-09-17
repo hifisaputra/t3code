@@ -6,6 +6,7 @@ import {
   type AssistantCheckRun,
   type AssistantDecision,
   type AssistantE2eCheckResult,
+  type AssistantE2eDepth,
   type AssistantProject,
   type AssistantTask,
   type EnvironmentId,
@@ -15,6 +16,7 @@ import {
   ArrowUpRightIcon,
   ChevronRightIcon,
   CircleCheckIcon,
+  CircleDashedIcon,
   CircleIcon,
   CircleSlashIcon,
   CircleXIcon,
@@ -39,9 +41,13 @@ import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
+import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
+  describeE2ePlan,
   describeTaskPhase,
+  e2eDepthChange,
+  e2eDepthLabel,
   previewLine,
   taskOutcome,
   taskPipeline,
@@ -126,6 +132,7 @@ function PipelineStepButton({
 }) {
   const kind = THREAD_KIND[step.kind];
   const current = step.state === "current";
+  const skipped = step.state === "skipped";
   const note = needsYou ? "Waiting for you" : busy && current ? "Working now" : step.note;
   return (
     <li className="flex min-w-0 flex-1 basis-24 items-stretch">
@@ -148,6 +155,7 @@ function PipelineStepButton({
                       ? "border-foreground/25 bg-accent/40"
                       : "border-border/50",
                 step.state === "todo" && "opacity-55",
+                skipped && "border-dashed opacity-55",
               )}
             />
           }
@@ -157,6 +165,11 @@ function PipelineStepButton({
               <CircleCheckIcon aria-hidden className="size-3.5 shrink-0 text-success-foreground" />
             ) : step.state === "failed" ? (
               <CircleXIcon aria-hidden className="size-3.5 shrink-0 text-destructive-foreground" />
+            ) : skipped ? (
+              <CircleDashedIcon
+                aria-hidden
+                className="size-3.5 shrink-0 text-muted-foreground/60"
+              />
             ) : current ? (
               <StatusDot
                 tone={needsYou ? "waiting" : busy ? "active" : "paused"}
@@ -166,7 +179,13 @@ function PipelineStepButton({
             ) : (
               <CircleIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground/50" />
             )}
-            <span className={cn("truncate", current ? "font-medium" : "text-muted-foreground")}>
+            <span
+              className={cn(
+                "truncate",
+                current ? "font-medium" : "text-muted-foreground",
+                skipped && "line-through",
+              )}
+            >
               {step.label}
             </span>
           </span>
@@ -176,8 +195,14 @@ function PipelineStepButton({
           </span>
         </TooltipTrigger>
         <TooltipPopup className="max-w-64">
-          <span className="font-medium">{kind.label}.</span> {kind.does}
-          {thread === null ? " Starts when the issue gets here." : null}
+          {skipped ? (
+            "This issue runs no e2e test."
+          ) : (
+            <>
+              <span className="font-medium">{kind.label}.</span> {kind.does}
+              {thread === null ? " Starts when the issue gets here." : null}
+            </>
+          )}
         </TooltipPopup>
       </Tooltip>
     </li>
@@ -208,7 +233,109 @@ const E2E_CHECK_RESULT: Record<AssistantE2eCheckResult, { label: string; classNa
   passed: { label: "Passed", className: "text-success-foreground" },
   failed: { label: "Failed", className: "text-destructive-foreground" },
   "not-checked": { label: "Not checked", className: "text-muted-foreground" },
+  skipped: { label: "Not in smoke test", className: "text-muted-foreground" },
 };
+
+const E2E_DEPTHS: ReadonlyArray<AssistantE2eDepth> = ["full", "smoke", "none"];
+const E2E_DEPTH_CHANGED: Record<AssistantE2eDepth, string> = {
+  full: "Full e2e test",
+  smoke: "Smoke test",
+  none: "No e2e test",
+};
+
+/**
+ * How deep the issue's e2e test goes, who set it, and the tester brief. On an
+ * active issue the person can change the depth until the test starts.
+ */
+function E2ePlanDetails({
+  environmentId,
+  task,
+  editable,
+}: {
+  environmentId: EnvironmentId;
+  task: AssistantTask;
+  editable: boolean;
+}) {
+  const setE2eDepth = useAtomCommand(developerAssistant.setE2eDepth);
+  const { pending, run } = useAssistantAction();
+  const summary = describeE2ePlan(task);
+  if (!summary || !task.e2ePlan) return null;
+  const change = e2eDepthChange(task);
+  const brief = task.e2ePlan.brief.trim();
+  const choose = async (depth: AssistantE2eDepth) => {
+    if (depth === summary.depth) return;
+    if (depth === "none") {
+      const confirmed = await confirmDestructive(
+        `No e2e test will run for ${task.issue.identifier}.\nThe issue comes to you once staging is verified.`,
+      );
+      if (!confirmed) return;
+    }
+    void run(depth, () => setE2eDepth({ environmentId, input: { taskId: task.id, depth } }), {
+      failure: "Could not change the e2e test",
+      success: `${E2E_DEPTH_CHANGED[depth]} for ${task.issue.identifier}`,
+    });
+  };
+  const control = (
+    <ToggleGroup
+      aria-label={`E2E test depth for ${task.issue.identifier}`}
+      variant="segmented"
+      value={[pending ?? summary.depth]}
+      disabled={!change.allowed || pending !== null}
+      onValueChange={(value) => {
+        const next = value[0];
+        if (next === "full" || next === "smoke" || next === "none") void choose(next);
+      }}
+    >
+      {E2E_DEPTHS.map((depth) => (
+        <Toggle key={depth} value={depth}>
+          {e2eDepthLabel(depth)}
+        </Toggle>
+      ))}
+    </ToggleGroup>
+  );
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+        <span className="font-medium text-muted-foreground uppercase tracking-wide">E2E test</span>
+        {editable ? (
+          change.allowed ? (
+            control
+          ) : (
+            <Tooltip>
+              <TooltipTrigger render={<span className="inline-flex" />}>{control}</TooltipTrigger>
+              <TooltipPopup className="max-w-64">{change.reason}</TooltipPopup>
+            </Tooltip>
+          )
+        ) : (
+          <span className="font-medium">{summary.label}</span>
+        )}
+        {pending ? <Spinner className="size-3.5" /> : null}
+        {summary.setBy ? <span className="text-muted-foreground">{summary.setBy}</span> : null}
+      </div>
+      {summary.detail ? (
+        <p className="text-muted-foreground text-xs">
+          {summary.depth === "none" ? `Why: ${summary.detail}` : summary.detail}
+        </p>
+      ) : null}
+      {brief && summary.depth !== "none" ? (
+        <Collapsible>
+          <CollapsibleTrigger className="group inline-flex items-center gap-1 font-medium text-muted-foreground text-xs hover:text-foreground">
+            <ChevronRightIcon
+              aria-hidden
+              className="size-3.5 transition-transform group-data-panel-open:rotate-90"
+            />
+            The tester&apos;s brief
+          </CollapsibleTrigger>
+          <CollapsiblePanel>
+            <div className="mt-2 rounded-lg border border-border/60 p-3">
+              <ExpandableMarkdown text={brief} environmentId={environmentId} />
+            </div>
+          </CollapsiblePanel>
+        </Collapsible>
+      ) : null}
+    </div>
+  );
+}
 
 /**
  * What the team leader said the issue has to do, numbered as every thread sees
@@ -546,6 +673,8 @@ export function ActiveTaskCard({
         </div>
       ) : null}
 
+      <E2ePlanDetails environmentId={environmentId} task={task} editable />
+
       {task.brief.trim() ? (
         <Collapsible>
           <CollapsibleTrigger className="group inline-flex items-center gap-1 font-medium text-muted-foreground text-xs hover:text-foreground">
@@ -776,6 +905,11 @@ function HistoryRecord({
       {task.e2e ? (
         <RecordSection title="E2E check">
           <p className="mb-2 font-medium text-xs">{E2E_VERDICT[task.e2e.verdict]}</p>
+          {task.e2ePlan ? (
+            <div className="mb-2">
+              <E2ePlanDetails environmentId={environmentId} task={task} editable={false} />
+            </div>
+          ) : null}
           {task.e2e.report.trim() ? (
             <ExpandableMarkdown text={task.e2e.report} environmentId={environmentId} />
           ) : null}
@@ -820,6 +954,11 @@ function HistoryRecord({
               ))}
             </ul>
           ) : null}
+        </RecordSection>
+      ) : null}
+      {!task.e2e && task.e2ePlan ? (
+        <RecordSection title="E2E check">
+          <E2ePlanDetails environmentId={environmentId} task={task} editable={false} />
         </RecordSection>
       ) : null}
       {task.reviewInstructions.trim() ? (

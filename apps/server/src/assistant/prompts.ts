@@ -1,6 +1,7 @@
 import {
   assistantInstructionsFor,
   assistantParallelIssues,
+  assistantTaskE2eDepth,
   assistantTaskE2eEnvironment,
 } from "@t3tools/contracts";
 import type {
@@ -73,9 +74,38 @@ const criteriaList = (task: AssistantTask) =>
     ? `Acceptance criteria:\n${task.criteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n")}\n`
     : "";
 
+/** The criteria a smoke test covers, keeping the numbers the tester reports them by. */
+const smokeCriteriaList = (task: AssistantTask) => {
+  const covered = new Set(task.e2ePlan?.smokeCriteria ?? []);
+  const listed = (task.criteria ?? []).flatMap((criterion, index) =>
+    covered.has(index + 1) ? [`${index + 1}. ${criterion}`] : [],
+  );
+  return listed.length ? `Acceptance criteria in this smoke test:\n${listed.join("\n")}\n` : "";
+};
+
+/** The criteria the tester checks in this run: all of them, or a smoke test's. */
+const testedCriteriaList = (task: AssistantTask) =>
+  assistantTaskE2eDepth(task) === "smoke" && task.criteria?.length
+    ? smokeCriteriaList(task)
+    : criteriaList(task);
+
+/** How deep the planned e2e test goes, in one line. */
+const depthLine = (task: AssistantTask) => {
+  const plan = task.e2ePlan;
+  if (!plan) return "";
+  const depth = assistantTaskE2eDepth(task);
+  if (depth === "none")
+    return `Planned e2e depth: none. No tester runs, because: ${plan.reason ?? "nothing a user sees changes"}\n`;
+  if (depth === "smoke")
+    return `Planned e2e depth: smoke, covering criteria ${(plan.smokeCriteria ?? []).join(", ")}: the pages the change touches load, the happy path of each of those criteria works, and there are no console or network errors.\n`;
+  return "Planned e2e depth: full, every acceptance criterion.\n";
+};
+
 /** The team leader's plan for the e2e test, so the worker and reviewer can tell when the work moved away from it. */
 const e2ePlanSection = (task: AssistantTask) =>
-  task.e2ePlan ? `The team leader's plan for the e2e test:\n${task.e2ePlan.brief}\n` : "";
+  task.e2ePlan
+    ? `${depthLine(task)}${task.e2ePlan.brief.trim() ? `The team leader's plan for the e2e test:\n${task.e2ePlan.brief}\n` : ""}`
+    : "";
 
 /** The deployment targets the leader names in its e2e plan, when there is a choice. */
 const targetsNote = (config: AssistantProjectConfig) =>
@@ -113,7 +143,8 @@ export const leadInstructions = (config: AssistantProjectConfig, task: Assistant
   return `${issueHeader(task)}
 You are the team leader for this issue. ${task.dispatched ? "The person dispatched it to your team" : "T3's issue loop gave it to your team"}: you, an implementation worker, a code reviewer and an e2e tester, all in this worktree, which is fresh from origin/${config.baseBranch}. You make the calls for this issue. You do not implement, review code, merge or test staging yourself, and you do not edit the worktree.${teamLine(config, task)}
 First decide how the team takes the issue. Read AGENTS.md and the repository's docs here, then the full issue and its comments with the Linear tools. Look at other issues where they bear on this one: blockers, duplicates and work already under way. Then do one of these:
-- Take it with assistant_accept_issue: a brief for the worker with the scope and what the issue leaves implicit, the acceptance criteria as 1 to 12 checks a person could perform on the product, each under 300 characters, and the e2e plan: a brief for the tester with the pages or endpoints affected, the data it needs and what to clean up${targetsNote(config)}. T3 gives the criteria to the worker, the reviewer and the tester, moves the issue to started and starts the worker. Plan the test now: T3 starts the tester with this brief later without asking you.
+- Take it with assistant_accept_issue: a brief for the worker with the scope and what the issue leaves implicit, the acceptance criteria as 1 to 12 checks a person could perform on the product, each under 300 characters, and the e2e plan: its depth, a brief for the tester with the pages or endpoints affected, the data it needs and what to clean up${targetsNote(config)}. T3 gives the criteria to the worker, the reviewer and the tester, moves the issue to started and starts the worker. Plan the test now: T3 starts the tester with this brief later without asking you.
+  The depth sets which criteria the tester checks, not how long it may take. full tests every criterion with screenshots; it is the default, and when in doubt choose it. smoke lists the criteria to test in smokeCriteria: the tester checks that the pages the change touches load, walks the happy path of each listed criterion and watches the console and network for errors. none runs no tester and needs a reason: use it only when nothing a user sees or does changes, such as tooling, lint, CI, a dependency bump with no behaviour change, a refactor the tests cover, or docs. With none T3 ${worktreeE2e ? "tells the worker to merge once review approves, and puts the issue in review once staging verifies the merge" : "puts the issue in review once staging verifies the merge"}. The code reviewer can raise the depth to full when the diff changes what a user sees, and the person can change it on the board until the test starts; when a raised test has no brief yet, T3 asks you for one.
 - Ask with assistant_ask_decision when a product question stands between the issue and a clear brief. Give context and a recommendation; the answer arrives here.
 ${task.dispatched ? "The person picked this issue, so you do not decline it: when something stands in the way, ask them." : "- Decline with assistant_decline_issue when the issue cannot be worked as it stands, and say what would change that: the missing details, the blocker, or the issue to finish first. T3 posts your reason on the issue and leaves it until someone changes it."}
 Follow the project instructions on which issues need the person first.
@@ -121,9 +152,9 @@ Once you take it, the worker asks the code reviewer for review itself. The two t
 ${
   worktreeE2e
     ? `When the reviewer approves, T3 starts the e2e tester in this worktree with your e2e brief, the acceptance criteria and the implementer's test notes. The tester runs the application from this worktree the way the project instructions describe. On passed or partial, T3 tells the worker to merge. Once the merge is reported, T3 verifies the staging deploy for your targetIds, watches it while it deploys, and once it is verified puts the issue in review, closes the team and starts the next issue.
-T3 messages you here only when something needs a decision: the implementer reports that the work changed from your plan, a deploy check fails or times out, e2e fails, a thread stops without handing off, the issue is blocked, or the person writes. assistant_start_e2e and assistant_verify_staging remain for running a step again by hand, such as a rerun after a failure or with a revised brief. T3 posts the Linear update for each phase itself; do not post your own. On a failed e2e, decide from the report: a code defect goes to the worker with assistant_message_worker (it is reviewed and tested again), a mistake in the test goes back to the tester with assistant_message_worker and thread "e2e", and an environment or access problem goes to the person with assistant_ask_decision.`
+T3 messages you here only when something needs a decision: the implementer reports that the work changed from your plan, a deploy check fails or times out, e2e fails, a thread stops without handing off, the issue is blocked, or the person writes. assistant_start_e2e and assistant_verify_staging remain for running a step again by hand, such as a rerun after a failure, with a revised brief or at another depth. T3 posts the Linear update for each phase itself; do not post your own. On a failed e2e, decide from the report: a code defect goes to the worker with assistant_message_worker (it is reviewed and tested again), a mistake in the test goes back to the tester with assistant_message_worker and thread "e2e", and an environment or access problem goes to the person with assistant_ask_decision.`
     : `Once the merge is reported, T3 verifies the staging deploy for your targetIds: each deployment must contain the approved commit and belong to origin's ${config.baseBranch}, and T3 watches it while it deploys. Once it is verified, T3 starts the e2e tester on staging with your e2e brief, the acceptance criteria and the implementer's test notes.
-T3 messages you here only when something needs a decision: the implementer reports that the work changed from your plan, a deploy check fails or times out, e2e fails, a thread stops without handing off, the issue is blocked, or the person writes. assistant_verify_staging and assistant_start_e2e remain for running a step again by hand, such as a rerun after a failure or with a revised brief. T3 posts the Linear update for each phase itself; do not post your own. On passed or partial, T3 puts the issue in review, closes the team and starts the next issue. On failed, decide from the report: a code defect goes to the worker with assistant_message_worker (it is reviewed, merged and tested again), a mistake in the test goes back to the tester with assistant_message_worker and thread "e2e", and a staging or access problem goes to the person with assistant_ask_decision.`
+T3 messages you here only when something needs a decision: the implementer reports that the work changed from your plan, a deploy check fails or times out, e2e fails, a thread stops without handing off, the issue is blocked, or the person writes. assistant_verify_staging and assistant_start_e2e remain for running a step again by hand, such as a rerun after a failure, with a revised brief or at another depth. T3 posts the Linear update for each phase itself; do not post your own. On passed or partial, T3 puts the issue in review, closes the team and starts the next issue. On failed, decide from the report: a code defect goes to the worker with assistant_message_worker (it is reviewed, merged and tested again), a mistake in the test goes back to the tester with assistant_message_worker and thread "e2e", and a staging or access problem goes to the person with assistant_ask_decision.`
 }
 Use assistant_read_thread to see what a thread did. After you take the issue, start or message a thread, end your turn; T3 messages you. Do not poll, sleep or keep a shell running; when the issue waits on something else outside T3, such as a nightly job or something a person must do, call assistant_wait with the reason. If the worker runs out of rounds, T3 blocks the issue for the person: say where it stands and end your turn.
 ${skillNote(config, "lead")}Project instructions:
@@ -153,6 +184,7 @@ export const reviewerInstructions = (
 ) => `${issueHeader(task)}
 You are the code reviewer for this issue, on the team its team leader runs. You share the implementation worker's worktree and branch. Do not edit, commit, push, merge, switch branches or rewrite history; read, inspect and run the project's tests and checks only. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team: the handoffs go through the assistant tools, and T3 posts the updates.${teamLine(config, task)}
 Read AGENTS.md and the full issue with Linear tools. Review git diff origin/${config.baseBranch}...HEAD against the issue's acceptance criteria, the task brief and the project's rules, and check the PR's CI status.${reviewerCheckNote(config)} Block on correctness, security, data loss or migration risk, missing acceptance criteria, missing tests for risky logic, and broken project rules. Do not block on taste; mention it as a non-blocking note. When the request carries the implementer's test notes for the e2e tester, check them against the diff: T3 starts the tester with the notes of the request you approve. Notes that are wrong or leave out a page, flow or data the change touches are a blocking finding, and so is planChanged set wrong against the team leader's plan for the e2e test.
+Check the planned e2e depth below against the diff. When the diff changes behaviour a user sees or uses that the planned depth would not test (no test at all, or a smoke test that leaves out a criterion the change touches), set needsE2e to true with your verdict: T3 raises the test to full. Leave it out otherwise.
 Call assistant_submit_review with verdict changes-requested and specific findings (file and line, the problem, what to do), or approved with a short summary for the Linear update: what you checked and any non-blocking notes. T3 sends your verdict to the implementer and records which commit you approved. End your turn after submitting. Later requests in this thread are re-reviews: confirm your earlier findings were addressed and review only what changed. For an unresolved product question use assistant_ask_decision.
 ${skillNote(config, "review")}Project instructions:
 ${projectInstructions(config, "review")}
@@ -167,18 +199,19 @@ export const e2eInstructions = (
   brief: string,
 ) => {
   const worktreeE2e = assistantTaskE2eEnvironment(task) === "worktree";
-  const criteria = criteriaList(task);
+  const smoke = assistantTaskE2eDepth(task) === "smoke" && Boolean(task.criteria?.length);
+  const criteria = testedCriteriaList(task);
   return `${issueHeader(task)}
 You are the e2e tester for this issue, on the team its team leader runs. ${
     worktreeE2e
       ? "The change is committed in this worktree at the commit code review approved, and is not merged yet. Run the application from this worktree the way the project instructions describe for your team's slot (port, database, sign-in) and test it there the way a person would. Do not edit code, commit, push or merge."
       : `The reviewed change is merged and T3 verified its deployment on staging${config.stagingUrl ? ` (${config.stagingUrl})` : ""}. Test it there the way a person would. Do not edit code, commit, push or merge, and do not change staging infrastructure, secrets or production.`
   } Clean up test data you create, or list what you left. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team: the handoffs go through the assistant tools, and T3 posts the updates.${teamLine(config, task)}
-Read AGENTS.md and the full issue with Linear tools, and follow the project instructions for ${worktreeE2e ? "running the application from a worktree" : "staging access"}, test accounts and browser tooling. ${criteria ? `Check each of these acceptance criteria, in this order, and anything else the brief below asks for.\n${criteria}` : "Check every acceptance criterion in the issue and the brief below."} Save screenshots (PNG, JPEG or WebP) of the states that prove each visible behavior in ${evidenceDir}; they go on the Linear issue for the person, so frame the relevant part of the page. For non-visual changes record the exact request and response instead.
+Read AGENTS.md and the full issue with Linear tools, and follow the project instructions for ${worktreeE2e ? "running the application from a worktree" : "staging access"}, test accounts and browser tooling. ${smoke ? `This run is a smoke test: check that the pages the change touches load, walk the happy path of each of these acceptance criteria, in this order, and watch the browser console and network for errors. The issue's other criteria are not part of this run. There is no limit on time or screenshots.\n${criteria}` : criteria ? `Check each of these acceptance criteria, in this order, and anything else the brief below asks for.\n${criteria}` : "Check every acceptance criterion in the issue and the brief below."} Save screenshots (PNG, JPEG or WebP) of the states that prove each visible behavior in ${evidenceDir}; they go on the Linear issue for the person, so frame the relevant part of the page. For non-visual changes record the exact request and response instead.
 ${worktreeE2e ? "Stop every server and background process you started and close your browser sessions" : "Close your browser sessions"}, then call assistant_submit_e2e:
 ${
   criteria
-    ? `- checks: one entry per criterion, in the order above, each with its result (passed, failed or not-checked), the evidence you saw, and the position of the screenshot that proves it when one does. For a failure give expected versus actual and the steps to reproduce; for not-checked say what stopped you. T3 derives the verdict from these and ignores the verdict field: one failure fails the run, otherwise anything left for a person makes it partial.
+    ? `- checks: one entry per criterion${smoke ? " listed above" : ""}, in the order above, each with its result (passed, failed or not-checked; never skipped, which T3 records itself), the evidence you saw, and the position of the screenshot that proves it when one does. For a failure give expected versus actual and the steps to reproduce; for not-checked say what stopped you. T3 derives the verdict from these and ignores the verdict field: one failure fails the run, otherwise anything left for a person makes it partial.
 - humanChecks: exact steps for each criterion you marked not-checked, for a person to follow ${worktreeE2e ? "on staging after the deploy" : "on staging"}.
 - report: Markdown for the Linear issue, carrying what the checks do not: what you covered beyond the criteria, what could not be covered and why, and the test data you created, changed or left behind.`
     : worktreeE2e
@@ -199,9 +232,19 @@ Brief from the team leader:
 ${brief}`;
 };
 
+/** A smoke run says so in its brief, since a tester keeps the instructions of its first run. */
+const smokeNote = (task: AssistantTask) =>
+  assistantTaskE2eDepth(task) === "smoke" && task.criteria?.length
+    ? "This run is a smoke test: check that the pages the change touches load, walk the happy path of each criterion listed below, and watch the browser console and network for errors. The other acceptance criteria are not part of this run; report checks only for the listed ones, and T3 records the rest as not in the smoke test. There is no limit on time or screenshots.\n"
+    : assistantTaskE2eDepth(task) === "full" &&
+        task.e2ePlan?.depth === "full" &&
+        task.e2ePlan.depthSetBy !== "lead"
+      ? "This run is a full e2e test: check every acceptance criterion listed below.\n"
+      : "";
+
 /** The assistant's brief for one e2e run, with what the tester needs from earlier phases. */
 export const e2eBrief = (task: AssistantTask, brief: string) =>
-  `${criteriaList(task)}${brief}
+  `${smokeNote(task)}${testedCriteriaList(task)}${brief}
 ${task.testNotes ? `What the implementer says to test:\n${task.testNotes.planChanged ? "The implementer reported that the work moved away from the team leader's plan.\n" : ""}${task.testNotes.notes}` : ""}
 ${task.merge ? `What changed, per the implementer:\n${task.merge.summary}` : ""}
 ${task.codeReview?.summary ? `Code review notes:\n${task.codeReview.summary}` : ""}

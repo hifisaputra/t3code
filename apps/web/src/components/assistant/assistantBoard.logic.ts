@@ -1,10 +1,12 @@
 import {
   ASSISTANT_INSTRUCTION_BUDGET,
   assistantPicksIssues,
+  assistantTaskE2eDepth,
   assistantTaskE2eEnvironment,
   assistantTaskHoldsProject,
   type AssistantBoard,
   type AssistantDecision,
+  type AssistantE2eDepth,
   type AssistantInstructionAudience,
   type AssistantProject,
   type AssistantProjectConfig,
@@ -253,6 +255,8 @@ export function describeTaskPhase(input: {
           detail: `The ${holder} starts when the ${STAGE_THREAD[waitingOn]}'s turn and background work end. T3 releases a finished thread's background work by itself.`,
         };
       const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
+      // With no e2e test the worktree order is the staging one: review, merge, deploy.
+      const testsInWorktree = inWorktree && assistantTaskE2eDepth(task) !== "none";
       const e2ePassed = Boolean(task.e2e) && task.e2e?.verdict !== "failed";
       switch (task.stage ?? "implement") {
         case "implement":
@@ -302,10 +306,10 @@ export function describeTaskPhase(input: {
                     ? "It failed in the worktree. The team leader is deciding on a fix."
                     : "It failed on staging. The team leader is deciding on a fix."
                   : task.merge && !task.deployment
-                    ? inWorktree
+                    ? testsInWorktree
                       ? "Merged after the e2e check passed. The team leader is checking the staging deploy."
                       : "Merged after code review. The team leader is checking the staging deploy."
-                    : inWorktree && task.codeReview?.verdict === "approved" && !task.e2e
+                    : testsInWorktree && task.codeReview?.verdict === "approved" && !task.e2e
                       ? "Code review approved the change. The team leader starts the e2e check in the worktree."
                       : "The team leader is deciding the next step.",
           };
@@ -322,6 +326,72 @@ export {
   type PipelineStepKey,
   type PipelineStepState,
 } from "@t3tools/contracts";
+
+const E2E_DEPTH_LABEL: Record<AssistantE2eDepth, string> = {
+  full: "Full",
+  smoke: "Smoke",
+  none: "None",
+};
+
+const E2E_DEPTH_SET_BY = {
+  lead: "Set by the team leader",
+  review: "Raised by code review",
+  person: "Set by you",
+} as const;
+
+export interface E2ePlanSummary {
+  readonly depth: AssistantE2eDepth;
+  /** "Full test", "Smoke test", "No e2e test". */
+  readonly label: string;
+  readonly setBy: string | null;
+  /** The reason for none, or which criteria a smoke test covers. */
+  readonly detail: string | null;
+}
+
+/** What the issue's e2e plan says about how deep the test goes. Null before the plan exists. */
+export function describeE2ePlan(
+  task: Pick<AssistantTask, "e2ePlan" | "criteria">,
+): E2ePlanSummary | null {
+  const plan = task.e2ePlan;
+  if (!plan) return null;
+  const depth = assistantTaskE2eDepth(task);
+  const setBy = plan.depthSetBy ? E2E_DEPTH_SET_BY[plan.depthSetBy] : null;
+  const smoke = plan.smokeCriteria?.length ? plan.smokeCriteria : null;
+  const detail =
+    depth === "none"
+      ? plan.reason?.trim() || null
+      : depth === "smoke"
+        ? smoke
+          ? `Criteria ${smoke.toSorted((a, b) => a - b).join(", ")}`
+          : task.criteria?.length
+            ? "All criteria"
+            : null
+        : null;
+  const label = depth === "none" ? "No e2e test" : depth === "smoke" ? "Smoke test" : "Full test";
+  return { depth, label, setBy, detail };
+}
+
+export const e2eDepthLabel = (depth: AssistantE2eDepth) => E2E_DEPTH_LABEL[depth];
+
+/**
+ * Whether the person can still change how deep the issue's e2e test goes: the
+ * server allows it on an active issue with a plan, until a test starts or passes.
+ */
+export function e2eDepthChange(
+  task: Pick<AssistantTask, "e2ePlan" | "status" | "stage" | "e2e">,
+): { readonly allowed: true } | { readonly allowed: false; readonly reason: string } {
+  if (!task.e2ePlan)
+    return {
+      allowed: false,
+      reason: "The team leader plans the e2e test when it takes the issue.",
+    };
+  if (!assistantTaskHoldsProject(task.status))
+    return { allowed: false, reason: "The issue is no longer being worked on." };
+  if (task.stage === "e2e") return { allowed: false, reason: "The e2e test is running." };
+  if (task.e2e && task.e2e.verdict !== "failed")
+    return { allowed: false, reason: "The e2e test already ran." };
+  return { allowed: true };
+}
 
 /** The first line of an agent's message as plain text, for a one-line preview. */
 export function previewLine(text: string): string {

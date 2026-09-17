@@ -158,6 +158,90 @@ describe("assistantTaskPipeline", () => {
     );
   });
 
+  it("labels a smoke test", () => {
+    const smoke = task({ stage: "review", e2ePlan: { brief: "", depth: "smoke" } });
+    expect(assistantTaskPipeline(smoke)?.[5]).toMatchObject({
+      key: "e2e",
+      label: "E2E test (smoke)",
+      state: "todo",
+    });
+  });
+
+  it("skips the e2e step at depth none, in both modes", () => {
+    const e2ePlan = { brief: "", depth: "none", reason: "Lint config only" } as const;
+    const none = (overrides: Partial<AssistantTask>) => task({ turns: 1, e2ePlan, ...overrides });
+    expect(states(none({ stage: "lead", turns: 0 }))).toBe(
+      "take:current code:todo review:todo merge:todo staging:todo e2e:skipped",
+    );
+    expect(states(none({ stage: "implement" }))).toBe(
+      "take:done code:current review:todo merge:todo staging:todo e2e:skipped",
+    );
+    expect(states(none({ stage: "review" }))).toBe(
+      "take:done code:done review:current merge:todo staging:todo e2e:skipped",
+    );
+    expect(states(none({ stage: "implement", ...approved }))).toBe(
+      "take:done code:done review:done merge:current staging:todo e2e:skipped",
+    );
+    expect(states(none({ stage: "lead", ...merged }))).toBe(
+      "take:done code:done review:done merge:done staging:current e2e:skipped",
+    );
+    expect(states(none({ stage: "lead", ...deployed }))).toBe(
+      "take:done code:done review:done merge:done staging:done e2e:skipped",
+    );
+    expect(assistantTaskPipeline(none({ stage: "review" }))?.[5]?.note).toBe(
+      "No e2e test: Lint config only",
+    );
+
+    const worktree = (overrides: Partial<AssistantTask>) =>
+      none({ e2eEnvironment: "worktree", ...overrides });
+    expect(states(worktree({ stage: "review" }))).toBe(
+      "take:done code:done review:current e2e:skipped merge:todo staging:todo",
+    );
+    // Approved, the change goes straight to the merge.
+    expect(states(worktree({ stage: "lead", ...approved }))).toBe(
+      "take:done code:done review:done e2e:skipped merge:current staging:todo",
+    );
+    expect(states(worktree({ stage: "implement", ...approved }))).toBe(
+      "take:done code:done review:done e2e:skipped merge:current staging:todo",
+    );
+    expect(states(worktree({ stage: "lead", ...merged }))).toBe(
+      "take:done code:done review:done e2e:skipped merge:done staging:current",
+    );
+    // A run that failed before the depth changed still sends the approved commit back.
+    const failedRun = {
+      verdict: "failed",
+      report: "",
+      humanChecks: [],
+      screenshots: [],
+      at: "2026-09-13T01:00:00.000Z",
+      environment: "worktree",
+    } as const;
+    expect(states(worktree({ stage: "implement", ...approved, e2e: failedRun }))).toBe(
+      "take:done code:current review:todo e2e:skipped merge:todo staging:todo",
+    );
+  });
+
+  it("shows a delivered issue with no e2e test done except the skipped step", () => {
+    const e2ePlan = { brief: "", depth: "none", reason: "x".repeat(80) } as const;
+    for (const e2eEnvironment of ["staging", "worktree"] as const) {
+      const delivered = task({
+        status: "review",
+        stage: "lead",
+        e2eEnvironment,
+        e2ePlan,
+        ...deployed,
+      });
+      const pipeline = assistantTaskPipeline(delivered) ?? [];
+      expect(pipeline.filter((step) => step.state !== "done").map((step) => step.key)).toEqual([
+        "e2e",
+      ]);
+      expect(pipeline.find((step) => step.key === "e2e")).toMatchObject({
+        state: "skipped",
+        note: "No e2e test",
+      });
+    }
+  });
+
   it("has none for work started before issues had review and e2e threads", () => {
     expect(assistantTaskPipeline(task())).toBeNull();
   });
@@ -240,6 +324,19 @@ describe("assistantLinearPlan", () => {
     expect(plan(task({ status: "skipped", stage: "review" })).slice(1, 3)).toEqual([
       "Code=completed",
       "Code review=canceled",
+    ]);
+  });
+
+  it("cancels a skipped e2e step and says why", () => {
+    const e2ePlan = { brief: "", depth: "none", reason: "CI only" } as const;
+    expect(plan(task({ status: "review", stage: "lead", e2ePlan, ...deployed }))).toEqual([
+      "Take on=completed",
+      "Code=completed",
+      "Code review=completed",
+      "Merge=completed",
+      "Staging: aaaaaaa deployed=completed",
+      "E2E test: No e2e test: CI only=canceled",
+      "Your check=inProgress",
     ]);
   });
 

@@ -682,7 +682,13 @@ const dropE2ePlan = (id: string) =>
   });
 
 /** The e2e test the leader plans when it takes an issue. */
-type E2ePlan = { readonly brief: string; readonly targetIds?: ReadonlyArray<string> };
+type E2ePlan = {
+  readonly depth: "full" | "smoke" | "none";
+  readonly brief: string;
+  readonly reason?: string;
+  readonly smokeCriteria?: ReadonlyArray<number>;
+  readonly targetIds?: ReadonlyArray<string>;
+};
 
 /**
  * One team takes its issue; the worker's first turn is queued. Without an e2e
@@ -698,7 +704,12 @@ const takeTask = (
 ) =>
   Effect.gen(function* () {
     yield* service.deliver();
-    yield* service.acceptIssue(leadOf(t), brief, criteria, e2e ?? { brief: "Open the page." });
+    yield* service.acceptIssue(
+      leadOf(t),
+      brief,
+      criteria,
+      e2e ?? { depth: "full", brief: "Open the page." },
+    );
     if (!e2e) yield* dropE2ePlan(t.id);
     yield* endTurn(h, service, leadOf(t));
     return yield* taskById(service, t.id);
@@ -1313,6 +1324,7 @@ it.effect("a paused loop takes no new issue, while its team and dispatched issue
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, leadOf(team)), 1);
     yield* service.acceptIssue(leadOf(team), "Fix it", ["The page loads"], {
+      depth: "full",
       brief: "Open the page.",
     });
     yield* endTurn(h, service, leadOf(team));
@@ -3143,7 +3155,11 @@ it.effect("a failed worktree e2e run goes to the team leader with nothing posted
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-const plan = { brief: "Open the report page as the test admin.", targetIds: ["web"] };
+const plan: E2ePlan = {
+  depth: "full",
+  brief: "Open the report page as the test admin.",
+  targetIds: ["web"],
+};
 
 it.effect("with an e2e plan T3 verifies staging after the merge and starts the tester", () =>
   Effect.gen(function* () {
@@ -3152,7 +3168,7 @@ it.effect("with an e2e plan T3 verifies staging after the merge and starts the t
     const team = yield* activeTask(service);
     const lead = leadOf(team);
     const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
-    assert.deepEqual(first.e2ePlan, plan);
+    assert.deepEqual(first.e2ePlan, { ...plan, depthSetBy: "lead" });
     // The tester is started from the notes, so a request without them is refused
     // before the project's checks run.
     yield* service.deliver();
@@ -3629,12 +3645,12 @@ it.effect("the team leader lists the acceptance criteria when it takes the issue
     const team = yield* activeTask(service);
     yield* service.deliver();
     const empty = yield* service
-      .acceptIssue(leadOf(team), "Fix it", [], { brief: "Open the page." })
+      .acceptIssue(leadOf(team), "Fix it", [], { depth: "full", brief: "Open the page." })
       .pipe(Effect.flip);
     assert.include(empty.detail, "acceptance criteria");
     // The e2e test is planned at take, since T3 starts the tester without the leader.
     const unplanned = yield* service
-      .acceptIssue(leadOf(team), "Fix it", ["The page loads"], { brief: "   " })
+      .acceptIssue(leadOf(team), "Fix it", ["The page loads"], { depth: "full", brief: "   " })
       .pipe(Effect.flip);
     assert.include(unplanned.detail, "brief for the tester");
     assert.lengthOf(h.started, 0);
@@ -4531,5 +4547,368 @@ it.effect("delegating an issue waiting for the person's review fails with the re
       "This issue is waiting for the person's review. Moving it back in Linear gives it to a new team with their feedback.",
     );
     assert.lengthOf(updatesOn(h, "delegated"), 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+const nonePlan: E2ePlan = {
+  depth: "none",
+  brief: "",
+  reason: "Only the lint config changes.",
+  targetIds: ["web"],
+};
+const smokeCriteria = ["The page loads", "The export downloads a CSV", "The CSV names each column"];
+
+it.effect("a plan at depth none needs a reason, and a smoke plan needs its criteria", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    yield* service.deliver();
+    const accept = (e2e: E2ePlan) =>
+      service.acceptIssue(lead, "Fix it", smokeCriteria, e2e).pipe(Effect.flip);
+    assert.include(
+      (yield* accept({ depth: "none", brief: "", reason: "  " })).detail,
+      "Give a reason for e2e depth none",
+    );
+    assert.include((yield* accept({ depth: "full", brief: "" })).detail, "brief for the tester");
+    assert.include(
+      (yield* accept({ depth: "smoke", brief: "Open it." })).detail,
+      "at least one acceptance criterion",
+    );
+    assert.include(
+      (yield* accept({ depth: "smoke", brief: "Open it.", smokeCriteria: [2, 2] })).detail,
+      "once",
+    );
+    assert.include(
+      (yield* accept({ depth: "smoke", brief: "Open it.", smokeCriteria: [0, 4] })).detail,
+      "there is no criterion 0, 4",
+    );
+    assert.lengthOf(h.started, 0);
+    const taken = yield* service.acceptIssue(lead, "Fix it", smokeCriteria, {
+      depth: "smoke",
+      brief: "Open it.",
+      reason: "Ignored for smoke.",
+      smokeCriteria: [3, 1],
+    });
+    // Only the fields the depth uses are kept.
+    assert.deepEqual(taken.e2ePlan, {
+      brief: "Open it.",
+      depth: "smoke",
+      depthSetBy: "lead",
+      smokeCriteria: [1, 3],
+    });
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("with no e2e test planned T3 delivers once staging verifies the merge", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const first = yield* takeTask(h, service, team, "Bump lint", ["Lint passes"], nonePlan);
+    assert.deepEqual(first.e2ePlan, {
+      brief: "",
+      targetIds: ["web"],
+      depth: "none",
+      depthSetBy: "lead",
+      reason: "Only the lint config changes.",
+    });
+    yield* service.deliver();
+    const leaderTurns = turnsOf(h, lead).length;
+    yield* reachMerge(h, service, first);
+    // The merge card says staging is the last step.
+    assert.include(h.comments[0]!.body, "The issue moves to review once it is verified there.");
+    yield* service.scan();
+    const delivered = yield* taskById(service, first.id);
+    assert.equal(delivered.status, "review");
+    assert.isNull(delivered.e2e);
+    assert.deepEqual(h.verified.at(-1)?.targetIds, ["web"]);
+    assert.include(delivered.reviewInstructions, "No e2e test ran");
+    assert.include(delivered.reviewInstructions, "Only the lint config changes.");
+    // No "deployed, e2e running" card: the merge card, then the no-e2e card.
+    assert.lengthOf(h.comments, 2);
+    assert.match(
+      h.comments[1]!.body,
+      /^\*\*No e2e test: Only the lint config changes\*\* \(decided by the team leader\)/,
+    );
+    assert.lengthOf(h.descriptions, 1);
+    assert.notInclude(h.descriptions[0]!.description, "Check before accepting");
+    assert.deepEqual(h.transitions, ["review"]);
+    assert.isFalse(h.threads.has(assistantTaskThreadId(first, "e2e")));
+    assert.lengthOf(turnsOf(h, lead), leaderTurns);
+    // Nothing of the team is running, so the scan closed it.
+    assert.isDefined((yield* taskById(service, first.id)).teamClosedAt);
+    assert.equal(h.threads.get(lead)?.settledOverride, "settled");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect(
+  "in the worktree with no e2e test the approval goes to the merge, and staging delivers",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      h.app.connected = true;
+      const { service } = yield* h.setupWith({ e2eEnvironment: "worktree" });
+      const team = yield* activeTask(service);
+      const lead = leadOf(team);
+      const first = yield* takeTask(h, service, team, "Bump lint", ["Lint passes"], nonePlan);
+      yield* service.deliver();
+      const leaderTurns = turnsOf(h, lead).length;
+      yield* approveReview(h, service, first);
+      const merging = yield* taskById(service, first.id);
+      assert.equal(merging.stage, "implement");
+      const told = turnsOf(h, first.threadId).at(-1);
+      assert.include(
+        told,
+        "No e2e test is planned for this issue (reason: Only the lint config changes.)",
+      );
+      assert.include(told, "Merge the PR into develop with a merge commit");
+      assert.isFalse(h.threads.has(assistantTaskThreadId(first, "e2e")));
+      // The person cannot ask for a test the merge already left behind.
+      const late = yield* service
+        .setE2eDepth({ taskId: first.id, depth: "full" })
+        .pipe(Effect.flip);
+      assert.include(late.detail, "already being merged without an e2e test");
+      yield* service.reportMerged(first.threadId, "Lint runs on CI.");
+      yield* endTurn(h, service, first.threadId);
+      yield* service.scan();
+      const delivered = yield* taskById(service, first.id);
+      assert.equal(delivered.status, "review");
+      assert.isNull(delivered.e2e);
+      assert.lengthOf(h.comments, 1);
+      assert.match(h.comments[0]!.body, /^\*\*No e2e test: Only the lint config changes\*\*/);
+      assert.include(
+        sessionLog(h),
+        "response:**No e2e test: Only the lint config changes** (decided by the team leader)",
+      );
+      assert.lengthOf(turnsOf(h, lead), leaderTurns);
+    }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a smoke test covers only its criteria, and T3 records the rest as skipped", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const first = yield* takeTask(h, service, team, "Add export", smokeCriteria, {
+      depth: "smoke",
+      brief: "Open the report page.",
+      smokeCriteria: [2],
+    });
+    yield* reachMerge(h, service, first);
+    yield* service.scan();
+    yield* service.deliver();
+    const tester = assistantTaskThreadId(first, "e2e");
+    const run = turnsOf(h, tester).at(-1)!;
+    assert.include(run, "This run is a smoke test");
+    assert.include(run, "Acceptance criteria in this smoke test:\n2. The export downloads a CSV");
+    assert.notInclude(run, "1. The page loads");
+    assert.notInclude(run, "3. The CSV names each column");
+    const submit = (checks: ReadonlyArray<AssistantE2eCheck>) =>
+      service.submitE2e(tester, {
+        checks,
+        report: "Smoke checked the export.",
+        humanChecks: [],
+        screenshots: [],
+      });
+    const skippedByTester = yield* submit([
+      { criterion: 1, result: "skipped", evidence: "" },
+      { criterion: 2, result: "passed", evidence: "Downloaded." },
+    ]).pipe(Effect.flip);
+    assert.include(skippedByTester.detail, "T3 records skipped itself");
+    const missing = yield* submit([{ criterion: 1, result: "passed", evidence: "Loaded." }]).pipe(
+      Effect.flip,
+    );
+    assert.include(missing.detail, "This smoke test covers criteria 2");
+    assert.include(missing.detail, "No check for 2.");
+    // A check outside the smoke test is kept when the tester gives one.
+    const delivered = yield* submit([
+      { criterion: 2, result: "passed", evidence: "Downloaded." },
+      { criterion: 3, result: "passed", evidence: "Columns named." },
+    ]);
+    assert.equal(delivered.status, "review");
+    assert.equal(delivered.e2e?.verdict, "passed");
+    assert.deepEqual(delivered.e2e?.checks, [
+      { criterion: 1, result: "skipped", evidence: "Not in the smoke test" },
+      { criterion: 2, result: "passed", evidence: "Downloaded." },
+      { criterion: 3, result: "passed", evidence: "Columns named." },
+    ]);
+    const card = h.comments.at(-1)!.body;
+    assert.match(card, /^\*\*✅ Smoke test passed on staging: ready to accept\*\*/);
+    assert.include(card, "| The page loads | ➖ not in the smoke test |");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect(
+  "a reviewer who asks for e2e raises a plan with no test, and the leader writes the brief",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      h.app.connected = true;
+      const { service } = yield* h.setup;
+      const team = yield* activeTask(service);
+      const lead = leadOf(team);
+      const reviewer = assistantTaskThreadId(team, "review");
+      const first = yield* takeTask(h, service, team, "Bump lint", ["The page loads"], nonePlan);
+      yield* service.deliver();
+      const leaderTurns = turnsOf(h, lead).length;
+      yield* service.requestReview(first.threadId, "Ready", testNotes);
+      yield* endTurn(h, service, first.threadId);
+      yield* service.deliver();
+      const raised = yield* service.submitReview(
+        reviewer,
+        "approved",
+        "The lint fix also renames a button.",
+        "Checked it.",
+        true,
+      );
+      assert.deepEqual(raised.e2ePlan, {
+        brief: "",
+        targetIds: ["web"],
+        depth: "full",
+        depthSetBy: "review",
+      });
+      assert.include(sessionLog(h), "thought:Reviewer asked for a full e2e test");
+      yield* endTurn(h, service, reviewer);
+      yield* service.deliver();
+      yield* service.reportMerged(first.threadId, "The button reads Export.");
+      yield* endTurn(h, service, first.threadId);
+      yield* service.scan();
+      yield* service.deliver();
+      const told = turnsOf(h, lead).slice(leaderTurns);
+      assert.lengthOf(told, 1);
+      assert.include(told[0], "The code reviewer set the e2e test to full");
+      assert.include(
+        told[0],
+        "Start the e2e check on staging with assistant_start_e2e and a brief",
+      );
+      const waiting = yield* taskById(service, first.id);
+      assert.equal(waiting.status, "working");
+      assert.isFalse(h.threads.has(assistantTaskThreadId(first, "e2e")));
+      // The leader's rerun at another depth becomes the plan.
+      const invalid = yield* service
+        .startE2e(lead, "Open the page.", { depth: "smoke", smokeCriteria: [2] })
+        .pipe(Effect.flip);
+      assert.include(invalid.detail, "there is no criterion 2");
+      const started = yield* service.startE2e(lead, "Open the page.", {
+        depth: "smoke",
+        smokeCriteria: [1],
+      });
+      assert.deepEqual(started.e2ePlan, {
+        brief: "Open the page.",
+        targetIds: ["web"],
+        depth: "smoke",
+        depthSetBy: "lead",
+        smokeCriteria: [1],
+      });
+      yield* endTurn(h, service, lead);
+      yield* service.deliver();
+      assert.include(
+        turnsOf(h, assistantTaskThreadId(first, "e2e")).at(-1),
+        "This run is a smoke test",
+      );
+    }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the person sets the depth on the board until the test starts", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const first = yield* takeTask(h, service, team, "Add export", smokeCriteria, plan);
+    // The default smoke test covers every criterion.
+    const smoked = yield* service.setE2eDepth({ taskId: first.id, depth: "smoke" });
+    assert.deepEqual(smoked.tasks.find((t) => t.id === first.id)?.e2ePlan, {
+      ...plan,
+      depth: "smoke",
+      depthSetBy: "person",
+      smokeCriteria: [1, 2, 3],
+    });
+    assert.include(sessionLog(h), "thought:Depth set to smoke by the person");
+    const bad = yield* service
+      .setE2eDepth({ taskId: first.id, depth: "smoke", smokeCriteria: [7] })
+      .pipe(Effect.flip);
+    assert.include(bad.detail, "there is no criterion 7");
+    // The implementer says the plan changed, so staging goes to the leader.
+    yield* reachMerge(h, service, first, { testNotes: "Export moved.", planChanged: true });
+    yield* service.scan();
+    yield* service.deliver();
+    const leaderTurns = turnsOf(h, lead).length;
+    assert.include(turnsOf(h, lead).at(-1), "the work changed from your plan");
+    // Choosing no test answers it: the issue is delivered without waking anyone.
+    const board = yield* service.setE2eDepth({ taskId: first.id, depth: "none" });
+    const delivered = board.tasks.find((t) => t.id === first.id)!;
+    assert.equal(delivered.status, "review");
+    assert.equal(delivered.e2ePlan?.reason, "Set by the person on the board.");
+    assert.match(h.comments.at(-1)!.body, /^\*\*No e2e test: set by the person on the board\*\*/);
+    assert.include(delivered.reviewInstructions, "the person set the depth to none");
+    assert.isFalse(h.threads.has(assistantTaskThreadId(first, "e2e")));
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, lead), leaderTurns);
+    const finished = yield* service
+      .setE2eDepth({ taskId: first.id, depth: "full" })
+      .pipe(Effect.flip);
+    assert.include(finished.detail, "Only an active issue");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the depth cannot change while the test runs, or before the leader plans it", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+    yield* reachMerge(h, service, first);
+    yield* service.scan();
+    assert.equal((yield* taskById(service, first.id)).stage, "e2e");
+    const running = yield* service
+      .setE2eDepth({ taskId: first.id, depth: "none" })
+      .pipe(Effect.flip);
+    assert.include(running.detail, "already running");
+    yield* dropE2ePlan(first.id);
+    const unplanned = yield* service
+      .setE2eDepth({ taskId: first.id, depth: "none" })
+      .pipe(Effect.flip);
+    assert.equal(unplanned.detail, "The team leader plans the test when it takes the issue.");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("choosing no test after a failed run on staging delivers while the leader decides", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const tester = assistantTaskThreadId(team, "e2e");
+    const first = yield* takeTask(h, service, team, "Fix it", ["The page loads"], plan);
+    yield* reachMerge(h, service, first);
+    yield* service.scan();
+    yield* service.deliver();
+    yield* service.submitE2e(tester, {
+      checks: oneCheck("failed", "The page shows a 500."),
+      report: "- The page loads: failed",
+      humanChecks: [],
+      screenshots: [],
+    });
+    yield* endTurn(h, service, tester);
+    yield* service.deliver();
+    assert.include(turnsOf(h, lead).at(-1), "failed its e2e check on staging");
+    // The leader's turn is running: nothing happens until it ends.
+    const busy = yield* service.setE2eDepth({ taskId: first.id, depth: "none" });
+    assert.equal(busy.tasks.find((t) => t.id === first.id)?.status, "working");
+    yield* endTurn(h, service, lead);
+    const board = yield* service.setE2eDepth({ taskId: first.id, depth: "none" });
+    const delivered = board.tasks.find((t) => t.id === first.id)!;
+    assert.equal(delivered.status, "review");
+    assert.equal(delivered.e2e?.verdict, "failed");
+    const card = h.comments.at(-1)!.body;
+    assert.match(card, /^\*\*No e2e test: set by the person on the board\*\*/);
+    assert.notInclude(card, "500");
+    assert.include(delivered.reviewInstructions, "No e2e test ran");
+    assert.deepEqual(h.transitions, ["review"]);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );

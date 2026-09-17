@@ -19,6 +19,10 @@ import { McpInvocationContext, requireMcpCapability } from "../../McpInvocationC
 const dependencies = [DeveloperAssistant, McpInvocationContext];
 const failure = Schema.Union([DeveloperAssistantError, PreviewAutomationUnavailableError]);
 const text = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(20000));
+const smokeCriteria = Schema.Array(Schema.Int).annotate({
+  description:
+    "For depth smoke: the 1-based numbers of the acceptance criteria the smoke test covers, at least one. The tester checks only these; T3 records the rest as not in the smoke test.",
+});
 const thread = Schema.optionalKey(
   AssistantThreadRole.annotate({
     description: 'Which of the issue\'s threads: "implement" (default), "review" or "e2e".',
@@ -43,7 +47,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_accept_issue", {
     description:
-      "Team leader only: take your issue, with the acceptance criteria and the plan for its e2e test. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own, and T3 verifies staging and starts the tester with your e2e brief. End your turn afterward; T3 messages you when the issue needs a decision.",
+      "Team leader only: take your issue, with the acceptance criteria and the plan for its e2e test. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own, and T3 verifies staging and starts the tester with your e2e brief at the depth you plan. End your turn afterward; T3 messages you when the issue needs a decision.",
     parameters: Schema.Struct({
       brief: text.annotate({
         description:
@@ -54,10 +58,21 @@ export const AssistantToolkit = Toolkit.make(
           "Each criterion is one check a person could perform on the product, not a diff. T3 gives them, numbered, to the worker, the reviewer and the tester.",
       }),
       e2e: Schema.Struct({
-        brief: text.annotate({
+        depth: Schema.Literals(["full", "smoke", "none"]).annotate({
           description:
-            "For the tester: the pages or endpoints affected, the data it needs and what to clean up. T3 starts the tester with it, plus the criteria and the implementer's test notes, once staging verifies the merge (or, when the project tests in the worktree, once review approves).",
+            "How deep the e2e test goes; it sets which criteria are tested, not a time or screenshot budget. full: every acceptance criterion with screenshots. smoke: only the criteria in smokeCriteria; the tester checks that the pages the change touches load, walks the happy path of each and watches the console and network for errors. none: no tester runs, and T3 delivers once staging verifies the merge; give a reason. When in doubt choose full. Choose none only when nothing a user sees or does changes: tooling, lint, CI, dependency bumps with no behaviour change, refactors covered by tests, docs. The code reviewer can raise the depth to full, and the person can change it on the board until the test starts.",
         }),
+        brief: Schema.String.check(Schema.isMaxLength(20000)).annotate({
+          description:
+            "For the tester: the pages or endpoints affected, the data it needs and what to clean up. Required for full and smoke; may be empty for none. T3 starts the tester with it, plus the criteria and the implementer's test notes, once staging verifies the merge (or, when the project tests in the worktree, once review approves).",
+        }),
+        reason: Schema.optionalKey(
+          text.annotate({
+            description:
+              "For depth none, required: why nothing a user sees or does changes. It goes on the Linear issue with the delivery. Omit for full and smoke.",
+          }),
+        ),
+        smokeCriteria: Schema.optionalKey(smokeCriteria),
         targetIds: Schema.optionalKey(
           Schema.Array(Schema.String).annotate({
             description:
@@ -153,6 +168,12 @@ export const AssistantToolkit = Toolkit.make(
         description:
           "On approval, one or two sentences for the Linear update: what the review covered and any non-blocking notes. No first person.",
       }),
+      needsE2e: Schema.optionalKey(
+        Schema.Boolean.annotate({
+          description:
+            "true when the diff changes behaviour a user sees or uses that the planned e2e depth would not test: a plan with no test, or a smoke test that leaves out what changed. T3 raises the test to full, with either verdict. Omit otherwise.",
+        }),
+      ),
     }),
     success: AssistantTask,
     failure,
@@ -187,8 +208,17 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_start_e2e", {
     description:
-      "Team leader: start (or rerun) the issue's e2e tester, on staging once the deploy is verified, or in the team's worktree on the approved commit before the merge when the project is set up that way. T3 starts the tester itself with the e2e brief you planned when taking the issue; use this to rerun it after a failure, or when the implementer reports the plan changed, with a revised brief or the original one. The brief gives the tester the pages or endpoints affected, the data it needs and what to clean up; T3 adds the acceptance criteria you listed and the implementer's test notes. The tester reports one result per criterion with screenshots. End your turn afterward.",
-    parameters: Schema.Struct({ brief: text }),
+      "Team leader: start (or rerun) the issue's e2e tester, on staging once the deploy is verified, or in the team's worktree on the approved commit before the merge when the project is set up that way. T3 starts the tester itself with the e2e brief you planned when taking the issue; use this to rerun it after a failure, or when the implementer reports the plan changed, with a revised brief or the original one. The brief gives the tester the pages or endpoints affected, the data it needs and what to clean up; T3 adds the acceptance criteria you listed and the implementer's test notes. The tester reports one result per criterion with screenshots. Give depth to change how deep the test goes (full, or smoke with smokeCriteria); it becomes the plan, and without it the planned depth stays. End your turn afterward.",
+    parameters: Schema.Struct({
+      brief: text,
+      depth: Schema.optionalKey(
+        Schema.Literals(["full", "smoke"]).annotate({
+          description:
+            "full tests every acceptance criterion; smoke tests only smokeCriteria: the pages the change touches load, the happy path of each, and no console or network errors. Omit to keep the planned depth.",
+        }),
+      ),
+      smokeCriteria: Schema.optionalKey(smokeCriteria),
+    }),
     success: AssistantTask,
     failure,
     dependencies,
@@ -200,7 +230,7 @@ export const AssistantToolkit = Toolkit.make(
       checks: Schema.optionalKey(
         Schema.Array(AssistantE2eCheck).annotate({
           description:
-            "checks is required when the issue has acceptance criteria (the brief lists them numbered): one entry per criterion, in order. T3 derives the verdict from them: one failed criterion fails the run, otherwise any not-checked criterion makes it partial, and each not-checked criterion needs a matching entry in humanChecks. screenshot is the 1-based position in screenshots of the one that proves the check.",
+            "checks is required when the issue has acceptance criteria (the brief lists them numbered): one entry per criterion, in order; in a smoke test, one per criterion the brief lists. Never report skipped: T3 records the criteria outside a smoke test itself. T3 derives the verdict from them: one failed criterion fails the run, otherwise any not-checked criterion makes it partial, and each not-checked criterion needs a matching entry in humanChecks. screenshot is the 1-based position in screenshots of the one that proves the check.",
         }),
       ),
       verdict: Schema.optionalKey(
@@ -254,7 +284,7 @@ const verifyNote = (result: {
 }) => {
   if (result.outcome === "watching")
     return `Staging is still deploying: ${result.task.deployWait?.detail ?? "the deploy has not landed yet"}. T3 checks every minute for up to 45 minutes and messages you when it is verified or fails. End your turn.`;
-  if (assistantTaskE2eEnvironment(result.task) === "worktree")
+  if (result.task.status === "review" || assistantTaskE2eEnvironment(result.task) === "worktree")
     return "Verified: the issue is delivered and in review. End your turn.";
   if (result.task.e2ePlan && result.task.stage === "e2e")
     return "Verified. T3 started the e2e tester with the brief you planned. End your turn.";
@@ -286,7 +316,10 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         input.brief.trim(),
         input.criteria.map((criterion) => criterion.trim()),
         {
+          depth: input.e2e.depth,
           brief: input.e2e.brief.trim(),
+          ...(input.e2e.reason !== undefined ? { reason: input.e2e.reason.trim() } : {}),
+          ...(input.e2e.smokeCriteria ? { smokeCriteria: input.e2e.smokeCriteria } : {}),
           ...(input.e2e.targetIds
             ? { targetIds: input.e2e.targetIds.map((id) => id.trim()).filter(Boolean) }
             : {}),
@@ -329,6 +362,7 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         input.verdict,
         input.findings.trim(),
         input.summary.trim(),
+        input.needsE2e,
       );
     }),
   assistant_report_merged: (input) =>
@@ -345,7 +379,10 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_start_e2e: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      return yield* service.startE2e(caller, input.brief.trim());
+      return yield* service.startE2e(caller, input.brief.trim(), {
+        ...(input.depth ? { depth: input.depth } : {}),
+        ...(input.smokeCriteria ? { smokeCriteria: input.smokeCriteria } : {}),
+      });
     }),
   assistant_submit_e2e: (input) =>
     Effect.gen(function* () {

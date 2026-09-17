@@ -64,5 +64,9 @@ export function createDeveloperAssistantAtoms<R, E>(
       label: "assistant:dispatch",
       tag: WS_METHODS.assistantDispatch,
     }),
+    setE2eDepth: createEnvironmentRpcCommand(runtime, {
+      label: "assistant:set-e2e-depth",
+      tag: WS_METHODS.assistantSetE2eDepth,
+    }),
   };
 }

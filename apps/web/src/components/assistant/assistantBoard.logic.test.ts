@@ -14,8 +14,10 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildInbox,
   decisionOptions,
+  describeE2ePlan,
   describeProjectActivity,
   describeTaskPhase,
+  e2eDepthChange,
   historyTasks,
   instructionSections,
   previewLine,
@@ -399,6 +401,84 @@ describe("describeTaskPhase", () => {
     expect(
       describeTaskPhase({ ...base, task: task({ status: "blocked", error: "Worker stopped." }) }),
     ).toEqual({ tone: "blocked", label: "Blocked", detail: "Worker stopped." });
+  });
+});
+
+describe("e2e depth", () => {
+  const at = "2026-09-13T00:00:00.000Z";
+  const run = (verdict: "passed" | "failed") =>
+    ({ verdict, report: "", humanChecks: [], screenshots: [], at }) as const;
+
+  it("says how deep the test goes, who set it, and why", () => {
+    expect(describeE2ePlan(task())).toBeNull();
+    expect(describeE2ePlan(task({ e2ePlan: { brief: "Open /billing" } }))).toEqual({
+      depth: "full",
+      label: "Full test",
+      setBy: null,
+      detail: null,
+    });
+    expect(
+      describeE2ePlan(
+        task({
+          criteria: ["One", "Two", "Three"],
+          e2ePlan: { brief: "", depth: "smoke", smokeCriteria: [3, 1], depthSetBy: "review" },
+        }),
+      ),
+    ).toMatchObject({
+      label: "Smoke test",
+      setBy: "Raised by code review",
+      detail: "Criteria 1, 3",
+    });
+    expect(
+      describeE2ePlan(task({ criteria: ["One"], e2ePlan: { brief: "", depth: "smoke" } }))?.detail,
+    ).toBe("All criteria");
+    expect(
+      describeE2ePlan(
+        task({ e2ePlan: { brief: "", depth: "none", reason: "CI only", depthSetBy: "person" } }),
+      ),
+    ).toMatchObject({ label: "No e2e test", setBy: "Set by you", detail: "CI only" });
+  });
+
+  it("lets the person change the depth only until a test starts or passes", () => {
+    const e2ePlan = { brief: "" };
+    expect(e2eDepthChange(task({ stage: "implement", e2ePlan })).allowed).toBe(true);
+    expect(e2eDepthChange(task({ stage: "implement" })).allowed).toBe(false);
+    expect(e2eDepthChange(task({ stage: "e2e", e2ePlan }))).toEqual({
+      allowed: false,
+      reason: "The e2e test is running.",
+    });
+    expect(e2eDepthChange(task({ stage: "lead", e2ePlan, e2e: run("passed") })).allowed).toBe(
+      false,
+    );
+    // A failed run goes back to the worker, and the next run can still change.
+    expect(e2eDepthChange(task({ stage: "implement", e2ePlan, e2e: run("failed") })).allowed).toBe(
+      true,
+    );
+    expect(e2eDepthChange(task({ status: "review", stage: "lead", e2ePlan })).allowed).toBe(false);
+  });
+
+  it("does not wait for a worktree e2e check that will not run", () => {
+    const base = { workerBusy: false, workerNeedsInput: false, step: null, hasOpenDecision: false };
+    const commit = "a".repeat(40);
+    const codeReview = { verdict: "approved", findings: "", summary: "", commit, at } as const;
+    const worktree = (depth: "full" | "none") =>
+      task({
+        stage: "lead",
+        turns: 1,
+        e2eEnvironment: "worktree",
+        e2ePlan: { brief: "", depth },
+        codeReview,
+      });
+    expect(describeTaskPhase({ ...base, task: worktree("full") }).detail).toBe(
+      "Code review approved the change. The team leader starts the e2e check in the worktree.",
+    );
+    expect(describeTaskPhase({ ...base, task: worktree("none") }).detail).toBe(
+      "The team leader is deciding the next step.",
+    );
+    const merged = { ...worktree("none"), merge: { commit, summary: "Fixed", at } };
+    expect(describeTaskPhase({ ...base, task: merged }).detail).toBe(
+      "Merged after code review. The team leader is checking the staging deploy.",
+    );
   });
 });
 

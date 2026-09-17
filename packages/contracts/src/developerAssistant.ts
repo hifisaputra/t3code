@@ -297,17 +297,37 @@ export const AssistantMerge = Schema.Struct({
 export type AssistantMerge = typeof AssistantMerge.Type;
 
 /**
+ * How deep an issue's e2e test goes. full tests every criterion; smoke tests
+ * only the criteria the plan lists; none runs no tester, for a change with no
+ * user-facing behaviour.
+ */
+export const AssistantE2eDepth = Schema.Literals(["full", "smoke", "none"]);
+export type AssistantE2eDepth = typeof AssistantE2eDepth.Type;
+
+/**
  * The e2e test the team leader planned on taking the issue. T3 starts the
  * tester with it once staging verifies (or, in the worktree, once review
  * approves), so the leader is not woken for the handoff.
  */
 export const AssistantE2ePlan = Schema.Struct({
-  /** The tester brief: pages or endpoints affected, data it needs, what to clean up. */
+  /** The tester brief: pages or endpoints affected, data it needs, what to clean up. Empty for none. */
   brief: Schema.String,
   /** The deployment targets the change affects; absent means all. */
   targetIds: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Absent on plans made before depths: full. */
+  depth: Schema.optionalKey(AssistantE2eDepth),
+  /** Why no test is needed; set when depth is none. */
+  reason: Schema.optionalKey(Schema.String),
+  /** The 1-based criterion numbers a smoke test covers; set when depth is smoke. */
+  smokeCriteria: Schema.optionalKey(Schema.Array(Schema.Int)),
+  /** Who set the depth last: the leader at take or rerun, the reviewer raising it, or the person on the board. */
+  depthSetBy: Schema.optionalKey(Schema.Literals(["lead", "review", "person"])),
 });
 export type AssistantE2ePlan = typeof AssistantE2ePlan.Type;
+
+/** The depth of an issue's e2e test; full when none was planned. */
+export const assistantTaskE2eDepth = (task: Pick<AssistantTask, "e2ePlan">): AssistantE2eDepth =>
+  task.e2ePlan?.depth ?? "full";
 
 /**
  * What the implementer says the tester should test, given with its latest
@@ -334,7 +354,13 @@ export const AssistantCriteria = Schema.Array(
 ).check(Schema.isMinLength(1), Schema.isMaxLength(12));
 export type AssistantCriteria = typeof AssistantCriteria.Type;
 
-export const AssistantE2eCheckResult = Schema.Literals(["passed", "failed", "not-checked"]);
+/** skipped: outside a smoke test's criteria; T3 records it, testers do not report it. */
+export const AssistantE2eCheckResult = Schema.Literals([
+  "passed",
+  "failed",
+  "not-checked",
+  "skipped",
+]);
 export type AssistantE2eCheckResult = typeof AssistantE2eCheckResult.Type;
 /** The tester's result for one criterion. */
 export const AssistantE2eCheck = Schema.Struct({
@@ -603,6 +629,13 @@ export const AssistantDispatchInput = Schema.Struct({
   reference: TrimmedNonEmptyString,
   note: Schema.String,
 });
+/** The person changes how deep an issue's e2e test goes, until the test starts. */
+export const AssistantSetE2eDepthInput = Schema.Struct({
+  taskId: TrimmedNonEmptyString,
+  depth: AssistantE2eDepth,
+  /** For smoke: the 1-based criterion numbers to test; absent keeps the plan's, or all criteria. */
+  smokeCriteria: Schema.optionalKey(Schema.Array(Schema.Int)),
+});
 export const AssistantAnswerInput = Schema.Struct({
   decisionId: TrimmedNonEmptyString,
   answer: TrimmedNonEmptyString,
@@ -617,7 +650,8 @@ export const assistantTaskHoldsProject = (status: AssistantTaskStatus): boolean 
   status === "preparing" || status === "working" || status === "waiting" || status === "blocked";
 
 export type PipelineStepKey = "take" | "code" | "review" | "merge" | "staging" | "e2e";
-export type PipelineStepState = "done" | "current" | "failed" | "todo";
+/** skipped: a step the issue does not run, such as the e2e test at depth none. */
+export type PipelineStepState = "done" | "current" | "failed" | "todo" | "skipped";
 
 export interface PipelineStep {
   readonly key: PipelineStepKey;
@@ -657,14 +691,22 @@ export const LED_WORKTREE_PIPELINE: ReadonlyArray<PipelineStepDef> = [
   ...TO_STAGING_WORKTREE_E2E,
 ];
 
+/** The note on a skipped e2e step; a reason longer than this stays in the task's plan. */
+const SKIPPED_E2E_REASON_MAX = 48;
+
 /**
  * Where an issue is on its way to staging, from what the server recorded.
- * Work started before issues had review and e2e threads has no pipeline.
+ * Work started before issues had review and e2e threads has no pipeline. At
+ * e2e depth none the e2e step stays in its place, skipped, and the issue
+ * moves through the other steps as if it were not there.
  */
 export function assistantTaskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> | null {
   if (task.stage === undefined) return null;
   const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
-  const steps = inWorktree ? LED_WORKTREE_PIPELINE : LED_PIPELINE;
+  const depth = assistantTaskE2eDepth(task);
+  const skipsE2e = depth === "none";
+  const allSteps = inWorktree ? LED_WORKTREE_PIPELINE : LED_PIPELINE;
+  const steps = skipsE2e ? allSteps.filter((step) => step.key !== "e2e") : allSteps;
   const offset = 1;
   const approved = task.codeReview?.verdict === "approved";
   const e2eFailed = task.e2e?.verdict === "failed";
@@ -672,6 +714,24 @@ export function assistantTaskPipeline(task: AssistantTask): ReadonlyArray<Pipeli
   const at = (() => {
     if (task.status === "review" || task.status === "accepted") return steps.length;
     if (task.stage === "lead" && task.turns === 0) return 0;
+    if (skipsE2e) {
+      // Both modes run code, review, merge, staging. An approval older than a
+      // failed run from before the depth changed is not one to merge.
+      const approvedToMerge =
+        approved &&
+        !(e2eFailed && task.codeReview && task.e2e && task.e2e.at >= task.codeReview.at);
+      switch (task.stage) {
+        case "review":
+          return offset + 1;
+        case "implement":
+          return offset + (approvedToMerge && !task.merge ? 2 : 0);
+        case "lead":
+        case "e2e":
+          // Delivery follows the verified deploy, so a deployment is the last step done.
+          if (task.deployment) return steps.length;
+          return offset + (task.merge ? 3 : approvedToMerge ? 2 : 0);
+      }
+    }
     if (inWorktree)
       switch (task.stage) {
         case "review":
@@ -708,6 +768,7 @@ export function assistantTaskPipeline(task: AssistantTask): ReadonlyArray<Pipeli
   const e2eAt = stepAt("e2e");
   const stagingAt = stepAt("staging");
   const changesRequested = task.codeReview?.verdict === "changes-requested";
+  const reason = task.e2ePlan?.reason?.trim() ?? "";
   const notes: Partial<Record<PipelineStepKey, string>> = {
     ...(changesRequested && at === codeAt
       ? { code: "Fixing review findings", review: "Changes requested" }
@@ -716,30 +777,43 @@ export function assistantTaskPipeline(task: AssistantTask): ReadonlyArray<Pipeli
     ...(task.deployment && at > stagingAt
       ? { staging: `${task.deployment.revision.slice(0, 7)} deployed` }
       : {}),
-    ...(task.e2e && at >= e2eAt && task.stage !== "e2e"
+    ...(skipsE2e
       ? {
-          e2e: e2eFailed
-            ? inWorktree
-              ? "Failed in the worktree"
-              : "Failed on staging"
-            : task.e2e.verdict === "partial"
-              ? "Passed, with checks for you"
-              : "Passed",
+          e2e:
+            reason && reason.length <= SKIPPED_E2E_REASON_MAX
+              ? `No e2e test: ${reason}`
+              : "No e2e test",
         }
-      : {}),
+      : task.e2e && at >= e2eAt && task.stage !== "e2e"
+        ? {
+            e2e: e2eFailed
+              ? inWorktree
+                ? "Failed in the worktree"
+                : "Failed on staging"
+              : task.e2e.verdict === "partial"
+                ? "Passed, with checks for you"
+                : "Passed",
+          }
+        : {}),
   };
-  return steps.map((step, index) => ({
-    ...step,
-    state:
-      index < at
-        ? "done"
-        : index > at
-          ? "todo"
-          : step.key === "e2e" && e2eFailed && task.stage === "lead"
-            ? "failed"
-            : "current",
-    note: notes[step.key] ?? null,
-  }));
+  return allSteps.map((step): PipelineStep => {
+    const note = notes[step.key] ?? null;
+    if (step.key === "e2e" && skipsE2e) return { ...step, state: "skipped", note };
+    const index = stepAt(step.key);
+    return {
+      ...step,
+      ...(step.key === "e2e" && depth === "smoke" ? { label: "E2E test (smoke)" } : {}),
+      state:
+        index < at
+          ? "done"
+          : index > at
+            ? "todo"
+            : step.key === "e2e" && e2eFailed && task.stage === "lead"
+              ? "failed"
+              : "current",
+      note,
+    };
+  });
 }
 
 export type AssistantLinearPlanStatus = "pending" | "inProgress" | "completed" | "canceled";
@@ -762,6 +836,11 @@ export function assistantLinearPlan(task: AssistantTask): ReadonlyArray<Assistan
   if (pipeline === null) return [];
   const ended = task.status === "declined" || task.status === "skipped";
   const steps = pipeline.map((step): AssistantLinearPlanStep => {
+    if (step.state === "skipped")
+      return {
+        content: step.note ? `${step.label}: ${step.note}` : step.label,
+        status: "canceled",
+      };
     const label = step.state === "failed" ? `${step.label} (failed)` : step.label;
     const content = step.note ? `${label}: ${step.note}` : label;
     if (step.state === "done") return { content, status: "completed" };

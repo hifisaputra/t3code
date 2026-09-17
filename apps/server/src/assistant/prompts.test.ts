@@ -178,7 +178,7 @@ describe("the e2e plan and the implementer's test notes", () => {
   it("has the team leader plan the test when it takes the issue, in both modes", () => {
     for (const issue of [task, worktree]) {
       const lead = leadInstructions(config, issue);
-      expect(lead).toContain("and the e2e plan: a brief for the tester");
+      expect(lead).toContain("and the e2e plan: its depth, a brief for the tester");
       expect(lead).toContain("T3 starts the tester with this brief later without asking you");
       expect(lead).toContain("T3 messages you here only when something needs a decision");
       expect(lead).toContain("the implementer reports that the work changed from your plan");
@@ -235,5 +235,80 @@ describe("the e2e plan and the implementer's test notes", () => {
     expect(changed).toContain(
       "What the implementer says to test:\nThe implementer reported that the work moved away from the team leader's plan.\nExport lives in the report menu now.",
     );
+  });
+});
+
+describe("e2e depth", () => {
+  const smoke: AssistantTask = {
+    ...withCriteria,
+    criteria: [...withCriteria.criteria!, "The CSV names each column."],
+    e2ePlan: {
+      brief: "Open the report page as the test admin.",
+      depth: "smoke",
+      smokeCriteria: [2],
+      depthSetBy: "lead",
+    },
+  };
+  const none: AssistantTask = {
+    ...withCriteria,
+    e2ePlan: {
+      brief: "",
+      depth: "none",
+      reason: "Only the lint config changes.",
+      depthSetBy: "lead",
+    },
+  };
+
+  it("has the team leader choose a depth, full when in doubt and none only with a reason", () => {
+    const lead = leadInstructions(config, task);
+    expect(lead).toContain(
+      "full tests every criterion with screenshots; it is the default, and when in doubt choose it",
+    );
+    expect(lead).toContain("smoke lists the criteria to test in smokeCriteria");
+    expect(lead).toContain("none runs no tester and needs a reason");
+    expect(lead).toContain("The code reviewer can raise the depth to full");
+    expect(lead).toContain("the person can change it on the board until the test starts");
+    expect(lead).not.toContain("\u2014");
+  });
+
+  it("shows the reviewer the planned depth and when to ask for a full test", () => {
+    const reviewer = reviewerInstructions(config, none);
+    expect(reviewer).toContain("set needsE2e to true with your verdict");
+    expect(reviewer).toContain(
+      "Planned e2e depth: none. No tester runs, because: Only the lint config changes.",
+    );
+    expect(reviewer).not.toContain("The team leader's plan for the e2e test:");
+    expect(reviewerInstructions(config, smoke)).toContain(
+      "Planned e2e depth: smoke, covering criteria 2:",
+    );
+  });
+
+  it("gives a smoke tester only its criteria, under their own numbers, with no cap", () => {
+    const brief = e2eBrief(smoke, "Test the export.");
+    expect(brief).toContain("This run is a smoke test");
+    expect(brief).toContain("There is no limit on time or screenshots.");
+    expect(brief).toContain(
+      "Acceptance criteria in this smoke test:\n2. Export downloads a CSV of the rows.\nTest the export.",
+    );
+    expect(brief).not.toContain("1. The report page shows an Export button.");
+    expect(brief).not.toContain("3. The CSV names each column.");
+    const instructions = e2eInstructions(config, smoke, "/evidence", brief);
+    expect(instructions).toContain(
+      "This run is a smoke test: check that the pages the change touches load",
+    );
+    expect(instructions).toContain("The issue's other criteria are not part of this run.");
+    expect(instructions).toContain("one entry per criterion listed above");
+    expect(instructions).toContain("never skipped, which T3 records itself");
+    expect(instructions).not.toContain("1. The report page shows an Export button.");
+  });
+
+  it("tells a tester a raised test is full again", () => {
+    const raised: AssistantTask = {
+      ...smoke,
+      e2ePlan: { brief: "Open the page.", depth: "full", depthSetBy: "review" },
+    };
+    const brief = e2eBrief(raised, "Open the page.");
+    expect(brief).toContain("This run is a full e2e test");
+    expect(brief).toContain("3. The CSV names each column.");
   });
 });

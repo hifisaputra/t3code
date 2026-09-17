@@ -11,6 +11,7 @@ import {
   linearFailureDetail,
   linearFeedback,
   mergedComment,
+  noE2eComment,
   sessionNotes,
   withSessionNote,
 } from "./linearUpdates.ts";
@@ -217,6 +218,65 @@ describe("e2eComment", () => {
     });
     expect(checked).toContain("+++ Tester's full report (tested commit 641c0f8)");
   });
+
+  it("says a smoke test ran and marks the criteria it left out", () => {
+    const body = e2eComment({
+      ...withCriteria,
+      smoke: true,
+      e2e: {
+        ...withCriteria.e2e,
+        verdict: "passed",
+        humanChecks: [],
+        checks: [
+          withCriteria.e2e.checks[0]!,
+          { criterion: 2, result: "skipped", evidence: "Not in the smoke test" },
+        ],
+      },
+    });
+    expect(body.startsWith("**✅ Smoke test passed on staging: ready to accept**")).toBe(true);
+    expect(body).toContain("| The author gets a reminder email | ➖ not in the smoke test |");
+    expect(body).toContain(
+      "2. **The author gets a reminder email** ➖ not in the smoke test: Not in the smoke test",
+    );
+    expect(body.endsWith(footer)).toBe(true);
+  });
+});
+
+describe("noE2eComment", () => {
+  const input = {
+    reason: "Only the lint config changes.",
+    decidedBy: "lead" as const,
+    merge: { commit: deployment.revision, summary: "Lint runs on CI.", at: "" },
+    deployment,
+    pullRequest: { number: 83, url: "https://github.com/Spice-Works/garibet/pull/83" },
+    acceptedState: "Done",
+  };
+
+  it("gives the reason and who decided, then the footer of a delivery card", () => {
+    expect(noE2eComment(input)).toBe(
+      [
+        "**No e2e test: Only the lint config changes** (decided by the team leader)",
+        "---",
+        "What shipped is in the issue description.",
+        "To accept, move this issue to Done. To ask for changes, move it back to an earlier state and comment what should change.",
+        [
+          "- Staging: [staging.garibet.id](https://staging.garibet.id)",
+          "- Deployed commit: `641c0f8`",
+          "- Deployments: [dashboard](https://github.com/Spice-Works/garibet/actions/runs/34731319248)",
+          "- Pull request: [#83](https://github.com/Spice-Works/garibet/pull/83)",
+        ].join("\n"),
+      ].join("\n\n"),
+    );
+  });
+
+  it("says the person chose no test on the board", () => {
+    const body = noE2eComment({
+      ...input,
+      decidedBy: "person",
+      reason: "Set by the person on the board.",
+    });
+    expect(body.split("\n")[0]).toBe("**No e2e test: set by the person on the board**");
+  });
 });
 
 describe("mergedComment", () => {
@@ -229,6 +289,14 @@ describe("mergedComment", () => {
     at: "2026-09-13T02:00:00.000Z",
   };
   const input = { merge, review, pullRequest: null, baseBranch: "main" };
+
+  it("points straight at review when the issue runs no e2e test", () => {
+    expect(
+      mergedComment({ ...input, noE2e: true }).endsWith(
+        "Next: staging deploy. The issue moves to review once it is verified there.",
+      ),
+    ).toBe(true);
+  });
 
   it("points at the e2e check on staging when the run happens there", () => {
     const body = mergedComment(input);
@@ -322,6 +390,13 @@ describe("deliveredDescription", () => {
     });
     expect(body).not.toContain("Check before accepting");
     expect(body).toContain("Blog posts show their body.");
+  });
+
+  it("works for an issue delivered without an e2e test", () => {
+    const body = deliveredDescription({ ...input, e2e: null });
+    expect(body).not.toContain("Check before accepting");
+    expect(body).toContain("Blog posts show their body.");
+    expect(body).toContain("Staging: [staging.garibet.id](https://staging.garibet.id)");
   });
 
   it("points at the comments when the implementer reported no summary", () => {

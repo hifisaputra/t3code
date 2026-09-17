@@ -406,7 +406,9 @@ function reviewHeadline(task: AssistantTask): { kind: string; outcome: string } 
       ? task.e2e.environment === "worktree"
         ? "Passed e2e in the worktree, deployed to staging"
         : "Passed e2e on staging"
-      : "Verified on staging",
+      : task.e2ePlan?.depth === "none"
+        ? "No e2e test, verified on staging"
+        : "Verified on staging",
     checks ? `${checks} check${checks === 1 ? "" : "s"} for you` : null,
     shots ? `${shots} screenshot${shots === 1 ? "" : "s"}` : null,
   ]

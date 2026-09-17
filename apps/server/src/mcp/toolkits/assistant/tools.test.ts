@@ -221,6 +221,8 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
     const planned: Array<unknown> = [];
     const requested: Array<unknown> = [];
     const reported: Array<unknown> = [];
+    const reviewed: Array<unknown> = [];
+    const started: Array<unknown> = [];
     const layer = McpServer.toolkit(AssistantToolkit).pipe(
       Layer.provide(AssistantToolkitHandlers),
       Layer.provideMerge(
@@ -230,6 +232,16 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
               taken.push(criteria);
               planned.push(e2e);
               return { ...managedTask, criteria };
+            }),
+          submitReview: (_caller, verdict, _findings, _summary, needsE2e) =>
+            Effect.sync(() => {
+              reviewed.push({ verdict, needsE2e });
+              return managedTask;
+            }),
+          startE2e: (_caller, brief, options) =>
+            Effect.sync(() => {
+              started.push({ brief, ...options });
+              return managedTask;
             }),
           requestReview: (_caller, message, input) =>
             Effect.sync(() => {
@@ -284,12 +296,67 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
         arguments: {
           brief: "Fix it",
           criteria: [" The page loads ", "The email arrives"],
-          e2e: { brief: " Open the page. ", targetIds: [" web ", ""] },
+          e2e: { depth: "full", brief: " Open the page. ", targetIds: [" web ", ""] },
         },
       });
       assert.isFalse(accepted.isError);
       assert.deepEqual(taken, [["The page loads", "The email arrives"]]);
-      assert.deepEqual(planned, [{ brief: "Open the page.", targetIds: ["web"] }]);
+      // Every plan names its depth.
+      const undepthed = yield* call({
+        name: "assistant_accept_issue",
+        arguments: { brief: "Fix it", criteria: ["The page loads"], e2e: { brief: "Open it." } },
+      }).pipe(Effect.flip);
+      assert.equal(undepthed._tag, "InvalidParams");
+      // A plan with no test may leave the brief empty; T3 checks the reason.
+      yield* call({
+        name: "assistant_accept_issue",
+        arguments: {
+          brief: "Bump lint",
+          criteria: ["Lint passes"],
+          e2e: { depth: "none", brief: "", reason: " Lint config only. " },
+        },
+      });
+      yield* call({
+        name: "assistant_accept_issue",
+        arguments: {
+          brief: "Fix it",
+          criteria: ["The page loads", "The email arrives"],
+          e2e: { depth: "smoke", brief: "Open the page.", smokeCriteria: [2] },
+        },
+      });
+      assert.deepEqual(planned, [
+        { depth: "full", brief: "Open the page.", targetIds: ["web"] },
+        { depth: "none", brief: "", reason: "Lint config only." },
+        { depth: "smoke", brief: "Open the page.", smokeCriteria: [2] },
+      ]);
+
+      yield* call({
+        name: "assistant_submit_review",
+        arguments: { verdict: "approved", findings: "None.", summary: "Fine.", needsE2e: true },
+      });
+      yield* call({
+        name: "assistant_submit_review",
+        arguments: { verdict: "approved", findings: "None.", summary: "Fine." },
+      });
+      assert.deepEqual(reviewed, [
+        { verdict: "approved", needsE2e: true },
+        { verdict: "approved", needsE2e: undefined },
+      ]);
+      yield* call({
+        name: "assistant_start_e2e",
+        arguments: { brief: " Open it. ", depth: "smoke", smokeCriteria: [1] },
+      });
+      yield* call({ name: "assistant_start_e2e", arguments: { brief: "Open it." } });
+      // Only the leader's reruns at full or smoke; none is set at take or on the board.
+      const noneRerun = yield* call({
+        name: "assistant_start_e2e",
+        arguments: { brief: "Open it.", depth: "none" },
+      }).pipe(Effect.flip);
+      assert.equal(noneRerun._tag, "InvalidParams");
+      assert.deepEqual(started, [
+        { brief: "Open it.", depth: "smoke", smokeCriteria: [1] },
+        { brief: "Open it." },
+      ]);
 
       // A worker whose tool list predates test notes can still call it; T3 decides.
       yield* call({ name: "assistant_request_review", arguments: { message: "Ready" } });
