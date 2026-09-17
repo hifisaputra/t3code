@@ -1643,6 +1643,31 @@ function resultOutcome(
   };
 }
 
+/**
+ * True for the empty result the CLI emits when it drains queued task
+ * notifications on resume (system/init + result(num_turns: 0)) without calling
+ * the model. When the new prompt's turn is already active this result arrives
+ * before the model has started on the prompt, so it must not close that turn.
+ *
+ * Every field has to agree: a success that is not flagged as an error, no
+ * model turn and no API time (any real turn, even one that produced nothing,
+ * has num_turns >= 1 or non-zero duration_api_ms), no result text (local
+ * commands report their output there), and, when the CLI tags the origin, a
+ * task-notification origin rather than the user's prompt.
+ */
+function isResumeHandshakeResult(result: SDKResultMessage): boolean {
+  if (result.subtype !== "success" || result.is_error === true) return false;
+  const record = result as unknown as Record<string, unknown>;
+  if (record.num_turns !== 0 || record.duration_api_ms !== 0) return false;
+  if (typeof record.result === "string" && record.result.length > 0) return false;
+  const origin = record.origin;
+  if (origin !== undefined && origin !== null) {
+    const kind = typeof origin === "object" ? (origin as Record<string, unknown>).kind : undefined;
+    if (kind !== "task-notification") return false;
+  }
+  return true;
+}
+
 function streamKindFromDeltaType(deltaType: string): ClaudeTextStreamKind {
   return deltaType.includes("thinking") ? "reasoning_text" : "assistant_text";
 }
@@ -3313,6 +3338,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const turn = context.turnState;
+    // The resume handshake result can land after sendTurn opened the prompt's
+    // turn (queued task notifications drain first). Closing the turn here
+    // would report it done before the model started; the prompt's own result
+    // follows and completes it.
+    if (turn && turn.items.length === 0 && isResumeHandshakeResult(message)) {
+      yield* Effect.logDebug("claude.turn.resume-handshake-result-ignored", {
+        threadId: context.session.threadId,
+        turnId: turn.turnId,
+        uuid: message.uuid,
+      });
+      return;
+    }
     // Rendered here rather than when the window was refused: the wait has to
     // count down from the moment the turn actually fails, which can be well
     // after the block arrived.

@@ -1400,6 +1400,158 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("keeps a resumed prompt's turn open through the resume handshake result", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "session.exited"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: {
+          threadId: "resume-thread-1",
+          resume: "550e8400-e29b-41d4-a716-446655440000",
+          turnCount: 0,
+        },
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "continue",
+        attachments: [],
+      });
+
+      // Shapes from a real resume after a stop with background agents running:
+      // stopped-task notifications drain, then system/init and an empty result.
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-stopped",
+        status: "stopped",
+        output_file: "/tmp/task-stopped.output",
+        summary: "Background agent didn't finish before the previous session ended",
+        uuid: "task-stopped-uuid",
+        session_id: "sdk-session-resume",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "init",
+        cwd: "/tmp",
+        session_id: "sdk-session-resume",
+        uuid: "init-handshake",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_api_ms: 0,
+        duration_ms: 216,
+        num_turns: 0,
+        result: "",
+        stop_reason: null,
+        total_cost_usd: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        origin: { kind: "task-notification" },
+        session_id: "sdk-session-resume",
+        uuid: "result-handshake",
+      } as unknown as SDKMessage);
+
+      // The model now works on the prompt and its own result ends the turn.
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-resume",
+        uuid: "assistant-resume-1",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-resume-1",
+          content: [{ type: "text", text: "Picking up where I left off." }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        duration_api_ms: 1200,
+        num_turns: 1,
+        result: "Picking up where I left off.",
+        session_id: "sdk-session-resume",
+        uuid: "result-real",
+      } as unknown as SDKMessage);
+
+      harness.query.finish();
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const types = runtimeEvents.map((event) => event.type);
+      const completions = runtimeEvents.filter((event) => event.type === "turn.completed");
+      assert.equal(completions.length, 1);
+      assert.equal(String(completions[0]?.turnId), String(turn.turnId));
+      // Completed after the assistant output, not at the handshake.
+      assert.ok(types.indexOf("turn.completed") > types.lastIndexOf("item.completed"));
+      assert.equal(runtimeEvents.filter((event) => event.type === "turn.started").length, 1);
+      const completed = completions[0];
+      if (completed?.type === "turn.completed") {
+        assert.equal(completed.payload.state, "completed");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("still ends an active turn on an immediate zero-turn error result", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Claude could not start."],
+        duration_api_ms: 0,
+        num_turns: 0,
+        session_id: "sdk-session-error",
+        uuid: "result-error",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const completed = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.equal(String(completed?.turnId), String(turn.turnId));
+      if (completed?.type === "turn.completed") {
+        assert.equal(completed.payload.state, "failed");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("steers a running turn instead of opening a new one on mid-turn sendTurn", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
