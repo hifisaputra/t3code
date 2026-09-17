@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Stream from "effect/Stream";
@@ -2774,6 +2775,40 @@ it.effect("a team whose threads the PR reactor settled first still closes on del
     assert.lengthOf(h.removed, 0);
     yield* endTurn(h, service, tester);
     assert.equal(h.threads.get(tester)?.settledOverride, "settled");
+    assert.deepEqual(h.removed, [`/worktrees/${task.threadId}`]);
+    assert.isString((yield* taskById(service, task.id)).teamClosedAt);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a finished team keeps its worktree until the last turn's checkpoint is taken", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const { task, tester } = yield* deliverWhileTesting(h, service);
+    yield* endTurn(h, service, tester);
+    // The turn ended just now by the clock, so its checkpoint is still being captured.
+    const thread = h.threads.get(tester)!;
+    const now = DateTime.formatIso(yield* DateTime.now);
+    h.threads.set(tester, {
+      ...thread,
+      settledOverride: null,
+      latestTurn: {
+        turnId: TurnId.make("tester-last"),
+        state: "completed",
+        requestedAt: now,
+        startedAt: now,
+        completedAt: now,
+        assistantMessageId: null,
+      },
+    });
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`UPDATE assistant_tasks SET data = json_remove(data, '$.teamClosedAt') WHERE id = ${task.id}`;
+    h.removed.length = 0;
+    yield* service.scan();
+    assert.lengthOf(h.removed, 0);
+    assert.isUndefined((yield* taskById(service, task.id)).teamClosedAt);
+    yield* TestClock.adjust(Duration.seconds(31));
+    yield* service.scan();
     assert.deepEqual(h.removed, [`/worktrees/${task.threadId}`]);
     assert.isString((yield* taskById(service, task.id)).teamClosedAt);
   }).pipe(Effect.provide(database()), Effect.scoped),

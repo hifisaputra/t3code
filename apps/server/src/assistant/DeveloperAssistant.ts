@@ -152,6 +152,8 @@ const ROLES = ["lead", "implement", "review", "e2e"] as const;
 const RELEASE_RETRY_MS = 30_000;
 /** How long after an issue last changed the scan still closes its finished team. */
 const CLOSE_RETRY_WINDOW_MS = 24 * 60 * 60_000;
+// How long after a turn ends its checkpoint may still be read from the worktree.
+const CHECKPOINT_GRACE_MS = 30_000;
 const ROLE_THREAD = /^assistant-(lead|review|e2e)-(.+)$/;
 const ROLE_TITLES = { lead: "team leader", review: "code review", e2e: "e2e on staging" } as const;
 const ROLE_NAMES = {
@@ -616,9 +618,13 @@ export const make = Effect.gen(function* () {
       yield* terminals.close({ threadId });
       if (!(yield* settleThread(threadId))) settled = false;
     }
-    if (!settled) {
+    // A turn that just ended still has its checkpoint captured from the
+    // worktree; removing the worktree under it fails that capture.
+    const recentTurn = settled && (yield* turnJustEnded(t));
+    if (!settled || recentTurn) {
       yield* Effect.logDebug("Developer assistant left a finished team open to close later", {
         task: t.id,
+        reason: settled ? "checkpoint" : "settle",
       });
       return;
     }
@@ -635,6 +641,17 @@ export const make = Effect.gen(function* () {
           ),
         );
     yield* saveTask({ ...t, teamClosedAt: yield* now });
+  });
+  /** Whether a team thread's latest turn ended too recently for its checkpoint to be captured. */
+  const turnJustEnded = Effect.fn("Assistant.turnJustEnded")(function* (t: AssistantTask) {
+    const at = yield* Clock.currentTimeMillis;
+    for (const threadId of taskThreadIds(t)) {
+      const shell = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
+      const completedAt = Option.isSome(shell) ? shell.value.latestTurn?.completedAt : null;
+      const age = completedAt ? at - Date.parse(completedAt) : null;
+      if (age !== null && age >= 0 && age < CHECKPOINT_GRACE_MS) return true;
+    }
+    return false;
   });
   /**
    * Delivered and declined issues whose team did not close when its last turn
