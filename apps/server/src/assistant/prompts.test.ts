@@ -10,7 +10,10 @@ import {
   e2eBrief,
   e2eInstructions,
   leadInstructions,
+  researchReviewerInstructions,
+  researchWorkerInstructions,
   reviewerInstructions,
+  setupInstructions,
   workerInstructions,
 } from "./prompts.ts";
 
@@ -429,5 +432,73 @@ describe("checks for the person", () => {
     expect(worktree).toContain(
       "call assistant_deliver with how each was settled; T3 then tells the worker to merge.",
     );
+  });
+});
+
+describe("research issues", () => {
+  const research: AssistantTask = {
+    ...task,
+    track: "research",
+    brief: "Compare the per-seat price of 5 project-management tools.",
+    criteria: ["Names the per-seat price of each of the 5 tools", "Says which is cheapest"],
+  };
+  const worker = researchWorkerInstructions(config, research, "/evidence/task");
+  const reviewer = researchReviewerInstructions(config, research);
+  const forms = "Never fill in, type into or submit anything";
+
+  it("has the team leader choose the track, and name what the worker can reach", () => {
+    const lead = leadInstructions(config, task);
+    expect(lead).toContain('Take an issue as research, with track "research"');
+    expect(lead).toContain("have the report recommend the build as a follow-up issue");
+    expect(lead).toContain(
+      "Research that needs a login, a form or a paid source is declined or asked about",
+    );
+    expect(lead).toContain("This team's worker runs on codex");
+  });
+
+  it("gives the worker and the reviewer the same web rules", () => {
+    for (const text of [worker, reviewer]) {
+      expect(text).toContain(forms);
+      expect(text).toContain("A page that needs any of those is a gap in the report");
+    }
+    expect(reviewer).toContain("Any sign that the worker broke these rules");
+  });
+
+  it("has the worker report rather than commit, with numbered questions and screenshots", () => {
+    expect(worker).toContain("do not edit, commit, push or open a pull request");
+    expect(worker).toContain("assistant_submit_research");
+    expect(worker).toContain("at most 30,000 characters");
+    expect(worker).toContain("in /evidence/task");
+    expect(worker).toContain(
+      "Questions the report must answer:\n1. Names the per-seat price of each of the 5 tools\n2. Says which is cheapest",
+    );
+    expect(worker).not.toContain("assistant_request_review");
+    expect(worker).toContain("IMPLEMENT SECTION");
+  });
+
+  it("has the reviewer open the sources and approve without first person", () => {
+    expect(reviewer).toContain("Open the report's sources yourself");
+    expect(reviewer).toContain("estimates presented as facts");
+    expect(reviewer).toContain("without first person");
+    expect(reviewer).toContain("REVIEW SECTION");
+  });
+
+  it("tells the setup that teams can take research issues", () => {
+    expect(
+      setupInstructions(
+        {
+          projectId: config.projectId,
+          linearProjectId: "linear",
+          assignedToMe: true,
+          modelSelection: config.modelSelection,
+          workerModelSelection: config.workerModelSelection,
+          runtimeMode: "full-access",
+          setupRuntimeMode: "approval-required",
+          context: "",
+        },
+        null,
+        null,
+      ),
+    ).toContain("Teams can also take research issues");
   });
 });

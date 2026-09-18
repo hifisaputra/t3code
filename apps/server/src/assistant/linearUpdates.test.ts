@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import type { LinearIssueDetail } from "@t3tools/contracts";
+import type { AssistantResearch, LinearIssueDetail } from "@t3tools/contracts";
 
 import {
   DELIVERED_MARKER_END,
@@ -12,6 +12,8 @@ import {
   linearFeedback,
   mergedComment,
   noE2eComment,
+  researchComments,
+  researchShortAnswer,
   sessionNotes,
   withSessionNote,
 } from "./linearUpdates.ts";
@@ -617,5 +619,123 @@ describe("issueFingerprint", () => {
     expect(
       issueFingerprint({ ...issue, comments: [comment("person", "Blocked by SPI-2")] }, []),
     ).not.toBe(before);
+  });
+});
+
+describe("researchComments", () => {
+  const research: AssistantResearch = {
+    report:
+      "## Short answer\n\n- Acme charges $10 per seat [1].\n- Globex has no public price [2].\n\n## Detail\n\nAcme's tiers are Basic and Pro [1].",
+    sources: [
+      { url: "https://acme.example/pricing", title: "Acme [pricing]", seen: "2026-09-18" },
+      { url: "https://globex.example/plans", title: "Globex plans", seen: "2026-09-17" },
+    ],
+    checks: [
+      { criterion: 1, result: "answered", evidence: "Short answer, first line.", screenshot: 1 },
+      { criterion: 2, result: "not-answered", evidence: "Globex asks for a sales call." },
+    ],
+    screenshots: [
+      {
+        path: "/evidence/t/acme.png",
+        caption: "Acme pricing page",
+        url: "https://uploads.linear.app/acme.png",
+      },
+      { path: "/evidence/t/globex.png", caption: "Globex plans page" },
+    ],
+    revision: 2,
+    at: "2026-09-18T00:00:00.000Z",
+    review: {
+      verdict: "approved",
+      findings: "",
+      summary: "Every figure matches its source.",
+      revision: 2,
+      at: "2026-09-18T01:00:00.000Z",
+    },
+  };
+  const criteria = ["Names Acme's per-seat price", "Names Globex's per-seat price"];
+
+  it("puts the questions, the open report, sources, screenshots and fact check on one card", () => {
+    const [card, ...rest] = researchComments({ research, criteria, acceptedState: "Done" });
+    expect(rest).toEqual([]);
+    expect(card).toBe(
+      [
+        "**Research ready for review**",
+        [
+          "| Question | Result |",
+          "| --- | --- |",
+          "| Names Acme's per-seat price | ✅ answered (screenshot 1) |",
+          "| Names Globex's per-seat price | 👀 not answered |",
+        ].join("\n"),
+        research.report,
+        [
+          "**Sources**",
+          "",
+          "1. [Acme \\[pricing\\]](https://acme.example/pricing), seen 2026-09-18",
+          "2. [Globex plans](https://globex.example/plans), seen 2026-09-17",
+        ].join("\n"),
+        "**Screenshots**",
+        "*Screenshot 1: Acme pricing page*\n\n![Acme pricing page](https://uploads.linear.app/acme.png)",
+        "*Screenshot 2: Globex plans page* (could not be uploaded)",
+        "**Fact check:** Every figure matches its source.",
+        "---",
+        "To accept, move this issue to Done. To ask for changes, move it back to an earlier state and comment what should change.",
+      ].join("\n\n"),
+    );
+  });
+
+  it("splits a card longer than one comment into numbered comments, the card first", () => {
+    const long: AssistantResearch = {
+      ...research,
+      report: Array.from({ length: 40 }, (_, i) => `Paragraph ${i + 1}: ${"x".repeat(80)}`).join(
+        "\n\n",
+      ),
+    };
+    const parts = researchComments({
+      research: long,
+      criteria,
+      acceptedState: "Done",
+      maxChars: 1500,
+    });
+    expect(parts.length).toBeGreaterThan(2);
+    for (const part of parts) expect(part.length).toBeLessThanOrEqual(1500);
+    expect(parts[0]).toMatch(/^\*\*Research ready for review\*\* \(part 1 of \d+\)/);
+    expect(parts[0]).toContain("| Names Acme's per-seat price | ✅ answered (screenshot 1) |");
+    expect(parts[1]).toMatch(new RegExp(`^\\*\\*Research, part 2 of ${parts.length}\\*\\*`));
+    expect(
+      parts.slice(0, -1).every((part) => part.endsWith("*Continued in the next comment.*")),
+    ).toBe(true);
+    // Nothing is lost or repeated: every paragraph is in exactly one part, in order.
+    const joined = parts.join("\n");
+    for (let i = 1; i <= 40; i++) expect(joined.split(`Paragraph ${i}:`)).toHaveLength(2);
+    expect(joined.indexOf("Paragraph 40:")).toBeGreaterThan(joined.indexOf("Paragraph 1:"));
+    expect(parts.at(-1)).toContain("To accept, move this issue to Done.");
+  });
+
+  it("cuts a single paragraph longer than a comment rather than dropping it", () => {
+    const parts = researchComments({
+      research: { ...research, report: "Ω".repeat(3000) },
+      criteria,
+      acceptedState: "Done",
+      maxChars: 1200,
+    });
+    for (const part of parts) expect(part.length).toBeLessThanOrEqual(1200);
+    expect(parts.join("").split("Ω").length - 1).toBe(3000);
+  });
+});
+
+describe("researchShortAnswer", () => {
+  it("is the text under the report's opening heading", () => {
+    expect(
+      researchShortAnswer(
+        "# Pricing research\n\n## Short answer\n\n- Acme is cheapest.\n\n## Detail\n\nMore.",
+      ),
+    ).toBe("- Acme is cheapest.");
+  });
+
+  it("is the start of a report with no headings, cut to its limit", () => {
+    expect(researchShortAnswer("Acme is cheapest.\n\nGlobex hides its prices.")).toBe(
+      "Acme is cheapest.\n\nGlobex hides its prices.",
+    );
+    expect(researchShortAnswer("z".repeat(50), 10)).toBe(`${"z".repeat(9)}…`);
   });
 });

@@ -6,6 +6,8 @@ import {
   AssistantCriteria,
   AssistantDecision,
   AssistantE2eCheck,
+  AssistantResearchCheck,
+  AssistantResearchSource,
   AssistantTask,
   AssistantSetup,
   AssistantSetupPlan,
@@ -48,39 +50,49 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_accept_issue", {
     description:
-      "Team leader only: take your issue, with the acceptance criteria and the plan for its e2e test. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own, and T3 verifies staging and starts the tester with your e2e brief at the depth you plan. End your turn afterward; T3 messages you when the issue needs a decision.",
+      'Team leader only: take your issue, with the acceptance criteria and the plan for its e2e test. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own, and T3 verifies staging and starts the tester with your e2e brief at the depth you plan. For an issue that asks for information rather than a change, pass track "research" and no e2e plan: the worker researches the public web and submits a report, the reviewer fact-checks it, and T3 posts it on the issue. End your turn afterward; T3 messages you when the issue needs a decision.',
     parameters: Schema.Struct({
+      track: Schema.optionalKey(
+        Schema.Literals(["code", "research"]).annotate({
+          description:
+            "code (default): a change that is merged, deployed to staging and tested. research: a report read from the public web, fact-checked by the reviewer and posted on the issue, with no merge, staging or tester. Choose research when the issue asks for information (a comparison, an analysis, a recommendation) and nothing in the repository or its deployments changes.",
+        }),
+      ),
       brief: text.annotate({
         description:
-          "For the worker: the scope, the acceptance criteria, and what the issue leaves implicit.",
+          "For the worker: the scope, the acceptance criteria, and what the issue leaves implicit. For research: which competitors or sources, the time frame, and what the person will decide with the answer.",
       }),
       criteria: AssistantCriteria.annotate({
         description:
-          "Each criterion is one check a person could perform on the product, not a diff. T3 gives them, numbered, to the worker, the reviewer and the tester.",
+          "Each criterion is one check a person could perform on the product, not a diff. T3 gives them, numbered, to the worker, the reviewer and the tester. For research: the questions the report must answer, each one a check a person can make by reading the report.",
       }),
-      e2e: Schema.Struct({
-        depth: Schema.Literals(["full", "smoke", "none"]).annotate({
-          description:
-            "How deep the e2e test goes; it sets which criteria are tested, not a time or screenshot budget. full: every acceptance criterion with screenshots. smoke: only the criteria in smokeCriteria; the tester checks that the pages the change touches load, walks the happy path of each and watches the console and network for errors. none: no tester runs, and T3 delivers once staging verifies the merge; give a reason. When in doubt choose full. Choose none only when nothing a user sees or does changes: tooling, lint, CI, dependency bumps with no behaviour change, refactors covered by tests, docs. The code reviewer can raise the depth to full, and the person can change it on the board until the test starts.",
-        }),
-        brief: Schema.String.check(Schema.isMaxLength(20000)).annotate({
-          description:
-            "For the tester: the pages or endpoints affected, the data it needs and what to clean up. Required for full and smoke; may be empty for none. T3 starts the tester with it, plus the criteria and the implementer's test notes, once staging verifies the merge (or, when the project tests in the worktree, once review approves).",
-        }),
-        reason: Schema.optionalKey(
-          text.annotate({
+      e2e: Schema.optionalKey(
+        Schema.Struct({
+          depth: Schema.Literals(["full", "smoke", "none"]).annotate({
             description:
-              "For depth none, required: why nothing a user sees or does changes. It goes on the Linear issue with the delivery. Omit for full and smoke.",
+              "How deep the e2e test goes; it sets which criteria are tested, not a time or screenshot budget. full: every acceptance criterion with screenshots. smoke: only the criteria in smokeCriteria; the tester checks that the pages the change touches load, walks the happy path of each and watches the console and network for errors. none: no tester runs, and T3 delivers once staging verifies the merge; give a reason. When in doubt choose full. Choose none only when nothing a user sees or does changes: tooling, lint, CI, dependency bumps with no behaviour change, refactors covered by tests, docs. The code reviewer can raise the depth to full, and the person can change it on the board until the test starts.",
           }),
-        ),
-        smokeCriteria: Schema.optionalKey(smokeCriteria),
-        targetIds: Schema.optionalKey(
-          Schema.Array(Schema.String).annotate({
+          brief: Schema.String.check(Schema.isMaxLength(20000)).annotate({
             description:
-              "The configured deployment target ids this change affects; omit to check all.",
+              "For the tester: the pages or endpoints affected, the data it needs and what to clean up. Required for full and smoke; may be empty for none. T3 starts the tester with it, plus the criteria and the implementer's test notes, once staging verifies the merge (or, when the project tests in the worktree, once review approves).",
           }),
-        ),
-      }),
+          reason: Schema.optionalKey(
+            text.annotate({
+              description:
+                "For depth none, required: why nothing a user sees or does changes. It goes on the Linear issue with the delivery. Omit for full and smoke.",
+            }),
+          ),
+          smokeCriteria: Schema.optionalKey(smokeCriteria),
+          targetIds: Schema.optionalKey(
+            Schema.Array(Schema.String).annotate({
+              description:
+                "The configured deployment target ids this change affects; omit to check all.",
+            }),
+          ),
+        }).annotate({
+          description: "Required for track code. Omit for research; T3 ignores it there.",
+        }),
+      ),
     }),
     success: AssistantTask,
     failure,
@@ -156,9 +168,39 @@ export const AssistantToolkit = Toolkit.make(
     failure,
     dependencies,
   }),
+  Tool.make("assistant_submit_research", {
+    description:
+      "Implementation thread of a research issue only: submit the report and ask the code reviewer to fact-check it. T3 checks the screenshots, records the report as a new revision and sends it to the reviewer. Its findings come back to this thread; submit again after fixing them. Once the reviewer approves, T3 uploads the screenshots, posts the report on the Linear issue and moves it to review. End your turn after submitting.",
+    parameters: Schema.Struct({
+      report: Schema.String.check(Schema.isNonEmpty()).annotate({
+        description:
+          "Markdown, at most 30,000 characters: the short answer first (the three to five things the person needs), then the detail and a comparison table where it fits. Every figure carries a footnote-style reference such as [3] to its numbered source; facts are kept apart from estimates; gaps say what could not be found. No first person or 'you'.",
+      }),
+      sources: Schema.Array(AssistantResearchSource).annotate({
+        description:
+          "Every page the report cites, numbered by position as the report references them: url, title and seen, the date the page was read (YYYY-MM-DD). At least one, at most 60.",
+      }),
+      checks: Schema.Array(AssistantResearchCheck).annotate({
+        description:
+          "One entry per question (the criteria the brief lists numbered), in order: result answered, partly or not-answered; evidence, where the report answers it or what could not be found; screenshot, the 1-based position in screenshots of the one that shows it, when one does.",
+      }),
+      screenshots: Schema.Array(
+        Schema.Struct({
+          path: text.annotate({
+            description:
+              "Absolute path of a PNG, JPEG or WebP file in the evidence folder T3 named.",
+          }),
+          caption: text.annotate({ description: "One line: the page and what it shows." }),
+        }),
+      ),
+    }),
+    success: AssistantTask,
+    failure,
+    dependencies,
+  }),
   Tool.make("assistant_submit_review", {
     description:
-      "Code review thread only: record your verdict on the worktree's current commit. changes-requested sends your findings to the implementer as its next round. approved tells the implementer to merge exactly that commit; any later commit needs another review. End your turn after submitting.",
+      "Code review thread only: record your verdict on the worktree's current commit, or, on a research issue, on the report's latest revision. changes-requested sends your findings to the implementer as its next round. approved tells the implementer to merge exactly that commit; any later commit needs another review. On a research issue approved delivers the report: T3 posts it on the issue. End your turn after submitting.",
     parameters: Schema.Struct({
       verdict: Schema.Literals(["approved", "changes-requested"]),
       findings: text.annotate({
@@ -361,19 +403,23 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_accept_issue: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
+      const e2e = input.e2e;
       return yield* service.acceptIssue(
         caller,
         input.brief.trim(),
         input.criteria.map((criterion) => criterion.trim()),
-        {
-          depth: input.e2e.depth,
-          brief: input.e2e.brief.trim(),
-          ...(input.e2e.reason !== undefined ? { reason: input.e2e.reason.trim() } : {}),
-          ...(input.e2e.smokeCriteria ? { smokeCriteria: input.e2e.smokeCriteria } : {}),
-          ...(input.e2e.targetIds
-            ? { targetIds: input.e2e.targetIds.map((id) => id.trim()).filter(Boolean) }
-            : {}),
-        },
+        e2e
+          ? {
+              depth: e2e.depth,
+              brief: e2e.brief.trim(),
+              ...(e2e.reason !== undefined ? { reason: e2e.reason.trim() } : {}),
+              ...(e2e.smokeCriteria ? { smokeCriteria: e2e.smokeCriteria } : {}),
+              ...(e2e.targetIds
+                ? { targetIds: e2e.targetIds.map((id) => id.trim()).filter(Boolean) }
+                : {}),
+            }
+          : null,
+        input.track ?? "code",
       );
     }),
   assistant_decline_issue: (input) =>
@@ -414,6 +460,19 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         input.summary.trim(),
         input.needsE2e,
       );
+    }),
+  assistant_submit_research: (input) =>
+    Effect.gen(function* () {
+      const { service, caller } = yield* scope;
+      return yield* service.submitResearch(caller, {
+        report: input.report.trim(),
+        sources: input.sources,
+        checks: input.checks,
+        screenshots: input.screenshots.map((shot) => ({
+          path: shot.path.trim(),
+          caption: shot.caption.trim(),
+        })),
+      });
     }),
   assistant_report_merged: (input) =>
     Effect.gen(function* () {

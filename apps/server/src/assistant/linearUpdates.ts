@@ -4,6 +4,8 @@ import type {
   AssistantDeployment,
   AssistantE2eResult,
   AssistantMerge,
+  AssistantResearch,
+  AssistantResearchCheck,
   LinearIssueDetail,
 } from "@t3tools/contracts";
 
@@ -344,6 +346,157 @@ export function noE2eComment(input: {
       ? "**No e2e test: set by the person on the board**"
       : `**No e2e test: ${reason || "nothing a user sees changed"}** (decided by the team leader)`,
     ...deliveryFooter({ ...input, delivered: true }),
+  );
+}
+
+/**
+ * The most characters T3 puts in one research comment. Linear refuses a comment
+ * over 100,000 characters; the margin covers what Linear counts differently.
+ */
+export const RESEARCH_COMMENT_MAX_CHARS = 90_000;
+
+const RESEARCH_RESULTS: Record<AssistantResearchCheck["result"], string> = {
+  answered: "✅ answered",
+  partly: "🟡 partly answered",
+  "not-answered": "👀 not answered",
+};
+
+/** A link label with its brackets escaped, so a title cannot end the link early. */
+const label = (text: string) => oneLine(text).replace(/[[\]]/g, "\\$&");
+
+/**
+ * The report's short answer: its text before the second heading, leaving out
+ * the headings that open it. The whole start of the report when it has none.
+ */
+export function researchShortAnswer(report: string, max = 2000): string {
+  const lines = report.trim().split("\n");
+  const heading = (line: string) => /^#{1,6}\s/.test(line);
+  let start = 0;
+  while (start < lines.length && (heading(lines[start]!) || !lines[start]!.trim())) start += 1;
+  const end = lines.findIndex((line, index) => index > start && heading(line));
+  const text =
+    lines
+      .slice(start, end < 0 ? undefined : end)
+      .join("\n")
+      .trim() || report.trim();
+  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+}
+
+/** Where a check's screenshot sits in the card's numbered screenshots, when it was uploaded. */
+const researchScreenshotRef = (check: AssistantResearchCheck, research: AssistantResearch) =>
+  check.screenshot && research.screenshots[check.screenshot - 1]?.url
+    ? ` (screenshot ${check.screenshot})`
+    : "";
+
+/**
+ * A text cut into pieces of at most `limit` characters: at blank lines where
+ * it can, then at line ends, and mid-line only for a line longer than the limit.
+ */
+const pieces = (text: string, limit: number): ReadonlyArray<string> => {
+  if (text.length <= limit) return [text];
+  const out: string[] = [];
+  let current = "";
+  const push = (part: string, separator: string) => {
+    if (!current) current = part;
+    else if (current.length + separator.length + part.length <= limit)
+      current = `${current}${separator}${part}`;
+    else {
+      out.push(current);
+      current = part;
+    }
+  };
+  for (const paragraph of text.split(/\n{2,}/)) {
+    if (paragraph.length <= limit) {
+      push(paragraph, "\n\n");
+      continue;
+    }
+    for (const line of paragraph.split("\n")) {
+      if (line.length <= limit) {
+        push(line, "\n");
+        continue;
+      }
+      for (let at = 0; at < line.length; at += limit) push(line.slice(at, at + limit), "");
+    }
+  }
+  if (current) out.push(current);
+  return out;
+};
+
+/**
+ * The research card a person decides from: whether each question is
+ * answered, the report open because it is the deliverable, its numbered
+ * sources, the pages as they were seen, and the reviewer's fact check. A card
+ * longer than one comment is split into numbered comments, the card first.
+ */
+export function researchComments(input: {
+  readonly research: AssistantResearch;
+  /** The issue's criteria: the questions the report answers. */
+  readonly criteria: ReadonlyArray<string>;
+  readonly acceptedState: string;
+  readonly maxChars?: number;
+}): ReadonlyArray<string> {
+  const { research } = input;
+  const accept = input.acceptedState.trim() || "a completed state";
+  const headline = "**Research ready for review**";
+  const table = research.checks.length
+    ? [
+        "| Question | Result |",
+        "| --- | --- |",
+        ...research.checks.map(
+          (check) =>
+            `| ${cell(input.criteria[check.criterion - 1] ?? `Question ${check.criterion}`)} | ${RESEARCH_RESULTS[check.result]}${researchScreenshotRef(check, research)} |`,
+        ),
+      ].join("\n")
+    : null;
+  const sources = research.sources.map(
+    (source, i) => `${i + 1}. [${label(source.title)}](${source.url}), seen ${source.seen}`,
+  );
+  const screenshots = research.screenshots.map((shot, i) =>
+    shot.url
+      ? `*Screenshot ${i + 1}: ${oneLine(shot.caption)}*\n\n![${label(shot.caption)}](${shot.url})`
+      : `*Screenshot ${i + 1}: ${oneLine(shot.caption)}* (could not be uploaded)`,
+  );
+  const factCheck = research.review?.summary.trim()
+    ? `**Fact check:** ${research.review.summary.trim()}`
+    : null;
+  const footer = sections(
+    "---",
+    `To accept, move this issue to ${accept}. To ask for changes, move it back to an earlier state and comment what should change.`,
+  );
+  const blocks = [
+    headline,
+    table,
+    research.report.trim(),
+    sources.length ? `**Sources**\n\n${sources.join("\n")}` : null,
+    screenshots.length ? ["**Screenshots**", ...screenshots].join("\n\n") : null,
+    factCheck,
+    footer,
+  ];
+  const card = sections(...blocks);
+  const max = input.maxChars ?? RESEARCH_COMMENT_MAX_CHARS;
+  if (card.length <= max) return [card];
+  // Room for the part labels added below.
+  const limit = max - 120;
+  const parts: string[] = [];
+  let current = "";
+  for (const block of blocks) {
+    const text = block?.trim();
+    if (!text) continue;
+    for (const piece of pieces(text, limit)) {
+      if (current && current.length + 2 + piece.length > limit) {
+        parts.push(current);
+        current = piece;
+      } else current = current ? `${current}\n\n${piece}` : piece;
+    }
+  }
+  if (current) parts.push(current);
+  return parts.map((part, i) =>
+    sections(
+      i === 0
+        ? part.replace(headline, `${headline} (part 1 of ${parts.length})`)
+        : `**Research, part ${i + 1} of ${parts.length}**\n\n${part}`,
+      i < parts.length - 1 ? "*Continued in the next comment.*" : null,
+    ),
   );
 }
 

@@ -228,10 +228,10 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
       Layer.provide(AssistantToolkitHandlers),
       Layer.provideMerge(
         Layer.mock(DeveloperAssistant)({
-          acceptIssue: (_caller, _brief, criteria, e2e) =>
+          acceptIssue: (_caller, _brief, criteria, e2e, track) =>
             Effect.sync(() => {
               taken.push(criteria);
-              planned.push(e2e);
+              planned.push(track === "research" ? { e2e, track } : e2e);
               return { ...managedTask, criteria };
             }),
           submitReview: (_caller, verdict, _findings, _summary, needsE2e) =>
@@ -291,12 +291,13 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
         arguments: { brief: "Fix it", criteria: [] },
       }).pipe(Effect.flip);
       assert.equal(empty._tag, "InvalidParams");
-      // The e2e test is planned when the issue is taken.
-      const unplanned = yield* call({
+      // A research issue has no e2e plan; T3 refuses a code issue without one.
+      yield* call({
         name: "assistant_accept_issue",
-        arguments: { brief: "Fix it", criteria: ["The page loads"] },
-      }).pipe(Effect.flip);
-      assert.equal(unplanned._tag, "InvalidParams");
+        arguments: { brief: "Compare prices", criteria: ["Names each price"], track: "research" },
+      });
+      assert.deepEqual(planned.splice(0), [{ e2e: null, track: "research" }]);
+      taken.splice(0);
       const accepted = yield* call({
         name: "assistant_accept_issue",
         arguments: {

@@ -486,6 +486,80 @@ export const AssistantDeployWait = Schema.Struct({
 });
 export type AssistantDeployWait = typeof AssistantDeployWait.Type;
 
+/**
+ * What an issue delivers. code: a change merged, deployed to staging and
+ * tested. research: a report read from the public web, fact-checked by the
+ * reviewer and posted on the issue; no merge, staging or tester.
+ */
+export const AssistantTaskTrack = Schema.Literals(["code", "research"]);
+export type AssistantTaskTrack = typeof AssistantTaskTrack.Type;
+
+/** The most characters a research report may have; T3 refuses a longer one. */
+export const ASSISTANT_RESEARCH_REPORT_MAX_CHARS = 30_000;
+
+/** A page a research report cites, numbered by its position in the report's sources. */
+export const AssistantResearchSource = Schema.Struct({
+  url: ReviewUrl.check(Schema.isMaxLength(1000)),
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(300)),
+  /** The day the page was read, as YYYY-MM-DD. */
+  seen: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/)),
+});
+export type AssistantResearchSource = typeof AssistantResearchSource.Type;
+
+export const AssistantResearchCheckResult = Schema.Literals(["answered", "partly", "not-answered"]);
+export type AssistantResearchCheckResult = typeof AssistantResearchCheckResult.Type;
+/** The research worker's result for one criterion: whether the report answers that question. */
+export const AssistantResearchCheck = Schema.Struct({
+  /** 1-based position in the task's criteria. */
+  criterion: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 12 })),
+  result: AssistantResearchCheckResult,
+  /** Where the report answers it, or what could not be found. */
+  evidence: Schema.String.check(Schema.isMaxLength(1000)),
+  /** 1-based position in the research's screenshots, when one shows it. */
+  screenshot: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
+});
+export type AssistantResearchCheck = typeof AssistantResearchCheck.Type;
+
+/** A page as the worker saw it on the day. url is set once T3 uploads it to Linear on delivery. */
+export const AssistantResearchScreenshot = Schema.Struct({
+  /** The evidence file on the environment host. */
+  path: Schema.String,
+  caption: Schema.String,
+  /** The copy on Linear; absent until delivery, or when the upload failed. */
+  url: Schema.optionalKey(Schema.String),
+});
+export type AssistantResearchScreenshot = typeof AssistantResearchScreenshot.Type;
+
+/** The reviewer's fact check of one revision of the report. */
+export const AssistantResearchReview = Schema.Struct({
+  verdict: Schema.Literals(["approved", "changes-requested"]),
+  /** The findings as sent to the worker. */
+  findings: Schema.String,
+  /** A short account for the Linear card: what was checked, non-blocking notes. */
+  summary: Schema.String,
+  /** The report revision the verdict covers. */
+  revision: Schema.Int,
+  at: IsoDateTime,
+});
+export type AssistantResearchReview = typeof AssistantResearchReview.Type;
+
+/**
+ * A research issue's report as the worker last submitted it. Each submission
+ * bumps revision and replaces the one before, with no review until the
+ * reviewer gives one.
+ */
+export const AssistantResearch = Schema.Struct({
+  /** Markdown: the short answer first, then the detail. */
+  report: Schema.String,
+  sources: Schema.Array(AssistantResearchSource),
+  checks: Schema.Array(AssistantResearchCheck),
+  screenshots: Schema.Array(AssistantResearchScreenshot),
+  revision: Schema.Int,
+  at: IsoDateTime,
+  review: Schema.optionalKey(Schema.NullOr(AssistantResearchReview)),
+});
+export type AssistantResearch = typeof AssistantResearch.Type;
+
 export const AssistantTask = Schema.Struct({
   id: TrimmedNonEmptyString,
   projectId: ProjectId,
@@ -558,8 +632,16 @@ export const AssistantTask = Schema.Struct({
       Schema.Struct({ id: Schema.String, origin: Schema.Literals(["delegated", "created"]) }),
     ),
   ),
+  /** Set by the team leader on taking the issue; absent means code. */
+  track: Schema.optionalKey(AssistantTaskTrack),
+  /** The research report, on a research issue once its worker submitted one. */
+  research: Schema.optionalKey(Schema.NullOr(AssistantResearch)),
 });
 export type AssistantTask = typeof AssistantTask.Type;
+
+/** What the issue delivers; see AssistantTask.track. */
+export const assistantTaskTrack = (task: Pick<AssistantTask, "track">): AssistantTaskTrack =>
+  task.track ?? "code";
 
 /** Where a managed issue's e2e check runs; see AssistantTask.e2eEnvironment. */
 export const assistantTaskE2eEnvironment = (
@@ -736,7 +818,15 @@ export const assistantTaskEngineeringChecksPending = (
     ? assistantE2ePendingEngineeringChecks(task.e2e)
     : 0;
 
-export type PipelineStepKey = "take" | "code" | "review" | "merge" | "staging" | "e2e";
+export type PipelineStepKey =
+  | "take"
+  | "code"
+  | "review"
+  | "merge"
+  | "staging"
+  | "e2e"
+  | "research"
+  | "fact-check";
 /** skipped: a step the issue does not run, such as the e2e test at depth none. */
 export type PipelineStepState = "done" | "current" | "failed" | "todo" | "skipped";
 
@@ -778,6 +868,42 @@ export const LED_WORKTREE_PIPELINE: ReadonlyArray<PipelineStepDef> = [
   ...TO_STAGING_WORKTREE_E2E,
 ];
 
+// A research issue has no merge, staging or tester: the report is delivered once fact-checked.
+export const RESEARCH_PIPELINE: ReadonlyArray<PipelineStepDef> = [
+  TAKE_ON,
+  { key: "research", label: "Research", kind: "implement" },
+  { key: "fact-check", label: "Fact check", kind: "review" },
+];
+
+/** Where a research issue is: taken, researching, fact-checked, then with the person. */
+function researchPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> {
+  const approved = task.research?.review?.verdict === "approved";
+  const at = (() => {
+    if (task.status === "review" || task.status === "accepted") return RESEARCH_PIPELINE.length;
+    switch (task.stage) {
+      case "implement":
+        return 1;
+      case "review":
+        return 2;
+      default:
+        if (task.turns === 0) return 0;
+        return approved ? RESEARCH_PIPELINE.length : task.research ? 2 : 1;
+    }
+  })();
+  const revising = task.research?.review?.verdict === "changes-requested" && at === 1;
+  return RESEARCH_PIPELINE.map((step, index): PipelineStep => ({
+    ...step,
+    state: index < at ? "done" : index > at ? "todo" : "current",
+    note: revising
+      ? step.key === "research"
+        ? "Addressing fact-check findings"
+        : step.key === "fact-check"
+          ? "Changes requested"
+          : null
+      : null,
+  }));
+}
+
 /** The note on a skipped e2e step; a reason longer than this stays in the task's plan. */
 const SKIPPED_E2E_REASON_MAX = 48;
 
@@ -789,6 +915,7 @@ const SKIPPED_E2E_REASON_MAX = 48;
  */
 export function assistantTaskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> | null {
   if (task.stage === undefined) return null;
+  if (assistantTaskTrack(task) === "research") return researchPipeline(task);
   const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
   const depth = assistantTaskE2eDepth(task);
   const skipsE2e = depth === "none";

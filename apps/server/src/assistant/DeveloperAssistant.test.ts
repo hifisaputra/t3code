@@ -23,6 +23,7 @@ import {
   assistantTaskHoldsProject,
   assistantTaskThreadId,
   type AssistantE2eCheck,
+  type AssistantResearchCheck,
   type AssistantProject,
   type AssistantProjectConfig,
   type AssistantTask,
@@ -5290,4 +5291,306 @@ it.effect("engineering checks hold the worktree merge until the leader settles t
     assert.equal(delivered.status, "review");
     assert.include(h.comments.at(-1)!.body, "The reviewer read the job log: no error.");
   }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+/** The questions a research issue is taken with in these tests. */
+const researchQuestions = ["Names Acme's per-seat price", "Says which tool is cheapest"];
+/** The team leader takes its issue as research; the research worker's first turn is queued. */
+const takeResearch = (h: Harness, service: Service, t: AssistantTask) =>
+  Effect.gen(function* () {
+    yield* service.deliver();
+    yield* service.acceptIssue(
+      leadOf(t),
+      "Compare the per-seat price of Acme and Globex.",
+      researchQuestions,
+      null,
+      "research",
+    );
+    yield* endTurn(h, service, leadOf(t));
+    return yield* taskById(service, t.id);
+  });
+/** A report that passes T3's checks, one check per question. */
+const researchInput = (
+  t: AssistantTask,
+): Parameters<Service["submitResearch"]>[1] & {
+  readonly checks: ReadonlyArray<AssistantResearchCheck>;
+} => ({
+  report:
+    "## Short answer\n\n- Acme costs $10 per seat [1].\n\n## Detail\n\nAcme has two tiers [1].",
+  sources: [{ url: "https://acme.example/pricing", title: "Acme pricing", seen: "2026-09-18" }],
+  checks: [
+    { criterion: 1, result: "answered", evidence: "Short answer.", screenshot: 1 },
+    { criterion: 2, result: "not-answered", evidence: "Globex has no public price." },
+  ],
+  screenshots: [{ path: `/evidence/${t.id}/acme.png`, caption: "Acme pricing page" }],
+});
+/** The research worker submits its report and its turn ends; the reviewer's turn is queued. */
+const submitReport = (h: Harness, service: Service, t: AssistantTask) =>
+  Effect.gen(function* () {
+    yield* service.deliver();
+    const submitted = yield* service.submitResearch(t.threadId, researchInput(t));
+    yield* endTurn(h, service, t.threadId);
+    yield* service.deliver();
+    return submitted;
+  });
+
+it.effect("a team leader takes an issue as research with its questions and no e2e plan", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    yield* service.deliver();
+    // A code issue still needs its e2e plan.
+    const unplanned = yield* service
+      .acceptIssue(leadOf(team), "Fix it", ["The page loads"], null)
+      .pipe(Effect.flip);
+    assert.include(unplanned.detail, "Give the e2e plan");
+    const taken = yield* takeResearch(h, service, team);
+    assert.equal(taken.track, "research");
+    assert.deepEqual(taken.criteria, researchQuestions);
+    assert.isNull(taken.e2ePlan);
+    assert.equal(taken.stage, "implement");
+    assert.equal(taken.turns, 1);
+    assert.deepEqual(h.started, ["APP-1"]);
+    yield* service.deliver();
+    const first = turnsOf(h, taken.threadId)[0]!;
+    assert.include(first, "You are the research worker for this issue");
+    assert.include(first, `/evidence/${taken.id}`);
+    assert.include(first, "1. Names Acme's per-seat price");
+    // The session's checklist is the research one.
+    const plan = yield* h.app.resolver!(taken.id);
+    assert.deepEqual(
+      plan?.plan.map((step) => `${step.content}=${step.status}`),
+      ["Take on=completed", "Research=inProgress", "Fact check=pending", "Your check=pending"],
+    );
+    // Nothing of the code path applies to it.
+    const lead = leadOf(taken);
+    for (const refused of [
+      service.verifyStaging(lead).pipe(Effect.flip),
+      service.startE2e(lead, "Open the page.").pipe(Effect.flip),
+      service.reportMerged(taken.threadId, "Done.").pipe(Effect.flip),
+      service.requestReview(taken.threadId, "Ready", testNotes).pipe(Effect.flip),
+    ])
+      assert.include((yield* refused).detail, "research issue");
+    assert.include(
+      (yield* service.messageWorker(lead, "Test it", "e2e").pipe(Effect.flip)).detail,
+      "no e2e tester",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a research report is checked before the reviewer gets it", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const taken = yield* takeResearch(h, service, yield* activeTask(service));
+    yield* service.deliver();
+    const good = researchInput(taken);
+    const refuse = (input: Partial<typeof good>) =>
+      service.submitResearch(taken.threadId, { ...good, ...input }).pipe(
+        Effect.flip,
+        Effect.map((error) => error.detail),
+      );
+    assert.include(yield* refuse({ report: "x".repeat(30_001) }), "30,001 characters");
+    assert.include(yield* refuse({ sources: [] }), "at least one");
+    assert.include(
+      yield* refuse({ checks: [good.checks[0]!] }),
+      "This issue has 2 questions; list one check for each, in order. No check for 2.",
+    );
+    assert.include(
+      yield* refuse({ checks: [...good.checks, good.checks[0]!] }),
+      "More than one check for 1.",
+    );
+    assert.include(
+      yield* refuse({
+        checks: [...good.checks, { criterion: 3, result: "answered", evidence: "" }],
+      }),
+      "No such criterion: 3.",
+    );
+    assert.include(
+      yield* refuse({
+        checks: [{ ...good.checks[0]!, screenshot: 2 }, good.checks[1]!],
+      }),
+      "points at screenshot 2, and you attached 1",
+    );
+    assert.include(
+      yield* refuse({ screenshots: [{ path: "/tmp/acme.png", caption: "Acme" }] }),
+      "is outside",
+    );
+    // Only the worker submits, and only a research issue has a report.
+    assert.isTrue(
+      yield* service
+        .submitResearch(assistantTaskThreadId(taken, "review"), good)
+        .pipe(Effect.isFailure),
+    );
+    const reviewer = assistantTaskThreadId(taken, "review");
+    const submitted = yield* service.submitResearch(taken.threadId, good);
+    assert.equal(submitted.stage, "review");
+    assert.equal(submitted.research?.revision, 1);
+    assert.deepEqual(submitted.research?.screenshots, [
+      { path: `/evidence/${taken.id}/acme.png`, caption: "Acme pricing page" },
+    ]);
+    // Nothing goes to Linear before the fact check.
+    assert.lengthOf(h.uploads, 0);
+    assert.lengthOf(h.comments, 0);
+    // A second submission while the reviewer has the first is refused.
+    assert.include(
+      (yield* service.submitResearch(taken.threadId, good).pipe(Effect.flip)).detail,
+      "fact-checking your last report",
+    );
+    yield* endTurn(h, service, taken.threadId);
+    yield* service.deliver();
+    const request = turnsOf(h, reviewer)[0]!;
+    assert.include(request, "You are the fact checker for this research issue");
+    assert.include(request, "Never fill in, type into or submit anything");
+    assert.include(request, "Report, revision 1:\n## Short answer");
+    assert.include(request, "1. Acme pricing: https://acme.example/pricing (seen 2026-09-18)");
+    assert.include(
+      request,
+      "2. Says which tool is cheapest: not-answered. Globex has no public price.",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the fact check trades rounds with the research worker, then delivers the report", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const taken = yield* takeResearch(h, service, yield* activeTask(service));
+    const reviewer = assistantTaskThreadId(taken, "review");
+    // No verdict before a report is submitted.
+    assert.include(
+      (yield* service.submitReview(reviewer, "approved", "Fine.", "Checked.").pipe(Effect.flip))
+        .detail,
+      "No report is waiting",
+    );
+    yield* submitReport(h, service, taken);
+    const sentBack = yield* service.submitReview(
+      reviewer,
+      "changes-requested",
+      "- The Acme price is the annual one [1].",
+      "",
+    );
+    assert.equal(sentBack.stage, "implement");
+    assert.equal(sentBack.turns, 2);
+    assert.equal(sentBack.research?.review?.verdict, "changes-requested");
+    // The same revision cannot be judged twice.
+    assert.isTrue(
+      yield* service.submitReview(reviewer, "approved", "Fine.", "Checked.").pipe(Effect.isFailure),
+    );
+    yield* endTurn(h, service, reviewer);
+    yield* service.deliver();
+    assert.include(turnsOf(h, taken.threadId).at(-1), "The Acme price is the annual one");
+    assert.include(turnsOf(h, taken.threadId).at(-1), "assistant_submit_research again");
+    const resubmitted = yield* submitReport(h, service, taken);
+    assert.equal(resubmitted.research?.revision, 2);
+    assert.isUndefined(resubmitted.research?.review);
+    assert.include(turnsOf(h, reviewer).at(-1), "Report, revision 2:");
+
+    const delivered = yield* service.submitReview(
+      reviewer,
+      "approved",
+      "Looks right.",
+      "Every figure matches its source.",
+    );
+    assert.equal(delivered.status, "review");
+    assert.deepEqual(h.uploads, ["acme.png"]);
+    assert.lengthOf(h.comments, 1);
+    const card = h.comments[0]!.body;
+    assert.match(card, /^\*\*Research ready for review\*\*/);
+    assert.include(card, "| Names Acme's per-seat price | ✅ answered (screenshot 1) |");
+    assert.include(card, "## Short answer\n\n- Acme costs $10 per seat [1].");
+    assert.include(card, "1. [Acme pricing](https://acme.example/pricing), seen 2026-09-18");
+    assert.include(card, "![Acme pricing page](https://uploads.linear.app/acme.png)");
+    assert.include(card, "**Fact check:** Every figure matches its source.");
+    assert.include(card, "To accept, move this issue to Done.");
+    assert.deepEqual(h.transitions, ["review"]);
+    assert.equal(delivered.deliveredState, "In Review");
+    // No "What shipped": the report is the delivery.
+    assert.lengthOf(h.descriptions, 0);
+    assert.equal(delivered.summary, "- Acme costs $10 per seat [1].");
+    assert.include(delivered.reviewInstructions, "- Acme costs $10 per seat [1].");
+    assert.include(
+      delivered.reviewInstructions,
+      "- Says which tool is cheapest: not answered. Globex has no public price.",
+    );
+    assert.equal(delivered.research?.screenshots[0]?.url, "https://uploads.linear.app/acme.png");
+    assert.deepEqual(sessionLog(h).slice(1), [
+      "thought:Taking this issue as research. Questions the report answers:",
+      "action:Research submitted for fact check:revision 1:ephemeral",
+      "action:Reviewer: changes requested:revision 1:1 finding",
+      "action:Research submitted for fact check:revision 2:ephemeral",
+      "action:Reviewer: approved:revision 2",
+      "response:**Research ready for review**",
+    ]);
+    // The team closes when the reviewer's turn ends, and the loop moves on.
+    yield* endTurn(h, service, reviewer);
+    for (const role of ["lead", "implement", "review"] as const)
+      assert.equal(h.threads.get(assistantTaskThreadId(taken, role))?.settledOverride, "settled");
+    assert.deepEqual(h.removed, [`/worktrees/${taken.threadId}`]);
+    assert.isString((yield* taskById(service, taken.id)).teamClosedAt);
+    yield* service.scan();
+    assert.equal((yield* activeTask(service)).issue.identifier, "APP-2");
+    // The person accepts in Linear as for code.
+    yield* service.review({ taskId: taken.id, action: "accept", feedback: "" });
+    assert.equal((yield* taskById(service, taken.id)).status, "accepted");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a fact check that still wants changes after the last round blocks the issue", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const taken = yield* takeResearch(h, service, yield* activeTask(service));
+    const reviewer = assistantTaskThreadId(taken, "review");
+    yield* submitReport(h, service, taken);
+    yield* service.submitReview(reviewer, "changes-requested", "- Add Globex.", "");
+    yield* endTurn(h, service, reviewer);
+    yield* submitReport(h, service, taken);
+    // maxWorkerTurns is 2: the second request for changes spends the last round.
+    const blocked = yield* service.submitReview(
+      reviewer,
+      "changes-requested",
+      "- Still no Globex.",
+      "",
+    );
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.stage, "lead");
+    assert.include(blocked.error ?? "", "after 2 worker rounds");
+    yield* endTurn(h, service, reviewer);
+    yield* service.deliver();
+    assert.include(turnsOf(h, leadOf(taken)).at(-1), "is blocked");
+    assert.lengthOf(h.comments, 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect(
+  "a research screenshot that cannot be uploaded is left off the card, not the delivery",
+  () =>
+    Effect.gen(function* () {
+      const h = harness();
+      const { service } = yield* h.setup;
+      const taken = yield* takeResearch(h, service, yield* activeTask(service));
+      yield* submitReport(h, service, taken);
+      // The evidence file went away between the report and its approval.
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`UPDATE assistant_tasks SET data = json_set(data, '$.research.screenshots[0].path', '/gone/acme.png') WHERE id = ${taken.id}`;
+      const delivered = yield* service.submitReview(
+        assistantTaskThreadId(taken, "review"),
+        "approved",
+        "",
+        "",
+      );
+      assert.equal(delivered.status, "review");
+      assert.lengthOf(h.uploads, 0);
+      assert.include(
+        h.comments[0]!.body,
+        "*Screenshot 1: Acme pricing page* (could not be uploaded)",
+      );
+      assert.notInclude(h.comments[0]!.body, "(screenshot 1)");
+      assert.include(delivered.error ?? "", "Could not upload a screenshot to Linear: acme.png");
+      assert.deepEqual(h.transitions, ["review"]);
+    }).pipe(Effect.provide(database()), Effect.scoped),
 );

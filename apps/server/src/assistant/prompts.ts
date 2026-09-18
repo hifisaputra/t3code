@@ -1,4 +1,5 @@
 import {
+  ASSISTANT_RESEARCH_REPORT_MAX_CHARS,
   assistantInstructionsFor,
   assistantParallelIssues,
   assistantTaskE2eDepth,
@@ -34,6 +35,7 @@ Read AGENTS.md and the repository's deployment/development docs, workflows, pack
 Use existing GitHub Actions or Railway deployments instead of requiring a new verification script. GitHub Actions targets need repository owner/name and workflow file; choose a workflow that actually deploys staging, not CI alone. Railway targets need exact project, environment and service UUIDs; identify the staging environment even if it is named test. Include meaningful target ids (e.g. dashboard, content, collector) and explain when each is relevant. Production targets must never be included. A service's deploy status is not proof the issue works: record how to verify issue-specific behavior and cron/worker health. Document staging coverage gaps, different data providers, skipped deploy paths, and known failures rather than claiming full readiness.
 After resolving essential questions, call assistant_propose_setup with the setup plan and a concise user-facing summary. T3 runs an issue loop that gives each eligible issue to a team: a team leader that reads the issue and takes it, asks the person first, or declines it; an implementation worker; a code reviewer that trades rounds with it and approves before the worker merges; and an e2e tester that exercises the change with a browser and takes screenshots and recordings, on staging once the merge is deployed or in the team's worktree before the merge (see e2eEnvironment below). Use the person's chosen Linear scope, models and permissions; you cannot change those through this tool. Default maxWorkerTurns to 6. Empty readyStates means unstarted issues. Verify Linear review/accepted state names using read-only tools or leave empty when unknown.
 The instructions field is the shared policy, and roleInstructions carries one section per team role; each thread receives the policy and its own role's section, and nothing else. Do not write an assistant section: no thread reads it, so leave it out when revising a setup that has one. instructions: the scope of the assistant's work, what the agents may do alone, what needs the person, and which repository documents hold the facts. lead: which issues to take, ask about first or decline; the deployment targets and which change each covers; what the tester can reach, for its e2e brief. implement: the branch, spec and PR conventions the repository's documents do not already carry, and the per-team resources (ports, databases). review: the standard the reviewer holds the code to, and what it must flag for the person (migrations, shared packages). e2e: how to run the application from a worktree for the team's slot, sign-in, test data, what counts as staging proof, coverage gaps and credentials. Once sections exist the shared policy has a budget of 4,000 characters and each section 6,000; T3 refuses a plan over either. For facts about the repository (worktree setup, required checks, migrations, staging access and accounts, coverage gaps), name the repository documents that hold them instead of restating them. Where a needed fact is in no document, keep it in the section that needs it under a "Not yet in repository docs" heading, and recommend in the summary which repository document should carry it. Credentials go only in the section of the role that uses them, never in the shared policy. Leave out point-in-time state such as migration counts, existing users or current issues; agents check it when they need it. The e2e section must carry a "Test data" heading: the seed commands, the test accounts and how to create them, and the features the tester cannot reach in each environment.
+Teams can also take research issues, whose result is a report posted on the Linear issue rather than a change: the worker only reads public web pages (no forms, logins, sign-ups, trials, contact-sales, chat widgets or paid sources) and the reviewer fact-checks the report against its sources; the instructions may narrow which issues can be taken as research.
 Set checkCommand to the non-mutating check the repository's CI runs on a pull request (lint, typecheck, tests), as one command run from the worktree root with the project's shell. T3 runs it in the team's worktree when the worker requests review and refuses the request while it is red, so never a formatter that writes files. Leave it empty when the repository has no such check.
 ${
   skills.length
@@ -169,6 +171,13 @@ const reviewerCheckNote = (config: AssistantProjectConfig) =>
 const engineeringChecksLead = (worktreeE2e: boolean) =>
   `When the tester lists engineering checks, things only an engineer can confirm such as console warnings in a development build, logs or database state, T3 holds the ${worktreeE2e ? "merge" : "delivery"} and messages you the list instead. Settle each with the code reviewer: send the checks with assistant_message_worker and thread "review" (it can run the app in this worktree), and read its answer with assistant_read_thread. When a check shows a defect, send it to the worker as after a failure. Once they are settled, call assistant_deliver with how each was settled; T3 then ${worktreeE2e ? "tells the worker to merge" : "puts the issue in review"}.`;
 
+/** The web rules a research worker and its reviewer follow, word for word the same for both. */
+const WEB_RULES = `Web rules: fetch and read public pages only, with WebFetch and WebSearch or your provider's equivalent. playwright-cli is only for opening a page, scrolling it and taking a screenshot. Never fill in, type into or submit anything: no logins, sign-ups, free trials, "contact sales" or demo requests, chat widgets or paid sources, and no cookie wall beyond dismissing it. A page that needs any of those is a gap in the report, not something to get around.`;
+
+/** How the team leader chooses between a code issue and a research issue. */
+const researchLead = (config: AssistantProjectConfig) =>
+  `Take an issue as research, with track "research", when what it asks for is information, such as a comparison, an analysis or a recommendation, and nothing in the repository or its deployments changes. When an issue asks for both research and a build, take it as research and have the report recommend the build as a follow-up issue, or ask the person. Research that needs a login, a form or a paid source is declined or asked about, never attempted. For research the criteria are the questions the report must answer, each one a check a person can make by reading the report, such as "names the pricing tiers of each of the 5 competitors listed"; the brief gives the scope: which competitors or sources, the time frame, and what the person will decide with the answer. Leave out the e2e plan: a research issue has no merge, staging deploy or tester. A research worker reads the public web and submits the report, the code reviewer fact-checks it against its sources, and once the reviewer approves, T3 posts the report on the issue, moves it to review and closes the team. The worker needs web access: Claude Code threads have WebFetch and WebSearch, while Codex threads search the web only when web search is enabled in their config. This team's worker runs on ${config.workerModelSelection.instanceId}; when it cannot reach the web, ask the person rather than take the issue as research.`;
+
 const issueHeader = (
   task: AssistantTask,
 ) => `Linear issue ${task.issue.identifier}: ${task.issue.title}
@@ -188,6 +197,7 @@ First decide how the team takes the issue. Read AGENTS.md and the repository's d
 - Ask with assistant_ask_decision when a product question stands between the issue and a clear brief. Give context and a recommendation; the answer arrives here.
 ${task.dispatched ? "The person picked this issue, so you do not decline it: when something stands in the way, ask them." : "- Decline with assistant_decline_issue when the issue cannot be worked as it stands, and say what would change that: the missing details, the blocker, or the issue to finish first. T3 posts your reason on the issue and leaves it until someone changes it."}
 Follow the project instructions on which issues need the person first.
+${researchLead(config)}
 Once you take it, the worker asks the code reviewer for review itself. The two trade rounds until the reviewer approves a commit${worktreeE2e ? `; the worker merges it into ${config.baseBranch} with a merge commit after the e2e check` : ` and the worker merges it into ${config.baseBranch} with a merge commit`}; do not relay messages between them.
 ${
   worktreeE2e
@@ -299,3 +309,48 @@ ${task.testNotes ? `What the implementer says to test:\n${task.testNotes.planCha
 ${task.merge ? `What changed, per the implementer:\n${task.merge.summary}` : ""}
 ${task.codeReview?.summary ? `Code review notes:\n${task.codeReview.summary}` : ""}
 ${task.e2e?.verdict === "failed" ? `Your previous run failed:\n${task.e2e.report}\nA fix has been reviewed${assistantTaskE2eEnvironment(task) === "worktree" ? "" : " and deployed"} since. Check the failure again, then the remaining criteria.` : ""}`.trim();
+
+/** The research questions, numbered the way the worker reports a check for each. */
+const questionList = (task: AssistantTask) =>
+  task.criteria?.length
+    ? `Questions the report must answer:\n${task.criteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n")}\n`
+    : "";
+
+/** The implementation worker's instructions on a research issue: a report, not a change. */
+export const researchWorkerInstructions = (
+  config: AssistantProjectConfig,
+  task: AssistantTask,
+  evidenceDir: string,
+  notes: PromptNotes = [],
+) => `${issueHeader(task)}
+You are the research worker for this issue, on the team its team leader runs. The issue asks for information, not a change: research it on the public web and write a report for the person reading the issue. This worktree is fresh from origin/${config.baseBranch}; read the product's own code and docs in it for context, but do not edit, commit, push or open a pull request.${teamLine(config, task)}
+Read AGENTS.md and the full issue and comments with the Linear tools, then research within the brief's scope. ${WEB_RULES}
+Save screenshots (PNG, JPEG or WebP) of the pages that back the key figures, such as each competitor's pricing page as seen today, in ${evidenceDir}. There is no limit on screenshots.
+Write the report in Markdown, at most ${ASSISTANT_RESEARCH_REPORT_MAX_CHARS.toLocaleString("en-US")} characters. Start with a short answer: the three to five things the person needs to know. Then give the detail, with a comparison table where it fits. Every figure carries a footnote-style reference such as [3] to its numbered source. Keep facts apart from estimates and say which is which. Where something could not be found, or sits behind a login, a form or a paywall, say so as a gap rather than guessing. Write for the issue's readers, without first person or "you".
+Then call assistant_submit_research with:
+- report: the Markdown report.
+- sources: every page the report cites, in the order its references number them, each with its url, title and the date you read it (YYYY-MM-DD).
+- checks: one entry per question above, in order, with result answered, partly or not-answered, the evidence (where the report answers it, or what could not be found) and the position of the screenshot that shows it, when one does.
+- screenshots: the absolute paths of the screenshots in ${evidenceDir}, each with a one-line caption.
+T3 sends it to the code reviewer, which fact-checks it against its sources. Its findings arrive in this thread: fix the report, or explain why a finding is wrong, and submit again. Once the reviewer approves, T3 posts the report on the issue. End your turn after submitting.
+For a question about scope or what the person needs, use assistant_ask_decision. If you are stuck on something else, explain it in your final message and end your turn; the team leader reads it. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team.
+${addNoteLine}${skillNote(config, "implement")}Project instructions:
+${projectInstructions(config, "implement")}
+${knownNotes(notes)}Task brief:
+${task.brief}
+${questionList(task)}${task.feedback ? `The person sent an earlier delivery of this issue back:\n${task.feedback}` : ""}`;
+
+/** The code reviewer's instructions on a research issue: it fact-checks the report. */
+export const researchReviewerInstructions = (
+  config: AssistantProjectConfig,
+  task: AssistantTask,
+  notes: PromptNotes = [],
+) => `${issueHeader(task)}
+You are the fact checker for this research issue, on the team its team leader runs. The research worker submits a report read from the public web; your review decides whether it goes to the person. Do not edit, commit or push anything in this worktree. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team.${teamLine(config, task)}
+Read the full issue with the Linear tools. Open the report's sources yourself and check that each figure matches its source and the date it was seen. Flag claims without a source, estimates presented as facts, stale or outdated pages, a missing competitor, source or question from the brief, a check marked answered that the report does not answer, and a short answer that the detail does not support. ${WEB_RULES} Any sign that the worker broke these rules, such as a figure only visible after signing in, a trial or a sales contact, or a form it filled in, is a blocking finding.
+Call assistant_submit_review with verdict changes-requested and specific findings (where in the report, the problem, what to do), or approved with a short summary for the Linear card: what you checked and any non-blocking notes, without first person. Do not block on style. T3 sends your verdict to the worker; on approval T3 posts the report on the issue. End your turn after submitting. Later requests in this thread are re-reviews: confirm your earlier findings were addressed and check what changed. For an unresolved question about scope, use assistant_ask_decision.
+${skillNote(config, "review")}Project instructions:
+${projectInstructions(config, "review")}
+${knownNotes(notes)}Task brief:
+${task.brief}
+${questionList(task)}`;
