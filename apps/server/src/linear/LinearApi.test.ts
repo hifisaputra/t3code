@@ -1032,3 +1032,22 @@ it.effect("refuses an upload Linear declines to sign", () => {
     assert.strictEqual(execute.mock.calls.length, 1);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("passes a caller-owned UUID when creating a retryable comment", () => {
+  const id = "778d7e70-33e7-46fd-a41a-d68c1ce109fe";
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({
+        data: { commentCreate: { success: true, comment: { id, url: "https://linear.app/c" } } },
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    yield* linear.createComment({ id, issueId: "issue-uuid", body: "Report" });
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      id,
+      issueId: "issue-uuid",
+      body: "Report",
+    });
+  }).pipe(Effect.provide(layer));
+});

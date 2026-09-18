@@ -70,6 +70,8 @@ export interface ProviderAdapterShape<TError> {
    */
   readonly provider: ProviderDriverKind;
   readonly capabilities: ProviderAdapterCapabilities;
+  /** Read-only inspection of this instance's native web tools for a workspace. */
+  readonly researchAccess?: (cwd: string) => Effect.Effect<string>;
 
   /**
    * Start a provider-backed session.

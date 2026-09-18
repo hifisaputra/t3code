@@ -419,8 +419,8 @@ const UPDATE_COMMENT_MUTATION = `
 `;
 
 const CREATE_COMMENT_MUTATION = `
-  mutation T3CodeCreateComment($issueId: String!, $body: String!) {
-    commentCreate(input: { issueId: $issueId, body: $body }) {
+  mutation T3CodeCreateComment($issueId: String!, $body: String!, $id: String) {
+    commentCreate(input: { issueId: $issueId, body: $body, id: $id }) {
       success
       comment { id url }
     }
@@ -631,6 +631,8 @@ export class LinearApi extends Context.Service<
       LinearUnavailableError | LinearOperationError
     >;
     readonly createComment: (input: {
+      /** A caller-owned UUID allows retries to recover the same comment. */
+      readonly id?: string;
       readonly issueId: string;
       readonly body: string;
     }) => Effect.Effect<
@@ -1187,13 +1189,18 @@ export const make = Effect.gen(function* () {
   });
 
   const createComment = Effect.fn("LinearApi.createComment")(function* (input: {
+    readonly id?: string;
     readonly issueId: string;
     readonly body: string;
   }) {
     const result = yield* request({
       operation: "createComment",
       query: CREATE_COMMENT_MUTATION,
-      variables: { issueId: input.issueId, body: input.body },
+      variables: {
+        issueId: input.issueId,
+        body: input.body,
+        ...(input.id ? { id: input.id } : {}),
+      },
       decode: decodeCommentCreateResult,
     }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
     if (!result.commentCreate.success || result.commentCreate.comment === null) {

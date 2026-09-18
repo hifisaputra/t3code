@@ -43,6 +43,7 @@ import {
 } from "../Layers/codexResetCredit.ts";
 import {
   checkCodexProviderStatus,
+  codexResearchAccess,
   makePendingCodexProvider,
   probeCodexSkillsForCwd,
   withCodexAppServerClient,
@@ -343,7 +344,29 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         snapshot,
         snapshotForCwd,
         consumeResetCredit,
-        adapter,
+        adapter: {
+          ...adapter,
+          researchAccess: (cwd) =>
+            Effect.gen(function* () {
+              const { client } = yield* withCodexAppServerClient({
+                binaryPath: effectiveConfig.binaryPath,
+                homePath: effectiveConfig.homePath,
+                launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
+                cwd,
+                environment: processEnv,
+              });
+              const result = yield* client.request("config/read", { cwd, includeLayers: false });
+              return codexResearchAccess(result.config.web_search);
+            }).pipe(
+              Effect.scoped,
+              Effect.timeout("20 seconds"),
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+              Effect.orElseSucceed(
+                () =>
+                  "Codex web configuration could not be read for this worktree. Access is unverified; check available tools before taking research, or ask the person.",
+              ),
+            ),
+        },
         textGeneration,
       } satisfies ProviderInstance;
     }),

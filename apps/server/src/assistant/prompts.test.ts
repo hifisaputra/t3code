@@ -453,15 +453,22 @@ describe("research issues", () => {
     expect(lead).toContain(
       "Research that needs a login, a form or a paid source is declined or asked about",
     );
-    expect(lead).toContain("This team's worker runs on codex");
+    expect(lead).toContain("The worker and fact checker both run on codex");
   });
 
   it("gives the worker and the reviewer the same web rules", () => {
     for (const text of [worker, reviewer]) {
       expect(text).toContain(forms);
       expect(text).toContain("A page that needs any of those is a gap in the report");
+      expect(text).toContain("Do not open plan builders, order summaries or checkout");
+      expect(text).toContain("Do not change the page's DOM, hide elements or alter its content");
+      expect(text).toContain("disclose exactly what happened with assistant_ask_decision");
     }
     expect(reviewer).toContain("Any sign that the worker broke these rules");
+    expect(reviewer).toContain(
+      "A disclosed violation is still blocking after the worker removes the resulting facts",
+    );
+    expect(reviewer).toContain("end your turn without approving");
   });
 
   it("has the worker report rather than commit, with numbered questions and screenshots", () => {
@@ -473,12 +480,19 @@ describe("research issues", () => {
       "Questions the report must answer:\n1. Names the per-seat price of each of the 5 tools\n2. Says which is cheapest",
     );
     expect(worker).not.toContain("assistant_request_review");
+    expect(worker).toContain("Use partly when a required vendor or fact remains unknown");
+    expect(worker).toContain("Only attach a screenshot that directly supports that question");
+    expect(worker).toContain("Do not include an empty fact-check section");
     expect(worker).toContain("IMPLEMENT SECTION");
   });
 
   it("has the reviewer open the sources and approve without first person", () => {
     expect(reviewer).toContain("Open the report's sources yourself");
     expect(reviewer).toContain("estimates presented as facts");
+    expect(reviewer).toContain(
+      "An unanswered required fact still makes a check partly or not-answered",
+    );
+    expect(reviewer).toContain("the report has no unfinished review placeholders");
     expect(reviewer).toContain("without first person");
     expect(reviewer).toContain("REVIEW SECTION");
   });

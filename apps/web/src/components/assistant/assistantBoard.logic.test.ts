@@ -867,3 +867,43 @@ describe("research board", () => {
     ).toBe("The report");
   });
 });
+
+describe("research delivery", () => {
+  it("shows automatic delivery and retries instead of waiting for a team leader", () => {
+    const pending = task({
+      track: "research",
+      stage: "lead",
+      status: "working",
+      research: {
+        report: "Report",
+        sources: [],
+        checks: [],
+        screenshots: [],
+        revision: 1,
+        at: "2026-09-18T00:00:00.000Z",
+        review: {
+          verdict: "approved",
+          findings: "",
+          summary: "Checked",
+          revision: 1,
+          at: "2026-09-18T00:00:00.000Z",
+        },
+      },
+    });
+    const phase = (error: string | null) =>
+      describeTaskPhase({
+        task: { ...pending, error },
+        workerBusy: false,
+        workerNeedsInput: false,
+        step: "",
+        hasOpenDecision: false,
+        waitingOn: "review",
+      });
+    expect(phase(null).label).toBe("Delivering report");
+    expect(phase("Linear unavailable; retrying")).toMatchObject({
+      label: "Delivering report",
+      tone: "waiting",
+      detail: "Linear unavailable; retrying",
+    });
+  });
+});

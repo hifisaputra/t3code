@@ -557,6 +557,14 @@ export const AssistantResearch = Schema.Struct({
   revision: Schema.Int,
   at: IsoDateTime,
   review: Schema.optionalKey(Schema.NullOr(AssistantResearchReview)),
+  /** Frozen after uploads, before posting. Stable UUIDs let delivery resume after a restart. */
+  delivery: Schema.optionalKey(
+    Schema.Struct({
+      commentIds: Schema.Array(Schema.String),
+      acceptedState: Schema.String,
+      problems: Schema.Array(Schema.String),
+    }),
+  ),
 });
 export type AssistantResearch = typeof AssistantResearch.Type;
 

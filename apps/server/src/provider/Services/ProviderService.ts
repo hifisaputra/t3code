@@ -106,6 +106,12 @@ export interface ProviderServiceShape {
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderServiceError>;
 
+  /** Workspace-specific web configuration, or an explicit explanation when it cannot be checked. */
+  readonly getResearchAccess: (
+    instanceId: ProviderInstanceId,
+    cwd: string,
+  ) => Effect.Effect<string, ProviderServiceError>;
+
   /**
    * Reject unsupported rewind before files change, without resuming the session.
    */

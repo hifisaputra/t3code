@@ -135,14 +135,18 @@ function harness() {
   const started: string[] = [];
   const prepared: LinearPrepareIssueThreadInput[] = [];
   const removed: string[] = [];
-  const comments: Array<{ issueId: string; body: string }> = [];
+  const comments: Array<{ issueId: string; body: string; id?: string }> = [];
+  const researchAccess = {
+    text: "Public web tools verified for this worker instance.",
+    requests: [] as Array<{ instanceId: string; cwd: string }>,
+  };
   const descriptions: Array<{ issueId: string; description: string | undefined }> = [];
   const listed: Array<{ assignedToMe: boolean; stateTypes: ReadonlyArray<string> }> = [];
   // Issues Linear refuses to read, and hooks that run while it is being read
   // or commented on, to test what the assistant does around those calls.
   const linearFailures = new Set<string>();
   let onIssueRead: (reference: string) => Effect.Effect<void> = () => Effect.void;
-  let onComment: (body: string) => Effect.Effect<void> = () => Effect.void;
+  let onComment: (body: string) => Effect.Effect<void, LinearOperationError> = () => Effect.void;
   let commentsHealthy = true;
   let descriptionsHealthy = true;
   const pendingStarts = new Set<ThreadId>();
@@ -219,6 +223,11 @@ function harness() {
     }),
     // Like a provider, a stopped session drops the thread's background work.
     Layer.mock(ProviderService)({
+      getResearchAccess: (instanceId, cwd) =>
+        Effect.sync(() => {
+          researchAccess.requests.push({ instanceId, cwd });
+          return researchAccess.text;
+        }),
       stopSession: ({ threadId }) =>
         Effect.sync(() => {
           stopped.push(threadId);
@@ -359,13 +368,33 @@ function harness() {
                 detail: "Linear refused to save the issue.",
               }),
             ),
+      getComment: (id) =>
+        Effect.gen(function* () {
+          const comment = comments.find(
+            (entry, index) => (entry.id ?? `comment-${index + 1}`) === id,
+          );
+          if (!comment)
+            return yield* new LinearOperationError({
+              operation: "getComment",
+              detail: "Not found",
+            });
+          return {
+            id,
+            body: comment.body,
+            url: "https://linear.app/c",
+            issue: { id: comment.issueId },
+          };
+        }),
       createComment: (input) =>
         commentsHealthy
           ? onComment(input.body).pipe(
               Effect.andThen(asApp("createComment")),
               Effect.map(() => {
                 comments.push(input);
-                return { id: `comment-${comments.length}`, url: "https://linear.app/c" };
+                return {
+                  id: input.id ?? `comment-${comments.length}`,
+                  url: "https://linear.app/c",
+                };
               }),
             )
           : Effect.fail(
@@ -576,6 +605,7 @@ function harness() {
     prepared,
     removed,
     comments,
+    researchAccess,
     descriptions,
     listed,
     linearFailures,
@@ -5593,4 +5623,241 @@ it.effect(
       assert.include(delivered.error ?? "", "Could not upload a screenshot to Linear: acme.png");
       assert.deepEqual(h.transitions, ["review"]);
     }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a failed research review-thread creation leaves the report retryable", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const taken = yield* takeResearch(h, service, yield* activeTask(service));
+    yield* service.deliver();
+    const reviewer = assistantTaskThreadId(taken, "review");
+    h.onDispatch((command) =>
+      command.type === "thread.create" && command.threadId === reviewer
+        ? Effect.die("Simulated interruption during thread creation")
+        : Effect.void,
+    );
+    assert.equal(
+      (yield* service.submitResearch(taken.threadId, researchInput(taken)).pipe(Effect.exit))._tag,
+      "Failure",
+    );
+    const beforeRetry = yield* taskById(service, taken.id);
+    assert.equal(beforeRetry.stage, "implement");
+    assert.isNull(beforeRetry.research);
+    h.onDispatch(() => Effect.void);
+    const submitted = yield* submitReport(h, service, taken);
+    assert.equal(submitted.research?.revision, 1);
+    assert.lengthOf(turnsOf(h, reviewer), 1);
+    assert.include(turnsOf(h, reviewer)[0], "You are the fact checker");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("research state rolls back when its review message cannot be queued", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const taken = yield* takeResearch(h, service, yield* activeTask(service));
+    yield* service.deliver();
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TRIGGER reject_research_handoff BEFORE INSERT ON assistant_messages
+      WHEN NEW.id LIKE '%:research:%' BEGIN SELECT RAISE(FAIL, 'injected queue failure'); END`;
+    assert.isTrue(
+      yield* service.submitResearch(taken.threadId, researchInput(taken)).pipe(Effect.isFailure),
+    );
+    const beforeRetry = yield* taskById(service, taken.id);
+    assert.equal(beforeRetry.stage, "implement");
+    assert.isNull(beforeRetry.research);
+    yield* sql`DROP TRIGGER reject_research_handoff`;
+    yield* submitReport(h, service, taken);
+    assert.lengthOf(turnsOf(h, assistantTaskThreadId(taken, "review")), 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("rejects an oversized complete research request before handing off", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const initial = yield* activeTask(service);
+    yield* service.deliver();
+    const taken = yield* service.acceptIssue(
+      leadOf(initial),
+      "Brief ".repeat(3300),
+      researchQuestions,
+      null,
+      "research",
+    );
+    yield* endTurn(h, service, leadOf(taken));
+    yield* service.deliver();
+    const rejected = yield* service
+      .submitResearch(taken.threadId, {
+        ...researchInput(taken),
+        report: "r".repeat(30_000),
+        sources: Array.from({ length: 60 }, (_, i) => ({
+          url: `https://example.com/${i}?q=`.padEnd(1000, "a"),
+          title: "t".repeat(300),
+          seen: "2026-09-18",
+        })),
+      })
+      .pipe(Effect.flip);
+    assert.include(rejected.detail, "complete fact-check request");
+    assert.include(rejected.detail, "120,000");
+    assert.equal((yield* taskById(service, taken.id)).stage, "implement");
+    const submitted = yield* submitReport(h, service, taken);
+    assert.equal(submitted.research?.revision, 1);
+    assert.lengthOf(turnsOf(h, assistantTaskThreadId(taken, "review")), 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a restarted assistant resumes an approval interrupted before posting", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const taken = yield* takeResearch(h, service, yield* activeTask(service));
+    const reviewer = assistantTaskThreadId(taken, "review");
+    yield* submitReport(h, service, taken);
+    h.whenCommentPosted(() => Effect.die("Simulated process exit before posting"));
+    assert.equal(
+      (yield* service.submitReview(reviewer, "approved", "", "Checked.").pipe(Effect.exit))._tag,
+      "Failure",
+    );
+    const pending = yield* taskById(service, taken.id);
+    assert.equal(pending.research?.review?.verdict, "approved");
+    assert.lengthOf(pending.research?.delivery?.commentIds ?? [], 1);
+    h.whenCommentPosted(() => Effect.void);
+    yield* endTurn(h, service, reviewer);
+    const restarted = yield* h.make;
+    yield* restarted.scan();
+    const delivered = yield* taskById(restarted, taken.id);
+    assert.equal(delivered.status, "review");
+    assert.equal(h.comments[0]?.id, pending.research?.delivery?.commentIds[0]);
+    assert.lengthOf(h.comments, 1);
+    assert.lengthOf(h.uploads, 1);
+    yield* restarted.scan();
+    assert.lengthOf(h.comments, 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("recovers a posted research comment when its acknowledgement was lost", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const taken = yield* takeResearch(h, service, yield* activeTask(service));
+    const reviewer = assistantTaskThreadId(taken, "review");
+    yield* submitReport(h, service, taken);
+    h.whenCommentPosted((body) =>
+      Effect.gen(function* () {
+        const pending = yield* taskById(service, taken.id).pipe(Effect.orDie);
+        h.comments.push({
+          id: pending.research!.delivery!.commentIds[0]!,
+          issueId: taken.issue.id,
+          body,
+        });
+        return yield* Effect.die("Simulated exit after remote commit");
+      }),
+    );
+    assert.equal(
+      (yield* service.submitReview(reviewer, "approved", "", "Checked.").pipe(Effect.exit))._tag,
+      "Failure",
+    );
+    assert.lengthOf(h.comments, 1);
+    h.whenCommentPosted(() =>
+      Effect.fail(
+        new LinearOperationError({ operation: "createComment", detail: "Duplicate identifier" }),
+      ),
+    );
+    const restarted = yield* h.make;
+    yield* restarted.scan();
+    const delivered = yield* taskById(restarted, taken.id);
+    assert.equal(delivered.status, "review");
+    assert.deepEqual(delivered.linearCommentIds, [h.comments[0]!.id!]);
+    assert.lengthOf(h.comments, 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a temporary Linear failure keeps research delivery pending for the next scan", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const taken = yield* takeResearch(h, service, yield* activeTask(service));
+    yield* submitReport(h, service, taken);
+    h.setCommentsHealthy(false);
+    const pending = yield* service.submitReview(
+      assistantTaskThreadId(taken, "review"),
+      "approved",
+      "",
+      "Checked.",
+    );
+    assert.equal(pending.status, "working");
+    assert.include(pending.error ?? "", "retry delivery automatically");
+    assert.lengthOf(h.transitions, 0);
+    h.setCommentsHealthy(true);
+    yield* service.scan();
+    assert.equal((yield* taskById(service, taken.id)).status, "review");
+    assert.lengthOf(h.comments, 1);
+    assert.deepEqual(h.transitions, ["review"]);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the leader gets the configured worker's workspace web-access result", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.researchAccess.text = "Codex web_search is disabled in this worktree.";
+    const { service } = yield* h.setup;
+    const taken = yield* activeTask(service);
+    yield* service.deliver();
+    assert.deepEqual(h.researchAccess.requests, [
+      { instanceId: config.workerModelSelection.instanceId, cwd: `/worktrees/${taken.threadId}` },
+    ]);
+    assert.include(turnsOf(h, leadOf(taken))[0], h.researchAccess.text);
+    assert.include(
+      turnsOf(h, leadOf(taken))[0],
+      "Never infer the worker's access from your own tools",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("resumes a split research report without reposting completed parts", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const taken = yield* takeResearch(h, service, yield* activeTask(service));
+    yield* service.deliver();
+    yield* service.submitResearch(taken.threadId, {
+      ...researchInput(taken),
+      report: "r".repeat(30_000),
+      sources: Array.from({ length: 60 }, (_, i) => ({
+        url: `https://example.com/${i}?q=`.padEnd(1000, "a"),
+        title: "t".repeat(300),
+        seen: "2026-09-18",
+      })),
+    });
+    yield* endTurn(h, service, taken.threadId);
+    yield* service.deliver();
+    h.whenCommentPosted((body) =>
+      body.includes("**Research, part 2")
+        ? Effect.fail(
+            new LinearOperationError({ operation: "createComment", detail: "Temporary failure" }),
+          )
+        : Effect.void,
+    );
+    const pending = yield* service.submitReview(
+      assistantTaskThreadId(taken, "review"),
+      "approved",
+      "",
+      "Checked.",
+    );
+    assert.equal(pending.status, "working");
+    assert.lengthOf(h.comments, 1);
+    assert.lengthOf(pending.linearCommentIds ?? [], 1);
+    assert.lengthOf(pending.research?.delivery?.commentIds ?? [], 2);
+    h.whenCommentPosted(() => Effect.void);
+    const restarted = yield* h.make;
+    yield* restarted.scan();
+    const delivered = yield* taskById(restarted, taken.id);
+    assert.equal(delivered.status, "review");
+    assert.lengthOf(h.comments, 2);
+    assert.deepEqual(delivered.linearCommentIds, pending.research!.delivery!.commentIds);
+    assert.include(h.comments[0]!.body, "part 1 of 2");
+    assert.include(h.comments[1]!.body, "part 2 of 2");
+  }).pipe(Effect.provide(database()), Effect.scoped),
 );

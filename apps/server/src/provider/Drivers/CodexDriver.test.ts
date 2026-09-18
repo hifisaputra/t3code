@@ -8,6 +8,8 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
@@ -55,7 +57,121 @@ const noSpawn = ChildProcessSpawner.make(() =>
   Effect.die("Disabled Codex must not spawn a process"),
 );
 
+const decodeResearchProbeRequest = Schema.decodeSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      id: Schema.optionalKey(Schema.Number),
+      method: Schema.String,
+      params: Schema.optionalKey(Schema.Unknown),
+    }),
+  ),
+);
+const encodeResearchProbeReply = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
 it.layer(testLayer)("CodexDriver", (it) => {
+  for (const configReadFails of [false, true]) {
+    it.effect(
+      `reads research web access from the instance and worktree (failure=${configReadFails})`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-web-access-" });
+          const cwd = NodePath.join(tempDir, "worktree");
+          const homePath = NodePath.join(tempDir, "codex-home");
+          const binaryPath = NodePath.join(tempDir, "codex");
+          const output = yield* Queue.unbounded<Uint8Array>();
+          const requests: Array<{ id?: number; method: string; params?: unknown }> = [];
+          const encoder = new TextEncoder();
+          const decoder = new TextDecoder();
+          let pending = "";
+          let spawned = false;
+          const spawner = ChildProcessSpawner.make((command) => {
+            if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+            expect(command.command).toBe(binaryPath);
+            expect(command.args).toContain("app-server");
+            expect(command.args).toContain('web_search="disabled"');
+            expect(command.options.cwd).toBe(cwd);
+            expect(command.options.env).toMatchObject({
+              CODEX_HOME: homePath,
+              RESEARCH_PROFILE: "worker",
+            });
+            spawned = true;
+            return Effect.succeed(
+              ChildProcessSpawner.makeHandle({
+                pid: ChildProcessSpawner.ProcessId(1),
+                exitCode: Effect.never,
+                isRunning: Effect.succeed(true),
+                kill: () => Effect.void,
+                unref: Effect.succeed(Effect.void),
+                stdin: Sink.forEach((chunk: Uint8Array) =>
+                  Effect.gen(function* () {
+                    pending += decoder.decode(chunk, { stream: true });
+                    const lines = pending.split("\n");
+                    pending = lines.pop()!;
+                    for (const line of lines) {
+                      const request = decodeResearchProbeRequest(line);
+                      requests.push(request);
+                      if (request.id === undefined) continue;
+                      const reply =
+                        request.method === "initialize"
+                          ? {
+                              result: {
+                                codexHome: homePath,
+                                platformFamily: "unix",
+                                platformOs: "linux",
+                                userAgent: "test",
+                              },
+                            }
+                          : configReadFails
+                            ? { error: { code: -32603, message: "Config unavailable" } }
+                            : { result: { config: { web_search: "disabled" }, origins: {} } };
+                      yield* Queue.offer(
+                        output,
+                        encoder.encode(
+                          `${encodeResearchProbeReply({ id: request.id, ...reply })}\n`,
+                        ),
+                      );
+                    }
+                  }),
+                ),
+                stdout: Stream.fromQueue(output),
+                stderr: Stream.empty,
+                all: Stream.empty,
+                getInputFd: () => Sink.drain,
+                getOutputFd: () => Stream.empty,
+              }),
+            );
+          });
+          const instance = yield* CodexDriver.create({
+            instanceId: ProviderInstanceId.make("codex-research-worker"),
+            displayName: "Research worker",
+            enabled: false,
+            environment: [{ name: "RESEARCH_PROFILE", value: "worker", sensitive: false }],
+            config: {
+              ...CodexDriver.defaultConfig(),
+              binaryPath,
+              homePath,
+              launchArgs: `-c 'web_search="disabled"'`,
+            },
+          }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+          const access = yield* instance.adapter.researchAccess!(cwd);
+          expect(spawned).toBe(true);
+          expect(requests.find((request) => request.method === "config/read")?.params).toEqual({
+            cwd,
+            includeLayers: false,
+          });
+          expect(
+            requests.every((request) =>
+              ["initialize", "initialized", "config/read"].includes(request.method),
+            ),
+          ).toBe(true);
+          expect(access).toContain(
+            configReadFails ? "Access is unverified" : "web_search is disabled",
+          );
+        }).pipe(Effect.scoped),
+    );
+  }
+
   it.effect.skipIf(windowsHost)(
     "runs the standalone updater against the shared home, not the shadow home",
     () =>

@@ -403,6 +403,24 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   return { client, initialize };
 });
 
+/** Report the configured mode without treating an omitted value as proof of live access. */
+export function codexResearchAccess(
+  mode: CodexSchema.V2ConfigReadResponse__WebSearchMode | null | undefined,
+) {
+  switch (mode) {
+    case "live":
+      return "Codex web_search is configured as live in this worktree. Public web search is enabled; confirm each source can actually be opened.";
+    case "cached":
+      return "Codex web_search is configured as cached in this worktree. Cached results are not proof of current figures; verify current sources with an available public-page reader, or ask the person.";
+    case "indexed":
+      return "Codex web_search is configured as indexed in this worktree. Indexed results are not proof of current figures; verify current sources with an available public-page reader, or ask the person.";
+    case "disabled":
+      return "Codex web_search is disabled in this worktree. Verify another permitted public-page reader is available before taking research, or ask the person.";
+    default:
+      return "Codex did not report a web_search mode for this worktree. Web access is unverified; check available tools before taking research, or ask the person.";
+  }
+}
+
 const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(function* (input: {
   readonly binaryPath: string;
   readonly homePath?: string;

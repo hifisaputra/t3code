@@ -1,6 +1,10 @@
 import { assert, it } from "@effect/vitest";
 
-import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
+import {
+  codexResearchAccess,
+  applyPreferredCodexDefaultModel,
+  mapCodexModelCapabilities,
+} from "./CodexProvider.ts";
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({
@@ -143,4 +147,13 @@ it("ignores custom models that shadow a preferred slug", () => {
   ]);
 
   assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-5.4");
+});
+
+it("distinguishes live, cached, indexed, disabled and unreported research access", () => {
+  assert.include(codexResearchAccess("live"), "configured as live");
+  assert.include(codexResearchAccess("cached"), "not proof of current figures");
+  assert.include(codexResearchAccess("indexed"), "not proof of current figures");
+  assert.include(codexResearchAccess("disabled"), "web_search is disabled");
+  assert.include(codexResearchAccess(null), "unverified");
+  assert.include(codexResearchAccess(undefined), "unverified");
 });

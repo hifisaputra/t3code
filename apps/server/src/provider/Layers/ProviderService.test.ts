@@ -474,6 +474,72 @@ function makeProviderServiceLayer(
   };
 }
 
+describe("research web access", () => {
+  const workerId = ProviderInstanceId.make("codex-research-worker");
+  const leaderId = ProviderInstanceId.make("codex-research-leader");
+  const unprobedId = ProviderInstanceId.make("claude-research-worker");
+  const disabledId = ProviderInstanceId.make("codex-research-disabled");
+  const calls: Array<{ instanceId: ProviderInstanceId; cwd: string }> = [];
+  const worker = makeFakeCodexAdapter();
+  const leader = makeFakeCodexAdapter();
+  const adapterWithProbe = (
+    instanceId: ProviderInstanceId,
+    adapter: ProviderAdapterShape<ProviderAdapterError>,
+  ) => ({
+    ...adapter,
+    researchAccess: (cwd: string) =>
+      Effect.sync(() => {
+        calls.push({ instanceId, cwd });
+        return `Web configuration for ${instanceId} at ${cwd}`;
+      }),
+  });
+  const registry = makeStaticInstanceRegistry([
+    [workerId, adapterWithProbe(workerId, worker.adapter)],
+    [leaderId, adapterWithProbe(leaderId, leader.adapter)],
+    [unprobedId, makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER).adapter],
+    [disabledId, adapterWithProbe(disabledId, worker.adapter)],
+  ]);
+  const { layer } = makeProviderServiceLayer({
+    registry: {
+      ...registry,
+      getInstanceInfo: (instanceId) =>
+        registry
+          .getInstanceInfo(instanceId)
+          .pipe(Effect.map((info) => ({ ...info, enabled: instanceId !== disabledId }))),
+    },
+  });
+
+  layer("selected provider", (it) => {
+    it.effect("probes the selected instance in the task worktree without starting a session", () =>
+      Effect.gen(function* () {
+        calls.length = 0;
+        const service = yield* ProviderService.ProviderService;
+        const result = yield* service.getResearchAccess(workerId, "/worktrees/research");
+        assert.equal(result, `Web configuration for ${workerId} at /worktrees/research`);
+        assert.deepEqual(calls, [{ instanceId: workerId, cwd: "/worktrees/research" }]);
+        assert.equal(worker.startSession.mock.calls.length, 0);
+        assert.equal(leader.startSession.mock.calls.length, 0);
+      }),
+    );
+
+    it.effect("reports unprobed and disabled instances without assuming web access", () =>
+      Effect.gen(function* () {
+        calls.length = 0;
+        const service = yield* ProviderService.ProviderService;
+        assert.include(
+          yield* service.getResearchAccess(unprobedId, "/worktrees/research"),
+          "Native web access is unverified",
+        );
+        assert.include(
+          yield* service.getResearchAccess(disabledId, "/worktrees/research"),
+          "is disabled",
+        );
+        assert.deepEqual(calls, []);
+      }),
+    );
+  });
+});
+
 for (const [enabled, completed] of [
   [false, false],
   [true, false],

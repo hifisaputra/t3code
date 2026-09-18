@@ -1925,6 +1925,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
+  const getResearchAccess: ProviderServiceMethod<"getResearchAccess"> = Effect.fn(
+    "ProviderService.getResearchAccess",
+  )(function* (instanceId, cwd) {
+    const info = yield* registry.getInstanceInfo(instanceId);
+    if (!info.enabled) return `Provider instance ${instanceId} is disabled; it cannot research.`;
+    const adapter = yield* registry.getByInstance(instanceId);
+    return adapter.researchAccess
+      ? yield* adapter.researchAccess(cwd)
+      : `Native web access is unverified for ${instanceId} (${info.driverKind}): this provider does not expose a workspace web-configuration probe. Check its configured tools and permissions before taking research; do not infer access from the provider name.`;
+  });
+
   const assertConversationRollbackSupported: ProviderServiceMethod<"assertConversationRollbackSupported"> =
     Effect.fn("assertConversationRollbackSupported")(function* (threadId) {
       const routed = yield* resolveRoutableSession({
@@ -2113,6 +2124,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listSessions,
     getCapabilities,
     getInstanceInfo,
+    getResearchAccess,
     assertConversationRollbackSupported,
     rollbackConversation,
     uploadFeedback,

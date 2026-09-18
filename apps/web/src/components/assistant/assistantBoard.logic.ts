@@ -236,6 +236,16 @@ export function describeTaskPhase(input: {
         detail: `The ${holder} asked something in its thread.`,
       };
     default: {
+      if (
+        task.track === "research" &&
+        task.research?.review?.verdict === "approved" &&
+        task.research.review.revision === task.research.revision
+      )
+        return {
+          tone: task.error ? "waiting" : "active",
+          label: "Delivering report",
+          detail: task.error ?? "The fact check passed. T3 is posting the report to Linear.",
+        };
       if (workerNeedsInput)
         return {
           tone: "waiting",
