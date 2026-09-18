@@ -118,3 +118,62 @@ describe("reviewSummary", () => {
     });
   });
 });
+
+const research = (
+  overrides: Partial<NonNullable<AssistantTask["research"]>> = {},
+): NonNullable<AssistantTask["research"]> => ({
+  report: "Short answer.\n\n## Detail\nMore detail.",
+  sources: [{ url: "https://example.com/pricing", title: "Pricing", seen: "2026-09-18" }],
+  checks: [{ criterion: 1, result: "answered", evidence: "Published price" }],
+  screenshots: [{ path: "/tmp/pricing.png", caption: "Pricing" }],
+  revision: 2,
+  at: "2026-09-18T00:00:00.000Z",
+  review: {
+    verdict: "approved",
+    findings: "",
+    summary: "Checked sources",
+    revision: 2,
+    at: "2026-09-18T01:00:00.000Z",
+  },
+  ...overrides,
+});
+
+describe("research review", () => {
+  it("opens the report for acceptance and reports questions, sources and screenshots", () => {
+    const summary = reviewSummary(
+      task({ track: "research", criteria: ["What does it cost?"], research: research() }),
+    );
+    expect(summary.verdict.label).toBe("Fact-check approved");
+    expect(summary.startsOpen).toBe(true);
+    expect(summary.nothingToCheck).toBe(false);
+    expect(summary.engineering).toBeNull();
+    expect(reviewOutcomeLine(summary)).toBe("1 of 1 questions answered · 1 source · 1 screenshot");
+  });
+
+  it("counts partly answered and missing questions as still open", () => {
+    const summary = reviewSummary(
+      task({
+        track: "research",
+        criteria: ["Price?", "Limits?", "Discounts?"],
+        research: research({
+          checks: [
+            { criterion: 1, result: "partly", evidence: "Only annual price found" },
+            { criterion: 2, result: "not-answered", evidence: "Requires login" },
+          ],
+        }),
+      }),
+    );
+    expect(summary.criteria).toEqual({ passed: 0, total: 3, label: "0 of 3 questions answered" });
+    expect(summary.nothingToCheck).toBe(false);
+  });
+
+  it("does not claim approval of a new revision or staging verification without a report", () => {
+    const newer = reviewSummary(task({ track: "research", research: research({ revision: 3 }) }));
+    expect(newer.verdict.label).toBe("Awaiting fact-check approval");
+    const missing = reviewSummary(task({ track: "research" }));
+    expect(missing.verdict.label).toBe("Awaiting fact-check approval");
+    expect(reviewOutcomeLine(missing)).toBe(
+      "0 of 0 questions answered · 0 sources · 0 screenshots",
+    );
+  });
+});

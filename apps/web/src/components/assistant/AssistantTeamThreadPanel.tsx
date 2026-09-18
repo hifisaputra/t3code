@@ -9,7 +9,7 @@ import { Button } from "../ui/button";
 import { describeTaskPhase, taskIsFinished, taskOutcome } from "./assistantBoard.logic";
 import { teamHolder, TeamThreads, useTeamShells } from "./AssistantTeam";
 import { IssueLink, threadIsBusy } from "./assistantUi";
-import { THREAD_KIND, ThreadKindIcon } from "./threadKinds";
+import { threadKind, ThreadKindIcon } from "./threadKinds";
 
 /**
  * A slim bar over one of an issue's team threads: which issue it belongs to,
@@ -31,7 +31,7 @@ export function AssistantTeamThreadPanel({
   if (!team || !task) return null;
 
   const role = team.role;
-  const kind = THREAD_KIND[role];
+  const kind = threadKind(role, task.track);
   const holder = teamHolder(task, shells);
   const phase = taskIsFinished(task)
     ? taskOutcome(task).label

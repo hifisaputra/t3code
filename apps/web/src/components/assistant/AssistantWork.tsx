@@ -56,6 +56,7 @@ import {
 } from "./assistantBoard.logic";
 import {
   CriteriaResults,
+  ResearchEvidence,
   EvidenceHeading,
   EvidenceNotes,
   RecordingList,
@@ -74,7 +75,7 @@ import {
   useAssistantAction,
   type StatusTone,
 } from "./assistantUi";
-import { THREAD_KIND } from "./threadKinds";
+import { THREAD_KIND, threadKind, ResearchBadge } from "./threadKinds";
 
 const PHASE_STYLE: Record<TaskPhaseTone, string> = {
   active: "bg-success/8 text-success-foreground",
@@ -137,7 +138,10 @@ function PipelineStepButton({
   needsYou: boolean;
   onOpen: (threadId: ThreadId) => void;
 }) {
-  const kind = THREAD_KIND[step.kind];
+  const kind = threadKind(
+    step.kind,
+    step.key === "research" || step.key === "fact-check" ? "research" : "code",
+  );
   const current = step.state === "current";
   const skipped = step.state === "skipped";
   const note = needsYou ? "Waiting for you" : busy && current ? "Working now" : step.note;
@@ -259,7 +263,7 @@ function E2ePlanDetails({
   const setE2eDepth = useAtomCommand(developerAssistant.setE2eDepth);
   const { pending, run } = useAssistantAction();
   const summary = describeE2ePlan(task);
-  if (!summary || !task.e2ePlan) return null;
+  if (task.track === "research" || !summary || !task.e2ePlan) return null;
   const change = e2eDepthChange(task);
   const brief = task.e2ePlan.brief.trim();
   const choose = async (depth: AssistantE2eDepth) => {
@@ -437,6 +441,7 @@ export function ActiveTaskCard({
     <article className="flex flex-col gap-3 rounded-xl border border-border/70 bg-card p-4 shadow-xs/5">
       <div className="flex min-w-0 items-center gap-2 text-xs">
         <IssueLink issue={task.issue} />
+        <ResearchBadge track={task.track} />
         {task.dispatched ? (
           <DispatchedChip fromLinear={task.linearSession?.origin === "delegated"} />
         ) : null}
@@ -593,7 +598,7 @@ export function ActiveTaskCard({
             </TooltipPopup>
           </Tooltip>
         ) : null}
-        {pullRequest ? (
+        {task.track !== "research" && pullRequest ? (
           <a
             href={pullRequest.url}
             target="_blank"
@@ -604,7 +609,7 @@ export function ActiveTaskCard({
             PR #{pullRequest.number}
           </a>
         ) : null}
-        {worker?.branch ? (
+        {task.track !== "research" && worker?.branch ? (
           <span className="min-w-0 truncate font-mono text-[11px]">{worker.branch}</span>
         ) : null}
         {!pipeline ? (
@@ -623,7 +628,9 @@ export function ActiveTaskCard({
 
       {task.criteria?.length ? (
         <div>
-          <EvidenceHeading>Acceptance criteria</EvidenceHeading>
+          <EvidenceHeading>
+            {task.track === "research" ? "Research questions" : "Acceptance criteria"}
+          </EvidenceHeading>
           <CriteriaResults task={task} viewer={viewer} />
           {viewer.dialog}
         </div>
@@ -680,6 +687,7 @@ export function AssistantQueue({
             className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg px-2 py-1 text-sm"
           >
             <IssueLink issue={task.issue} />
+            <ResearchBadge track={task.track} />
             <span className="min-w-0 truncate">
               {task.issue.title}
               {label ? <span className="text-muted-foreground"> · {label}</span> : null}
@@ -800,7 +808,7 @@ function HistoryRecord({
       />
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-muted-foreground text-xs">
-        {pullRequest ? (
+        {task.track !== "research" && pullRequest ? (
           <a
             href={pullRequest.url}
             target="_blank"
@@ -811,7 +819,7 @@ function HistoryRecord({
             PR #{pullRequest.number}
           </a>
         ) : null}
-        {worker?.branch ? (
+        {task.track !== "research" && worker?.branch ? (
           <span className="min-w-0 truncate font-mono text-[11px]">{worker.branch}</span>
         ) : null}
         {task.deployment ? (
@@ -839,73 +847,81 @@ function HistoryRecord({
         ) : null}
       </div>
 
-      {task.checks ? <CheckRunLine checks={task.checks} /> : null}
+      {task.track === "research" ? (
+        <ResearchEvidence task={task} environmentId={environmentId} viewer={viewer} />
+      ) : (
+        <>
+          {task.checks ? <CheckRunLine checks={task.checks} /> : null}
 
-      {task.merge?.summary.trim() ? (
-        <RecordSection title="What shipped">
-          <ExpandableMarkdown text={task.merge.summary} environmentId={environmentId} />
-        </RecordSection>
-      ) : null}
-      {task.criteria?.length ? (
-        <RecordSection title="Acceptance criteria">
-          <CriteriaResults task={task} viewer={viewer} />
-        </RecordSection>
-      ) : null}
-      {task.codeReview ? (
-        <RecordSection title="Code review">
-          <p className="mb-2 font-medium text-xs">{CODE_REVIEW_VERDICT[task.codeReview.verdict]}</p>
-          {task.codeReview.summary.trim() ? (
-            <ExpandableMarkdown text={task.codeReview.summary} environmentId={environmentId} />
+          {task.merge?.summary.trim() ? (
+            <RecordSection title="What shipped">
+              <ExpandableMarkdown text={task.merge.summary} environmentId={environmentId} />
+            </RecordSection>
           ) : null}
-        </RecordSection>
-      ) : null}
-      {task.e2e ? (
-        <RecordSection title="E2E check">
-          <p className="mb-2 font-medium text-xs">{E2E_VERDICT[task.e2e.verdict]}</p>
-          {task.e2ePlan ? (
-            <div className="mb-2">
+          {task.criteria?.length ? (
+            <RecordSection title="Acceptance criteria">
+              <CriteriaResults task={task} viewer={viewer} />
+            </RecordSection>
+          ) : null}
+          {task.codeReview ? (
+            <RecordSection title="Code review">
+              <p className="mb-2 font-medium text-xs">
+                {CODE_REVIEW_VERDICT[task.codeReview.verdict]}
+              </p>
+              {task.codeReview.summary.trim() ? (
+                <ExpandableMarkdown text={task.codeReview.summary} environmentId={environmentId} />
+              ) : null}
+            </RecordSection>
+          ) : null}
+          {task.e2e ? (
+            <RecordSection title="E2E check">
+              <p className="mb-2 font-medium text-xs">{E2E_VERDICT[task.e2e.verdict]}</p>
+              {task.e2ePlan ? (
+                <div className="mb-2">
+                  <E2ePlanDetails environmentId={environmentId} task={task} editable={false} />
+                </div>
+              ) : null}
+              {task.e2e.report.trim() ? (
+                <ExpandableMarkdown text={task.e2e.report} environmentId={environmentId} />
+              ) : null}
+              {task.e2e.humanChecks.length > 0 ? (
+                <div className="mt-3">
+                  <EvidenceHeading>Checks for you</EvidenceHeading>
+                  <EvidenceNotes items={task.e2e.humanChecks} />
+                </div>
+              ) : null}
+              {task.e2e.worthALook?.length ? (
+                <div className="mt-3">
+                  <EvidenceHeading>Worth a look</EvidenceHeading>
+                  <EvidenceNotes items={task.e2e.worthALook} />
+                </div>
+              ) : null}
+              {viewer.shots.length > 0 ? (
+                <div className="mt-3">
+                  <EvidenceHeading count={viewer.shots.length}>Screenshots</EvidenceHeading>
+                  <ScreenshotGrid viewer={viewer} />
+                </div>
+              ) : null}
+              {viewer.videos.length > 0 ? (
+                <div className="mt-3">
+                  <EvidenceHeading count={viewer.videos.length}>Recordings</EvidenceHeading>
+                  <RecordingList viewer={viewer} />
+                </div>
+              ) : null}
+            </RecordSection>
+          ) : null}
+          {!task.e2e && task.e2ePlan ? (
+            <RecordSection title="E2E check">
               <E2ePlanDetails environmentId={environmentId} task={task} editable={false} />
-            </div>
+            </RecordSection>
           ) : null}
-          {task.e2e.report.trim() ? (
-            <ExpandableMarkdown text={task.e2e.report} environmentId={environmentId} />
+          {task.reviewInstructions.trim() ? (
+            <RecordSection title="How to check it">
+              <ExpandableMarkdown text={task.reviewInstructions} environmentId={environmentId} />
+            </RecordSection>
           ) : null}
-          {task.e2e.humanChecks.length > 0 ? (
-            <div className="mt-3">
-              <EvidenceHeading>Checks for you</EvidenceHeading>
-              <EvidenceNotes items={task.e2e.humanChecks} />
-            </div>
-          ) : null}
-          {task.e2e.worthALook?.length ? (
-            <div className="mt-3">
-              <EvidenceHeading>Worth a look</EvidenceHeading>
-              <EvidenceNotes items={task.e2e.worthALook} />
-            </div>
-          ) : null}
-          {viewer.shots.length > 0 ? (
-            <div className="mt-3">
-              <EvidenceHeading count={viewer.shots.length}>Screenshots</EvidenceHeading>
-              <ScreenshotGrid viewer={viewer} />
-            </div>
-          ) : null}
-          {viewer.videos.length > 0 ? (
-            <div className="mt-3">
-              <EvidenceHeading count={viewer.videos.length}>Recordings</EvidenceHeading>
-              <RecordingList viewer={viewer} />
-            </div>
-          ) : null}
-        </RecordSection>
-      ) : null}
-      {!task.e2e && task.e2ePlan ? (
-        <RecordSection title="E2E check">
-          <E2ePlanDetails environmentId={environmentId} task={task} editable={false} />
-        </RecordSection>
-      ) : null}
-      {task.reviewInstructions.trim() ? (
-        <RecordSection title="How to check it">
-          <ExpandableMarkdown text={task.reviewInstructions} environmentId={environmentId} />
-        </RecordSection>
-      ) : null}
+        </>
+      )}
       {task.brief.trim() ? (
         <RecordSection
           title={task.leader ? "The team leader's brief" : "What the assistant asked for"}
@@ -913,7 +929,7 @@ function HistoryRecord({
           <ExpandableMarkdown text={task.brief} environmentId={environmentId} />
         </RecordSection>
       ) : null}
-      {task.summary.trim() ? (
+      {task.track !== "research" && task.summary.trim() ? (
         <RecordSection title="Summary">
           <ExpandableMarkdown text={task.summary} environmentId={environmentId} />
         </RecordSection>
@@ -953,7 +969,7 @@ function HistoryRow({
         <status.icon aria-hidden className={cn("size-3.5", status.className)} />
         <span className="font-mono text-muted-foreground text-xs">{task.issue.identifier}</span>
         <span className="min-w-0 truncate">
-          {task.issue.title}
+          {task.issue.title} <ResearchBadge track={task.track} />
           {projectLabel ? <span className="text-muted-foreground"> · {projectLabel}</span> : null}
         </span>
         <span className="shrink-0 text-muted-foreground text-xs">

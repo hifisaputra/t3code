@@ -38,6 +38,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { decisionOptions, previewLine, type InboxItem } from "./assistantBoard.logic";
 import {
   CriteriaResults,
+  ResearchEvidence,
   EvidenceHeading,
   EvidenceNotes,
   HumanChecklist,
@@ -56,7 +57,7 @@ import {
   type StatusTone,
 } from "./assistantUi";
 import { reviewOutcomeLine, reviewSummary, type ReviewVerdictTone } from "./reviewCard.logic";
-import { THREAD_KIND } from "./threadKinds";
+import { THREAD_KIND, ResearchBadge } from "./threadKinds";
 
 type Accent = "question" | "review" | "blocked" | "paused" | "setup";
 
@@ -492,16 +493,17 @@ function ReviewCard({
       Accept
     </Button>
   );
-  const stagingButton = task.deployment ? (
-    <Button
-      size="xs"
-      variant="outline"
-      render={<a href={task.deployment.url} target="_blank" rel="noreferrer" />}
-    >
-      <ExternalLinkIcon />
-      Open staging
-    </Button>
-  ) : null;
+  const stagingButton =
+    task.track !== "research" && task.deployment ? (
+      <Button
+        size="xs"
+        variant="outline"
+        render={<a href={task.deployment.url} target="_blank" rel="noreferrer" />}
+      >
+        <ExternalLinkIcon />
+        Open staging
+      </Button>
+    ) : null;
   const humanChecks = e2e?.humanChecks ?? [];
 
   return (
@@ -513,6 +515,7 @@ function ReviewCard({
       context={
         <>
           <span className="shrink-0 font-mono">{task.issue.identifier}</span>
+          <ResearchBadge track={task.track} />
           {context.projectLabel(task.projectId) ? (
             <span className="min-w-0 truncate">{context.projectLabel(task.projectId)}</span>
           ) : null}
@@ -556,8 +559,10 @@ function ReviewCard({
             <span className="text-muted-foreground">{summary.engineering.label}</span>
           )
         ) : null}
-        {task.deployment ? <CommitChip revision={task.deployment.revision} /> : null}
-        {task.deployment?.evidence?.map((entry) => (
+        {task.track !== "research" && task.deployment ? (
+          <CommitChip revision={task.deployment.revision} />
+        ) : null}
+        {(task.track === "research" ? undefined : task.deployment?.evidence)?.map((entry) => (
           <span
             key={entry.targetId}
             className="inline-flex items-center gap-1 text-muted-foreground"
@@ -571,68 +576,74 @@ function ReviewCard({
           <IssueLink issue={task.issue} />
         </span>
       </div>
-      {task.summary.trim() ? (
-        <ExpandableMarkdown
-          text={task.summary}
-          environmentId={context.environmentId}
-          collapsedClassName="max-h-28"
-        />
-      ) : null}
-      {humanChecks.length > 0 ? (
-        <section>
-          <EvidenceHeading count={`${ticked.size} of ${humanChecks.length}`}>
-            Check before accepting
-          </EvidenceHeading>
-          <HumanChecklist
-            checks={humanChecks}
-            ticked={ticked}
-            onTick={(index, checked) =>
-              setTicked((current) => {
-                const next = new Set(current);
-                if (checked) next.add(index);
-                else next.delete(index);
-                return next;
-              })
-            }
-          />
-        </section>
-      ) : null}
-      {task.criteria?.length || e2e?.checks?.length ? (
-        <section>
-          <EvidenceHeading>
-            {e2e ? "What the tester checked" : "Acceptance criteria"}
-          </EvidenceHeading>
-          <CriteriaResults task={task} viewer={viewer} />
-        </section>
-      ) : null}
-      {viewer.shots.length > 0 ? (
-        <section>
-          <EvidenceHeading count={viewer.shots.length}>Screenshots</EvidenceHeading>
-          <ScreenshotGrid viewer={viewer} />
-        </section>
-      ) : null}
-      {viewer.videos.length > 0 ? (
-        <section>
-          <EvidenceHeading count={viewer.videos.length}>Recordings</EvidenceHeading>
-          <RecordingList viewer={viewer} />
-        </section>
-      ) : null}
-      {e2e?.worthALook?.length ? (
-        <section>
-          <EvidenceHeading>Worth a look</EvidenceHeading>
-          <EvidenceNotes items={e2e.worthALook} />
-        </section>
-      ) : null}
-      {task.reviewInstructions.trim() ? (
-        <div className="rounded-lg bg-muted/50 px-3 py-2.5">
-          <EvidenceHeading>{e2e ? "Staging check" : "How to check it"}</EvidenceHeading>
-          <ExpandableMarkdown
-            text={task.reviewInstructions}
-            environmentId={context.environmentId}
-            collapsedClassName="max-h-32"
-          />
-        </div>
-      ) : null}
+      {task.track === "research" ? (
+        <ResearchEvidence task={task} environmentId={context.environmentId} viewer={viewer} />
+      ) : (
+        <>
+          {task.summary.trim() ? (
+            <ExpandableMarkdown
+              text={task.summary}
+              environmentId={context.environmentId}
+              collapsedClassName="max-h-28"
+            />
+          ) : null}
+          {humanChecks.length > 0 ? (
+            <section>
+              <EvidenceHeading count={`${ticked.size} of ${humanChecks.length}`}>
+                Check before accepting
+              </EvidenceHeading>
+              <HumanChecklist
+                checks={humanChecks}
+                ticked={ticked}
+                onTick={(index, checked) =>
+                  setTicked((current) => {
+                    const next = new Set(current);
+                    if (checked) next.add(index);
+                    else next.delete(index);
+                    return next;
+                  })
+                }
+              />
+            </section>
+          ) : null}
+          {task.criteria?.length || e2e?.checks?.length ? (
+            <section>
+              <EvidenceHeading>
+                {e2e ? "What the tester checked" : "Acceptance criteria"}
+              </EvidenceHeading>
+              <CriteriaResults task={task} viewer={viewer} />
+            </section>
+          ) : null}
+          {viewer.shots.length > 0 ? (
+            <section>
+              <EvidenceHeading count={viewer.shots.length}>Screenshots</EvidenceHeading>
+              <ScreenshotGrid viewer={viewer} />
+            </section>
+          ) : null}
+          {viewer.videos.length > 0 ? (
+            <section>
+              <EvidenceHeading count={viewer.videos.length}>Recordings</EvidenceHeading>
+              <RecordingList viewer={viewer} />
+            </section>
+          ) : null}
+          {e2e?.worthALook?.length ? (
+            <section>
+              <EvidenceHeading>Worth a look</EvidenceHeading>
+              <EvidenceNotes items={e2e.worthALook} />
+            </section>
+          ) : null}
+          {task.reviewInstructions.trim() ? (
+            <div className="rounded-lg bg-muted/50 px-3 py-2.5">
+              <EvidenceHeading>{e2e ? "Staging check" : "How to check it"}</EvidenceHeading>
+              <ExpandableMarkdown
+                text={task.reviewInstructions}
+                environmentId={context.environmentId}
+                collapsedClassName="max-h-32"
+              />
+            </div>
+          ) : null}
+        </>
+      )}
       {task.error ? (
         <p className="rounded-lg bg-warning/8 px-3 py-2 text-warning-foreground text-xs">
           {task.error}
@@ -650,7 +661,11 @@ function ReviewCard({
             size="sm"
             autoFocus
             aria-label={`Changes you want in ${task.issue.identifier}`}
-            placeholder="What should change? A fresh worker starts from the current integration branch."
+            placeholder={
+              task.track === "research"
+                ? "What should the team research or correct?"
+                : "What should change? A fresh worker starts from the current integration branch."
+            }
             value={feedback}
             onChange={(event) => setFeedback(event.target.value)}
             onKeyDown={(event) => {

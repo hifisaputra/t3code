@@ -1,19 +1,29 @@
-import type { AssistantE2eCheckResult, AssistantTask, EnvironmentId } from "@t3tools/contracts";
+import type {
+  AssistantE2eCheckResult,
+  AssistantResearchCheckResult,
+  AssistantTask,
+  EnvironmentId,
+} from "@t3tools/contracts";
 import { CheckIcon, CircleIcon, FilmIcon, ImageIcon, MinusIcon, XIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 
+import ChatMarkdown from "../ChatMarkdown";
 import { ExpandedImageDialog } from "../chat/ExpandedImageDialog";
 import type { ExpandedImagePreview } from "../chat/ExpandedImagePreview";
 import { MediaVideoPlayer } from "../media/MediaVideoPlayer";
 import { Checkbox } from "../ui/checkbox";
+import { ExpandableMarkdown } from "./assistantUi";
 import { useAssistantEvidenceUrls } from "./assistantScreenshots";
 
 const CHECK_RESULT: Record<
-  AssistantE2eCheckResult,
+  AssistantE2eCheckResult | AssistantResearchCheckResult,
   { icon: typeof CheckIcon; label: string; className: string }
 > = {
+  answered: { icon: CheckIcon, label: "Answered", className: "text-success-foreground" },
+  partly: { icon: MinusIcon, label: "Partly answered", className: "text-warning-foreground" },
+  "not-answered": { icon: CircleIcon, label: "Not answered", className: "text-warning-foreground" },
   passed: { icon: CheckIcon, label: "Passed", className: "text-success-foreground" },
   failed: { icon: XIcon, label: "Failed", className: "text-destructive-foreground" },
   "not-checked": { icon: CircleIcon, label: "Not checked", className: "text-warning-foreground" },
@@ -39,8 +49,9 @@ const EMPTY_FILES: ReadonlyArray<never> = [];
  * Files with no inline address link to the Linear issue instead.
  */
 export function useScreenshotViewer(environmentId: EnvironmentId, task: AssistantTask) {
-  const shots = task.e2e?.screenshots ?? EMPTY_FILES;
-  const videos = task.e2e?.videos ?? EMPTY_FILES;
+  const shots =
+    (task.track === "research" ? task.research?.screenshots : task.e2e?.screenshots) ?? EMPTY_FILES;
+  const videos = (task.track === "research" ? undefined : task.e2e?.videos) ?? EMPTY_FILES;
   const urls = useAssistantEvidenceUrls(environmentId, task.threadId, shots);
   const videoUrls = useAssistantEvidenceUrls(environmentId, task.threadId, videos);
   const [preview, setPreview] = useState<ExpandedImagePreview | null>(null);
@@ -156,7 +167,7 @@ export function CriteriaResults({
   viewer: ScreenshotViewer;
 }) {
   const criteria = task.criteria ?? [];
-  const checks = task.e2e?.checks ?? [];
+  const checks = (task.track === "research" ? task.research?.checks : task.e2e?.checks) ?? [];
   const count = Math.max(criteria.length, ...checks.map((check) => check.criterion));
   if (count <= 0) return null;
   return (
@@ -165,7 +176,7 @@ export function CriteriaResults({
         const check = checks.find((entry) => entry.criterion === index + 1) ?? null;
         const result = check ? CHECK_RESULT[check.result] : null;
         const shot = check?.screenshot ? check.screenshot - 1 : null;
-        const video = check?.video ? check.video - 1 : null;
+        const video = check && "video" in check && check.video ? check.video - 1 : null;
         return (
           // The position is the criterion's identity: results index into it.
           <li key={index} className="flex min-w-0 items-start gap-2">
@@ -183,6 +194,9 @@ export function CriteriaResults({
               <p className={cn(check?.result === "skipped" && "text-muted-foreground")}>
                 {criteria[index] ?? `Criterion ${index + 1}`}
               </p>
+              {task.track === "research" && result ? (
+                <p className={cn("text-xs", result.className)}>{result.label}</p>
+              ) : null}
               {check?.evidence.trim() ? <Evidence text={check.evidence.trim()} /> : null}
             </div>
             {shot !== null && shot < viewer.shots.length ? (
@@ -333,5 +347,93 @@ export function HumanChecklist({
         </li>
       ))}
     </ul>
+  );
+}
+
+/** The report remains available in both the review inbox and the issue's history. */
+export function ResearchEvidence({
+  task,
+  environmentId,
+  viewer,
+}: {
+  task: AssistantTask;
+  environmentId: EnvironmentId;
+  viewer: ScreenshotViewer;
+}) {
+  const research = task.research;
+  const [reportOpen, setReportOpen] = useState(false);
+  if (!research)
+    return <p className="text-muted-foreground text-sm">No research report submitted yet.</p>;
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      {task.summary.trim() ? (
+        <ExpandableMarkdown
+          text={task.summary}
+          environmentId={environmentId}
+          collapsedClassName="max-h-28"
+        />
+      ) : null}
+      <section>
+        <button
+          type="button"
+          aria-expanded={reportOpen}
+          onClick={() => setReportOpen(!reportOpen)}
+          className="font-medium text-sm hover:underline"
+        >
+          {reportOpen ? "Hide full report" : "Read full report"}
+        </button>
+        {reportOpen ? (
+          <div className="mt-2">
+            <ChatMarkdown
+              text={research.report}
+              cwd={undefined}
+              environmentId={environmentId}
+              className="text-sm [&_p]:leading-relaxed"
+            />
+          </div>
+        ) : null}
+      </section>
+      <section>
+        <EvidenceHeading>Research questions</EvidenceHeading>
+        <CriteriaResults task={task} viewer={viewer} />
+      </section>
+      <section>
+        <EvidenceHeading count={research.sources.length}>Sources</EvidenceHeading>
+        <ol className="flex list-decimal flex-col gap-1 pl-5 text-sm">
+          {research.sources.map((source, index) => (
+            // Sources are numbered by position in the report, including repeated URLs.
+            // oxlint-disable-next-line react/no-array-index-key
+            <li key={`${index}:${source.url}`}>
+              <a
+                href={source.url}
+                target="_blank"
+                rel="noreferrer"
+                className="break-words underline underline-offset-2"
+              >
+                {source.title}
+              </a>
+              <span className="text-muted-foreground text-xs"> · Seen {source.seen}</span>
+            </li>
+          ))}
+        </ol>
+      </section>
+      {viewer.shots.length ? (
+        <section>
+          <EvidenceHeading count={viewer.shots.length}>Screenshots</EvidenceHeading>
+          <ScreenshotGrid viewer={viewer} />
+        </section>
+      ) : null}
+      {research.review && research.review.revision === research.revision ? (
+        <section>
+          <EvidenceHeading>
+            Fact check · {research.review.verdict === "approved" ? "Approved" : "Changes requested"}
+          </EvidenceHeading>
+          <ExpandableMarkdown text={research.review.summary} environmentId={environmentId} />
+          {research.review.findings.length ? (
+            <ExpandableMarkdown text={research.review.findings} environmentId={environmentId} />
+          ) : null}
+        </section>
+      ) : null}
+    </div>
   );
 }

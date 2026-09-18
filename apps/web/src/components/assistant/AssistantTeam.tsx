@@ -2,6 +2,7 @@ import {
   assistantTaskThreadId,
   type AssistantBoard,
   type AssistantTask,
+  type AssistantTaskTrack,
   type AssistantThreadRole,
   type EnvironmentId,
   type ThreadId,
@@ -18,7 +19,7 @@ import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { taskIsFinished, teamRoleOrder, threadHasOpenQuestion } from "./assistantBoard.logic";
 import { StatusDot, threadIsBusy, useAssistantAction } from "./assistantUi";
-import { THREAD_KIND, ThreadKindIcon } from "./threadKinds";
+import { ThreadKindIcon, threadKind, ResearchBadge } from "./threadKinds";
 
 /** One issue's four conversations, keyed by the role each plays. */
 export type TeamShells = Readonly<Record<AssistantThreadRole, EnvironmentThreadShell | null>>;
@@ -67,7 +68,7 @@ export function teamHolder(
  * thread that never existed has nothing to restore.
  */
 export function teamThreadEverRan(
-  task: Pick<AssistantTask, "leader" | "turns" | "codeReview" | "e2e">,
+  task: Pick<AssistantTask, "leader" | "turns" | "codeReview" | "e2e" | "research">,
   role: AssistantThreadRole,
 ): boolean {
   switch (role) {
@@ -76,7 +77,7 @@ export function teamThreadEverRan(
     case "implement":
       return task.turns > 0;
     case "review":
-      return task.codeReview != null;
+      return task.codeReview != null || task.research != null;
     case "e2e":
       return task.e2e != null;
   }
@@ -111,6 +112,7 @@ function ChipMarker({ state, pending }: { state: ChipState; pending: boolean }) 
 }
 
 function TeamChipButton({
+  track,
   role,
   size,
   state,
@@ -121,6 +123,7 @@ function TeamChipButton({
   onClick,
 }: {
   role: AssistantThreadRole;
+  track?: AssistantTaskTrack | undefined;
   size: ChipSize;
   state: ChipState;
   /** A finished issue: a thread that is missing now never started. */
@@ -132,7 +135,7 @@ function TeamChipButton({
   pending: boolean;
   onClick: (() => void) | null;
 }) {
-  const kind = THREAD_KIND[role];
+  const kind = threadKind(role, track);
   const label = kind.label;
   const note =
     state === "missing"
@@ -194,6 +197,7 @@ function TeamChipButton({
  * chip that can actually restore should pay for it.
  */
 function RestoreTeamChip({
+  track,
   environmentId,
   threadId,
   role,
@@ -204,6 +208,7 @@ function RestoreTeamChip({
   environmentId: EnvironmentId;
   threadId: ThreadId;
   role: AssistantThreadRole;
+  track?: AssistantTaskTrack | undefined;
   size: ChipSize;
   holder: boolean;
   onOpenThread: (threadId: ThreadId) => void;
@@ -213,13 +218,14 @@ function RestoreTeamChip({
   const restore = () => {
     if (pending) return;
     void run("restore", () => unarchiveThread({ environmentId, threadId }), {
-      failure: `Could not restore the ${THREAD_KIND[role].label.toLowerCase()} thread`,
+      failure: `Could not restore the ${threadKind(role, track).label.toLowerCase()} thread`,
     }).then((restored) => {
       if (restored) onOpenThread(threadId);
     });
   };
   return (
     <TeamChipButton
+      track={track}
       role={role}
       size={size}
       state="archived"
@@ -264,51 +270,56 @@ export function TeamThreads({
           {label}
         </span>
       ) : null}
-      {teamRoleOrder.map((role) => {
-        const threadId = assistantTaskThreadId(task, role);
-        const shell = shells[role];
-        const holder = task.stage === role && !finished;
-        // A finished issue's missing thread is archived only if it once ran:
-        // the record says which of the four ever did.
-        if (shell === null && finished && teamThreadEverRan(task, role))
+      <ResearchBadge track={task.track} />
+      {teamRoleOrder
+        .filter((role) => task.track !== "research" || role !== "e2e")
+        .map((role) => {
+          const threadId = assistantTaskThreadId(task, role);
+          const shell = shells[role];
+          const holder = task.stage === role && !finished;
+          // A finished issue's missing thread is archived only if it once ran:
+          // the record says which of the four ever did.
+          if (shell === null && finished && teamThreadEverRan(task, role))
+            return (
+              <RestoreTeamChip
+                track={task.track}
+                key={role}
+                environmentId={environmentId}
+                threadId={threadId}
+                role={role}
+                size={size}
+                holder={holder}
+                onOpenThread={onOpenThread}
+              />
+            );
+          const waiting =
+            Boolean(shell?.hasPendingApprovals || shell?.hasPendingUserInput) ||
+            threadHasOpenQuestion(board ?? null, threadId);
+          const state: ChipState =
+            shell === null
+              ? "missing"
+              : threadIsBusy(shell)
+                ? "busy"
+                : waiting
+                  ? "waiting"
+                  : finished
+                    ? "done"
+                    : "idle";
           return (
-            <RestoreTeamChip
+            <TeamChipButton
+              track={task.track}
               key={role}
-              environmentId={environmentId}
-              threadId={threadId}
               role={role}
               size={size}
+              state={state}
+              finished={finished}
               holder={holder}
-              onOpenThread={onOpenThread}
+              current={current === role}
+              pending={false}
+              onClick={shell === null ? null : () => onOpenThread(threadId)}
             />
           );
-        const waiting =
-          Boolean(shell?.hasPendingApprovals || shell?.hasPendingUserInput) ||
-          threadHasOpenQuestion(board ?? null, threadId);
-        const state: ChipState =
-          shell === null
-            ? "missing"
-            : threadIsBusy(shell)
-              ? "busy"
-              : waiting
-                ? "waiting"
-                : finished
-                  ? "done"
-                  : "idle";
-        return (
-          <TeamChipButton
-            key={role}
-            role={role}
-            size={size}
-            state={state}
-            finished={finished}
-            holder={holder}
-            current={current === role}
-            pending={false}
-            onClick={shell === null ? null : () => onOpenThread(threadId)}
-          />
-        );
-      })}
+        })}
     </div>
   );
 }

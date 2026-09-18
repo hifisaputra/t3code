@@ -6,6 +6,7 @@ export type ReviewVerdictTone = AssistantE2eVerdict | "verified";
 
 export interface ReviewSummary {
   kind: "Check and accept" | "Ready to accept";
+  sources?: number;
   verdict: { label: string; tone: ReviewVerdictTone };
   /** Criteria the tester passed out of those it ran; skipped ones are not counted. */
   criteria: { passed: number; total: number; label: string } | null;
@@ -41,6 +42,28 @@ function verdictLabel(task: AssistantTask, e2e: AssistantE2eResult | null) {
 
 /** What an issue waiting for acceptance amounts to, for its inbox card. */
 export function reviewSummary(task: AssistantTask): ReviewSummary {
+  if (task.track === "research") {
+    const research = task.research;
+    const total = Math.max(task.criteria?.length ?? 0, research?.checks.length ?? 0);
+    const answered = research?.checks.filter((check) => check.result === "answered").length ?? 0;
+    const approved =
+      research?.review?.verdict === "approved" && research.review.revision === research.revision;
+    return {
+      kind: "Check and accept",
+      verdict: {
+        label: approved ? "Fact-check approved" : "Awaiting fact-check approval",
+        tone: approved ? "verified" : "partial",
+      },
+      criteria: { passed: answered, total, label: `${answered} of ${total} questions answered` },
+      sources: research?.sources.length ?? 0,
+      screenshots: research?.screenshots.length ?? 0,
+      videos: 0,
+      humanChecks: 0,
+      nothingToCheck: false,
+      startsOpen: true,
+      engineering: null,
+    };
+  }
   const e2e = task.e2e ?? null;
   const humanChecks = e2e?.humanChecks.length ?? 0;
   const ran = (e2e?.checks ?? []).filter((check) => check.result !== "skipped");
@@ -70,6 +93,15 @@ export function reviewSummary(task: AssistantTask): ReviewSummary {
 
 /** The muted line under a collapsed review card's title. */
 export function reviewOutcomeLine(summary: ReviewSummary): string {
+  if (summary.sources !== undefined) {
+    return [
+      summary.criteria?.label,
+      plural(summary.sources, "source"),
+      plural(summary.screenshots, "screenshot"),
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
   return [
     summary.verdict.label,
     summary.criteria?.label,

@@ -214,7 +214,11 @@ export function describeTaskPhase(input: {
   waitingOn?: AssistantThreadRole | null;
 }): TaskPhase {
   const { task, workerBusy, workerNeedsInput, step, hasOpenDecision, waitingOn } = input;
-  const holder = STAGE_THREAD[task.stage ?? "implement"] ?? "worker";
+  const stageThread: Record<string, string> = {
+    ...STAGE_THREAD,
+    ...(task.track === "research" ? { review: "fact checker" } : {}),
+  };
+  const holder = stageThread[task.stage ?? "implement"] ?? "worker";
   // A question outranks whatever state the issue was left in while it waits.
   if (hasOpenDecision && task.status !== "preparing")
     return { tone: "waiting", label: "Waiting for your answer", detail: null };
@@ -254,8 +258,8 @@ export function describeTaskPhase(input: {
       if (!workerBusy && waitingOn && task.stage !== undefined)
         return {
           tone: "idle",
-          label: `Waiting for the ${STAGE_THREAD[waitingOn]}`,
-          detail: `The ${holder} starts when the ${STAGE_THREAD[waitingOn]}'s turn and background work end. T3 releases a finished thread's background work by itself.`,
+          label: `Waiting for the ${stageThread[waitingOn]}`,
+          detail: `The ${holder} starts when the ${stageThread[waitingOn]}'s turn and background work end. T3 releases a finished thread's background work by itself.`,
         };
       const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
       // With no e2e test the worktree order is the staging one: review, merge, deploy.
@@ -263,6 +267,12 @@ export function describeTaskPhase(input: {
       const e2ePassed = Boolean(task.e2e) && task.e2e?.verdict !== "failed";
       switch (task.stage ?? "implement") {
         case "implement":
+          if (task.track === "research")
+            return {
+              tone: workerBusy ? "active" : "idle",
+              label: workerBusy ? "Researching" : "Research worker is next",
+              detail: workerBusy ? step : null,
+            };
           if (workerBusy)
             return task.codeReview?.verdict === "approved"
               ? {
@@ -276,6 +286,12 @@ export function describeTaskPhase(input: {
               : { tone: "active", label: "Coding", detail: step };
           return { tone: "idle", label: "Worker is next", detail: null };
         case "review":
+          if (task.track === "research")
+            return {
+              tone: workerBusy ? "active" : "idle",
+              label: workerBusy ? "Fact-checking" : "Fact check is next",
+              detail: workerBusy ? step : "The reviewer starts when the worker's turn ends.",
+            };
           return workerBusy
             ? { tone: "active", label: "In code review", detail: step }
             : {

@@ -1,4 +1,4 @@
-import type { AssistantThreadKind } from "@t3tools/contracts";
+import type { AssistantThreadKind, AssistantTaskTrack } from "@t3tools/contracts";
 import {
   BotIcon,
   CodeXmlIcon,
@@ -64,4 +64,25 @@ export function ThreadKindIcon({
 }) {
   const { icon: Icon, className: tint } = THREAD_KIND[kind];
   return <Icon aria-hidden className={cn("size-3.5 shrink-0", tint, className)} />;
+}
+
+export function threadKind(kind: AssistantThreadKind, track?: AssistantTaskTrack) {
+  const base = THREAD_KIND[kind];
+  if (track !== "research") return base;
+  if (kind === "implement") return { ...base, does: "Researches on the public web." };
+  if (kind === "review") return { ...base, label: "Fact check", does: "Fact-checks the report." };
+  if (kind === "lead")
+    return {
+      ...base,
+      does: "Scopes the research, briefs the worker, and coordinates the fact check.",
+    };
+  return base;
+}
+
+export function ResearchBadge({ track }: { track?: AssistantTaskTrack | undefined }) {
+  return track === "research" ? (
+    <span className="shrink-0 rounded border border-info/25 bg-info/5 px-1.5 py-0.5 text-[10px] font-medium text-info-foreground">
+      Research
+    </span>
+  ) : null;
 }

@@ -27,6 +27,7 @@ import {
   projectNoteSource,
   projectWaitingReason,
   taskOutcome,
+  taskPipeline,
   teamRoleOrder,
 } from "./assistantBoard.logic";
 
@@ -821,5 +822,48 @@ describe("projectNoteSource", () => {
     expect(
       projectNoteSource({ ...note, role: "person", taskId: null, issueIdentifier: null }),
     ).toBe("Added by you");
+  });
+});
+
+describe("research board", () => {
+  const phase = (overrides: Partial<AssistantTask>, workerBusy = true) =>
+    describeTaskPhase({
+      task: task({ track: "research", ...overrides }),
+      workerBusy,
+      workerNeedsInput: false,
+      step: "Reading sources",
+      hasOpenDecision: false,
+    });
+  it("names the work and review for their research roles", () => {
+    expect(phase({ stage: "implement" }).label).toBe("Researching");
+    expect(phase({ stage: "review" }).label).toBe("Fact-checking");
+    expect(phase({ stage: "review" }, false).label).toBe("Fact check is next");
+    expect(phase({ stage: "review", status: "blocked", error: "Source unavailable" }).label).toBe(
+      "Blocked",
+    );
+  });
+  it("uses the research pipeline without merge or e2e steps", () => {
+    expect(
+      taskPipeline(task({ track: "research", leader: true, stage: "review" }))?.map(
+        (step) => step.label,
+      ),
+    ).toEqual(["Take on", "Research", "Fact check"]);
+  });
+  it("retains the report in history after acceptance", () => {
+    const finished = task({
+      track: "research",
+      status: "accepted",
+      research: {
+        report: "The report",
+        sources: [],
+        checks: [],
+        screenshots: [],
+        revision: 1,
+        at: "2026-09-18T00:00:00.000Z",
+      },
+    });
+    expect(
+      historyTasks({ projects: [], tasks: [finished], decisions: [] })[0]?.research?.report,
+    ).toBe("The report");
   });
 });

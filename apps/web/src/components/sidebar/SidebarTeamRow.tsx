@@ -14,6 +14,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import {
   assistantTeamThread,
+  type AssistantTaskTrack,
   type AssistantThreadRole,
   type EnvironmentId,
   type ProjectIconOverride,
@@ -22,13 +23,16 @@ import {
 } from "@t3tools/contracts";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 
+import { developerAssistant } from "~/state/developerAssistant";
+import { useEnvironmentQuery } from "~/state/query";
+
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { cn } from "../../lib/utils";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { formatRelativeTimeLabel, formatShortTimestamp } from "../../timestampFormat";
 import { useUiStateStore } from "../../uiStateStore";
 import { useAssistantThreadAsksYou } from "../assistant/AssistantThreadTag";
-import { THREAD_KIND, ThreadKindIcon } from "../assistant/threadKinds";
+import { threadKind, ThreadKindIcon, ResearchBadge } from "../assistant/threadKinds";
 import { ProjectFavicon } from "../ProjectFavicon";
 import {
   animateSidebarLayoutChanges,
@@ -271,6 +275,11 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
 
   const hasRouteMember = members.some((member) => member.key === routeThreadKey);
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(hasRouteMember);
+  const board = useEnvironmentQuery(
+    leaseLiveStatus ? developerAssistant.board({ environmentId, input: {} }) : null,
+  );
+  const taskId = members[0] ? assistantTeamThread(members[0].thread.id)?.taskId : undefined;
+  const track = board.data?.tasks.find((task) => task.id === taskId)?.track;
 
   // One call per role, never per member: the hook count has to stay constant
   // across renders, and every call shares the same board subscription.
@@ -476,6 +485,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
               </span>
             ) : null}
             <span className="min-w-0 flex-1 truncate text-sm font-medium">{issueTitle}</span>
+            <ResearchBadge track={track} />
             {teamStatus !== null ? (
               <StatusLabel status={teamStatus} dim={!hasRouteMember && teamStatus.working} />
             ) : null}
@@ -500,6 +510,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
             {entries.map(({ member, status }) => (
               <SidebarTeamMemberRow
                 key={member.key}
+                track={track}
                 member={member}
                 status={status}
                 isActive={routeThreadKey === member.key}
@@ -519,6 +530,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
 
 const SidebarTeamMemberRow = memo(function SidebarTeamMemberRow(props: {
   member: TeamMember;
+  track?: AssistantTaskTrack | undefined;
   status: MemberStatus | null;
   isActive: boolean;
   isSelected: boolean;
@@ -574,7 +586,9 @@ const SidebarTeamMemberRow = memo(function SidebarTeamMemberRow(props: {
         )}
       >
         <ThreadKindIcon kind={member.role} />
-        <span className="min-w-0 flex-1 truncate text-xs">{THREAD_KIND[member.role].label}</span>
+        <span className="min-w-0 flex-1 truncate text-xs">
+          {threadKind(member.role, props.track).label}
+        </span>
         {props.status !== null ? (
           <StatusLabel status={props.status} dim={!props.isActive && props.status.working} />
         ) : (
