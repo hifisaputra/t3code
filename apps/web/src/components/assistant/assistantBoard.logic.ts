@@ -58,7 +58,10 @@ export type ProjectActivityTone = "active" | "idle" | "waiting" | "paused" | "at
 
 export interface ProjectActivity {
   readonly tone: ProjectActivityTone;
-  /** The status pill: Running, Paused, Stopped. */
+  /**
+   * A one-word state that never contradicts the headline: Working, Idle,
+   * Paused, Stopped, Waiting, or Needs you.
+   */
   readonly status: string;
   /** One line of what is happening right now. */
   readonly headline: string;
@@ -109,11 +112,17 @@ export function describeProjectActivity(input: {
   const failure = projectFailure(project);
   if (project.status === "stopped")
     return failure
-      ? { tone: "attention", status: "Stopped", headline: "Stopped by a problem", detail: failure }
+      ? {
+          tone: "attention",
+          status: "Needs you",
+          headline: "Stopped by a problem",
+          detail: failure,
+        }
       : {
           tone: "paused",
           status: "Stopped",
-          headline: activeTasks.length > 0 ? `Holding ${namedIssues(activeTasks)}` : "Stopped",
+          headline:
+            activeTasks.length > 0 ? `Stopped · holding ${namedIssues(activeTasks)}` : "Stopped",
           detail:
             activeTasks.length === 0
               ? "Start to take issues from Linear, or resume the teams and dispatch issues yourself."
@@ -121,46 +130,39 @@ export function describeProjectActivity(input: {
                 ? "Its team is stopped. Start, or resume the teams from the menu, to continue it."
                 : "Their teams are stopped. Start, or resume the teams from the menu, to continue them.",
         };
-  const status = project.status === "paused" ? "Paused" : "Running";
   if (failure)
     return {
       tone: "attention",
-      status,
-      headline: project.status === "running" ? "Stuck on a problem" : "Loop paused by a problem",
+      status: "Needs you",
+      headline: project.status === "running" ? "Stuck on a problem" : "Paused by a problem",
       detail: failure,
     };
   const waiting = projectWaitingReason(project);
-  // A usage limit leaves every thread idle, so without this line the card would
-  // report the project as thinking or working when nothing can run at all.
+  // A usage limit leaves every thread idle, so without this line the row would
+  // report the project as working when nothing can run at all.
   const limitHold = projectLimitHold(project, nowMs);
   if (limitHold)
     return {
       tone: "waiting",
-      status,
+      status: "Waiting",
       headline: "Waiting for Claude's usage limit to reset",
       detail: limitResumesAt
         ? `Work continues by itself once it resets at ${limitResumesAt}. Start now to try sooner.`
         : "Work continues by itself once it resets. Start now to try sooner.",
     };
-  if (waiting)
-    return {
-      tone: "waiting",
-      status,
-      headline: "Waiting on something",
-      detail: waiting,
-    };
+  if (waiting) return { tone: "waiting", status: "Waiting", headline: "Waiting", detail: waiting };
   if (activeTasks.length > 0)
     return {
       tone: "active",
-      status,
+      status: "Working",
       headline: `Working on ${namedIssues(activeTasks)}`,
       detail: issuesDetail(activeTasks),
     };
   if (project.status === "paused")
     return {
       tone: "paused",
-      status,
-      headline: "Taking only issues you dispatch",
+      status: "Paused",
+      headline: "Paused · works on issues you dispatch",
       detail: "Start to let it pick issues from Linear again.",
     };
   // Started with automatic picking off: idle is the choice the person made, not
@@ -168,16 +170,15 @@ export function describeProjectActivity(input: {
   if (!assistantPicksIssues(project.config))
     return {
       tone: "idle",
-      status,
-      headline: "Waiting for you to dispatch an issue",
-      detail:
-        "It picks nothing from Linear. Dispatch an issue, or start again with automatic picking.",
+      status: "Idle",
+      headline: "Idle · works on issues you dispatch",
+      detail: null,
     };
   return {
     tone: "idle",
-    status,
-    headline: "Watching for issues",
-    detail: "Nothing is ready to pick up. The assistant starts on the next issue that is.",
+    status: "Idle",
+    headline: "Idle · watching Linear for issues",
+    detail: "Nothing is ready to pick up yet.",
   };
 }
 

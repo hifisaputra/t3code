@@ -142,9 +142,19 @@ const collapsed = (title: string, content: string) =>
 
 type E2eCheck = NonNullable<AssistantE2eResult["checks"]>[number];
 
-/** Where a check's screenshot sits in the card's numbered screenshots, when it has one. */
-const screenshotRef = (check: E2eCheck, screenshots: AssistantE2eResult["screenshots"]) =>
-  check.screenshot && screenshots[check.screenshot - 1] ? ` (screenshot ${check.screenshot})` : "";
+/**
+ * Where a check's screenshot and video sit in the card's numbered screenshots
+ * and recordings, when it has them: ` (screenshot 2, video 1)`.
+ */
+const evidenceRef = (check: E2eCheck, e2e: AssistantE2eResult) => {
+  const refs = [
+    check.screenshot && e2e.screenshots[check.screenshot - 1]
+      ? `screenshot ${check.screenshot}`
+      : null,
+    check.video && e2e.videos?.[check.video - 1] ? `video ${check.video}` : null,
+  ].filter(Boolean);
+  return refs.length ? ` (${refs.join(", ")})` : "";
+};
 
 const criterionName = (check: E2eCheck, criteria: ReadonlyArray<string>) =>
   criteria[check.criterion - 1] ?? `Criterion ${check.criterion}`;
@@ -153,14 +163,14 @@ const criterionName = (check: E2eCheck, criteria: ReadonlyArray<string>) =>
 const checksTable = (
   checks: ReadonlyArray<E2eCheck>,
   criteria: ReadonlyArray<string>,
-  screenshots: AssistantE2eResult["screenshots"],
+  e2e: AssistantE2eResult,
 ) =>
   [
     "| Criterion | Result |",
     "| --- | --- |",
     ...checks.map(
       (check) =>
-        `| ${cell(criterionName(check, criteria))} | ${RESULTS[check.result]}${screenshotRef(check, screenshots)} |`,
+        `| ${cell(criterionName(check, criteria))} | ${RESULTS[check.result]}${evidenceRef(check, e2e)} |`,
     ),
   ].join("\n");
 
@@ -168,12 +178,12 @@ const checksTable = (
 const evidenceList = (
   checks: ReadonlyArray<E2eCheck>,
   criteria: ReadonlyArray<string>,
-  screenshots: AssistantE2eResult["screenshots"],
+  e2e: AssistantE2eResult,
 ) =>
   checks
     .map((check) => {
       const evidence = oneLine(check.evidence);
-      return `${check.criterion}. **${oneLine(criterionName(check, criteria))}** ${RESULTS[check.result]}${screenshotRef(check, screenshots)}${evidence ? `: ${evidence}` : ""}`;
+      return `${check.criterion}. **${oneLine(criterionName(check, criteria))}** ${RESULTS[check.result]}${evidenceRef(check, e2e)}${evidence ? `: ${evidence}` : ""}`;
     })
     .join("\n");
 
@@ -225,7 +235,7 @@ export function issueFingerprint(
 /**
  * The card a person decides from, written for someone reading the issue rather
  * than the engineering: what to check, the result per criterion, what the
- * tester flagged and every screenshot up top, with the evidence and the
+ * tester flagged and every screenshot and recording up top, with the evidence and the
  * tester's full report collapsed below. What shipped is in the description.
  */
 export function e2eComment(input: {
@@ -260,7 +270,7 @@ export function e2eComment(input: {
     e2e.humanChecks.length
       ? `**Check before accepting**\n\n${e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
       : null,
-    checks ? checksTable(checks, criteria, e2e.screenshots) : null,
+    checks ? checksTable(checks, criteria, e2e) : null,
     notes.length ? `**Worth a look**\n\n${bullets(notes)}` : null,
     e2e.screenshots.length
       ? [
@@ -271,9 +281,16 @@ export function e2eComment(input: {
           ),
         ].join("\n\n")
       : null,
-    checks
-      ? collapsed("Evidence per criterion", evidenceList(checks, criteria, e2e.screenshots))
+    // Linear plays a video embedded with image markdown inline.
+    e2e.videos?.length
+      ? [
+          "**Recordings**",
+          ...e2e.videos.map(
+            (clip, i) => `*Video ${i + 1}: ${clip.caption}*\n\n![${clip.caption}](${clip.url})`,
+          ),
+        ].join("\n\n")
       : null,
+    checks ? collapsed("Evidence per criterion", evidenceList(checks, criteria, e2e)) : null,
     // Without criteria the report is the only record of what was checked, so it stays open.
     report && checks
       ? collapsed(`Tester's full report${commit ? ` (tested commit ${commit})` : ""}`, report)

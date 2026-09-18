@@ -209,7 +209,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_start_e2e", {
     description:
-      "Team leader: start (or rerun) the issue's e2e tester, on staging once the deploy is verified, or in the team's worktree on the approved commit before the merge when the project is set up that way. T3 starts the tester itself with the e2e brief you planned when taking the issue; use this to rerun it after a failure, or when the implementer reports the plan changed, with a revised brief or the original one. The brief gives the tester the pages or endpoints affected, the data it needs and what to clean up; T3 adds the acceptance criteria you listed and the implementer's test notes. The tester reports one result per criterion with screenshots. Give depth to change how deep the test goes (full, or smoke with smokeCriteria); it becomes the plan, and without it the planned depth stays. End your turn afterward.",
+      "Team leader: start (or rerun) the issue's e2e tester, on staging once the deploy is verified, or in the team's worktree on the approved commit before the merge when the project is set up that way. T3 starts the tester itself with the e2e brief you planned when taking the issue; use this to rerun it after a failure, or when the implementer reports the plan changed, with a revised brief or the original one. The brief gives the tester the pages or endpoints affected, the data it needs and what to clean up; T3 adds the acceptance criteria you listed and the implementer's test notes. The tester reports one result per criterion with screenshots, and a recording where a criterion is about a flow or a change over time. Give depth to change how deep the test goes (full, or smoke with smokeCriteria); it becomes the plan, and without it the planned depth stays. End your turn afterward.",
     parameters: Schema.Struct({
       brief: text,
       depth: Schema.optionalKey(
@@ -226,12 +226,12 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_submit_e2e", {
     description:
-      "E2E thread only: report your test, on staging or in the team's worktree, wherever you ran it. T3 uploads the screenshots and records the result; on passed or partial the issue moves on (in staging mode straight to review, in worktree mode to the merge and the staging deploy), unless you list engineeringChecks, which the team leader settles first. On failed the team leader decides the fix. End your turn after submitting.",
+      "E2E thread only: report your test, on staging or in the team's worktree, wherever you ran it. T3 uploads the screenshots and recordings and records the result; on passed or partial the issue moves on (in staging mode straight to review, in worktree mode to the merge and the staging deploy), unless you list engineeringChecks, which the team leader settles first. On failed the team leader decides the fix. End your turn after submitting.",
     parameters: Schema.Struct({
       checks: Schema.optionalKey(
         Schema.Array(AssistantE2eCheck).annotate({
           description:
-            "checks is required when the issue has acceptance criteria (the brief lists them numbered): one entry per criterion, in order; in a smoke test, one per criterion the brief lists. Never report skipped: T3 records the criteria outside a smoke test itself. T3 derives the verdict from them: one failed criterion fails the run, otherwise any not-checked criterion makes it partial, and each not-checked criterion needs a matching entry in humanChecks or engineeringChecks. screenshot is the 1-based position in screenshots of the one that proves the check.",
+            "checks is required when the issue has acceptance criteria (the brief lists them numbered): one entry per criterion, in order; in a smoke test, one per criterion the brief lists. Never report skipped: T3 records the criteria outside a smoke test itself. T3 derives the verdict from them: one failed criterion fails the run, otherwise any not-checked criterion makes it partial, and each not-checked criterion needs a matching entry in humanChecks or engineeringChecks. screenshot is the 1-based position in screenshots of the one that proves the check, and video the 1-based position in videos of the recording that does; a check can point at either, both or neither.",
         }),
       ),
       verdict: Schema.optionalKey(
@@ -267,6 +267,20 @@ export const AssistantToolkit = Toolkit.make(
               "Absolute path of a PNG, JPEG or WebP file in the evidence folder T3 named.",
           }),
           caption: text.annotate({ description: "One line: what the screenshot shows." }),
+        }),
+      ),
+      videos: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            path: text.annotate({
+              description:
+                "Absolute path of an MP4 or WebM file in the evidence folder T3 named, at most 10 MB.",
+            }),
+            caption: text.annotate({ description: "One line: what the clip shows." }),
+          }),
+        ).annotate({
+          description:
+            "Recordings, one per criterion that needs one: behaviour over time such as a multi-step flow, validation while typing or a transition. A final state is a screenshot. Omit when there are none.",
         }),
       ),
     }),
@@ -442,6 +456,14 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
           path: shot.path.trim(),
           caption: shot.caption.trim(),
         })),
+        ...(input.videos
+          ? {
+              videos: input.videos.map((clip) => ({
+                path: clip.path.trim(),
+                caption: clip.caption.trim(),
+              })),
+            }
+          : {}),
       });
     }),
   assistant_deliver: (input) =>

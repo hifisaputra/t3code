@@ -5,7 +5,6 @@ import {
   type AssistantBoard,
   type AssistantCheckRun,
   type AssistantDecision,
-  type AssistantE2eCheckResult,
   type AssistantE2eDepth,
   type AssistantProject,
   type AssistantTask,
@@ -24,7 +23,6 @@ import {
   ExternalLinkIcon,
   GitPullRequestIcon,
   HandIcon,
-  ImageIcon,
   RotateCcwIcon,
   SkipForwardIcon,
   UndoIcon,
@@ -56,6 +54,14 @@ import {
   type PipelineStep,
   type TaskPhaseTone,
 } from "./assistantBoard.logic";
+import {
+  CriteriaResults,
+  EvidenceHeading,
+  EvidenceNotes,
+  RecordingList,
+  ScreenshotGrid,
+  useScreenshotViewer,
+} from "./AssistantReviewEvidence";
 import { teamHolder, TeamThreads, useTeamShells } from "./AssistantTeam";
 import {
   CommitChip,
@@ -230,13 +236,6 @@ function DispatchedChip({ fromLinear }: { fromLinear: boolean }) {
   );
 }
 
-const E2E_CHECK_RESULT: Record<AssistantE2eCheckResult, { label: string; className: string }> = {
-  passed: { label: "Passed", className: "text-success-foreground" },
-  failed: { label: "Failed", className: "text-destructive-foreground" },
-  "not-checked": { label: "Not checked", className: "text-muted-foreground" },
-  skipped: { label: "Not in smoke test", className: "text-muted-foreground" },
-};
-
 const E2E_DEPTHS: ReadonlyArray<AssistantE2eDepth> = ["full", "smoke", "none"];
 const E2E_DEPTH_CHANGED: Record<AssistantE2eDepth, string> = {
   full: "Full e2e test",
@@ -339,54 +338,6 @@ function E2ePlanDetails({
 }
 
 /**
- * What the team leader said the issue has to do, numbered as every thread sees
- * them, each with the tester's result once the e2e run reports one.
- */
-function CriteriaList({ task }: { task: AssistantTask }) {
-  const criteria = task.criteria;
-  if (!criteria || criteria.length === 0) return null;
-  const checks = task.e2e?.checks ?? null;
-  const screenshots = task.e2e?.screenshots ?? [];
-  return (
-    <ol className="flex list-decimal flex-col gap-1.5 pl-5 text-sm marker:text-muted-foreground">
-      {criteria.map((criterion, index) => {
-        const check = checks?.find((entry) => entry.criterion === index + 1) ?? null;
-        const result = check ? E2E_CHECK_RESULT[check.result] : null;
-        const shot = check?.screenshot ? (screenshots[check.screenshot - 1] ?? null) : null;
-        // Criteria are distinct checks, so the text identifies a row; the number
-        // comes from the position, which is what the tester's results index into.
-        return (
-          <li key={criterion}>
-            <span>{criterion}</span>
-            {result ? (
-              <span className={cn("ml-1.5 font-medium text-xs", result.className)}>
-                {result.label}
-              </span>
-            ) : null}
-            {check?.evidence.trim() ? (
-              <p className="mt-0.5 whitespace-pre-line text-muted-foreground text-xs">
-                {check.evidence}
-              </p>
-            ) : null}
-            {shot ? (
-              <a
-                href={shot.url}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-0.5 inline-flex max-w-full items-center gap-1 text-muted-foreground text-xs hover:text-foreground hover:underline"
-              >
-                <ImageIcon aria-hidden className="size-3.5 shrink-0" />
-                <span className="min-w-0 truncate">{shot.caption || "Screenshot"}</span>
-              </a>
-            ) : null}
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
-/**
  * The project's own check command as T3 ran it for the last review request. A
  * red run never reached the reviewer: the worker was sent back with this output.
  */
@@ -447,6 +398,7 @@ export function ActiveTaskCard({
 }) {
   const review = useAtomCommand(developerAssistant.review);
   const { pending, run } = useAssistantAction();
+  const viewer = useScreenshotViewer(environmentId, task);
   const shells = useTeamShells(environmentId, task);
   const worker = shells.implement;
   // The phase follows whichever of the issue's threads holds it.
@@ -671,10 +623,9 @@ export function ActiveTaskCard({
 
       {task.criteria?.length ? (
         <div>
-          <p className="mb-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-            Acceptance criteria
-          </p>
-          <CriteriaList task={task} />
+          <EvidenceHeading>Acceptance criteria</EvidenceHeading>
+          <CriteriaResults task={task} viewer={viewer} />
+          {viewer.dialog}
         </div>
       ) : null}
 
@@ -814,6 +765,7 @@ function HistoryRecord({
   onOpenThread: (threadId: ThreadId) => void;
 }) {
   const shells = useTeamShells(environmentId, task);
+  const viewer = useScreenshotViewer(environmentId, task);
   const worker = shells.implement;
   const outcome = taskOutcome(task);
   // Null once the worker thread is archived: the shell it came from is gone.
@@ -896,7 +848,7 @@ function HistoryRecord({
       ) : null}
       {task.criteria?.length ? (
         <RecordSection title="Acceptance criteria">
-          <CriteriaList task={task} />
+          <CriteriaResults task={task} viewer={viewer} />
         </RecordSection>
       ) : null}
       {task.codeReview ? (
@@ -919,45 +871,28 @@ function HistoryRecord({
             <ExpandableMarkdown text={task.e2e.report} environmentId={environmentId} />
           ) : null}
           {task.e2e.humanChecks.length > 0 ? (
-            <div className="mt-2">
-              <p className="mb-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-                Checks for you
-              </p>
-              <ul className="flex list-disc flex-col gap-1 pl-4 text-sm">
-                {task.e2e.humanChecks.map((check) => (
-                  <li key={check}>{check}</li>
-                ))}
-              </ul>
+            <div className="mt-3">
+              <EvidenceHeading>Checks for you</EvidenceHeading>
+              <EvidenceNotes items={task.e2e.humanChecks} />
             </div>
           ) : null}
           {task.e2e.worthALook?.length ? (
-            <div className="mt-2">
-              <p className="mb-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-                Worth a look
-              </p>
-              <ul className="flex list-disc flex-col gap-1 pl-4 text-sm">
-                {task.e2e.worthALook.map((note) => (
-                  <li key={note}>{note}</li>
-                ))}
-              </ul>
+            <div className="mt-3">
+              <EvidenceHeading>Worth a look</EvidenceHeading>
+              <EvidenceNotes items={task.e2e.worthALook} />
             </div>
           ) : null}
-          {task.e2e.screenshots.length > 0 ? (
-            <ul className="mt-2 flex flex-col gap-1">
-              {task.e2e.screenshots.map((shot) => (
-                <li key={shot.url}>
-                  <a
-                    href={shot.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground hover:underline"
-                  >
-                    <ImageIcon aria-hidden className="size-3.5 shrink-0" />
-                    <span className="min-w-0 truncate">{shot.caption || "Screenshot"}</span>
-                  </a>
-                </li>
-              ))}
-            </ul>
+          {viewer.shots.length > 0 ? (
+            <div className="mt-3">
+              <EvidenceHeading count={viewer.shots.length}>Screenshots</EvidenceHeading>
+              <ScreenshotGrid viewer={viewer} />
+            </div>
+          ) : null}
+          {viewer.videos.length > 0 ? (
+            <div className="mt-3">
+              <EvidenceHeading count={viewer.videos.length}>Recordings</EvidenceHeading>
+              <RecordingList viewer={viewer} />
+            </div>
           ) : null}
         </RecordSection>
       ) : null}
@@ -983,6 +918,7 @@ function HistoryRecord({
           <ExpandableMarkdown text={task.summary} environmentId={environmentId} />
         </RecordSection>
       ) : null}
+      {viewer.dialog}
     </div>
   );
 }

@@ -281,11 +281,12 @@ function harness() {
     }),
     Layer.mock(AssistantEvidence)({
       directory: (taskId) => Effect.succeed(`/evidence/${taskId}`),
-      read: (_taskId, file) =>
+      read: (_taskId, file, kind) =>
         file.startsWith("/evidence/")
           ? Effect.succeed({
+              path: file,
               fileName: file.split("/").at(-1)!,
-              contentType: "image/png",
+              contentType: kind === "video" ? "video/webm" : "image/png",
               bytes: new Uint8Array([1]),
             })
           : Effect.fail(new DeveloperAssistantError({ detail: `"${file}" is outside` })),
@@ -1142,10 +1143,21 @@ it.effect("posts a Linear update for each phase, with the e2e card last", () =>
     assert.include(card, "![The page after the fix](https://uploads.linear.app/page.png)");
     assert.include(card, "move this issue to Done");
     assert.deepEqual(h.uploads, ["page.png"]);
+    // The evidence file is kept next to the Linear copy so clients can show it without a Linear login.
+    assert.deepEqual(delivered.e2e?.screenshots, [
+      {
+        url: "https://uploads.linear.app/page.png",
+        caption: "The page after the fix",
+        path: `/evidence/${first.id}/page.png`,
+      },
+    ]);
     assert.equal(delivered.status, "review");
     assert.deepEqual(delivered.linearCommentIds, ["comment-1", "comment-2", "comment-3"]);
     assert.include(delivered.reviewInstructions, "Open the reminder email");
     assert.deepEqual(delivered.e2e?.worthALook, ["The footer still says Read more."]);
+    // A run without recordings stores none and shows no recordings section.
+    assert.notProperty(delivered.e2e!, "videos");
+    assert.notInclude(card, "**Recordings**");
     // The issue itself says what shipped, above the person's own description.
     assert.deepEqual(
       h.descriptions.map((d) => d.issueId),
@@ -2367,6 +2379,46 @@ it.effect(
     }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
+it.effect("uploads recordings next to the screenshots and embeds them on the card", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const tester = assistantTaskThreadId(first, "e2e");
+    yield* reachMerge(h, service, first);
+    yield* leadToE2e(h, service, first);
+    const delivered = yield* service.submitE2e(tester, {
+      checks: [
+        {
+          criterion: 1,
+          result: "passed",
+          evidence: "Walked the flow.",
+          screenshot: 1,
+          video: 1,
+        },
+      ],
+      report: "- The page loads: passed",
+      humanChecks: [],
+      screenshots: [{ path: `/evidence/${first.id}/page.png`, caption: "The page" }],
+      videos: [{ path: `/evidence/${first.id}/flow.webm`, caption: "Loading the page" }],
+    });
+    assert.deepEqual(h.uploads, ["page.png", "flow.webm"]);
+    assert.deepEqual(delivered.e2e?.videos, [
+      {
+        url: "https://uploads.linear.app/flow.webm",
+        caption: "Loading the page",
+        path: `/evidence/${first.id}/flow.webm`,
+      },
+    ]);
+    const card = h.comments.at(-1)!.body;
+    assert.include(card, "(screenshot 1, video 1)");
+    assert.include(
+      card,
+      "**Recordings**\n\n*Video 1: Loading the page*\n\n![Loading the page](https://uploads.linear.app/flow.webm)",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 it.effect("screenshots must come from the issue's evidence folder, and notes stay short", () =>
   Effect.gen(function* () {
     const h = harness();
@@ -2390,6 +2442,18 @@ it.effect("screenshots must come from the issue's evidence folder, and notes sta
     assert.include(attempt.detail, "outside");
     assert.lengthOf(h.uploads, 0);
     assert.lengthOf(h.comments, comments);
+    // A recording outside the folder stops the screenshots uploading too.
+    const badVideo = yield* service
+      .submitE2e(tester, {
+        checks: oneCheck("passed"),
+        report: "- The page loads: passed",
+        humanChecks: [],
+        screenshots: [{ path: `/evidence/${first.id}/page.png`, caption: "Page" }],
+        videos: [{ path: "/tmp/flow.webm", caption: "Not evidence" }],
+      })
+      .pipe(Effect.flip);
+    assert.include(badVideo.detail, "outside");
+    assert.lengthOf(h.uploads, 0);
     assert.isTrue(
       yield* service
         .submitE2e(tester, {
@@ -3752,6 +3816,14 @@ it.effect("the tester reports one result per criterion and T3 adds up the verdic
       })).detail,
       "points at screenshot 2",
     );
+    const strayVideo = yield* submit({
+      ...base,
+      checks: [
+        { criterion: 1, result: "passed", evidence: "Loaded" },
+        { criterion: 2, result: "passed", evidence: "Arrived", video: 1 },
+      ],
+    });
+    assert.include(strayVideo.detail, "points at video 1, and you attached 0");
     assert.include(
       (yield* submit({
         ...base,

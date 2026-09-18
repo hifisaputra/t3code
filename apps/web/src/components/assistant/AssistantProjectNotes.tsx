@@ -19,7 +19,8 @@ import { confirmDestructive, useAssistantAction } from "./assistantUi";
 /**
  * Facts the project's teams wrote down for later teams, which every team's first
  * message lists until a setup revision folds them into the instructions. The
- * person deletes the ones that are wrong or adds their own.
+ * person deletes the ones that are wrong or adds their own. Shown in the
+ * project panel's Notes tab.
  */
 export function AssistantProjectNotes({
   environmentId,
@@ -48,17 +49,17 @@ export function AssistantProjectNotes({
   };
 
   return (
-    <div className="flex flex-col gap-2">
-      <p className="-mt-1 text-muted-foreground text-xs">
-        What teams found out about the project for the teams after them. Every team&apos;s first
-        message lists these until a setup revision folds them into the instructions.
+    <div className="flex flex-col gap-3">
+      <p className="text-muted-foreground text-xs">
+        Facts teams found for the teams after them. Each team&apos;s first message lists them until
+        a setup revision folds them in.
       </p>
       {notes.length > 0 ? (
-        <ul className="-mx-2 flex flex-col">
+        <ul className="-mx-2 flex flex-col divide-y divide-border/60">
           {notes.map((note) => (
             <li
               key={note.id}
-              className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2.5 rounded-lg px-2 py-1.5 text-sm"
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2.5 px-2 py-2 text-sm"
             >
               <div className="min-w-0">
                 <p className="break-words">{note.text}</p>

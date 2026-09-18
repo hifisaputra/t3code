@@ -371,6 +371,8 @@ export const AssistantE2eCheck = Schema.Struct({
   evidence: Schema.String,
   /** 1-based position in the result's screenshots, when one proves it. */
   screenshot: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 12 }))),
+  /** 1-based position in the result's videos, when a recording proves it. */
+  video: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 12 }))),
 });
 export type AssistantE2eCheck = typeof AssistantE2eCheck.Type;
 
@@ -388,6 +390,19 @@ export const assistantE2eVerdict = (
     : checks.some((check) => check.result === "not-checked")
       ? "partial"
       : "passed";
+
+/** A screenshot or recording a tester attached, as uploaded to Linear. */
+export const AssistantE2eEvidenceFile = Schema.Struct({
+  /** The copy on Linear; it needs a Linear login to load. */
+  url: Schema.String,
+  caption: Schema.String,
+  /**
+   * The evidence file on the environment host, so clients can show it
+   * through a signed asset URL. Absent on results from before it was kept.
+   */
+  path: Schema.optionalKey(Schema.String),
+});
+export type AssistantE2eEvidenceFile = typeof AssistantE2eEvidenceFile.Type;
 
 export const AssistantE2eResult = Schema.Struct({
   verdict: AssistantE2eVerdict,
@@ -409,7 +424,12 @@ export const AssistantE2eResult = Schema.Struct({
    * wording, inconsistencies, odd behavior outside the criteria. Absent when none.
    */
   worthALook: Schema.optionalKey(Schema.Array(Schema.String)),
-  screenshots: Schema.Array(Schema.Struct({ url: Schema.String, caption: Schema.String })),
+  screenshots: Schema.Array(AssistantE2eEvidenceFile),
+  /**
+   * Recordings of behaviour over time (a flow, validation while typing, a
+   * transition), at most one per criterion. Absent when the run recorded none.
+   */
+  videos: Schema.optionalKey(Schema.Array(AssistantE2eEvidenceFile)),
   at: IsoDateTime,
   /** Where the run happened; absent on results from before the worktree option. */
   environment: Schema.optionalKey(AssistantE2eEnvironment),

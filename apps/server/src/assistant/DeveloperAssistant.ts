@@ -82,7 +82,7 @@ import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { forkParked } from "../serverActivation.ts";
-import { AssistantEvidence } from "./AssistantEvidence.ts";
+import { AssistantEvidence, type EvidenceKind } from "./AssistantEvidence.ts";
 import {
   declinedComment,
   deliveredDescription,
@@ -2579,8 +2579,8 @@ export const make = Effect.gen(function* () {
       updated,
       "e2e",
       head
-        ? `New e2e run on commit ${head.slice(0, 7)} in the worktree. Save screenshots in ${directory}.\n${run}`
-        : `New e2e run on the deployment of ${t.deployment!.revision.slice(0, 7)}. Save screenshots in ${directory}.\n${run}`,
+        ? `New e2e run on commit ${head.slice(0, 7)} in the worktree. Save screenshots and recordings in ${directory}.\n${run}`
+        : `New e2e run on the deployment of ${t.deployment!.revision.slice(0, 7)}. Save screenshots and recordings in ${directory}.\n${run}`,
       (notes) => e2eInstructions(p.config, updated, directory, run, notes),
     );
     yield* sessionUpdate(updated, `e2e-started:${updated.updatedAt}`, {
@@ -2762,6 +2762,10 @@ export const make = Effect.gen(function* () {
         /** What only an engineer can check; on a pass they hold the delivery for the team leader. */
         readonly engineeringChecks?: ReadonlyArray<string> | undefined;
         readonly screenshots: ReadonlyArray<{ readonly path: string; readonly caption: string }>;
+        /** Recordings of behaviour over time, at most one per criterion. */
+        readonly videos?:
+          | ReadonlyArray<{ readonly path: string; readonly caption: string }>
+          | undefined;
         readonly checks?: ReadonlyArray<AssistantE2eCheck> | undefined;
         /** Notes for the person that are not failures. */
         readonly worthALook?: ReadonlyArray<string> | undefined;
@@ -2772,6 +2776,7 @@ export const make = Effect.gen(function* () {
       if (t.stage !== "e2e" || (!inWorktree && !t.deployment))
         return yield* fail("No e2e run is in progress for this issue.");
       const worthALook = input.worthALook ?? [];
+      const videoInputs = input.videos ?? [];
       const engineeringChecks = input.engineeringChecks ?? [];
       if (worthALook.length > 15)
         return yield* fail(
@@ -2838,6 +2843,13 @@ export const make = Effect.gen(function* () {
           return yield* fail(
             `Criterion ${stray.criterion} points at screenshot ${stray.screenshot}, and you attached ${input.screenshots.length}. Number each screenshot by its position in screenshots.`,
           );
+        const strayVideo = reported.find(
+          (check) => check.video !== undefined && check.video > videoInputs.length,
+        );
+        if (strayVideo)
+          return yield* fail(
+            `Criterion ${strayVideo.criterion} points at video ${strayVideo.video}, and you attached ${videoInputs.length}. Number each video by its position in videos.`,
+          );
         if (
           reported.some((check) => check.result === "not-checked") &&
           !input.humanChecks.length &&
@@ -2870,17 +2882,26 @@ export const make = Effect.gen(function* () {
           `The worktree moved past the tested commit ${t.codeReview?.commit.slice(0, 7) ?? ""}. Commit what changed, push and request review again.`,
         );
       // Every file is read before any upload, so a bad path uploads nothing.
-      const images = yield* Effect.forEach(input.screenshots, (shot) =>
-        evidence.read(t.id, shot.path).pipe(Effect.map((image) => ({ image, shot }))),
-      );
-      const screenshots = yield* Effect.forEach(images, ({ image, shot }) =>
-        asAssistant(linear.uploadFile(image)).pipe(
-          Effect.map(({ url }) => ({ url, caption: shot.caption })),
-          Effect.mapError((error) =>
-            fail(`Could not upload ${image.fileName} to Linear: ${linearFailureDetail(error)}`),
+      const readAll = (
+        attached: ReadonlyArray<{ readonly path: string; readonly caption: string }>,
+        kind: EvidenceKind,
+      ) =>
+        Effect.forEach(attached, (item) =>
+          evidence.read(t.id, item.path, kind).pipe(Effect.map((file) => ({ file, item }))),
+        );
+      const images = yield* readAll(input.screenshots, "screenshot");
+      const clips = yield* readAll(videoInputs, "video");
+      const upload = (files: typeof images) =>
+        Effect.forEach(files, ({ file, item }) =>
+          asAssistant(linear.uploadFile(file)).pipe(
+            Effect.map(({ url }) => ({ url, caption: item.caption, path: file.path })),
+            Effect.mapError((error) =>
+              fail(`Could not upload ${file.fileName} to Linear: ${linearFailureDetail(error)}`),
+            ),
           ),
-        ),
-      );
+        );
+      const screenshots = yield* upload(images);
+      const videos = yield* upload(clips);
       const e2e: AssistantE2eResult = {
         verdict,
         report: input.report,
@@ -2889,6 +2910,7 @@ export const make = Effect.gen(function* () {
         ...(engineeringChecks.length ? { engineeringChecks } : {}),
         ...(worthALook.length ? { worthALook } : {}),
         screenshots,
+        ...(videos.length ? { videos } : {}),
         at: yield* now,
         environment: inWorktree ? "worktree" : "staging",
         ...(head ? { commit: head } : {}),

@@ -34,15 +34,28 @@ import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
 import { Spinner } from "../ui/spinner";
 import { Textarea } from "../ui/textarea";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { decisionOptions, previewLine, type InboxItem } from "./assistantBoard.logic";
+import {
+  CriteriaResults,
+  EvidenceHeading,
+  EvidenceNotes,
+  HumanChecklist,
+  RecordingList,
+  ScreenshotGrid,
+  useScreenshotViewer,
+} from "./AssistantReviewEvidence";
 import { TeamThreads } from "./AssistantTeam";
 import {
   CommitChip,
   confirmDestructive,
   ExpandableMarkdown,
   IssueLink,
+  StatusDot,
   useAssistantAction,
+  type StatusTone,
 } from "./assistantUi";
+import { reviewOutcomeLine, reviewSummary, type ReviewVerdictTone } from "./reviewCard.logic";
 import { THREAD_KIND } from "./threadKinds";
 
 type Accent = "question" | "review" | "blocked" | "paused" | "setup";
@@ -58,7 +71,8 @@ const ACCENT: Record<Accent, { icon: typeof CheckIcon; tint: string }> = {
 /**
  * One thing waiting on the person, as a two-line row that opens in place.
  * Agent text is long; the row says what it is and who is asking, and the
- * detail and the controls to act on it are one click away.
+ * detail and the controls to act on it are one click away. `actions` sit on
+ * the collapsed row outside the toggle, so clicking them never opens it.
  */
 function InboxRow({
   id,
@@ -66,9 +80,11 @@ function InboxRow({
   kind,
   context,
   summary,
+  detail,
   at,
   expanded,
   onToggle,
+  actions,
   links,
   children,
 }: {
@@ -77,9 +93,12 @@ function InboxRow({
   kind: ReactNode;
   context?: ReactNode;
   summary: ReactNode;
+  /** A muted line under the summary. */
+  detail?: ReactNode;
   at?: string | null;
   expanded: boolean;
   onToggle: () => void;
+  actions?: ReactNode;
   links?: ReactNode;
   children: ReactNode;
 }) {
@@ -92,18 +111,20 @@ function InboxRow({
         expanded ? "border-border" : "border-border/70",
       )}
     >
-      <button
-        type="button"
-        aria-expanded={expanded}
-        onClick={onToggle}
-        className="flex w-full min-w-0 items-start gap-3 rounded-xl px-4 py-3 text-left hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-      >
+      {/* The toggle's ::after covers the whole header, so the row is one click
+          target while the actions, raised above it, stay separate buttons. */}
+      <div className="relative flex min-w-0 items-start gap-3 rounded-xl px-4 py-3 hover:bg-accent/40 has-[>button:focus-visible]:ring-1 has-[>button:focus-visible]:ring-ring">
         <span
           className={cn("mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md", tint)}
         >
           <Icon aria-hidden className="size-3.5" />
         </span>
-        <span className="min-w-0 flex-1">
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={onToggle}
+          className="block min-w-0 flex-1 text-left after:absolute after:inset-0 after:rounded-xl focus-visible:outline-none"
+        >
           <span className="flex min-w-0 items-center gap-1.5 text-xs">
             <span className="flex shrink-0 items-center gap-1 font-medium text-foreground">
               {kind}
@@ -128,7 +149,15 @@ function InboxRow({
           >
             {summary}
           </span>
-        </span>
+          {detail ? (
+            <span className="mt-0.5 block truncate text-muted-foreground text-xs">{detail}</span>
+          ) : null}
+        </button>
+        {actions ? (
+          <div className="relative z-10 flex shrink-0 items-center gap-1.5 self-center">
+            {actions}
+          </div>
+        ) : null}
         <ChevronDownIcon
           aria-hidden
           className={cn(
@@ -136,7 +165,7 @@ function InboxRow({
             expanded && "rotate-180",
           )}
         />
-      </button>
+      </div>
       {expanded ? (
         <div className="flex flex-col gap-3 border-border/60 border-t px-4 pt-3 pb-4">
           {links ? (
@@ -398,25 +427,18 @@ function DecisionCard({
   );
 }
 
-function reviewHeadline(task: AssistantTask): { kind: string; outcome: string } {
-  const checks = task.e2e?.humanChecks.length ?? 0;
-  const shots = task.e2e?.screenshots.length ?? 0;
-  const outcome = [
-    task.e2e
-      ? task.e2e.environment === "worktree"
-        ? "Passed e2e in the worktree, deployed to staging"
-        : "Passed e2e on staging"
-      : task.e2ePlan?.depth === "none"
-        ? "No e2e test, verified on staging"
-        : "Verified on staging",
-    checks ? `${checks} check${checks === 1 ? "" : "s"} for you` : null,
-    shots ? `${shots} screenshot${shots === 1 ? "" : "s"}` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  return { kind: checks ? "Check and accept" : "Ready to accept", outcome };
-}
+const VERDICT_TONE: Record<ReviewVerdictTone, { dot: StatusTone; text: string }> = {
+  passed: { dot: "active", text: "text-success-foreground" },
+  verified: { dot: "active", text: "text-success-foreground" },
+  partial: { dot: "attention", text: "text-warning-foreground" },
+  failed: { dot: "blocked", text: "text-destructive-foreground" },
+};
 
+/**
+ * Finished work waiting for the person to accept it: what changed, what the
+ * tester checked and showed, and what is left for the person to check. Work
+ * with nothing left to check can be accepted from the collapsed row.
+ */
 function ReviewCard({
   task,
   context,
@@ -430,7 +452,19 @@ function ReviewCard({
   const { pending, run } = useAssistantAction();
   const [requesting, setRequesting] = useState(false);
   const [feedback, setFeedback] = useState("");
-  const headline = reviewHeadline(task);
+  // Ticks live here, not in the body, so collapsing the card keeps them.
+  const [ticked, setTicked] = useState<ReadonlySet<number>>(() => new Set());
+  const viewer = useScreenshotViewer(context.environmentId, task);
+  const summary = reviewSummary(task);
+  // The page keeps one set of toggled keys, closed by default. A card worth
+  // opening at once reads membership inverted, so it starts open and the
+  // person's first click closes it.
+  const expanded = summary.startsOpen ? !row.expanded : row.expanded;
+  const e2e = task.e2e ?? null;
+  const acceptedState =
+    context.projects.find((p) => p.config.projectId === task.projectId)?.config.acceptedState ??
+    "done";
+  const tone = VERDICT_TONE[summary.verdict.tone];
   const submit = (action: "accept" | "request-changes") =>
     run(
       action,
@@ -447,12 +481,35 @@ function ReviewCard({
             : `${task.issue.identifier} sent back for changes`,
       },
     );
+  const acceptButton = (size: "xs" | "sm") => (
+    <Button
+      size={size}
+      variant={size === "xs" ? "outline" : "default"}
+      disabled={pending !== null}
+      onClick={() => void submit("accept")}
+    >
+      {pending === "accept" ? <Spinner className="size-3.5" /> : <CheckIcon />}
+      Accept
+    </Button>
+  );
+  const stagingButton = task.deployment ? (
+    <Button
+      size="xs"
+      variant="outline"
+      render={<a href={task.deployment.url} target="_blank" rel="noreferrer" />}
+    >
+      <ExternalLinkIcon />
+      Open staging
+    </Button>
+  ) : null;
+  const humanChecks = e2e?.humanChecks ?? [];
 
   return (
     <InboxRow
       {...row}
+      expanded={expanded}
       accent="review"
-      kind={headline.kind}
+      kind={summary.kind}
       context={
         <>
           <span className="shrink-0 font-mono">{task.issue.identifier}</span>
@@ -461,41 +518,118 @@ function ReviewCard({
           ) : null}
         </>
       }
-      summary={
-        <>
-          <span className="font-medium">{task.issue.title}</span>
-          {!row.expanded ? (
-            <span className="text-muted-foreground"> · {headline.outcome}</span>
-          ) : null}
-        </>
-      }
+      summary={<span className="font-medium">{task.issue.title}</span>}
+      detail={expanded ? null : reviewOutcomeLine(summary)}
       at={task.deployment?.verifiedAt ?? task.updatedAt}
-      links={
-        <>
-          <IssueLink issue={task.issue} />
-          <span className="text-muted-foreground">{headline.outcome}</span>
-        </>
+      actions={
+        !expanded && summary.nothingToCheck ? (
+          <>
+            {stagingButton}
+            {acceptButton("xs")}
+          </>
+        ) : null
       }
     >
-      <TeamThreads
-        label="Team"
-        size="sm"
-        environmentId={context.environmentId}
-        task={task}
-        onOpenThread={context.onOpenThread}
-      />
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-muted/50 px-3 py-2 text-xs">
+        <span className={cn("inline-flex items-center gap-1.5 font-medium", tone.text)}>
+          <StatusDot tone={tone.dot} />
+          {summary.verdict.label}
+        </span>
+        {summary.criteria ? (
+          <span className="text-muted-foreground">{summary.criteria.label}</span>
+        ) : null}
+        {summary.engineering ? (
+          summary.engineering.detail ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span className="cursor-default text-muted-foreground underline decoration-dotted underline-offset-2" />
+                }
+              >
+                {summary.engineering.label}
+              </TooltipTrigger>
+              <TooltipPopup className="max-w-80 whitespace-pre-line">
+                {summary.engineering.detail}
+              </TooltipPopup>
+            </Tooltip>
+          ) : (
+            <span className="text-muted-foreground">{summary.engineering.label}</span>
+          )
+        ) : null}
+        {task.deployment ? <CommitChip revision={task.deployment.revision} /> : null}
+        {task.deployment?.evidence?.map((entry) => (
+          <span
+            key={entry.targetId}
+            className="inline-flex items-center gap-1 text-muted-foreground"
+          >
+            <CheckIcon aria-hidden className="size-3 text-success-foreground" />
+            {entry.targetId} deployed
+          </span>
+        ))}
+        <span className="ml-auto flex items-center gap-3">
+          {stagingButton}
+          <IssueLink issue={task.issue} />
+        </span>
+      </div>
       {task.summary.trim() ? (
-        <ExpandableMarkdown text={task.summary} environmentId={context.environmentId} />
+        <ExpandableMarkdown
+          text={task.summary}
+          environmentId={context.environmentId}
+          collapsedClassName="max-h-28"
+        />
+      ) : null}
+      {humanChecks.length > 0 ? (
+        <section>
+          <EvidenceHeading count={`${ticked.size} of ${humanChecks.length}`}>
+            Check before accepting
+          </EvidenceHeading>
+          <HumanChecklist
+            checks={humanChecks}
+            ticked={ticked}
+            onTick={(index, checked) =>
+              setTicked((current) => {
+                const next = new Set(current);
+                if (checked) next.add(index);
+                else next.delete(index);
+                return next;
+              })
+            }
+          />
+        </section>
+      ) : null}
+      {task.criteria?.length || e2e?.checks?.length ? (
+        <section>
+          <EvidenceHeading>
+            {e2e ? "What the tester checked" : "Acceptance criteria"}
+          </EvidenceHeading>
+          <CriteriaResults task={task} viewer={viewer} />
+        </section>
+      ) : null}
+      {viewer.shots.length > 0 ? (
+        <section>
+          <EvidenceHeading count={viewer.shots.length}>Screenshots</EvidenceHeading>
+          <ScreenshotGrid viewer={viewer} />
+        </section>
+      ) : null}
+      {viewer.videos.length > 0 ? (
+        <section>
+          <EvidenceHeading count={viewer.videos.length}>Recordings</EvidenceHeading>
+          <RecordingList viewer={viewer} />
+        </section>
+      ) : null}
+      {e2e?.worthALook?.length ? (
+        <section>
+          <EvidenceHeading>Worth a look</EvidenceHeading>
+          <EvidenceNotes items={e2e.worthALook} />
+        </section>
       ) : null}
       {task.reviewInstructions.trim() ? (
         <div className="rounded-lg bg-muted/50 px-3 py-2.5">
-          <p className="mb-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-            {task.e2e ? "Staging check" : "How to check it"}
-          </p>
+          <EvidenceHeading>{e2e ? "Staging check" : "How to check it"}</EvidenceHeading>
           <ExpandableMarkdown
             text={task.reviewInstructions}
             environmentId={context.environmentId}
-            collapsedClassName="max-h-40"
+            collapsedClassName="max-h-32"
           />
         </div>
       ) : null}
@@ -504,41 +638,9 @@ function ReviewCard({
           {task.error}
         </p>
       ) : null}
-      {task.deployment ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="xs"
-            variant="outline"
-            render={<a href={task.deployment.url} target="_blank" rel="noreferrer" />}
-          >
-            <ExternalLinkIcon />
-            Open staging
-          </Button>
-          <CommitChip revision={task.deployment.revision} />
-          {task.e2e?.screenshots.length ? (
-            <a
-              href={task.issue.url}
-              target="_blank"
-              rel="noreferrer"
-              className="text-[11px] text-muted-foreground hover:text-foreground hover:underline"
-            >
-              Screenshots on Linear
-            </a>
-          ) : null}
-          {task.deployment.evidence?.map((entry) => (
-            <span
-              key={entry.targetId}
-              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"
-            >
-              <CheckIcon aria-hidden className="size-3 text-success-foreground" />
-              {entry.targetId} deployed
-            </span>
-          ))}
-        </div>
-      ) : null}
       {requesting ? (
         <form
-          className="flex flex-col gap-2"
+          className="flex flex-col gap-2 border-border/60 border-t pt-3"
           onSubmit={(event) => {
             event.preventDefault();
             if (feedback.trim()) void submit("request-changes");
@@ -569,23 +671,36 @@ function ReviewCard({
             </Button>
           </div>
         </form>
-      ) : (
-        <div className="flex flex-wrap items-center gap-2 border-border/60 border-t pt-3">
-          <Button size="sm" disabled={pending !== null} onClick={() => void submit("accept")}>
-            {pending === "accept" ? <Spinner className="size-3.5" /> : <CheckIcon />}
-            Accept
-          </Button>
-          <Button
+      ) : null}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-2 border-border/60 border-t pt-3">
+        {requesting ? null : (
+          <>
+            {acceptButton("sm")}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={pending !== null}
+              onClick={() => setRequesting(true)}
+            >
+              <UndoIcon />
+              Request changes
+            </Button>
+            <span className="text-muted-foreground text-xs">
+              Accepting moves the issue to {acceptedState}
+            </span>
+          </>
+        )}
+        <div className="ml-auto">
+          <TeamThreads
+            label="Team"
             size="sm"
-            variant="outline"
-            disabled={pending !== null}
-            onClick={() => setRequesting(true)}
-          >
-            <UndoIcon />
-            Request changes
-          </Button>
+            environmentId={context.environmentId}
+            task={task}
+            onOpenThread={context.onOpenThread}
+          />
         </div>
-      )}
+      </div>
+      {viewer.dialog}
     </InboxRow>
   );
 }

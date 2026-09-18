@@ -115,6 +115,46 @@ describe("e2eComment", () => {
     expect(body.split("+++ Evidence per criterion")[0]).not.toContain("No test inbox on staging.");
   });
 
+  it("embeds recordings after the screenshots and points each check at its evidence", () => {
+    const videos = [
+      { url: "https://uploads.linear.app/signup.webm", caption: "Signing up, step by step" },
+    ];
+    const body = e2eComment({
+      ...withCriteria,
+      e2e: {
+        ...withCriteria.e2e,
+        screenshots: screenshots.slice(0, 2),
+        checks: [
+          { ...withCriteria.e2e.checks[0]!, screenshot: 2, video: 1 },
+          { criterion: 2, result: "passed" as const, evidence: "Saw the email.", video: 1 },
+        ],
+        videos,
+      },
+    });
+    expect(body).toContain("| A blog post shows its body | ✅ passed (screenshot 2, video 1) |");
+    expect(body).toContain("| The author gets a reminder email | ✅ passed (video 1) |");
+    expect(body).toContain(
+      "2. **The author gets a reminder email** ✅ passed (video 1): Saw the email.",
+    );
+    const recordings =
+      "**Recordings**\n\n*Video 1: Signing up, step by step*\n\n![Signing up, step by step](https://uploads.linear.app/signup.webm)";
+    expect(body).toContain(
+      `![State 2](https://uploads.linear.app/shot-2.png)\n\n${recordings}\n\n+++ Evidence`,
+    );
+  });
+
+  it("leaves out recordings, and a video reference to a missing clip, when there are none", () => {
+    const body = e2eComment({
+      ...withCriteria,
+      e2e: {
+        ...withCriteria.e2e,
+        checks: [{ ...withCriteria.e2e.checks[0]!, video: 1 }, withCriteria.e2e.checks[1]!],
+      },
+    });
+    expect(body).not.toContain("**Recordings**");
+    expect(body).not.toContain("video 1");
+  });
+
   it("leaves out the notes and screenshots headings when there are none", () => {
     const body = e2eComment({
       ...withCriteria,

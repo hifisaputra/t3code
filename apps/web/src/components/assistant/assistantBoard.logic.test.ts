@@ -121,13 +121,15 @@ describe("project status text", () => {
     expect(projectFailure(failed)).toBe("Linear rejected the API key");
     expect(describeProjectActivity({ project: failed, activeTasks: [] })).toMatchObject({
       tone: "attention",
-      status: "Stopped",
+      status: "Needs you",
+      headline: "Stopped by a problem",
     });
-    // Three declines in a row pause the loop with a reason, and the pill says so.
+    // Three declines in a row pause the loop with a reason, and the status says so.
     const paused = project({ status: "paused", error: "Team leaders declined 3 issues in a row" });
     expect(describeProjectActivity({ project: paused, activeTasks: [] })).toMatchObject({
       tone: "attention",
-      status: "Paused",
+      status: "Needs you",
+      headline: "Paused by a problem",
     });
     expect(buildInbox(board({ projects: [paused] }))).toMatchObject([{ kind: "paused" }]);
   });
@@ -137,12 +139,13 @@ describe("project status text", () => {
     const paused = project({ status: "paused" });
     expect(describeProjectActivity({ project: paused, activeTasks: [active] })).toMatchObject({
       tone: "active",
-      status: "Paused",
+      status: "Working",
       headline: `Working on ${active.issue.identifier}`,
     });
     expect(describeProjectActivity({ project: paused, activeTasks: [] })).toMatchObject({
       tone: "paused",
-      headline: "Taking only issues you dispatch",
+      status: "Paused",
+      headline: "Paused · works on issues you dispatch",
     });
   });
 
@@ -173,18 +176,18 @@ describe("project status text", () => {
         activeTasks: [one, two],
       }),
     ).toMatchObject({
-      headline: `Holding ${one.issue.identifier} and ${two.issue.identifier}`,
+      headline: `Stopped · holding ${one.issue.identifier} and ${two.issue.identifier}`,
       detail:
         "Their teams are stopped. Start, or resume the teams from the menu, to continue them.",
     });
   });
 
-  it("says a running loop with automatic picking off is waiting on a dispatch", () => {
+  it("says a running loop with automatic picking off is idle until a dispatch", () => {
     const manual = project({ autoPick: false });
     expect(describeProjectActivity({ project: manual, activeTasks: [] })).toMatchObject({
       tone: "idle",
-      status: "Running",
-      headline: "Waiting for you to dispatch an issue",
+      status: "Idle",
+      headline: "Idle · works on issues you dispatch",
     });
     // A deliberate choice, so nothing in the inbox asks about it.
     expect(buildInbox(board({ projects: [manual] }))).toEqual([]);
@@ -192,18 +195,24 @@ describe("project status text", () => {
     const active = task();
     expect(describeProjectActivity({ project: manual, activeTasks: [active] })).toMatchObject({
       tone: "active",
+      status: "Working",
       headline: `Working on ${active.issue.identifier}`,
     });
     // Automatic picking on is the default, and a paused loop keeps its own text.
-    expect(describeProjectActivity({ project: project(), activeTasks: [] }).headline).toBe(
-      "Watching for issues",
-    );
+    expect(describeProjectActivity({ project: project(), activeTasks: [] })).toMatchObject({
+      status: "Idle",
+      headline: "Idle · watching Linear for issues",
+    });
     expect(
       describeProjectActivity({
         project: project({ status: "paused", autoPick: false }),
         activeTasks: [],
       }),
-    ).toMatchObject({ tone: "paused", headline: "Taking only issues you dispatch" });
+    ).toMatchObject({
+      tone: "paused",
+      status: "Paused",
+      headline: "Paused · works on issues you dispatch",
+    });
   });
 
   it("ignores a stale waiting note once the queue is stopped", () => {
@@ -217,6 +226,7 @@ describe("project status text", () => {
     const running = project({ error: "Waiting: deploy" });
     expect(describeProjectActivity({ project: running, activeTasks: [active] })).toMatchObject({
       tone: "waiting",
+      status: "Waiting",
       detail: "deploy",
     });
     expect(describeProjectActivity({ project: project(), activeTasks: [active] }).headline).toBe(
@@ -239,11 +249,11 @@ describe("project status text", () => {
       }),
     ).toEqual({
       tone: "waiting",
-      status: "Running",
+      status: "Waiting",
       headline: "Waiting for Claude's usage limit to reset",
       detail: "Work continues by itself once it resets at 3:00 PM. Start now to try sooner.",
     });
-    // A paused loop keeps its own pill while it waits out the same limit.
+    // A paused loop waits out the same limit.
     expect(
       describeProjectActivity({
         project: project({ status: "paused", limitedUntil: "2026-09-14T15:00:00.000Z" }),
@@ -252,7 +262,7 @@ describe("project status text", () => {
       }),
     ).toMatchObject({
       tone: "waiting",
-      status: "Paused",
+      status: "Waiting",
       detail: "Work continues by itself once it resets. Start now to try sooner.",
     });
   });
@@ -263,7 +273,7 @@ describe("project status text", () => {
     const past = project({ limitedUntil: "2026-09-14T12:00:00.000Z" });
     expect(projectLimitHold(past, nowMs)).toBeNull();
     expect(describeProjectActivity({ project: past, activeTasks: [], nowMs }).headline).toBe(
-      "Watching for issues",
+      "Idle · watching Linear for issues",
     );
     const stopped = project({ status: "stopped", limitedUntil: "2026-09-14T15:00:00.000Z" });
     expect(projectLimitHold(stopped, nowMs)).toBeNull();
@@ -581,7 +591,7 @@ describe("buildInbox", () => {
     ]);
     expect(describeProjectActivity({ project: stuck, activeTasks: [] })).toMatchObject({
       tone: "attention",
-      status: "Running",
+      status: "Needs you",
       headline: "Stuck on a problem",
       detail: "Linear rejected the API key.",
     });
@@ -590,6 +600,8 @@ describe("buildInbox", () => {
     expect(buildInbox(board({ projects: [waiting] }))).toEqual([]);
     expect(describeProjectActivity({ project: waiting, activeTasks: [] })).toMatchObject({
       tone: "waiting",
+      status: "Waiting",
+      headline: "Waiting",
       detail: "staging deploy is running",
     });
   });

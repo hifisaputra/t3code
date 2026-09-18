@@ -339,6 +339,15 @@ describe("project notes", () => {
     );
   });
 
+  it("has the tester record a clip per criterion only for behaviour over time, in the evidence folder", () => {
+    expect(prompts.e2e).toContain("Screenshots are the default.");
+    expect(prompts.e2e).toContain("`video-start` with a .webm file in /evidence/task");
+    expect(prompts.e2e).toContain("one clip per criterion, never one recording of the whole run");
+    expect(prompts.e2e).toContain("under 10 MB");
+    expect(prompts.e2e).toContain("If the project's browser tooling cannot record");
+    expect(prompts.lead).toContain("criteria that need a recording");
+  });
+
   it("lists the open notes after the project instructions in every role's first message", () => {
     for (const [role, prompt] of Object.entries(prompts)) {
       const section = prompt.indexOf(
