@@ -148,6 +148,7 @@ import {
   hasUnseenCompletion,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
+  keepAssistantTeamsWhole,
   orderItemsByPreferredIds,
   planSidebarThreadDrop,
   reduceSidebarProjectScopeMenuState,
@@ -162,6 +163,7 @@ import {
   resolveWorkingStartedAt,
   sidebarListItemId,
   sidebarMarkerId,
+  sidebarTeamId,
   sortLogicalProjectsForSidebar,
   sortPinnedThreadsForSidebar,
   sortSettledThreadsForSidebar,
@@ -2581,6 +2583,13 @@ export default function Sidebar() {
         active.push(thread);
       }
     }
+    // One row per issue: a team that settles a thread while the rest of it
+    // works would otherwise hold a row in both sections under the same key.
+    const { active: activeRows, settled: settledRows } = keepAssistantTeamsWhole(
+      active,
+      settled,
+      sidebarTeamId,
+    );
     // An assistant team's threads render inside one team row in Active and
     // Settled, so there is no individual row left to pick up. A member the
     // user pinned or snoozed keeps its own row — and stays draggable — where
@@ -2588,7 +2597,7 @@ export default function Sidebar() {
     // gone, but the thread still takes an activeOrderKey when a neighbouring
     // drop rewrites the section, and refusing those writes would make every
     // Active reorder a no-op as soon as one team is on the board.
-    for (const thread of [...active, ...settled]) {
+    for (const thread of [...activeRows, ...settledRows]) {
       if (assistantTeamThread(thread.id) === null) continue;
       draggable.delete(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)));
     }
@@ -2598,7 +2607,7 @@ export default function Sidebar() {
     // sort, or mixed-version fleets would render different pinned orders on
     // web and mobile from the same data.
     const sortedPinned = sortPinnedThreadsForSidebar(pinned);
-    const sortedActive = sortThreadsForSidebar(active);
+    const sortedActive = sortThreadsForSidebar(activeRows);
     return {
       pinnedThreads:
         optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
@@ -2624,7 +2633,7 @@ export default function Sidebar() {
           firstValidTimestampMs(left.snoozedUntil ?? null) -
           firstValidTimestampMs(right.snoozedUntil ?? null),
       ),
-      settledThreads: sortSettledThreadsForSidebar(settled),
+      settledThreads: sortSettledThreadsForSidebar(settledRows),
       snoozeNow: preciseNow,
     };
   }, [nowMinute, optimisticDrop, scopedProjectKeys, serverConfigs, snoozeWakeTick, threads]);
@@ -3299,10 +3308,7 @@ export default function Sidebar() {
       list: readonly EnvironmentThreadShell[],
       section: SidebarSection,
     ): SidebarListItem[] =>
-      groupSidebarTeamThreads(list, (thread) => {
-        const team = assistantTeamThread(thread.id);
-        return team === null ? null : `${thread.environmentId}:${team.taskId}`;
-      }).map((entry) =>
+      groupSidebarTeamThreads(list, sidebarTeamId).map((entry) =>
         entry.kind === "thread"
           ? { kind: "thread", key: keyOf(entry.thread), section }
           : {

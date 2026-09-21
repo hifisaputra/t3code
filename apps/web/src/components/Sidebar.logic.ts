@@ -4,7 +4,12 @@ import {
   isAtomCommandInterrupted,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import type { ContextMenuItem } from "@t3tools/contracts";
+import {
+  assistantTeamThread,
+  type ContextMenuItem,
+  type EnvironmentId,
+  type ThreadId,
+} from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
@@ -169,6 +174,48 @@ export function groupSidebarTeamThreads<T>(
     entries.push({ kind: "team", teamId, threads: members.get(teamId) ?? [thread] });
   }
   return entries;
+}
+
+/** The id that folds an issue's threads into one row, or null for a thread
+    that belongs to no assistant team. Sections and rows share it, so a team
+    is grouped and placed by the same key. */
+export function sidebarTeamId(thread: {
+  readonly id: ThreadId;
+  readonly environmentId: EnvironmentId;
+}): string | null {
+  const team = assistantTeamThread(thread.id);
+  return team === null ? null : `${thread.environmentId}:${team.taskId}`;
+}
+
+/**
+ * Keep a team's settled threads beside its working ones. Active and Settled
+ * each fold a team into a single row under the same issue key, so a team
+ * whose threads straddle both sections writes that key twice into one list:
+ * React then remounts one of the pair on every list change — a second row of
+ * the same issue, a status behind and inert to clicks — and dnd-kit measures
+ * two rows under one sortable id. The team is one unit of work, so it
+ * follows the members still working.
+ */
+export function keepAssistantTeamsWhole<T>(
+  active: readonly T[],
+  settled: readonly T[],
+  teamOf: (thread: T) => string | null,
+): { readonly active: readonly T[]; readonly settled: readonly T[] } {
+  const working = new Set<string>();
+  for (const thread of active) {
+    const teamId = teamOf(thread);
+    if (teamId !== null) working.add(teamId);
+  }
+  if (working.size === 0) return { active, settled };
+  const rejoined: T[] = [];
+  const rest: T[] = [];
+  for (const thread of settled) {
+    const teamId = teamOf(thread);
+    (teamId !== null && working.has(teamId) ? rejoined : rest).push(thread);
+  }
+  return rejoined.length === 0
+    ? { active, settled }
+    : { active: [...active, ...rejoined], settled: rest };
 }
 
 /** The section a slot belongs to, read off the markers around it: from

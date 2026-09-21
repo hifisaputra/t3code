@@ -34,6 +34,7 @@ import {
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebar,
   groupSidebarTeamThreads,
+  keepAssistantTeamsWhole,
   resolveSidebarDropTarget,
   pinOrderKeyBetween,
   planPinnedReorder,
@@ -1248,6 +1249,74 @@ describe("groupSidebarTeamThreads", () => {
         { id: "two", team: null },
       ]),
     ).toEqual(["one", "two"]);
+  });
+});
+
+describe("keepAssistantTeamsWhole", () => {
+  type Row = { readonly id: string; readonly team: string | null };
+  const teamOf = (row: Row) => row.team;
+  const keep = (active: readonly Row[], settled: readonly Row[]) => {
+    const result = keepAssistantTeamsWhole(active, settled, teamOf);
+    return {
+      active: result.active.map((row) => row.id),
+      settled: result.settled.map((row) => row.id),
+    };
+  };
+
+  it("keeps a working team's settled threads with it", () => {
+    expect(
+      keep(
+        [
+          { id: "solo", team: null },
+          { id: "lead", team: "t1" },
+        ],
+        [
+          { id: "work", team: "t1" },
+          { id: "review", team: "t1" },
+          { id: "old", team: null },
+        ],
+      ),
+    ).toEqual({ active: ["solo", "lead", "work", "review"], settled: ["old"] });
+  });
+
+  it("leaves a finished team on the settled shelf", () => {
+    expect(
+      keep(
+        [{ id: "solo", team: null }],
+        [
+          { id: "lead", team: "t1" },
+          { id: "work", team: "t1" },
+        ],
+      ),
+    ).toEqual({ active: ["solo"], settled: ["lead", "work"] });
+  });
+
+  it("moves only the team that is still working", () => {
+    expect(
+      keep(
+        [{ id: "a-lead", team: "a" }],
+        [
+          { id: "a-work", team: "a" },
+          { id: "b-lead", team: "b" },
+        ],
+      ),
+    ).toEqual({ active: ["a-lead", "a-work"], settled: ["b-lead"] });
+  });
+
+  it("gives an issue one row key: no team is grouped in both sections", () => {
+    const active: Row[] = [{ id: "lead", team: "t1" }];
+    const settled: Row[] = [
+      { id: "work", team: "t1" },
+      { id: "done-lead", team: "t2" },
+    ];
+    const whole = keepAssistantTeamsWhole(active, settled, teamOf);
+    const teamIds = (rows: readonly Row[]) =>
+      groupSidebarTeamThreads(rows, teamOf).flatMap((entry) =>
+        entry.kind === "team" ? [entry.teamId] : [],
+      );
+    const keys = [...teamIds(whole.active), ...teamIds(whole.settled)];
+    expect(keys).toEqual(["t1", "t2"]);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 });
 
