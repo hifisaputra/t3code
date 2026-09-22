@@ -3,7 +3,7 @@ import {
   assistantPicksIssues,
   type AssistantBoard,
   type AssistantProject,
-  type AssistantTask,
+  type AssistantTaskSummary,
   type EnvironmentId,
   type ServerProvider,
   type ThreadId,
@@ -63,8 +63,8 @@ export function AssistantProjectPanel({
   title: string;
   linearProjectName: string | null;
   providers: ReadonlyArray<ServerProvider>;
-  activeTasks: ReadonlyArray<AssistantTask>;
-  historyTasks: ReadonlyArray<AssistantTask>;
+  activeTasks: ReadonlyArray<AssistantTaskSummary>;
+  historyTasks: ReadonlyArray<AssistantTaskSummary>;
   open: boolean;
   tab: ProjectPanelTab;
   onTabChange: (tab: ProjectPanelTab) => void;
@@ -116,8 +116,8 @@ function PanelContents({
   title: string;
   linearProjectName: string | null;
   providers: ReadonlyArray<ServerProvider>;
-  activeTasks: ReadonlyArray<AssistantTask>;
-  historyTasks: ReadonlyArray<AssistantTask>;
+  activeTasks: ReadonlyArray<AssistantTaskSummary>;
+  historyTasks: ReadonlyArray<AssistantTaskSummary>;
   tab: ProjectPanelTab;
   onTabChange: (tab: ProjectPanelTab) => void;
   onEditSetup: () => void;
@@ -224,7 +224,7 @@ function SetupTab({
   project: AssistantProject;
   title: string;
   providers: ReadonlyArray<ServerProvider>;
-  activeTasks: ReadonlyArray<AssistantTask>;
+  activeTasks: ReadonlyArray<AssistantTaskSummary>;
   control: ProjectControl;
   onEditSetup: () => void;
 }) {

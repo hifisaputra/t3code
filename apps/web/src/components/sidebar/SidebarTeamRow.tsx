@@ -53,8 +53,14 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
  * One developer-assistant team — an issue's lead, worker, code review and
  * e2e threads — under a single sidebar row. Four rows per issue made the flat
  * Active list unreadable with more than one issue in flight, and nothing said
- * which rows belonged together; the group header carries the issue and the
- * team's worst-blocked status, and the member rows stay one click away.
+ * which rows belonged together; the group header carries the issue and, while
+ * folded up, the team's worst-blocked status, and the member rows stay one
+ * click away.
+ *
+ * The header borrows the plain thread card's two-line shape — project and
+ * state on top, the work below — so a team does not read as a foreign object
+ * in the list, and so the issue title gets the row's full width instead of
+ * competing with an identifier chip and a status label on one line.
  *
  * The row registers with dnd-kit so it translates around the gap a dragged
  * thread opens, but it can never be picked up itself: a team is a landing
@@ -149,10 +155,22 @@ function memberStatus(
   }
 }
 
-function compactTimeLabel(thread: EnvironmentThreadShell): string {
-  const label = formatRelativeTimeLabel(thread.latestUserMessageAt ?? thread.updatedAt);
+function compactTimeLabel(at: string): string {
+  const label = formatRelativeTimeLabel(at);
   if (label === "just now") return "now";
   return label.endsWith(" ago") ? label.slice(0, -4) : label;
+}
+
+function threadActivityAt(thread: EnvironmentThreadShell): string {
+  return thread.latestUserMessageAt ?? thread.updatedAt;
+}
+
+function TimeLabel({ at }: { at: string }) {
+  return (
+    <span className="shrink-0 text-xs tabular-nums text-muted-foreground/60">
+      {compactTimeLabel(at)}
+    </span>
+  );
 }
 
 function escapeForRegExp(value: string): string {
@@ -233,6 +251,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
   projectFaviconPath: string | null;
   projectIcon: ProjectIconOverride | null;
   projectTitle: string | null;
+  projectDisplayName: string | null;
   timestampFormat: TimestampFormat;
   onThreadClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
   onThreadActivate: (threadRef: ScopedThreadRef) => void;
@@ -416,7 +435,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
   if (members.length === 0) return null;
 
   const latestActivity = members.reduce<string | null>((latest, member) => {
-    const candidate = member.thread.latestUserMessageAt ?? member.thread.updatedAt;
+    const candidate = threadActivityAt(member.thread);
     return latest === null || candidate > latest ? candidate : latest;
   }, null);
   const isRemote =
@@ -453,7 +472,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
                 onKeyDown={handleHeaderKeyDown}
                 // The open member's own row carries the route tint; a second
                 // solid fill here would read as one undifferentiated block.
-                className="group/sidebar-row relative flex h-9 w-full cursor-pointer items-center gap-1.5 overflow-hidden rounded-md bg-transparent px-1.5 text-left text-sidebar-foreground outline-none select-none hover:bg-sidebar-row-hover"
+                className="group/sidebar-row relative flex w-full cursor-pointer gap-1.5 overflow-hidden rounded-md bg-transparent px-[var(--sidebar-row-content-inset)] py-1.5 text-left text-sidebar-foreground outline-none select-none hover:bg-sidebar-row-hover"
               />
             }
           >
@@ -462,33 +481,53 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
               aria-expanded={expanded}
               aria-label={expanded ? `Collapse ${headerLabel}` : `Expand ${headerLabel}`}
               onClick={handleToggle}
-              className="inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-sidebar-muted-foreground outline-none hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              className="mt-0.5 inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-sidebar-muted-foreground outline-none hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
               <ChevronDownIcon
                 aria-hidden
                 className={cn("size-3.5 transition-transform", !expanded && "-rotate-90")}
               />
             </button>
-            <ProjectFavicon
-              environmentId={environmentId}
-              cwd={props.projectCwd ?? ""}
-              projectName={props.projectTitle ?? ""}
-              faviconPath={props.projectFaviconPath}
-              projectIcon={props.projectIcon}
-              className="size-4 shrink-0"
-            />
-            {issueStatus !== null ? (
-              <IssueStatusChip status={issueStatus} onOpen={handleOpenIssue} />
-            ) : identifier !== "" ? (
-              <span className="shrink-0 rounded-sm bg-sidebar-row-hover px-1 font-mono text-[10px] font-medium text-sidebar-muted-foreground">
-                {identifier}
-              </span>
-            ) : null}
-            <span className="min-w-0 flex-1 truncate text-sm font-medium">{issueTitle}</span>
-            <ResearchBadge track={track} />
-            {teamStatus !== null ? (
-              <StatusLabel status={teamStatus} dim={!hasRouteMember && teamStatus.working} />
-            ) : null}
+            {/* Same two-line shape as a plain thread card — project and state
+                on top, the thing being worked on below — so a team does not
+                read as a different species from the rows around it. */}
+            <div className="min-w-0 flex-1">
+              <div className="flex h-5 min-w-0 items-center gap-1.5">
+                <ProjectFavicon
+                  environmentId={environmentId}
+                  cwd={props.projectCwd ?? ""}
+                  projectName={props.projectTitle ?? ""}
+                  faviconPath={props.projectFaviconPath}
+                  projectIcon={props.projectIcon}
+                  className="size-4 shrink-0"
+                />
+                {props.projectDisplayName !== null ? (
+                  <span className="min-w-0 truncate text-secondary-label text-xs font-medium">
+                    {props.projectDisplayName}
+                  </span>
+                ) : null}
+                <ResearchBadge track={track} />
+                <span className="flex-1" />
+                {/* Expanded, every member states its own status one row down;
+                    repeating the worst of them here just says "Working" three
+                    times. Folded up, this label is the only thing left. */}
+                {!expanded && teamStatus !== null ? (
+                  <StatusLabel status={teamStatus} dim={teamStatus.working} />
+                ) : latestActivity !== null ? (
+                  <TimeLabel at={latestActivity} />
+                ) : null}
+              </div>
+              <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                {issueStatus !== null ? (
+                  <IssueStatusChip status={issueStatus} onOpen={handleOpenIssue} />
+                ) : identifier !== "" ? (
+                  <span className="shrink-0 font-mono text-[10px] font-medium text-sidebar-muted-foreground">
+                    {identifier}
+                  </span>
+                ) : null}
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">{issueTitle}</span>
+              </div>
+            </div>
           </TooltipTrigger>
           <TooltipPopup side="right">
             <span className="flex flex-col gap-0.5">
@@ -575,9 +614,11 @@ const SidebarTeamMemberRow = memo(function SidebarTeamMemberRow(props: {
         onKeyDown={handleKeyDown}
         onContextMenu={handleContextMenu}
         className={cn(
-          // A left rule ties the members to the header they belong to; the
-          // indent leaves the header's chevron and favicon column clear.
-          "group/sidebar-row relative ml-3.5 flex h-8 cursor-pointer items-center gap-2 overflow-hidden rounded-md border-l border-sidebar-border/60 pl-3 pr-2 text-left outline-none select-none",
+          // One unbroken rule down the left ties the members to the header
+          // they belong to, and the indent lands their labels under the issue
+          // title rather than under the header's chevron. Members are support
+          // for the header, so they sit a size class below a real thread row.
+          "group/sidebar-row relative ml-4 flex h-7 cursor-pointer items-center gap-2 overflow-hidden rounded-r-md border-l border-sidebar-border/60 pl-3.5 pr-[var(--sidebar-row-content-inset)] text-left outline-none select-none",
           props.isActive
             ? "bg-sidebar-row-active text-sidebar-foreground"
             : props.isSelected
@@ -589,12 +630,12 @@ const SidebarTeamMemberRow = memo(function SidebarTeamMemberRow(props: {
         <span className="min-w-0 flex-1 truncate text-xs">
           {threadKind(member.role, props.track).label}
         </span>
+        {/* A member with nothing to say falls back to its last-activity time,
+            recessed hard so the row that IS saying something wins the eye. */}
         {props.status !== null ? (
           <StatusLabel status={props.status} dim={!props.isActive && props.status.working} />
         ) : (
-          <span className="shrink-0 text-xs tabular-nums text-secondary-label">
-            {compactTimeLabel(member.thread)}
-          </span>
+          <TimeLabel at={threadActivityAt(member.thread)} />
         )}
         {props.jumpLabel !== null ? <JumpHintBadge label={props.jumpLabel} /> : null}
       </div>

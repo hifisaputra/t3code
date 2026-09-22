@@ -1,7 +1,7 @@
 import type {
   AssistantE2eCheckResult,
   AssistantResearchCheckResult,
-  AssistantTask,
+  AssistantTaskSummary,
   EnvironmentId,
 } from "@t3tools/contracts";
 import { CheckIcon, CircleIcon, FilmIcon, ImageIcon, MinusIcon, XIcon } from "lucide-react";
@@ -43,17 +43,22 @@ export function EvidenceHeading({ children, count }: { children: ReactNode; coun
 const EMPTY_FILES: ReadonlyArray<never> = [];
 
 /**
- * The task's e2e screenshots and recordings and the lightbox that shows them.
- * Criteria rows and the evidence sections share one, so "screenshot 2" and the
- * second tile open the same image, and "video 1" plays the first recording.
- * Files with no inline address link to the Linear issue instead.
+ * The evidence files of the one issue a person has open, and the lightbox that
+ * shows them. Criteria rows and the galleries share one, so "screenshot 2" and
+ * the second tile open the same image, and "video 1" plays the first recording.
+ *
+ * It is deliberately fed the issue's detail rather than its board summary: the
+ * board carries no files, and minting a signed URL for evidence nobody has
+ * asked to see is what made a page of reviews slow enough to drop requests.
  */
-export function useScreenshotViewer(environmentId: EnvironmentId, task: AssistantTask) {
+export function useEvidenceViewer(environmentId: EnvironmentId, task: AssistantTaskSummary | null) {
   const shots =
-    (task.track === "research" ? task.research?.screenshots : task.e2e?.screenshots) ?? EMPTY_FILES;
-  const videos = (task.track === "research" ? undefined : task.e2e?.videos) ?? EMPTY_FILES;
-  const urls = useAssistantEvidenceUrls(environmentId, task.threadId, shots);
-  const videoUrls = useAssistantEvidenceUrls(environmentId, task.threadId, videos);
+    (task?.track === "research" ? task.research?.screenshots : task?.e2e?.screenshots) ??
+    EMPTY_FILES;
+  const videos = (task?.track === "research" ? undefined : task?.e2e?.videos) ?? EMPTY_FILES;
+  const threadId = task?.threadId ?? null;
+  const urls = useAssistantEvidenceUrls(environmentId, threadId, shots);
+  const videoUrls = useAssistantEvidenceUrls(environmentId, threadId, videos);
   const [preview, setPreview] = useState<ExpandedImagePreview | null>(null);
   const viewable = shots.flatMap((shot, index) => {
     const src = urls[index];
@@ -84,7 +89,7 @@ export function useScreenshotViewer(environmentId: EnvironmentId, task: Assistan
     urls,
     videos,
     videoUrls,
-    issueUrl: task.issue.url,
+    issueUrl: task?.issue.url ?? "",
     open,
     openVideo,
     dialog: preview ? (
@@ -97,7 +102,7 @@ export function useScreenshotViewer(environmentId: EnvironmentId, task: Assistan
   };
 }
 
-export type ScreenshotViewer = ReturnType<typeof useScreenshotViewer>;
+export type EvidenceViewer = ReturnType<typeof useEvidenceViewer>;
 
 /**
  * "screenshot N" or "video N": opens the file in the lightbox, or the issue
@@ -108,7 +113,7 @@ function EvidenceLink({
   kind,
   index,
 }: {
-  viewer: ScreenshotViewer;
+  viewer: EvidenceViewer;
   kind: "screenshot" | "video";
   index: number;
 }) {
@@ -163,8 +168,8 @@ export function CriteriaResults({
   task,
   viewer,
 }: {
-  task: AssistantTask;
-  viewer: ScreenshotViewer;
+  task: AssistantTaskSummary;
+  viewer: EvidenceViewer;
 }) {
   const criteria = task.criteria ?? [];
   const checks = (task.track === "research" ? task.research?.checks : task.e2e?.checks) ?? [];
@@ -197,7 +202,7 @@ export function CriteriaResults({
               {task.track === "research" && result ? (
                 <p className={cn("text-xs", result.className)}>{result.label}</p>
               ) : null}
-              {check?.evidence.trim() ? <Evidence text={check.evidence.trim()} /> : null}
+              {check?.evidence?.trim() ? <Evidence text={check.evidence.trim()} /> : null}
             </div>
             {shot !== null && shot < viewer.shots.length ? (
               <EvidenceLink viewer={viewer} kind="screenshot" index={shot} />
@@ -212,8 +217,81 @@ export function CriteriaResults({
   );
 }
 
+/** A tile that says so when a file will not load, rather than leaving a broken image. */
+function UnavailableEvidence({
+  kind,
+  index,
+  caption,
+  issueUrl,
+}: {
+  kind: "Screenshot" | "Recording";
+  index: number;
+  caption: string;
+  issueUrl: string;
+}) {
+  const Icon = kind === "Recording" ? FilmIcon : ImageIcon;
+  return (
+    <a
+      href={issueUrl}
+      target="_blank"
+      rel="noreferrer"
+      className="flex min-w-0 items-center gap-1.5 rounded-md border border-border/70 px-2 py-1.5 text-muted-foreground text-xs hover:bg-accent/40 hover:text-foreground"
+    >
+      <Icon aria-hidden className="size-3.5 shrink-0" />
+      <span className="shrink-0">
+        {kind} {index + 1}
+      </span>
+      {caption ? <span className="min-w-0 truncate">· {caption}</span> : null}
+      <span className="ml-auto shrink-0">Open in Linear</span>
+    </a>
+  );
+}
+
+/** One screenshot tile. A file the host will not serve says so in place of a broken image. */
+function ScreenshotTile({
+  viewer,
+  index,
+  caption,
+  src,
+}: {
+  viewer: EvidenceViewer;
+  index: number;
+  caption: string;
+  src: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed)
+    return (
+      <UnavailableEvidence
+        kind="Screenshot"
+        index={index}
+        caption={caption}
+        issueUrl={viewer.issueUrl}
+      />
+    );
+  return (
+    <button
+      type="button"
+      onClick={() => viewer.open(index)}
+      className="group flex w-full min-w-0 flex-col gap-1 text-left focus-visible:outline-none"
+    >
+      <img
+        src={src}
+        alt={caption}
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(true)}
+        className="aspect-video w-full rounded-md border border-border/70 bg-muted/40 object-cover object-top group-hover:border-border group-focus-visible:ring-1 group-focus-visible:ring-ring"
+      />
+      <span className="truncate text-muted-foreground text-xs group-hover:text-foreground">
+        {caption}
+      </span>
+    </button>
+  );
+}
+
 /** The e2e screenshots as thumbnails that open the lightbox, or links to Linear. */
-export function ScreenshotGrid({ viewer }: { viewer: ScreenshotViewer }) {
+export function ScreenshotGrid({ viewer }: { viewer: EvidenceViewer }) {
   if (viewer.shots.length === 0) return null;
   return (
     <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -224,33 +302,14 @@ export function ScreenshotGrid({ viewer }: { viewer: ScreenshotViewer }) {
           // oxlint-disable-next-line react/no-array-index-key
           <li key={index} className="min-w-0">
             {src ? (
-              <button
-                type="button"
-                onClick={() => viewer.open(index)}
-                className="group flex w-full min-w-0 flex-col gap-1 text-left focus-visible:outline-none"
-              >
-                <img
-                  src={src}
-                  alt={caption}
-                  loading="lazy"
-                  decoding="async"
-                  className="aspect-video w-full rounded-md border border-border/70 bg-muted/40 object-cover object-top group-hover:border-border group-focus-visible:ring-1 group-focus-visible:ring-ring"
-                />
-                <span className="truncate text-muted-foreground text-xs group-hover:text-foreground">
-                  {caption}
-                </span>
-              </button>
+              <ScreenshotTile viewer={viewer} index={index} caption={caption} src={src} />
             ) : (
-              <a
-                href={viewer.issueUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="flex min-w-0 items-center gap-1.5 rounded-md border border-border/70 px-2 py-1.5 text-muted-foreground text-xs hover:bg-accent/40 hover:text-foreground"
-              >
-                <ImageIcon aria-hidden className="size-3.5 shrink-0" />
-                <span className="shrink-0">Screenshot {index + 1}</span>
-                {shot.caption ? <span className="min-w-0 truncate">· {shot.caption}</span> : null}
-              </a>
+              <UnavailableEvidence
+                kind="Screenshot"
+                index={index}
+                caption={shot.caption}
+                issueUrl={viewer.issueUrl}
+              />
             )}
           </li>
         );
@@ -260,10 +319,11 @@ export function ScreenshotGrid({ viewer }: { viewer: ScreenshotViewer }) {
 }
 
 /**
- * The e2e recordings as inline players that load only their metadata until
- * played, or links to Linear when a clip cannot be served here.
+ * The e2e recordings as inline players. Each waits until it is near the
+ * viewport before it fetches anything, so a run with a dozen clips costs one
+ * request for the one being watched.
  */
-export function RecordingList({ viewer }: { viewer: ScreenshotViewer }) {
+export function RecordingList({ viewer }: { viewer: EvidenceViewer }) {
   if (viewer.videos.length === 0) return null;
   return (
     <ul className="grid gap-3 sm:grid-cols-2">
@@ -279,23 +339,18 @@ export function RecordingList({ viewer }: { viewer: ScreenshotViewer }) {
                   src={src}
                   label={caption}
                   originalUrl={viewer.issueUrl}
-                  preload="metadata"
                   className="w-full"
                   videoClassName="rounded-md border border-border/70"
                 />
                 <span className="truncate text-muted-foreground text-xs">{caption}</span>
               </>
             ) : (
-              <a
-                href={viewer.issueUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="flex min-w-0 items-center gap-1.5 rounded-md border border-border/70 px-2 py-1.5 text-muted-foreground text-xs hover:bg-accent/40 hover:text-foreground"
-              >
-                <FilmIcon aria-hidden className="size-3.5 shrink-0" />
-                <span className="shrink-0">Recording {index + 1}</span>
-                {video.caption ? <span className="min-w-0 truncate">· {video.caption}</span> : null}
-              </a>
+              <UnavailableEvidence
+                kind="Recording"
+                index={index}
+                caption={video.caption}
+                issueUrl={viewer.issueUrl}
+              />
             )}
           </li>
         );
@@ -356,51 +411,56 @@ export function ResearchEvidence({
   environmentId,
   viewer,
 }: {
-  task: AssistantTask;
+  task: AssistantTaskSummary;
   environmentId: EnvironmentId;
-  viewer: ScreenshotViewer;
+  viewer: EvidenceViewer;
 }) {
   const research = task.research;
   const [reportOpen, setReportOpen] = useState(false);
   if (!research)
     return <p className="text-muted-foreground text-sm">No research report submitted yet.</p>;
+  // Absent while the report is still being fetched; see useAssistantTaskDetail.
+  const report = research.report ?? "";
+  const sources = research.sources ?? [];
   return (
     <div className="flex min-w-0 flex-col gap-4">
-      {task.summary.trim() ? (
+      {task.summary?.trim() ? (
         <ExpandableMarkdown
           text={task.summary}
           environmentId={environmentId}
           collapsedClassName="max-h-28"
         />
       ) : null}
-      <section>
-        <button
-          type="button"
-          aria-expanded={reportOpen}
-          onClick={() => setReportOpen(!reportOpen)}
-          className="font-medium text-sm hover:underline"
-        >
-          {reportOpen ? "Hide full report" : "Read full report"}
-        </button>
-        {reportOpen ? (
-          <div className="mt-2">
-            <ChatMarkdown
-              text={research.report}
-              cwd={undefined}
-              environmentId={environmentId}
-              className="text-sm [&_p]:leading-relaxed"
-            />
-          </div>
-        ) : null}
-      </section>
+      {report ? (
+        <section>
+          <button
+            type="button"
+            aria-expanded={reportOpen}
+            onClick={() => setReportOpen(!reportOpen)}
+            className="font-medium text-sm hover:underline"
+          >
+            {reportOpen ? "Hide full report" : "Read full report"}
+          </button>
+          {reportOpen ? (
+            <div className="mt-2">
+              <ChatMarkdown
+                text={report}
+                cwd={undefined}
+                environmentId={environmentId}
+                className="text-sm [&_p]:leading-relaxed"
+              />
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       <section>
         <EvidenceHeading>Research questions</EvidenceHeading>
         <CriteriaResults task={task} viewer={viewer} />
       </section>
       <section>
-        <EvidenceHeading count={research.sources.length}>Sources</EvidenceHeading>
+        <EvidenceHeading count={sources.length}>Sources</EvidenceHeading>
         <ol className="flex list-decimal flex-col gap-1 pl-5 text-sm">
-          {research.sources.map((source, index) => (
+          {sources.map((source, index) => (
             // Sources are numbered by position in the report, including repeated URLs.
             // oxlint-disable-next-line react/no-array-index-key
             <li key={`${index}:${source.url}`}>
@@ -428,8 +488,10 @@ export function ResearchEvidence({
           <EvidenceHeading>
             Fact check · {research.review.verdict === "approved" ? "Approved" : "Changes requested"}
           </EvidenceHeading>
-          <ExpandableMarkdown text={research.review.summary} environmentId={environmentId} />
-          {research.review.findings.length ? (
+          {research.review.summary ? (
+            <ExpandableMarkdown text={research.review.summary} environmentId={environmentId} />
+          ) : null}
+          {research.review.findings ? (
             <ExpandableMarkdown text={research.review.findings} environmentId={environmentId} />
           ) : null}
         </section>

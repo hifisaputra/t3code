@@ -13,7 +13,7 @@ import {
   type AssistantProjectConfig,
   type AssistantProjectNote,
   type AssistantSetup,
-  type AssistantTask,
+  type AssistantTaskSummary,
   type AssistantThreadRole,
   type ProjectId,
 } from "@t3tools/contracts";
@@ -69,7 +69,7 @@ export interface ProjectActivity {
 }
 
 /** The issues themselves when there are few, a count when there are many. */
-function namedIssues(tasks: ReadonlyArray<AssistantTask>): string {
+function namedIssues(tasks: ReadonlyArray<AssistantTaskSummary>): string {
   const [first, second] = tasks;
   if (tasks.length === 1 && first) return first.issue.identifier;
   if (tasks.length === 2 && first && second)
@@ -78,14 +78,14 @@ function namedIssues(tasks: ReadonlyArray<AssistantTask>): string {
 }
 
 /** "SPI-1, SPI-2 and SPI-3", for a line that has room to name them all. */
-function identifierList(tasks: ReadonlyArray<AssistantTask>): string {
+function identifierList(tasks: ReadonlyArray<AssistantTaskSummary>): string {
   const ids = tasks.map((t) => t.issue.identifier);
   const last = ids.at(-1);
   return ids.length > 1 && last ? `${ids.slice(0, -1).join(", ")} and ${last}` : ids.join("");
 }
 
 /** One title reads best on its own; several need their identifiers to tell apart. */
-function issuesDetail(tasks: ReadonlyArray<AssistantTask>): string | null {
+function issuesDetail(tasks: ReadonlyArray<AssistantTaskSummary>): string | null {
   const [first] = tasks;
   if (tasks.length === 0) return null;
   if (tasks.length === 1 && first) return first.issue.title;
@@ -96,7 +96,7 @@ function issuesDetail(tasks: ReadonlyArray<AssistantTask>): string | null {
 export function describeProjectActivity(input: {
   project: AssistantProject;
   /** Every issue the project holds right now, in the order the board lists them. */
-  activeTasks: ReadonlyArray<AssistantTask>;
+  activeTasks: ReadonlyArray<AssistantTaskSummary>;
   /**
    * The usage-limit reset already in the person's own clock format. The caller
    * formats it because the preference lives in the settings store, which this
@@ -206,7 +206,7 @@ const STAGE_THREAD: Record<string, string> = {
  * left, that the handoff to the holder waits for.
  */
 export function describeTaskPhase(input: {
-  task: AssistantTask;
+  task: AssistantTaskSummary;
   workerBusy: boolean;
   workerNeedsInput: boolean;
   step: string | null;
@@ -351,13 +351,13 @@ export function describeTaskPhase(input: {
  * What the board says while the team settles the engineering checks an e2e run
  * listed before delivery; null otherwise. The person's own checks come later.
  */
-export function engineeringChecksLine(task: AssistantTask): string | null {
+export function engineeringChecksLine(task: AssistantTaskSummary): string | null {
   const count = assistantTaskEngineeringChecksPending(task);
   if (!count) return null;
   return `Team is confirming ${count} engineering check${count === 1 ? "" : "s"}`;
 }
 
-export const taskRoundsExhausted = (task: AssistantTask) => task.turns >= task.turnLimit;
+export const taskRoundsExhausted = (task: AssistantTaskSummary) => task.turns >= task.turnLimit;
 
 export {
   assistantTaskPipeline as taskPipeline,
@@ -389,7 +389,7 @@ export interface E2ePlanSummary {
 
 /** What the issue's e2e plan says about how deep the test goes. Null before the plan exists. */
 export function describeE2ePlan(
-  task: Pick<AssistantTask, "e2ePlan" | "criteria">,
+  task: Pick<AssistantTaskSummary, "e2ePlan" | "criteria">,
 ): E2ePlanSummary | null {
   const plan = task.e2ePlan;
   if (!plan) return null;
@@ -417,7 +417,7 @@ export const e2eDepthLabel = (depth: AssistantE2eDepth) => E2E_DEPTH_LABEL[depth
  * server allows it on an active issue with a plan, until a test starts or passes.
  */
 export function e2eDepthChange(
-  task: Pick<AssistantTask, "e2ePlan" | "status" | "stage" | "e2e">,
+  task: Pick<AssistantTaskSummary, "e2ePlan" | "status" | "stage" | "e2e">,
 ): { readonly allowed: true } | { readonly allowed: false; readonly reason: string } {
   if (!task.e2ePlan)
     return {
@@ -477,14 +477,14 @@ export type InboxItem =
       readonly kind: "stuck";
       readonly key: string;
       readonly at: string;
-      readonly task: AssistantTask;
+      readonly task: AssistantTaskSummary;
       readonly reason: "rounds" | "stopped";
     }
   | {
       readonly kind: "review";
       readonly key: string;
       readonly at: string;
-      readonly task: AssistantTask;
+      readonly task: AssistantTaskSummary;
     };
 
 /**
@@ -567,13 +567,13 @@ export function buildInbox(board: AssistantBoard): ReadonlyArray<InboxItem> {
 export function activeTasksFor(
   board: AssistantBoard,
   projectId: ProjectId,
-): ReadonlyArray<AssistantTask> {
+): ReadonlyArray<AssistantTaskSummary> {
   return board.tasks.filter(
     (t) => t.projectId === projectId && assistantTaskHoldsProject(t.status),
   );
 }
 
-const HISTORY_STATUSES = new Set<AssistantTask["status"]>([
+const HISTORY_STATUSES = new Set<AssistantTaskSummary["status"]>([
   "accepted",
   "changes-requested",
   "skipped",
@@ -581,10 +581,10 @@ const HISTORY_STATUSES = new Set<AssistantTask["status"]>([
 ]);
 
 /** Whether the issue is done with: its team settled and its row moved to history. */
-export const taskIsFinished = (task: Pick<AssistantTask, "status">): boolean =>
+export const taskIsFinished = (task: Pick<AssistantTaskSummary, "status">): boolean =>
   HISTORY_STATUSES.has(task.status);
 
-export function historyTasks(board: AssistantBoard): ReadonlyArray<AssistantTask> {
+export function historyTasks(board: AssistantBoard): ReadonlyArray<AssistantTaskSummary> {
   return board.tasks
     .filter(taskIsFinished)
     .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -611,7 +611,7 @@ export interface TaskOutcome {
 const trimmedOrNull = (text: string | null | undefined): string | null => text?.trim() || null;
 
 /** How a finished issue ended, for its history record. */
-export function taskOutcome(task: AssistantTask): TaskOutcome {
+export function taskOutcome(task: AssistantTaskSummary): TaskOutcome {
   switch (task.status) {
     case "accepted":
       return {
@@ -630,7 +630,7 @@ export function taskOutcome(task: AssistantTask): TaskOutcome {
 }
 
 /** Issues the person put next, in the order the loop takes them. */
-export function queuedTasks(board: AssistantBoard): ReadonlyArray<AssistantTask> {
+export function queuedTasks(board: AssistantBoard): ReadonlyArray<AssistantTaskSummary> {
   return board.tasks
     .filter((t) => t.status === "queued")
     .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));

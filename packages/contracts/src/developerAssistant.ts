@@ -444,7 +444,10 @@ export type AssistantE2eResult = typeof AssistantE2eResult.Type;
  * goes back to the leader anyway.
  */
 export const assistantE2ePendingEngineeringChecks = (
-  e2e: AssistantE2eResult | null | undefined,
+  e2e:
+    | Pick<AssistantE2eResult, "verdict" | "engineeringChecks" | "engineeringSettled">
+    | null
+    | undefined,
 ): number =>
   e2e && e2e.verdict !== "failed" && e2e.engineeringSettled === undefined
     ? (e2e.engineeringChecks?.length ?? 0)
@@ -647,7 +650,228 @@ export const AssistantTask = Schema.Struct({
 });
 export type AssistantTask = typeof AssistantTask.Type;
 
-/** What the issue delivers; see AssistantTask.track. */
+/** A tester's run as the board sends it; see AssistantTaskSummary. */
+export const AssistantE2eSummary = Schema.Struct({
+  ...AssistantE2eResult.fields,
+  report: Schema.optionalKey(Schema.String),
+  checks: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({ ...AssistantE2eCheck.fields, evidence: Schema.optionalKey(Schema.String) }),
+    ),
+  ),
+  screenshots: Schema.optionalKey(Schema.Array(AssistantE2eEvidenceFile)),
+  /** How many screenshots the run attached, when the files themselves were left out. */
+  screenshotCount: Schema.optionalKey(Schema.Int),
+  /** How many recordings the run attached, when the files themselves were left out. */
+  videoCount: Schema.optionalKey(Schema.Int),
+});
+export type AssistantE2eSummary = typeof AssistantE2eSummary.Type;
+
+/**
+ * How much evidence a tester's run attached. A board that left the files out
+ * still says how many there are, so a card can offer them before they load.
+ */
+export const assistantE2eEvidenceCounts = (
+  e2e: Pick<AssistantE2eSummary, "screenshots" | "screenshotCount" | "videos" | "videoCount">,
+): { readonly screenshots: number; readonly videos: number } => ({
+  screenshots: e2e.screenshots?.length ?? e2e.screenshotCount ?? 0,
+  videos: e2e.videos?.length ?? e2e.videoCount ?? 0,
+});
+
+/** A research report as the board sends it; see AssistantTaskSummary. */
+export const AssistantResearchSummary = Schema.Struct({
+  ...AssistantResearch.fields,
+  report: Schema.optionalKey(Schema.String),
+  sources: Schema.optionalKey(Schema.Array(AssistantResearchSource)),
+  /** How many sources the report cites, when the sources themselves were left out. */
+  sourceCount: Schema.optionalKey(Schema.Int),
+  screenshots: Schema.optionalKey(Schema.Array(AssistantResearchScreenshot)),
+  /** How many pages the worker captured, when the files themselves were left out. */
+  screenshotCount: Schema.optionalKey(Schema.Int),
+  checks: Schema.Array(
+    Schema.Struct({
+      ...AssistantResearchCheck.fields,
+      evidence: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(1000))),
+    }),
+  ),
+  review: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        ...AssistantResearchReview.fields,
+        findings: Schema.optionalKey(Schema.String),
+        summary: Schema.optionalKey(Schema.String),
+      }),
+    ),
+  ),
+});
+export type AssistantResearchSummary = typeof AssistantResearchSummary.Type;
+
+/** How much of a research report there is, however much of it the board sent. */
+export const assistantResearchCounts = (
+  research: Pick<
+    AssistantResearchSummary,
+    "sources" | "sourceCount" | "screenshots" | "screenshotCount"
+  >,
+): { readonly sources: number; readonly screenshots: number } => ({
+  sources: research.sources?.length ?? research.sourceCount ?? 0,
+  screenshots: research.screenshots?.length ?? research.screenshotCount ?? 0,
+});
+
+/**
+ * A managed issue as the board sends it: every field its rows, cards and
+ * pipeline read, with the long-form text only as far as the server included
+ * it. The board is a live subscription that re-sends the whole board on every
+ * change, so an issue's brief, summary, review instructions, reports and
+ * evidence files are left out of it and fetched per issue when a person opens
+ * one; see WS_METHODS.assistantTaskDetail.
+ *
+ * Each of those is optional rather than gone: servers from before the detail
+ * request send them inline, and a client that already has the text shows it
+ * without asking again. A whole AssistantTask is itself one of these.
+ */
+export const AssistantTaskSummary = Schema.Struct({
+  ...AssistantTask.fields,
+  brief: Schema.optionalKey(Schema.String),
+  summary: Schema.optionalKey(Schema.String),
+  reviewInstructions: Schema.optionalKey(Schema.String),
+  declined: Schema.optionalKey(
+    Schema.Struct({
+      ...AssistantDecline.fields,
+      fingerprint: Schema.optionalKey(Schema.String),
+      issueUpdatedAt: Schema.optionalKey(Schema.String),
+    }),
+  ),
+  codeReview: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        ...AssistantCodeReview.fields,
+        findings: Schema.optionalKey(Schema.String),
+        summary: Schema.optionalKey(Schema.String),
+      }),
+    ),
+  ),
+  merge: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({ ...AssistantMerge.fields, summary: Schema.optionalKey(Schema.String) }),
+    ),
+  ),
+  checks: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        ...AssistantCheckRun.fields,
+        output: Schema.optionalKey(Schema.String),
+        /** Whether the run left output to read, when the output itself was left out. */
+        hasOutput: Schema.optionalKey(Schema.Boolean),
+      }),
+    ),
+  ),
+  e2e: Schema.optionalKey(Schema.NullOr(AssistantE2eSummary)),
+  research: Schema.optionalKey(Schema.NullOr(AssistantResearchSummary)),
+});
+export type AssistantTaskSummary = typeof AssistantTaskSummary.Type;
+
+/** Whether a check run left output to read, however much of it the board sent. */
+export const assistantCheckRunHasOutput = (
+  checks: Pick<NonNullable<AssistantTaskSummary["checks"]>, "output" | "hasOutput">,
+): boolean => checks.hasOutput ?? (checks.output ?? "").trim().length > 0;
+
+/**
+ * The board's view of a stored issue: the same issue without the text and
+ * files a person only reads once they open it. See AssistantTaskSummary.
+ */
+export function assistantTaskSummary(task: AssistantTask): AssistantTaskSummary {
+  // Named only to leave them out; the rest of the issue goes through as it is.
+  const {
+    brief: _brief,
+    summary: _summary,
+    reviewInstructions: _reviewInstructions,
+    testNotes: _testNotes,
+    linearCommentIds: _linearCommentIds,
+    ...rest
+  } = task;
+  const { declined, codeReview, merge, checks, e2e, research } = task;
+  return {
+    ...rest,
+    ...(declined ? { declined: { reason: declined.reason, at: declined.at } } : {}),
+    ...(codeReview === undefined
+      ? {}
+      : {
+          codeReview: codeReview && {
+            verdict: codeReview.verdict,
+            commit: codeReview.commit,
+            at: codeReview.at,
+          },
+        }),
+    ...(merge === undefined ? {} : { merge: merge && { commit: merge.commit, at: merge.at } }),
+    ...(checks === undefined
+      ? {}
+      : {
+          checks: checks && {
+            command: checks.command,
+            commit: checks.commit,
+            exitCode: checks.exitCode,
+            at: checks.at,
+            hasOutput: checks.output.trim().length > 0,
+          },
+        }),
+    ...(e2e === undefined
+      ? {}
+      : {
+          e2e: e2e && {
+            verdict: e2e.verdict,
+            at: e2e.at,
+            ...(e2e.environment === undefined ? {} : { environment: e2e.environment }),
+            ...(e2e.commit === undefined ? {} : { commit: e2e.commit }),
+            ...(e2e.checks === undefined
+              ? {}
+              : {
+                  checks: e2e.checks.map((check) => ({
+                    criterion: check.criterion,
+                    result: check.result,
+                    ...(check.screenshot === undefined ? {} : { screenshot: check.screenshot }),
+                    ...(check.video === undefined ? {} : { video: check.video }),
+                  })),
+                }),
+            humanChecks: e2e.humanChecks,
+            ...(e2e.engineeringChecks === undefined
+              ? {}
+              : { engineeringChecks: e2e.engineeringChecks }),
+            ...(e2e.engineeringSettled === undefined
+              ? {}
+              : { engineeringSettled: e2e.engineeringSettled }),
+            ...(e2e.worthALook === undefined ? {} : { worthALook: e2e.worthALook }),
+            screenshotCount: e2e.screenshots.length,
+            videoCount: e2e.videos?.length ?? 0,
+          },
+        }),
+    ...(research === undefined
+      ? {}
+      : {
+          research: research && {
+            revision: research.revision,
+            at: research.at,
+            sourceCount: research.sources.length,
+            screenshotCount: research.screenshots.length,
+            checks: research.checks.map((check) => ({
+              criterion: check.criterion,
+              result: check.result,
+              ...(check.screenshot === undefined ? {} : { screenshot: check.screenshot }),
+            })),
+            ...(research.review === undefined
+              ? {}
+              : {
+                  review: research.review && {
+                    verdict: research.review.verdict,
+                    revision: research.review.revision,
+                    at: research.review.at,
+                  },
+                }),
+            ...(research.delivery === undefined ? {} : { delivery: research.delivery }),
+          },
+        }),
+  };
+}
+
 export const assistantTaskTrack = (task: Pick<AssistantTask, "track">): AssistantTaskTrack =>
   task.track ?? "code";
 
@@ -757,7 +981,8 @@ export type AssistantProject = typeof AssistantProject.Type;
 export const AssistantBoard = Schema.Struct({
   setups: Schema.optionalKey(Schema.Array(AssistantSetup)),
   projects: Schema.Array(AssistantProject),
-  tasks: Schema.Array(AssistantTask),
+  /** Summaries; a person opening an issue fetches the rest. See AssistantTaskSummary. */
+  tasks: Schema.Array(AssistantTaskSummary),
   decisions: Schema.Array(AssistantDecision),
 });
 export type AssistantBoard = typeof AssistantBoard.Type;
@@ -805,6 +1030,10 @@ export const AssistantAnswerInput = Schema.Struct({
   decisionId: TrimmedNonEmptyString,
   answer: TrimmedNonEmptyString,
 });
+/** One issue's whole record, for the person who opened it. See AssistantTaskSummary. */
+export const AssistantTaskDetailInput = Schema.Struct({ taskId: TrimmedNonEmptyString });
+export type AssistantTaskDetailInput = typeof AssistantTaskDetailInput.Type;
+
 export const AssistantReviewInput = Schema.Struct({
   taskId: TrimmedNonEmptyString,
   action: Schema.Literals(["accept", "request-changes", "skip", "retry"]),
@@ -820,7 +1049,7 @@ export const assistantTaskHoldsProject = (status: AssistantTaskStatus): boolean 
  * a defect goes back to the worker, the issue is coding again.
  */
 export const assistantTaskEngineeringChecksPending = (
-  task: Pick<AssistantTask, "status" | "stage" | "e2e">,
+  task: Pick<AssistantTaskSummary, "status" | "stage" | "e2e">,
 ): number =>
   assistantTaskHoldsProject(task.status) && (task.stage === "lead" || task.stage === "review")
     ? assistantE2ePendingEngineeringChecks(task.e2e)
@@ -884,7 +1113,7 @@ export const RESEARCH_PIPELINE: ReadonlyArray<PipelineStepDef> = [
 ];
 
 /** Where a research issue is: taken, researching, fact-checked, then with the person. */
-function researchPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> {
+function researchPipeline(task: AssistantTaskSummary): ReadonlyArray<PipelineStep> {
   const approved = task.research?.review?.verdict === "approved";
   const at = (() => {
     if (task.status === "review" || task.status === "accepted") return RESEARCH_PIPELINE.length;
@@ -921,7 +1150,9 @@ const SKIPPED_E2E_REASON_MAX = 48;
  * e2e depth none the e2e step stays in its place, skipped, and the issue
  * moves through the other steps as if it were not there.
  */
-export function assistantTaskPipeline(task: AssistantTask): ReadonlyArray<PipelineStep> | null {
+export function assistantTaskPipeline(
+  task: AssistantTaskSummary,
+): ReadonlyArray<PipelineStep> | null {
   if (task.stage === undefined) return null;
   if (assistantTaskTrack(task) === "research") return researchPipeline(task);
   const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
@@ -1060,7 +1291,9 @@ export const ASSISTANT_LINEAR_PLAN_CHECK = "Your check";
  * its pipeline, then the person's own check. An issue declined or skipped
  * cancels the steps it never finished. Empty for work with no pipeline.
  */
-export function assistantLinearPlan(task: AssistantTask): ReadonlyArray<AssistantLinearPlanStep> {
+export function assistantLinearPlan(
+  task: AssistantTaskSummary,
+): ReadonlyArray<AssistantLinearPlanStep> {
   const pipeline = assistantTaskPipeline(task);
   if (pipeline === null) return [];
   const ended = task.status === "declined" || task.status === "skipped";

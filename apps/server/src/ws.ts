@@ -2134,6 +2134,8 @@ const makeWsRpcLayer = (
           }),
         [WS_METHODS.assistantBoard]: () =>
           observeRpcEffect(WS_METHODS.assistantBoard, developerAssistant.board(null)),
+        [WS_METHODS.assistantTaskDetail]: (input) =>
+          observeRpcEffect(WS_METHODS.assistantTaskDetail, developerAssistant.taskDetail(input)),
         [WS_METHODS.assistantConfigure]: (input) =>
           observeRpcEffect(WS_METHODS.assistantConfigure, developerAssistant.configure(input)),
         [WS_METHODS.assistantSetupBegin]: (input) =>

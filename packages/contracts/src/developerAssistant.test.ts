@@ -1,9 +1,15 @@
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { ProjectId, ThreadId } from "./baseSchemas.ts";
 import {
+  assistantCheckRunHasOutput,
+  assistantE2eEvidenceCounts,
   assistantLinearPlan,
+  assistantResearchCounts,
   assistantTaskPipeline,
+  assistantTaskSummary,
+  AssistantE2eSummary,
   type AssistantTask,
 } from "./developerAssistant.ts";
 
@@ -38,6 +44,7 @@ const task = (overrides: Partial<AssistantTask> = {}): AssistantTask => {
 };
 
 const commit = "a".repeat(40);
+const now = "2026-09-13T00:00:00.000Z";
 const at = "2026-09-13T00:00:00.000Z";
 const approved = {
   codeReview: { verdict: "approved", findings: "", summary: "", commit, at },
@@ -389,5 +396,105 @@ describe("assistantLinearPlan", () => {
 
   it("is empty for work with no pipeline", () => {
     expect(assistantLinearPlan(task())).toEqual([]);
+  });
+});
+
+describe("assistantTaskSummary", () => {
+  const file = (name: string) => ({ url: `https://linear.app/${name}`, caption: name, path: name });
+  const full = (): AssistantTask =>
+    task({
+      status: "review",
+      brief: "The brief, at length. ".repeat(40),
+      summary: "What changed, at length. ".repeat(40),
+      reviewInstructions: "How to check it, at length. ".repeat(40),
+      criteria: ["Terms page loads", "Refund page loads"],
+      codeReview: { verdict: "approved", findings: "…", summary: "…", commit, at: now },
+      merge: { commit, summary: "What shipped, at length.", at: now },
+      checks: { command: "bun test", commit, exitCode: 0, output: "1 pass", at: now },
+      testNotes: { notes: "…", planChanged: false, commit, at: now },
+      linearCommentIds: ["comment-1"],
+      e2e: {
+        verdict: "partial",
+        report: "The whole report, at length. ".repeat(40),
+        checks: [
+          { criterion: 1, result: "passed", evidence: "Loaded it.", screenshot: 1 },
+          { criterion: 2, result: "not-checked", evidence: "Ran out of time." },
+        ],
+        humanChecks: ["Have a lawyer read it"],
+        engineeringChecks: ["Check the logs"],
+        worthALook: ["The footer wraps"],
+        screenshots: [file("one"), file("two")],
+        videos: [file("clip")],
+        at: now,
+      },
+    });
+
+  it("keeps what the board's rows read and drops what only a reader needs", () => {
+    const summary = assistantTaskSummary(full());
+    expect(summary.brief).toBeUndefined();
+    expect(summary.summary).toBeUndefined();
+    expect(summary.reviewInstructions).toBeUndefined();
+    expect(summary.testNotes).toBeUndefined();
+    expect(summary.linearCommentIds).toBeUndefined();
+    expect(summary.e2e?.report).toBeUndefined();
+    expect(summary.e2e?.screenshots).toBeUndefined();
+    expect(summary.e2e?.checks?.[0]?.evidence).toBeUndefined();
+    expect(summary.codeReview?.summary).toBeUndefined();
+    expect(summary.merge?.summary).toBeUndefined();
+    expect(summary.checks?.output).toBeUndefined();
+
+    expect(summary.status).toBe("review");
+    expect(summary.criteria).toEqual(["Terms page loads", "Refund page loads"]);
+    expect(summary.e2e?.verdict).toBe("partial");
+    expect(summary.e2e?.checks?.map((check) => check.result)).toEqual(["passed", "not-checked"]);
+    expect(summary.e2e?.checks?.[0]?.screenshot).toBe(1);
+    expect(summary.e2e?.humanChecks).toEqual(["Have a lawyer read it"]);
+    expect(summary.codeReview?.verdict).toBe("approved");
+    expect(summary.checks?.exitCode).toBe(0);
+  });
+
+  it("counts the evidence it left out, from either shape", () => {
+    const summary = assistantTaskSummary(full());
+    expect(assistantE2eEvidenceCounts(summary.e2e!)).toEqual({ screenshots: 2, videos: 1 });
+    // A server from before the detail request sends the files themselves.
+    expect(assistantE2eEvidenceCounts(full().e2e!)).toEqual({ screenshots: 2, videos: 1 });
+    expect(assistantCheckRunHasOutput(summary.checks!)).toBe(true);
+    expect(assistantCheckRunHasOutput(full().checks!)).toBe(true);
+  });
+
+  it("is smaller than the task it came from", () => {
+    const stored = full();
+    expect(JSON.stringify(assistantTaskSummary(stored)).length).toBeLessThan(
+      JSON.stringify(stored).length / 2,
+    );
+  });
+
+  it("accepts both what it sends and what an older server sends", () => {
+    const e2e = Schema.decodeUnknownSync(AssistantE2eSummary);
+    expect(() => e2e(assistantTaskSummary(full()).e2e)).not.toThrow();
+    // Servers from before the detail request send the whole result inline.
+    expect(() => e2e(full().e2e)).not.toThrow();
+  });
+
+  it("keeps a research report's counts and results without the report", () => {
+    const research = assistantTaskSummary(
+      task({
+        track: "research",
+        research: {
+          report: "The whole report.",
+          sources: [{ url: "https://example.com", title: "A page", seen: "2026-09-20" }],
+          checks: [{ criterion: 1, result: "answered", evidence: "Section two." }],
+          screenshots: [{ path: "one.png", caption: "one" }],
+          revision: 2,
+          at: now,
+          review: { verdict: "approved", findings: "…", summary: "…", revision: 2, at: now },
+        },
+      }),
+    ).research;
+    expect(research?.report).toBeUndefined();
+    expect(research?.sources).toBeUndefined();
+    expect(research?.checks).toEqual([{ criterion: 1, result: "answered" }]);
+    expect(research?.review?.verdict).toBe("approved");
+    expect(assistantResearchCounts(research!)).toEqual({ sources: 1, screenshots: 1 });
   });
 });

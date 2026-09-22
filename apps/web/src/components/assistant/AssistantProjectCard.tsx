@@ -5,7 +5,7 @@ import {
   type AssistantProjectConfig,
   type AssistantSetup,
   type AssistantStartOptions,
-  type AssistantTask,
+  type AssistantTaskSummary,
   type EnvironmentId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -183,7 +183,7 @@ function StartButton({
 /** The project's status in words, with a usage-limit reset in the person's clock format. */
 export function useProjectActivity(
   project: AssistantProject,
-  activeTasks: ReadonlyArray<AssistantTask>,
+  activeTasks: ReadonlyArray<AssistantTaskSummary>,
 ): ProjectActivity {
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
   const limitHold = projectLimitHold(project);
@@ -297,7 +297,7 @@ export function ProjectDispatchButton({
   environmentId: EnvironmentId;
   project: AssistantProject;
   title: string;
-  activeTasks: ReadonlyArray<AssistantTask>;
+  activeTasks: ReadonlyArray<AssistantTaskSummary>;
 }) {
   const [dispatching, setDispatching] = useState(false);
   return (
@@ -340,7 +340,7 @@ export function ProjectMenu({
 }: {
   project: AssistantProject;
   title: string;
-  activeTasks: ReadonlyArray<AssistantTask>;
+  activeTasks: ReadonlyArray<AssistantTaskSummary>;
   control: ProjectControl;
   onEditSetup?: () => void;
 }) {
@@ -486,7 +486,7 @@ export function AssistantProjectRow({
   environmentId: EnvironmentId;
   project: AssistantProject;
   title: string;
-  activeTasks: ReadonlyArray<AssistantTask>;
+  activeTasks: ReadonlyArray<AssistantTaskSummary>;
   onEditSetup: () => void;
   onOpenDetails: () => void;
 }) {

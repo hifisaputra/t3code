@@ -12,6 +12,8 @@ import {
   AssistantSetup,
   AssistantSetupInput,
   AssistantSetupResolveInput,
+  AssistantTask,
+  AssistantTaskDetailInput,
   DeveloperAssistantError,
 } from "./developerAssistant.ts";
 import {
@@ -454,6 +456,7 @@ export const WS_METHODS = {
   assistantSetE2eDepth: "assistant.setE2eDepth",
   assistantAddProjectNote: "assistant.addProjectNote",
   assistantDeleteProjectNote: "assistant.deleteProjectNote",
+  assistantTaskDetail: "assistant.taskDetail",
   assistantSubscribe: "assistant.subscribe",
 
   // Streaming subscriptions
@@ -1477,6 +1480,11 @@ export const WsRpcGroup = RpcGroup.make(
   Rpc.make(WS_METHODS.assistantDeleteProjectNote, {
     payload: AssistantDeleteProjectNoteInput,
     success: AssistantBoard,
+    error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.assistantTaskDetail, {
+    payload: AssistantTaskDetailInput,
+    success: Schema.NullOr(AssistantTask),
     error: Schema.Union([DeveloperAssistantError, EnvironmentAuthorizationError]),
   }),
   Rpc.make(WS_METHODS.assistantSubscribe, {

@@ -1,4 +1,10 @@
-import type { AssistantE2eResult, AssistantE2eVerdict, AssistantTask } from "@t3tools/contracts";
+import {
+  assistantE2eEvidenceCounts,
+  assistantResearchCounts,
+  type AssistantE2eSummary,
+  type AssistantE2eVerdict,
+  type AssistantTaskSummary,
+} from "@t3tools/contracts";
 
 import { engineeringChecksLine } from "./assistantBoard.logic";
 
@@ -15,14 +21,12 @@ export interface ReviewSummary {
   humanChecks: number;
   /** A tester ran and left nothing for the person: no checks, no failed or unchecked criterion. */
   nothingToCheck: boolean;
-  /** Worth opening on first sight: the person has checks to do or the run did not pass. */
-  startsOpen: boolean;
   engineering: { label: string; detail: string | null } | null;
 }
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
 
-function verdictLabel(task: AssistantTask, e2e: AssistantE2eResult | null) {
+function verdictLabel(task: AssistantTaskSummary, e2e: AssistantE2eSummary | null) {
   if (!e2e)
     return task.e2ePlan?.depth === "none"
       ? "No e2e test, verified on staging"
@@ -41,7 +45,7 @@ function verdictLabel(task: AssistantTask, e2e: AssistantE2eResult | null) {
 }
 
 /** What an issue waiting for acceptance amounts to, for its inbox card. */
-export function reviewSummary(task: AssistantTask): ReviewSummary {
+export function reviewSummary(task: AssistantTaskSummary): ReviewSummary {
   if (task.track === "research") {
     const research = task.research;
     const total = Math.max(task.criteria?.length ?? 0, research?.checks.length ?? 0);
@@ -55,16 +59,16 @@ export function reviewSummary(task: AssistantTask): ReviewSummary {
         tone: approved ? "verified" : "partial",
       },
       criteria: { passed: answered, total, label: `${answered} of ${total} questions answered` },
-      sources: research?.sources.length ?? 0,
-      screenshots: research?.screenshots.length ?? 0,
+      sources: research ? assistantResearchCounts(research).sources : 0,
+      screenshots: research ? assistantResearchCounts(research).screenshots : 0,
       videos: 0,
       humanChecks: 0,
       nothingToCheck: false,
-      startsOpen: true,
       engineering: null,
     };
   }
   const e2e = task.e2e ?? null;
+  const evidence = e2e ? assistantE2eEvidenceCounts(e2e) : { screenshots: 0, videos: 0 };
   const humanChecks = e2e?.humanChecks.length ?? 0;
   const ran = (e2e?.checks ?? []).filter((check) => check.result !== "skipped");
   const passed = ran.filter((check) => check.result === "passed").length;
@@ -78,11 +82,10 @@ export function reviewSummary(task: AssistantTask): ReviewSummary {
       ran.length > 0
         ? { passed, total: ran.length, label: `${passed} of ${ran.length} criteria passed` }
         : null,
-    screenshots: e2e?.screenshots.length ?? 0,
-    videos: e2e?.videos?.length ?? 0,
+    screenshots: evidence.screenshots,
+    videos: evidence.videos,
     humanChecks,
     nothingToCheck: e2e !== null && e2e.verdict !== "failed" && humanChecks === 0 && open === 0,
-    startsOpen: humanChecks > 0 || (e2e !== null && e2e.verdict !== "passed"),
     engineering: settled
       ? { label: "Engineering checks settled", detail: e2e.engineeringSettled?.trim() || null }
       : pending

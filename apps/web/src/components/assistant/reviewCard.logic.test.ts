@@ -1,4 +1,9 @@
-import { ProjectId, ThreadId, type AssistantTask } from "@t3tools/contracts";
+import {
+  ProjectId,
+  ThreadId,
+  type AssistantTask,
+  type AssistantTaskSummary,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { reviewOutcomeLine, reviewSummary } from "./reviewCard.logic";
@@ -14,7 +19,7 @@ const e2e = (overrides: Partial<E2e> = {}): E2e => ({
   ...overrides,
 });
 
-const task = (overrides: Partial<AssistantTask> = {}): AssistantTask => ({
+const task = (overrides: Partial<AssistantTaskSummary> = {}): AssistantTaskSummary => ({
   id: "task-1",
   projectId: ProjectId.make("project-1"),
   issue: {
@@ -39,7 +44,7 @@ const task = (overrides: Partial<AssistantTask> = {}): AssistantTask => ({
 });
 
 describe("reviewSummary", () => {
-  it("offers a quick accept for a clean pass and keeps it collapsed", () => {
+  it("offers a quick accept for a clean pass", () => {
     const summary = reviewSummary(
       task({
         e2e: e2e({
@@ -54,19 +59,17 @@ describe("reviewSummary", () => {
     );
     expect(summary.kind).toBe("Ready to accept");
     expect(summary.nothingToCheck).toBe(true);
-    expect(summary.startsOpen).toBe(false);
     expect(reviewOutcomeLine(summary)).toBe(
       "Passed e2e on staging · 2 of 2 criteria passed · 1 screenshot · nothing left for you to check",
     );
   });
 
-  it("opens and withholds the quick accept when the person has checks", () => {
+  it("withholds the quick accept when the person has checks", () => {
     const summary = reviewSummary(
       task({ e2e: e2e({ verdict: "partial", humanChecks: ["Read the email"] }) }),
     );
     expect(summary.kind).toBe("Check and accept");
     expect(summary.nothingToCheck).toBe(false);
-    expect(summary.startsOpen).toBe(true);
     expect(reviewOutcomeLine(summary)).toBe("Partly passed e2e on staging · 1 check for you");
   });
 
@@ -83,8 +86,23 @@ describe("reviewSummary", () => {
   it("leaves work without a tester to the person's own check", () => {
     const summary = reviewSummary(task({ e2ePlan: null }));
     expect(summary.nothingToCheck).toBe(false);
-    expect(summary.startsOpen).toBe(false);
     expect(summary.verdict).toEqual({ label: "Verified on staging", tone: "verified" });
+  });
+
+  it("counts the evidence the board sent as counts", () => {
+    const summary = reviewSummary(
+      task({
+        e2e: {
+          verdict: "passed",
+          at: "2026-09-13T00:00:00.000Z",
+          humanChecks: [],
+          screenshotCount: 3,
+          videoCount: 2,
+        },
+      }),
+    );
+    expect(summary.screenshots).toBe(3);
+    expect(summary.videos).toBe(2);
   });
 
   it("counts recordings next to screenshots", () => {
@@ -144,7 +162,6 @@ describe("research review", () => {
       task({ track: "research", criteria: ["What does it cost?"], research: research() }),
     );
     expect(summary.verdict.label).toBe("Fact-check approved");
-    expect(summary.startsOpen).toBe(true);
     expect(summary.nothingToCheck).toBe(false);
     expect(summary.engineering).toBeNull();
     expect(reviewOutcomeLine(summary)).toBe("1 of 1 questions answered · 1 source · 1 screenshot");

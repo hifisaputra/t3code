@@ -182,9 +182,11 @@ that process during setup; until the instructions allow it, the assistant does n
 
 ## Review delivered work
 
-The review card contains the change summary, the e2e report and any checks left for you, the staging
-URL, and the verified commit. Staging can contain later issues by the time you review; the recorded commit identifies
-what was verified for that delivery.
+Each delivered issue gets a row under **Needs you**; opening one gives it the whole page, with the
+change summary, the e2e report, any checks left for you, the tester's screenshots and recordings, the
+staging URL and the verified commit. The other issues waiting for you stay listed beside it, so you can
+work through them in one sitting, and answering one moves to the next. Staging can contain later issues
+by the time you review; the recorded commit identifies what was verified for that delivery.
 
 **Accept** records your review and applies the configured Linear acceptance state. **Request changes**
 records feedback, and the loop gives the issue to a new team as soon as one is free. The new

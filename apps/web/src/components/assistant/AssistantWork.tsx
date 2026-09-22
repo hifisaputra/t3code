@@ -1,13 +1,13 @@
 import {
+  assistantCheckRunHasOutput,
   assistantParallelIssues,
   assistantTaskE2eEnvironment,
   assistantThreadKind,
   type AssistantBoard,
-  type AssistantCheckRun,
   type AssistantDecision,
   type AssistantE2eDepth,
   type AssistantProject,
-  type AssistantTask,
+  type AssistantTaskSummary,
   type EnvironmentId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -38,6 +38,7 @@ import { formatElapsedDurationLabel, formatRelativeTimeLabel } from "~/timestamp
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
+import { Skeleton } from "../ui/skeleton";
 import { Spinner } from "../ui/spinner";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -61,7 +62,7 @@ import {
   EvidenceNotes,
   RecordingList,
   ScreenshotGrid,
-  useScreenshotViewer,
+  useEvidenceViewer,
 } from "./AssistantReviewEvidence";
 import { teamHolder, TeamThreads, useTeamShells } from "./AssistantTeam";
 import {
@@ -76,6 +77,7 @@ import {
   type StatusTone,
 } from "./assistantUi";
 import { THREAD_KIND, threadKind, ResearchBadge } from "./threadKinds";
+import { useAssistantTaskDetail } from "./useAssistantTaskDetail";
 
 const PHASE_STYLE: Record<TaskPhaseTone, string> = {
   active: "bg-success/8 text-success-foreground",
@@ -257,7 +259,7 @@ function E2ePlanDetails({
   editable,
 }: {
   environmentId: EnvironmentId;
-  task: AssistantTask;
+  task: AssistantTaskSummary;
   editable: boolean;
 }) {
   const setE2eDepth = useAtomCommand(developerAssistant.setE2eDepth);
@@ -342,42 +344,116 @@ function E2ePlanDetails({
 }
 
 /**
+ * A long text that lives in the issue's detail rather than on the board,
+ * fetched the first time a person opens it. Used where a card offers a text it
+ * would otherwise carry for every issue on the board, whether read or not.
+ */
+function DetailSection({
+  environmentId,
+  task,
+  title,
+  read,
+  children,
+}: {
+  environmentId: EnvironmentId;
+  task: AssistantTaskSummary;
+  title: string;
+  /** The text from the whole issue, once it is here. */
+  read: (task: AssistantTaskSummary) => string | undefined;
+  /** Rendered in place of the text; the default reads it as markdown. */
+  children?: (text: string) => ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger className="group inline-flex items-center gap-1 font-medium text-muted-foreground text-xs hover:text-foreground">
+        <ChevronRightIcon
+          aria-hidden
+          className="size-3.5 transition-transform group-data-panel-open:rotate-90"
+        />
+        {title}
+      </CollapsibleTrigger>
+      <CollapsiblePanel>
+        <div className="mt-2 rounded-lg border border-border/60 p-3">
+          {open ? (
+            <DetailText environmentId={environmentId} task={task} read={read}>
+              {children}
+            </DetailText>
+          ) : null}
+        </div>
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
+function DetailText({
+  environmentId,
+  task,
+  read,
+  children,
+}: {
+  environmentId: EnvironmentId;
+  task: AssistantTaskSummary;
+  read: (task: AssistantTaskSummary) => string | undefined;
+  children?: ((text: string) => ReactNode) | undefined;
+}) {
+  const detail = useAssistantTaskDetail(environmentId, task);
+  const text = detail.task ? read(detail.task) : undefined;
+  if (detail.error) return <p className="text-warning-foreground text-xs">{detail.error}</p>;
+  if (text === undefined) return <Skeleton className="h-12" />;
+  if (!text.trim()) return <p className="text-muted-foreground text-xs">Nothing was written.</p>;
+  return children ? (
+    children(text)
+  ) : (
+    <ExpandableMarkdown text={text} environmentId={environmentId} />
+  );
+}
+
+/**
  * The project's own check command as T3 ran it for the last review request. A
  * red run never reached the reviewer: the worker was sent back with this output.
  */
-function CheckRunLine({ checks }: { checks: AssistantCheckRun }) {
+function CheckRunLine({
+  environmentId,
+  task,
+  checks,
+}: {
+  environmentId: EnvironmentId;
+  task: AssistantTaskSummary;
+  checks: NonNullable<AssistantTaskSummary["checks"]>;
+}) {
   const passed = checks.exitCode === 0;
-  const line = (
-    <>
-      <span className={passed ? "text-success-foreground" : "text-destructive-foreground"}>
-        {passed ? "Checks passed" : `Checks failed (exit ${checks.exitCode})`}
-      </span>{" "}
-      at <span className="font-mono">{checks.commit.slice(0, 7)}</span>
-    </>
-  );
-  if (!checks.output.trim()) return <p className="text-muted-foreground text-xs">{line}</p>;
+  const label = passed ? "Checks passed" : `Checks failed (exit ${checks.exitCode})`;
+  const commit = checks.commit.slice(0, 7);
+  if (!assistantCheckRunHasOutput(checks))
+    return (
+      <p className="text-muted-foreground text-xs">
+        <span className={passed ? "text-success-foreground" : "text-destructive-foreground"}>
+          {label}
+        </span>{" "}
+        at <span className="font-mono">{commit}</span>
+      </p>
+    );
   return (
-    <Collapsible>
-      <CollapsibleTrigger className="group inline-flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
-        <ChevronRightIcon
-          aria-hidden
-          className="size-3.5 shrink-0 transition-transform group-data-panel-open:rotate-90"
-        />
-        {line}
-      </CollapsibleTrigger>
-      <CollapsiblePanel>
-        <div className="mt-1.5 rounded-lg border border-border/60 p-2">
+    <DetailSection
+      environmentId={environmentId}
+      task={task}
+      title={`${label} at ${commit}`}
+      read={(whole) => whole.checks?.output}
+    >
+      {(output) => (
+        <>
           {checks.command.trim() ? (
             <p className="mb-1 break-all font-mono text-[11px] text-muted-foreground">
               {checks.command}
             </p>
           ) : null}
           <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px]">
-            {checks.output}
+            {output}
           </pre>
-        </div>
-      </CollapsiblePanel>
-    </Collapsible>
+        </>
+      )}
+    </DetailSection>
   );
 }
 
@@ -392,7 +468,7 @@ export function ActiveTaskCard({
   onShowDecision,
 }: {
   environmentId: EnvironmentId;
-  task: AssistantTask;
+  task: AssistantTaskSummary;
   project: AssistantProject | undefined;
   projectLabel: string | null;
   decisions: ReadonlyArray<AssistantDecision>;
@@ -402,7 +478,9 @@ export function ActiveTaskCard({
 }) {
   const review = useAtomCommand(developerAssistant.review);
   const { pending, run } = useAssistantAction();
-  const viewer = useScreenshotViewer(environmentId, task);
+  // An issue still being worked has nothing to show yet; its evidence arrives
+  // with the review, where it is read.
+  const viewer = useEvidenceViewer(environmentId, null);
   const shells = useTeamShells(environmentId, task);
   const worker = shells.implement;
   // The phase follows whichever of the issue's threads holds it.
@@ -624,7 +702,9 @@ export function ActiveTaskCard({
         ) : null}
       </div>
 
-      {task.checks ? <CheckRunLine checks={task.checks} /> : null}
+      {task.checks ? (
+        <CheckRunLine environmentId={environmentId} task={task} checks={task.checks} />
+      ) : null}
 
       {task.criteria?.length ? (
         <div>
@@ -638,22 +718,12 @@ export function ActiveTaskCard({
 
       <E2ePlanDetails environmentId={environmentId} task={task} editable />
 
-      {task.brief.trim() ? (
-        <Collapsible>
-          <CollapsibleTrigger className="group inline-flex items-center gap-1 font-medium text-muted-foreground text-xs hover:text-foreground">
-            <ChevronRightIcon
-              aria-hidden
-              className="size-3.5 transition-transform group-data-panel-open:rotate-90"
-            />
-            {task.leader ? "The team leader's brief" : "What the assistant asked for"}
-          </CollapsibleTrigger>
-          <CollapsiblePanel>
-            <div className="mt-2 rounded-lg border border-border/60 p-3">
-              <ExpandableMarkdown text={task.brief} environmentId={environmentId} />
-            </div>
-          </CollapsiblePanel>
-        </Collapsible>
-      ) : null}
+      <DetailSection
+        environmentId={environmentId}
+        task={task}
+        title={task.leader ? "The team leader's brief" : "What the assistant asked for"}
+        read={(whole) => whole.brief}
+      />
     </article>
   );
 }
@@ -672,8 +742,8 @@ export function AssistantQueue({
   projectLabel,
 }: {
   environmentId: EnvironmentId;
-  tasks: ReadonlyArray<AssistantTask>;
-  projectLabel: (task: AssistantTask) => string | null;
+  tasks: ReadonlyArray<AssistantTaskSummary>;
+  projectLabel: (task: AssistantTaskSummary) => string | null;
 }) {
   const review = useAtomCommand(developerAssistant.review);
   const { pending, run } = useAssistantAction();
@@ -769,11 +839,15 @@ function HistoryRecord({
 }: {
   environmentId: EnvironmentId;
   board: AssistantBoard | null;
-  task: AssistantTask;
+  task: AssistantTaskSummary;
   onOpenThread: (threadId: ThreadId) => void;
 }) {
   const shells = useTeamShells(environmentId, task);
-  const viewer = useScreenshotViewer(environmentId, task);
+  // Mounted only while its row is open, so a long history costs nothing until
+  // the person opens one: this is where a finished issue's evidence is fetched.
+  const detail = useAssistantTaskDetail(environmentId, task);
+  const opened = detail.task ?? task;
+  const viewer = useEvidenceViewer(environmentId, detail.task);
   const worker = shells.implement;
   const outcome = taskOutcome(task);
   // Null once the worker thread is archived: the shell it came from is gone.
@@ -848,30 +922,33 @@ function HistoryRecord({
       </div>
 
       {task.track === "research" ? (
-        <ResearchEvidence task={task} environmentId={environmentId} viewer={viewer} />
+        <ResearchEvidence task={opened} environmentId={environmentId} viewer={viewer} />
       ) : (
         <>
-          {task.checks ? <CheckRunLine checks={task.checks} /> : null}
+          {task.checks ? (
+            <CheckRunLine environmentId={environmentId} task={task} checks={task.checks} />
+          ) : null}
 
-          {task.merge?.summary.trim() ? (
-            <RecordSection title="What shipped">
-              <ExpandableMarkdown text={task.merge.summary} environmentId={environmentId} />
-            </RecordSection>
+          {task.merge ? (
+            <DetailSection
+              environmentId={environmentId}
+              task={task}
+              title="What shipped"
+              read={(whole) => whole.merge?.summary}
+            />
           ) : null}
           {task.criteria?.length ? (
             <RecordSection title="Acceptance criteria">
-              <CriteriaResults task={task} viewer={viewer} />
+              <CriteriaResults task={opened} viewer={viewer} />
             </RecordSection>
           ) : null}
           {task.codeReview ? (
-            <RecordSection title="Code review">
-              <p className="mb-2 font-medium text-xs">
-                {CODE_REVIEW_VERDICT[task.codeReview.verdict]}
-              </p>
-              {task.codeReview.summary.trim() ? (
-                <ExpandableMarkdown text={task.codeReview.summary} environmentId={environmentId} />
-              ) : null}
-            </RecordSection>
+            <DetailSection
+              environmentId={environmentId}
+              task={task}
+              title={`Code review · ${CODE_REVIEW_VERDICT[task.codeReview.verdict]}`}
+              read={(whole) => whole.codeReview?.summary}
+            />
           ) : null}
           {task.e2e ? (
             <RecordSection title="E2E check">
@@ -881,8 +958,8 @@ function HistoryRecord({
                   <E2ePlanDetails environmentId={environmentId} task={task} editable={false} />
                 </div>
               ) : null}
-              {task.e2e.report.trim() ? (
-                <ExpandableMarkdown text={task.e2e.report} environmentId={environmentId} />
+              {opened.e2e?.report?.trim() ? (
+                <ExpandableMarkdown text={opened.e2e.report} environmentId={environmentId} />
               ) : null}
               {task.e2e.humanChecks.length > 0 ? (
                 <div className="mt-3">
@@ -915,24 +992,27 @@ function HistoryRecord({
               <E2ePlanDetails environmentId={environmentId} task={task} editable={false} />
             </RecordSection>
           ) : null}
-          {task.reviewInstructions.trim() ? (
-            <RecordSection title="How to check it">
-              <ExpandableMarkdown text={task.reviewInstructions} environmentId={environmentId} />
-            </RecordSection>
-          ) : null}
+          <DetailSection
+            environmentId={environmentId}
+            task={task}
+            title="How to check it"
+            read={(whole) => whole.reviewInstructions}
+          />
         </>
       )}
-      {task.brief.trim() ? (
-        <RecordSection
-          title={task.leader ? "The team leader's brief" : "What the assistant asked for"}
-        >
-          <ExpandableMarkdown text={task.brief} environmentId={environmentId} />
-        </RecordSection>
-      ) : null}
-      {task.track !== "research" && task.summary.trim() ? (
-        <RecordSection title="Summary">
-          <ExpandableMarkdown text={task.summary} environmentId={environmentId} />
-        </RecordSection>
+      <DetailSection
+        environmentId={environmentId}
+        task={task}
+        title={task.leader ? "The team leader's brief" : "What the assistant asked for"}
+        read={(whole) => whole.brief}
+      />
+      {task.track !== "research" ? (
+        <DetailSection
+          environmentId={environmentId}
+          task={task}
+          title="Summary"
+          read={(whole) => whole.summary}
+        />
       ) : null}
       {viewer.dialog}
     </div>
@@ -950,7 +1030,7 @@ function HistoryRow({
 }: {
   environmentId: EnvironmentId;
   board: AssistantBoard | null;
-  task: AssistantTask;
+  task: AssistantTaskSummary;
   projectLabel: string | null;
   expanded: boolean;
   onToggle: () => void;
@@ -1016,8 +1096,8 @@ export function AssistantHistory({
 }: {
   environmentId: EnvironmentId;
   board: AssistantBoard | null;
-  tasks: ReadonlyArray<AssistantTask>;
-  projectLabel: (task: AssistantTask) => string | null;
+  tasks: ReadonlyArray<AssistantTaskSummary>;
+  projectLabel: (task: AssistantTaskSummary) => string | null;
   onOpenThread: (threadId: ThreadId) => void;
 }) {
   const [showAll, setShowAll] = useState(false);

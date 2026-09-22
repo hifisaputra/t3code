@@ -3,7 +3,7 @@ import {
   type AssistantDecision,
   type AssistantProject,
   type AssistantSetup,
-  type AssistantTask,
+  type AssistantTaskSummary,
   type EnvironmentId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -11,7 +11,6 @@ import {
   ArrowUpRightIcon,
   CheckIcon,
   ChevronDownIcon,
-  ExternalLinkIcon,
   MessageCircleQuestionIcon,
   OctagonAlertIcon,
   PauseCircleIcon,
@@ -21,7 +20,6 @@ import {
   ShieldQuestionIcon,
   SkipForwardIcon,
   SparklesIcon,
-  UndoIcon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
@@ -34,21 +32,8 @@ import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
 import { Spinner } from "../ui/spinner";
 import { Textarea } from "../ui/textarea";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { decisionOptions, previewLine, type InboxItem } from "./assistantBoard.logic";
 import {
-  CriteriaResults,
-  ResearchEvidence,
-  EvidenceHeading,
-  EvidenceNotes,
-  HumanChecklist,
-  RecordingList,
-  ScreenshotGrid,
-  useScreenshotViewer,
-} from "./AssistantReviewEvidence";
-import { TeamThreads } from "./AssistantTeam";
-import {
-  CommitChip,
   confirmDestructive,
   ExpandableMarkdown,
   IssueLink,
@@ -186,7 +171,7 @@ function RowLinks({
   threadLabel,
   onOpenThread,
 }: {
-  issue?: AssistantTask["issue"] | undefined;
+  issue?: AssistantTaskSummary["issue"] | undefined;
   thread?: ThreadId;
   threadLabel?: string;
   onOpenThread: (threadId: ThreadId) => void;
@@ -213,7 +198,7 @@ function IssueContext({
   issue,
 }: {
   project: string | null;
-  issue?: AssistantTask["issue"] | undefined;
+  issue?: AssistantTaskSummary["issue"] | undefined;
 }) {
   return (
     <>
@@ -233,9 +218,11 @@ export interface InboxContext {
   /** Project names, shown only when more than one project could be meant. */
   projectLabel: (projectId: AssistantProject["config"]["projectId"]) => string | null;
   projectTitle: (projectId: AssistantProject["config"]["projectId"]) => string;
-  tasks: ReadonlyArray<AssistantTask>;
+  tasks: ReadonlyArray<AssistantTaskSummary>;
   projects: ReadonlyArray<AssistantProject>;
   onOpenThread: (threadId: ThreadId) => void;
+  /** Opens one finished issue to read and answer; see AssistantReviewView. */
+  onOpenReview: (taskId: string) => void;
   onReviewSetup: (setup: AssistantSetup) => void;
   isExpanded: (key: string) => boolean;
   onToggle: (key: string) => void;
@@ -253,7 +240,7 @@ export function InboxItemCard({ item, context }: { item: InboxItem; context: Inb
     case "decision":
       return <DecisionCard decision={item.decision} context={context} row={row} />;
     case "review":
-      return <ReviewCard task={item.task} context={context} row={row} />;
+      return <ReviewRow task={item.task} context={context} row={row} />;
     case "stuck":
       return <StuckTaskCard task={item.task} reason={item.reason} context={context} row={row} />;
     case "paused":
@@ -436,287 +423,97 @@ const VERDICT_TONE: Record<ReviewVerdictTone, { dot: StatusTone; text: string }>
 };
 
 /**
- * Finished work waiting for the person to accept it: what changed, what the
- * tester checked and showed, and what is left for the person to check. Work
- * with nothing left to check can be accepted from the collapsed row.
+ * Finished work waiting to be accepted, as one row: what it is, how the run
+ * went, and the way in. The reading — the summary, the tester's evidence, the
+ * screenshots and the recordings — happens in the review view, which is where
+ * the files are fetched. Work with nothing left to check can be accepted from
+ * here without opening it at all.
  */
-function ReviewCard({
+function ReviewRow({
   task,
   context,
   row,
 }: {
-  task: AssistantTask;
+  task: AssistantTaskSummary;
   context: InboxContext;
   row: RowState;
 }) {
   const review = useAtomCommand(developerAssistant.review);
   const { pending, run } = useAssistantAction();
-  const [requesting, setRequesting] = useState(false);
-  const [feedback, setFeedback] = useState("");
-  // Ticks live here, not in the body, so collapsing the card keeps them.
-  const [ticked, setTicked] = useState<ReadonlySet<number>>(() => new Set());
-  const viewer = useScreenshotViewer(context.environmentId, task);
   const summary = reviewSummary(task);
-  // The page keeps one set of toggled keys, closed by default. A card worth
-  // opening at once reads membership inverted, so it starts open and the
-  // person's first click closes it.
-  const expanded = summary.startsOpen ? !row.expanded : row.expanded;
-  const e2e = task.e2e ?? null;
-  const acceptedState =
-    context.projects.find((p) => p.config.projectId === task.projectId)?.config.acceptedState ??
-    "done";
   const tone = VERDICT_TONE[summary.verdict.tone];
-  const submit = (action: "accept" | "request-changes") =>
-    run(
-      action,
-      () =>
-        review({
-          environmentId: context.environmentId,
-          input: { taskId: task.id, action, feedback: action === "accept" ? "" : feedback.trim() },
-        }),
-      {
-        failure: action === "accept" ? "Could not accept the work" : "Could not send it back",
-        success:
-          action === "accept"
-            ? `${task.issue.identifier} accepted`
-            : `${task.issue.identifier} sent back for changes`,
-      },
-    );
-  const acceptButton = (size: "xs" | "sm") => (
-    <Button
-      size={size}
-      variant={size === "xs" ? "outline" : "default"}
-      disabled={pending !== null}
-      onClick={() => void submit("accept")}
-    >
-      {pending === "accept" ? <Spinner className="size-3.5" /> : <CheckIcon />}
-      Accept
-    </Button>
-  );
-  const stagingButton =
-    task.track !== "research" && task.deployment ? (
-      <Button
-        size="xs"
-        variant="outline"
-        render={<a href={task.deployment.url} target="_blank" rel="noreferrer" />}
-      >
-        <ExternalLinkIcon />
-        Open staging
-      </Button>
-    ) : null;
-  const humanChecks = e2e?.humanChecks ?? [];
-
+  const open = () => context.onOpenReview(task.id);
   return (
-    <InboxRow
-      {...row}
-      expanded={expanded}
-      accent="review"
-      kind={summary.kind}
-      context={
-        <>
-          <span className="shrink-0 font-mono">{task.issue.identifier}</span>
-          <ResearchBadge track={task.track} />
-          {context.projectLabel(task.projectId) ? (
-            <span className="min-w-0 truncate">{context.projectLabel(task.projectId)}</span>
-          ) : null}
-        </>
-      }
-      summary={<span className="font-medium">{task.issue.title}</span>}
-      detail={expanded ? null : reviewOutcomeLine(summary)}
-      at={task.deployment?.verifiedAt ?? task.updatedAt}
-      actions={
-        !expanded && summary.nothingToCheck ? (
-          <>
-            {stagingButton}
-            {acceptButton("xs")}
-          </>
-        ) : null
-      }
+    <article
+      id={row.id}
+      className="relative flex min-w-0 scroll-mt-4 items-start gap-3 rounded-xl border border-border/70 bg-card px-4 py-3 shadow-xs/5 transition-colors hover:bg-accent/40"
     >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg bg-muted/50 px-3 py-2 text-xs">
-        <span className={cn("inline-flex items-center gap-1.5 font-medium", tone.text)}>
-          <StatusDot tone={tone.dot} />
-          {summary.verdict.label}
-        </span>
-        {summary.criteria ? (
-          <span className="text-muted-foreground">{summary.criteria.label}</span>
-        ) : null}
-        {summary.engineering ? (
-          summary.engineering.detail ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span className="cursor-default text-muted-foreground underline decoration-dotted underline-offset-2" />
-                }
-              >
-                {summary.engineering.label}
-              </TooltipTrigger>
-              <TooltipPopup className="max-w-80 whitespace-pre-line">
-                {summary.engineering.detail}
-              </TooltipPopup>
-            </Tooltip>
-          ) : (
-            <span className="text-muted-foreground">{summary.engineering.label}</span>
-          )
-        ) : null}
-        {task.track !== "research" && task.deployment ? (
-          <CommitChip revision={task.deployment.revision} />
-        ) : null}
-        {(task.track === "research" ? undefined : task.deployment?.evidence)?.map((entry) => (
-          <span
-            key={entry.targetId}
-            className="inline-flex items-center gap-1 text-muted-foreground"
-          >
-            <CheckIcon aria-hidden className="size-3 text-success-foreground" />
-            {entry.targetId} deployed
-          </span>
-        ))}
-        <span className="ml-auto flex items-center gap-3">
-          {stagingButton}
-          <IssueLink issue={task.issue} />
-        </span>
-      </div>
-      {task.track === "research" ? (
-        <ResearchEvidence task={task} environmentId={context.environmentId} viewer={viewer} />
-      ) : (
-        <>
-          {task.summary.trim() ? (
-            <ExpandableMarkdown
-              text={task.summary}
-              environmentId={context.environmentId}
-              collapsedClassName="max-h-28"
-            />
-          ) : null}
-          {humanChecks.length > 0 ? (
-            <section>
-              <EvidenceHeading count={`${ticked.size} of ${humanChecks.length}`}>
-                Check before accepting
-              </EvidenceHeading>
-              <HumanChecklist
-                checks={humanChecks}
-                ticked={ticked}
-                onTick={(index, checked) =>
-                  setTicked((current) => {
-                    const next = new Set(current);
-                    if (checked) next.add(index);
-                    else next.delete(index);
-                    return next;
-                  })
-                }
-              />
-            </section>
-          ) : null}
-          {task.criteria?.length || e2e?.checks?.length ? (
-            <section>
-              <EvidenceHeading>
-                {e2e ? "What the tester checked" : "Acceptance criteria"}
-              </EvidenceHeading>
-              <CriteriaResults task={task} viewer={viewer} />
-            </section>
-          ) : null}
-          {viewer.shots.length > 0 ? (
-            <section>
-              <EvidenceHeading count={viewer.shots.length}>Screenshots</EvidenceHeading>
-              <ScreenshotGrid viewer={viewer} />
-            </section>
-          ) : null}
-          {viewer.videos.length > 0 ? (
-            <section>
-              <EvidenceHeading count={viewer.videos.length}>Recordings</EvidenceHeading>
-              <RecordingList viewer={viewer} />
-            </section>
-          ) : null}
-          {e2e?.worthALook?.length ? (
-            <section>
-              <EvidenceHeading>Worth a look</EvidenceHeading>
-              <EvidenceNotes items={e2e.worthALook} />
-            </section>
-          ) : null}
-          {task.reviewInstructions.trim() ? (
-            <div className="rounded-lg bg-muted/50 px-3 py-2.5">
-              <EvidenceHeading>{e2e ? "Staging check" : "How to check it"}</EvidenceHeading>
-              <ExpandableMarkdown
-                text={task.reviewInstructions}
-                environmentId={context.environmentId}
-                collapsedClassName="max-h-32"
-              />
-            </div>
-          ) : null}
-        </>
-      )}
-      {task.error ? (
-        <p className="rounded-lg bg-warning/8 px-3 py-2 text-warning-foreground text-xs">
-          {task.error}
-        </p>
-      ) : null}
-      {requesting ? (
-        <form
-          className="flex flex-col gap-2 border-border/60 border-t pt-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (feedback.trim()) void submit("request-changes");
-          }}
-        >
-          <Textarea
-            size="sm"
-            autoFocus
-            aria-label={`Changes you want in ${task.issue.identifier}`}
-            placeholder={
-              task.track === "research"
-                ? "What should the team research or correct?"
-                : "What should change? A fresh worker starts from the current integration branch."
-            }
-            value={feedback}
-            onChange={(event) => setFeedback(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && feedback.trim()) {
-                event.preventDefault();
-                void submit("request-changes");
-              }
-            }}
-            className="[&_textarea]:min-h-16"
-          />
-          <div className="flex justify-end gap-2">
-            <Button type="button" size="sm" variant="ghost" onClick={() => setRequesting(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" size="sm" disabled={!feedback.trim() || pending !== null}>
-              {pending === "request-changes" ? <Spinner className="size-3.5" /> : <UndoIcon />}
-              Send back
-            </Button>
-          </div>
-        </form>
-      ) : null}
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-2 border-border/60 border-t pt-3">
-        {requesting ? null : (
-          <>
-            {acceptButton("sm")}
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={pending !== null}
-              onClick={() => setRequesting(true)}
-            >
-              <UndoIcon />
-              Request changes
-            </Button>
-            <span className="text-muted-foreground text-xs">
-              Accepting moves the issue to {acceptedState}
-            </span>
-          </>
+      <span
+        className={cn(
+          "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md",
+          ACCENT.review.tint,
         )}
-        <div className="ml-auto">
-          <TeamThreads
-            label="Team"
-            size="sm"
-            environmentId={context.environmentId}
-            task={task}
-            onOpenThread={context.onOpenThread}
-          />
-        </div>
+      >
+        <CheckIcon aria-hidden className="size-3.5" />
+      </span>
+      <button
+        type="button"
+        onClick={open}
+        className="block min-w-0 flex-1 text-left after:absolute after:inset-0 after:rounded-xl focus-visible:outline-none"
+      >
+        <span className="flex min-w-0 items-center gap-1.5 text-xs">
+          <span className="shrink-0 font-medium">{summary.kind}</span>
+          <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+            <span aria-hidden>·</span>
+            <span className="shrink-0 font-mono">{task.issue.identifier}</span>
+            <ResearchBadge track={task.track} />
+            {context.projectLabel(task.projectId) ? (
+              <span className="min-w-0 truncate">{context.projectLabel(task.projectId)}</span>
+            ) : null}
+          </span>
+          <span className="ml-auto shrink-0 pl-2 text-muted-foreground/80 tabular-nums">
+            {formatRelativeTimeLabel(task.deployment?.verifiedAt ?? task.updatedAt)}
+          </span>
+        </span>
+        <span className="mt-0.5 block truncate font-medium text-sm">{task.issue.title}</span>
+        <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs">
+          <StatusDot tone={tone.dot} className="shrink-0" />
+          <span className="min-w-0 truncate text-muted-foreground">
+            {reviewOutcomeLine(summary)}
+          </span>
+        </span>
+      </button>
+      <div className="relative z-10 flex shrink-0 items-center gap-1.5 self-center">
+        {summary.nothingToCheck ? (
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={pending !== null}
+            onClick={() =>
+              void run(
+                "accept",
+                () =>
+                  review({
+                    environmentId: context.environmentId,
+                    input: { taskId: task.id, action: "accept", feedback: "" },
+                  }),
+                {
+                  failure: "Could not accept the work",
+                  success: `${task.issue.identifier} accepted`,
+                },
+              )
+            }
+          >
+            {pending === "accept" ? <Spinner className="size-3.5" /> : <CheckIcon />}
+            Accept
+          </Button>
+        ) : null}
+        <Button size="xs" onClick={open}>
+          Review
+          <ArrowUpRightIcon />
+        </Button>
       </div>
-      {viewer.dialog}
-    </InboxRow>
+    </article>
   );
 }
 
@@ -726,7 +523,7 @@ function StuckTaskCard({
   context,
   row,
 }: {
-  task: AssistantTask;
+  task: AssistantTaskSummary;
   reason: "rounds" | "stopped";
   context: InboxContext;
   row: RowState;

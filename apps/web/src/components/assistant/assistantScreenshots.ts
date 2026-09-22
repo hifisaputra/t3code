@@ -19,12 +19,12 @@ import { usePreparedConnection } from "../../state/session";
  */
 export function useAssistantEvidenceUrls(
   environmentId: EnvironmentId,
-  threadId: ThreadId,
+  threadId: ThreadId | null,
   files: ReadonlyArray<{ readonly path?: string | undefined }>,
 ): ReadonlyArray<string | null> {
   const resources: Array<AssetResource> = [];
   const resourceIndex = files.map((file) => {
-    if (file.path === undefined) return null;
+    if (file.path === undefined || threadId === null) return null;
     resources.push({ _tag: "media-file", threadId, path: file.path });
     return resources.length - 1;
   });

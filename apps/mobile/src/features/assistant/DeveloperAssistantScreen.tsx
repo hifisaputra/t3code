@@ -6,7 +6,8 @@ import {
 import {
   assistantTaskThreadId,
   type AssistantBoard,
-  type AssistantTask,
+  type AssistantTaskSummary,
+  type EnvironmentId,
   type ThreadId,
 } from "@t3tools/contracts";
 import { useState } from "react";
@@ -231,6 +232,7 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
         .map((t) => (
           <MobileReview
             key={t.id}
+            environmentId={environmentId}
             task={t}
             busy={busy}
             openThread={openThread}
@@ -297,25 +299,35 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
 }
 
 function MobileReview({
+  environmentId,
   task,
   busy,
   openThread,
   onReview,
 }: {
-  task: AssistantTask;
+  environmentId: EnvironmentId;
+  task: AssistantTaskSummary;
   busy: boolean;
   openThread: (id: ThreadId) => void;
   onReview: (action: "accept" | "request-changes", feedback: string) => void;
 }) {
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The board carries summaries; what changed and how to check it are the
+  // issue's own record, asked for once a review is on screen.
+  const detail = useEnvironmentQuery(
+    task.brief === undefined
+      ? developerAssistant.taskDetail({ environmentId, input: { taskId: task.id } })
+      : null,
+  );
+  const opened = detail.data ?? task;
   return (
     <View className="gap-3 rounded-xl border border-border p-4">
       <Text className="font-semibold text-foreground">
         Ready for review · {task.issue.identifier}
       </Text>
-      <Text className="text-foreground">{task.summary}</Text>
-      <Text className="text-foreground-muted">{task.reviewInstructions}</Text>
+      <Text className="text-foreground">{opened.summary ?? "Loading…"}</Text>
+      <Text className="text-foreground-muted">{opened.reviewInstructions ?? ""}</Text>
       <Text className="text-xs text-foreground-muted">
         Verified {task.deployment?.revision.slice(0, 8)} · staging may include later changes
       </Text>

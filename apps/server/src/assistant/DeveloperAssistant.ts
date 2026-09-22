@@ -38,6 +38,7 @@ import {
   assistantTaskE2eEnvironment,
   assistantTaskEngineeringChecksPending,
   assistantTaskHoldsProject,
+  assistantTaskSummary,
   assistantTaskThreadId,
   assistantTaskTrack,
   assistantThreadKind,
@@ -48,6 +49,7 @@ import {
   type AssistantDeployment,
   type AssistantE2eCheck,
   type AssistantE2eDepth,
+  type AssistantTaskDetailInput,
   type AssistantE2ePlan,
   type AssistantE2eResult,
   type AssistantProjectNote,
@@ -560,7 +562,8 @@ export const make = Effect.gen(function* () {
     if (!owner[0]) return null;
     return { task: yield* decodeTask(owner[0].data), role: match[1] as AssistantThreadRole };
   });
-  const taskThreadIds = (t: AssistantTask) => ROLES.map((role) => assistantTaskThreadId(t, role));
+  const taskThreadIds = (t: Pick<AssistantTask, "id" | "threadId">) =>
+    ROLES.map((role) => assistantTaskThreadId(t, role));
   /** The issues the project's teams hold right now, oldest first; one per slot. */
   const heldTasks = Effect.fn("Assistant.heldTasks")(function* (projectId: string) {
     const rows =
@@ -871,7 +874,11 @@ export const make = Effect.gen(function* () {
           })),
         ),
       ),
-      tasks: yield* Effect.forEach(tasks, (t) => decodeTask(t.data)),
+      // Summaries: the board re-sends on every change, so an issue's long-form
+      // text and evidence are fetched per issue instead. See taskDetail.
+      tasks: yield* Effect.forEach(tasks, (t) =>
+        Effect.map(decodeTask(t.data), assistantTaskSummary),
+      ),
       decisions: yield* Effect.forEach(decisions, (d) =>
         decodeDecision(d.data).pipe(
           Effect.map((value) =>
@@ -880,6 +887,17 @@ export const make = Effect.gen(function* () {
         ),
       ),
     } satisfies AssistantBoard;
+  }, Effect.mapError(wrap));
+
+  /**
+   * One issue's whole record, for the person who opened it on the board. Null
+   * for an issue the server no longer has, which a stale board can still name.
+   */
+  const taskDetail = Effect.fn("Assistant.taskDetail")(function* (
+    input: typeof AssistantTaskDetailInput.Type,
+  ) {
+    const rows = yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE id = ${input.taskId}`;
+    return rows[0] ? yield* decodeTask(rows[0].data) : null;
   }, Effect.mapError(wrap));
 
   /** A tool only one of an active issue's threads may call. */
@@ -4450,6 +4468,7 @@ export const make = Effect.gen(function* () {
     proposeSetup,
     resolveSetup,
     board,
+    taskDetail,
     configure,
     control,
     answer,

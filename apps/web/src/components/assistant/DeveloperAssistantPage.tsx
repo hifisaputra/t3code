@@ -37,6 +37,7 @@ import { Skeleton } from "../ui/skeleton";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { AssistantProjectRow, AssistantSetupRow } from "./AssistantProjectCard";
+import { AssistantReviewView } from "./AssistantReviewView";
 import { AssistantProjectPanel, type ProjectPanelTab } from "./AssistantProjectPanel";
 import { AssistantSetupDialog } from "./AssistantSetupDialog";
 import { AssistantSetupSheet } from "./AssistantSetupReview";
@@ -178,6 +179,7 @@ function AssistantEnvironment({
 }) {
   const environmentId = environment.environmentId;
   const navigate = useNavigate();
+  const { review: openedReview } = useSearch({ from: "/_chat/assistant" });
   const allProjects = useProjects();
   const projects = useMemo(
     () => allProjects.filter((p) => p.environmentId === environmentId),
@@ -220,6 +222,12 @@ function AssistantEnvironment({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams({ environmentId, threadId }),
     });
+  // The issue being read lives in the URL, so a review survives a reload and
+  // can be linked to; dropping it is what goes back to the board.
+  const openReview = (taskId: string) =>
+    void navigate({ to: "/assistant", search: { environment: environmentId, review: taskId } });
+  const closeReview = () =>
+    void navigate({ to: "/assistant", search: { environment: environmentId } });
   const openSetup = (projectId: ProjectId | null) => setDialog({ key: Date.now(), projectId });
   const openPanel = (projectId: ProjectId, tab: ProjectPanelTab = "setup") =>
     setPanel({ projectId, tab, open: true });
@@ -254,6 +262,9 @@ function AssistantEnvironment({
   const multiple = assistantProjectIds.size > 1;
   const projectLabel = (id: ProjectId) => (multiple ? projectTitle(id) : null);
   const inbox = buildInbox(data);
+  // The queue the review view moves through, in the order the board lists it.
+  const reviews = inbox.flatMap((item) => (item.kind === "review" ? [item.task] : []));
+  const reading = reviews.find((task) => task.id === openedReview) ?? null;
   const stuck = new Set(inbox.flatMap((item) => (item.kind === "stuck" ? [item.task.id] : [])));
   const active = data.tasks.filter((t) => assistantTaskHoldsProject(t.status) && !stuck.has(t.id));
   const history = historyTasks(data);
@@ -277,6 +288,7 @@ function AssistantEnvironment({
     tasks: data.tasks,
     projects: data.projects,
     onOpenThread: openThread,
+    onOpenReview: openReview,
     onReviewSetup: (setup: AssistantSetup) => setReviewing(setup.threadId),
     isExpanded: (key) => expanded.has(key),
     onToggle: toggle,
@@ -295,6 +307,30 @@ function AssistantEnvironment({
       Add project
     </Button>
   ) : null;
+
+  // Reading one finished issue takes the whole page: its evidence is the only
+  // evidence fetched, and the rail keeps the rest of the queue one click away.
+  if (reading)
+    return (
+      <>
+        <PageHeader environments={environments} environment={environment} />
+        {board.error ? <StaleBoardWarning reason={board.error} /> : null}
+        <AssistantReviewView
+          environmentId={environmentId}
+          board={data}
+          task={reading}
+          reviews={reviews}
+          projectLabel={projectLabel(reading.projectId)}
+          acceptedState={
+            data.projects.find((p) => p.config.projectId === reading.projectId)?.config
+              .acceptedState ?? "done"
+          }
+          onSelect={openReview}
+          onBack={closeReview}
+          onOpenThread={openThread}
+        />
+      </>
+    );
 
   return (
     <>

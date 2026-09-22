@@ -4876,6 +4876,11 @@ export default function Sidebar() {
                             projectFaviconPath={projectFaviconPathByKey.get(projectKey) ?? null}
                             projectIcon={projectIconByKey.get(projectKey) ?? null}
                             projectTitle={projectTitleByKey.get(projectKey) ?? null}
+                            projectDisplayName={
+                              projectDisplayNameByKey.get(
+                                `${first.environmentId}:${first.projectId}`,
+                              ) ?? null
+                            }
                             timestampFormat={timestampFormat}
                             onThreadClick={handleThreadClick}
                             onThreadActivate={navigateToThread}

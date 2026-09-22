@@ -1,7 +1,7 @@
 import {
   assistantTaskThreadId,
   type AssistantBoard,
-  type AssistantTask,
+  type AssistantTaskSummary,
   type AssistantTaskTrack,
   type AssistantThreadRole,
   type EnvironmentId,
@@ -32,7 +32,7 @@ export type TeamShells = Readonly<Record<AssistantThreadRole, EnvironmentThreadS
  */
 export function useTeamShells(
   environmentId: EnvironmentId,
-  task: Pick<AssistantTask, "id" | "threadId"> | null,
+  task: Pick<AssistantTaskSummary, "id" | "threadId"> | null,
 ): TeamShells {
   const ref = (role: AssistantThreadRole) =>
     task === null ? null : { environmentId, threadId: assistantTaskThreadId(task, role) };
@@ -46,7 +46,7 @@ export function useTeamShells(
 
 /** The thread that holds the issue right now, whose turn the phase describes. */
 export function teamHolder(
-  task: Pick<AssistantTask, "stage">,
+  task: Pick<AssistantTaskSummary, "stage">,
   shells: TeamShells,
 ): EnvironmentThreadShell | null {
   switch (task.stage) {
@@ -68,7 +68,7 @@ export function teamHolder(
  * thread that never existed has nothing to restore.
  */
 export function teamThreadEverRan(
-  task: Pick<AssistantTask, "leader" | "turns" | "codeReview" | "e2e" | "research">,
+  task: Pick<AssistantTaskSummary, "leader" | "turns" | "codeReview" | "e2e" | "research">,
   role: AssistantThreadRole,
 ): boolean {
   switch (role) {
@@ -252,7 +252,7 @@ export function TeamThreads({
   label,
 }: {
   environmentId: EnvironmentId;
-  task: AssistantTask;
+  task: AssistantTaskSummary;
   /** Only needed where a thread may be holding an unanswered question. */
   board?: AssistantBoard | null;
   onOpenThread: (threadId: ThreadId) => void;

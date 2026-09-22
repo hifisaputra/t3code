@@ -20,13 +20,14 @@ import {
   ProviderInstanceId,
   ThreadId,
   TurnId,
+  assistantE2eEvidenceCounts,
   assistantTaskHoldsProject,
   assistantTaskThreadId,
   type AssistantE2eCheck,
   type AssistantResearchCheck,
   type AssistantProject,
   type AssistantProjectConfig,
-  type AssistantTask,
+  type AssistantTaskSummary,
   type LinearIssueDetail,
   type LinearPrepareIssueThreadInput,
   type OrchestrationCommand,
@@ -676,25 +677,36 @@ const turnsOf = (h: Harness, threadId: ThreadId) =>
   h.commands.flatMap((c) =>
     c.type === "thread.turn.start" && c.threadId === threadId ? [c.message.text] : [],
   );
-const leadOf = (t: AssistantTask) => assistantTaskThreadId(t, "lead");
+const leadOf = (t: AssistantTaskSummary) => assistantTaskThreadId(t, "lead");
 /** The tester's result for the single criterion the helpers take an issue with. */
 const oneCheck = (
   result: AssistantE2eCheck["result"],
   evidence = "Opened the page and it loaded.",
 ): ReadonlyArray<AssistantE2eCheck> => [{ criterion: 1, result, evidence }];
-const activeTask = (service: Service) =>
-  service
-    .board(null)
-    .pipe(Effect.map((b) => b.tasks.find((t) => assistantTaskHoldsProject(t.status))!));
+/**
+ * The whole record of an issue the board named. The board carries summaries,
+ * so anything written on the issue itself is read the way a client reads it.
+ */
 const taskById = (service: Service, id: string) =>
-  service.board(null).pipe(Effect.map((b) => b.tasks.find((t) => t.id === id)!));
+  service.taskDetail({ taskId: id }).pipe(Effect.map((t) => t!));
+const activeTask = (service: Service) =>
+  Effect.gen(function* () {
+    const b = yield* service.board(null);
+    const held = b.tasks.find((t) => assistantTaskHoldsProject(t.status));
+    // Undefined when no team holds the project, which several tests assert.
+    return held === undefined ? held! : yield* taskById(service, held.id);
+  });
 
 /** Every issue the project's teams hold, by identifier. */
 /** The person dispatches an issue from the board; the task it became. */
 const dispatchIssue = (service: Service, reference: string, note = "") =>
   service
     .dispatch({ projectId: config.projectId, reference, note })
-    .pipe(Effect.map((b) => b.tasks.find((t) => t.issue.identifier === reference)!));
+    .pipe(
+      Effect.flatMap((b) =>
+        taskById(service, b.tasks.find((t) => t.issue.identifier === reference)!.id),
+      ),
+    );
 
 const heldTasks = (service: Service) =>
   service
@@ -733,7 +745,7 @@ type E2ePlan = {
 const takeTask = (
   h: Harness,
   service: Service,
-  t: AssistantTask,
+  t: AssistantTaskSummary,
   brief = "Fix it",
   criteria: ReadonlyArray<string> = ["The page loads"],
   e2e: E2ePlan | null = null,
@@ -762,7 +774,7 @@ const takeIssue = (h: Harness, service: Service, brief = "Fix it") =>
 const testNotes = { testNotes: "Open /report and export a CSV.", planChanged: false };
 
 /** The code reviewer approves the worker's commit. */
-const approveReview = (h: Harness, service: Service, t: AssistantTask, notes = testNotes) =>
+const approveReview = (h: Harness, service: Service, t: AssistantTaskSummary, notes = testNotes) =>
   Effect.gen(function* () {
     const reviewer = assistantTaskThreadId(t, "review");
     yield* service.deliver();
@@ -775,7 +787,7 @@ const approveReview = (h: Harness, service: Service, t: AssistantTask, notes = t
   });
 
 /** Carry a taken issue through review and merge, ready for staging. */
-const reachMerge = (h: Harness, service: Service, t: AssistantTask, notes = testNotes) =>
+const reachMerge = (h: Harness, service: Service, t: AssistantTaskSummary, notes = testNotes) =>
   Effect.gen(function* () {
     const reviewer = assistantTaskThreadId(t, "review");
     yield* service.deliver();
@@ -795,7 +807,7 @@ const reachMerge = (h: Harness, service: Service, t: AssistantTask, notes = test
   });
 
 /** The team leader, told about the merge, verifies staging and starts e2e. */
-const leadToE2e = (h: Harness, service: Service, t: AssistantTask) =>
+const leadToE2e = (h: Harness, service: Service, t: AssistantTaskSummary) =>
   Effect.gen(function* () {
     yield* service.deliver();
     yield* service.verifyStaging(leadOf(t));
@@ -805,7 +817,7 @@ const leadToE2e = (h: Harness, service: Service, t: AssistantTask) =>
   });
 
 /** Carry a taken issue through merge, staging and a passing e2e run. */
-const deliverIssue = (h: Harness, service: Service, t: AssistantTask) =>
+const deliverIssue = (h: Harness, service: Service, t: AssistantTaskSummary) =>
   Effect.gen(function* () {
     const tester = assistantTaskThreadId(t, "e2e");
     yield* reachMerge(h, service, t);
@@ -1133,6 +1145,49 @@ it.effect("the loop gives one issue at a time to a team and moves on after e2e",
     const next = yield* activeTask(service);
     assert.equal(next.issue.identifier, "APP-2");
     assert.deepEqual(h.transitions, ["review"]);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("the board carries summaries and the whole issue comes from taskDetail", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service, "Fix the reminder email");
+    yield* reachMerge(h, service, first);
+    yield* leadToE2e(h, service, first);
+    yield* service.submitE2e(assistantTaskThreadId(first, "e2e"), {
+      checks: oneCheck("passed", "Opened the page and the banner was gone."),
+      report: "- The page loads: passed",
+      humanChecks: ["Read the copy once more."],
+      screenshots: [{ path: `/evidence/${first.id}/page.png`, caption: "The page" }],
+    });
+
+    const listed = (yield* service.board(null)).tasks.find((t) => t.id === first.id)!;
+    // What a row and a card read is on the board.
+    assert.equal(listed.status, "review");
+    assert.equal(listed.e2e?.verdict, "passed");
+    assert.deepEqual(listed.e2e?.checks, [{ criterion: 1, result: "passed" }]);
+    assert.deepEqual(listed.e2e?.humanChecks, ["Read the copy once more."]);
+    assert.deepEqual(assistantE2eEvidenceCounts(listed.e2e!), { screenshots: 1, videos: 0 });
+    // What only a person who opened it reads is not.
+    assert.isUndefined(listed.brief);
+    assert.isUndefined(listed.summary);
+    assert.isUndefined(listed.reviewInstructions);
+    assert.isUndefined(listed.e2e?.report);
+    assert.isUndefined(listed.e2e?.screenshots);
+    assert.isUndefined(listed.e2e?.checks?.[0]?.evidence);
+
+    const opened = yield* taskById(service, first.id);
+    assert.equal(opened.brief, "Fix the reminder email");
+    assert.include(opened.reviewInstructions, "Read the copy once more.");
+    assert.equal(opened.e2e?.report, "- The page loads: passed");
+    assert.equal(opened.e2e?.checks?.[0]?.evidence, "Opened the page and the banner was gone.");
+    assert.deepEqual(
+      opened.e2e?.screenshots?.map((s) => s.path),
+      [`/evidence/${first.id}/page.png`],
+    );
+    // An issue the server no longer has, which a stale board can still name.
+    assert.isNull(yield* service.taskDetail({ taskId: "gone" }));
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -4256,7 +4311,7 @@ it.effect("a declined issue keeps its comment and ends its session with the reas
 /** The person replies on the team's Linear session, as Linear delegation hands it on. */
 const linearReply = (
   h: Harness,
-  t: AssistantTask,
+  t: AssistantTaskSummary,
   deliveryId: string,
   body: string,
   signal?: string,
@@ -4981,8 +5036,8 @@ it.effect("the person sets the depth on the board until the test starts", () =>
     const leaderTurns = turnsOf(h, lead).length;
     assert.include(turnsOf(h, lead).at(-1), "the work changed from your plan");
     // Choosing no test answers it: the issue is delivered without waking anyone.
-    const board = yield* service.setE2eDepth({ taskId: first.id, depth: "none" });
-    const delivered = board.tasks.find((t) => t.id === first.id)!;
+    yield* service.setE2eDepth({ taskId: first.id, depth: "none" });
+    const delivered = yield* taskById(service, first.id);
     assert.equal(delivered.status, "review");
     assert.equal(delivered.e2ePlan?.reason, "Set by the person on the board.");
     assert.match(h.comments.at(-1)!.body, /^\*\*No e2e test: set by the person on the board\*\*/);
@@ -5042,8 +5097,8 @@ it.effect("choosing no test after a failed run on staging delivers while the lea
     const busy = yield* service.setE2eDepth({ taskId: first.id, depth: "none" });
     assert.equal(busy.tasks.find((t) => t.id === first.id)?.status, "working");
     yield* endTurn(h, service, lead);
-    const board = yield* service.setE2eDepth({ taskId: first.id, depth: "none" });
-    const delivered = board.tasks.find((t) => t.id === first.id)!;
+    yield* service.setE2eDepth({ taskId: first.id, depth: "none" });
+    const delivered = yield* taskById(service, first.id);
     assert.equal(delivered.status, "review");
     assert.equal(delivered.e2e?.verdict, "failed");
     const card = h.comments.at(-1)!.body;
@@ -5326,7 +5381,7 @@ it.effect("engineering checks hold the worktree merge until the leader settles t
 /** The questions a research issue is taken with in these tests. */
 const researchQuestions = ["Names Acme's per-seat price", "Says which tool is cheapest"];
 /** The team leader takes its issue as research; the research worker's first turn is queued. */
-const takeResearch = (h: Harness, service: Service, t: AssistantTask) =>
+const takeResearch = (h: Harness, service: Service, t: AssistantTaskSummary) =>
   Effect.gen(function* () {
     yield* service.deliver();
     yield* service.acceptIssue(
@@ -5341,7 +5396,7 @@ const takeResearch = (h: Harness, service: Service, t: AssistantTask) =>
   });
 /** A report that passes T3's checks, one check per question. */
 const researchInput = (
-  t: AssistantTask,
+  t: AssistantTaskSummary,
 ): Parameters<Service["submitResearch"]>[1] & {
   readonly checks: ReadonlyArray<AssistantResearchCheck>;
 } => ({
@@ -5355,7 +5410,7 @@ const researchInput = (
   screenshots: [{ path: `/evidence/${t.id}/acme.png`, caption: "Acme pricing page" }],
 });
 /** The research worker submits its report and its turn ends; the reviewer's turn is queued. */
-const submitReport = (h: Harness, service: Service, t: AssistantTask) =>
+const submitReport = (h: Harness, service: Service, t: AssistantTaskSummary) =>
   Effect.gen(function* () {
     yield* service.deliver();
     const submitted = yield* service.submitResearch(t.threadId, researchInput(t));

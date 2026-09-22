@@ -2,7 +2,7 @@ import {
   assistantParallelIssues,
   assistantTaskHoldsProject,
   type AssistantProject,
-  type AssistantTask,
+  type AssistantTaskSummary,
   type EnvironmentId,
 } from "@t3tools/contracts";
 import { SendIcon } from "lucide-react";
@@ -31,7 +31,7 @@ import { useAssistantAction } from "./assistantUi";
 /** When a dispatched issue would start, given what the project is doing now. */
 export function dispatchTiming(
   project: AssistantProject,
-  activeTasks: ReadonlyArray<AssistantTask>,
+  activeTasks: ReadonlyArray<AssistantTaskSummary>,
 ) {
   if (project.status === "stopped")
     return "The assistant is stopped, so the issue waits until you start it or resume the teams.";
@@ -61,7 +61,7 @@ export function AssistantDispatchDialog({
 }: {
   environmentId: EnvironmentId;
   project: AssistantProject;
-  activeTasks: ReadonlyArray<AssistantTask>;
+  activeTasks: ReadonlyArray<AssistantTaskSummary>;
   title: string;
   reference?: string;
   open: boolean;
