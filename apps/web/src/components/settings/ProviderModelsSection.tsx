@@ -312,13 +312,7 @@ export function ProviderModelsSection({
         render={
           <Button
             size="icon-micro"
-            variant="ghost"
-            className={cn(
-              "[--control-icon-color:currentColor]",
-              isFavorite
-                ? "text-yellow-500 hover:text-yellow-600"
-                : "text-muted-foreground/40 hover:text-muted-foreground",
-            )}
+            variant="ghost-muted"
             onClick={() => handleToggleFavorite(model.slug)}
             aria-label={`${isFavorite ? "Remove" : "Add"} ${model.name} ${
               isFavorite ? "from" : "to"
@@ -326,7 +320,7 @@ export function ProviderModelsSection({
           />
         }
       >
-        <StarIcon className={cn("size-3", isFavorite && "fill-current")} />
+        <StarIcon className={cn("size-3", isFavorite && "fill-current text-warning")} />
       </TooltipTrigger>
       <TooltipPopup side="top">
         {isFavorite ? "Remove from favorites" : "Add to favorites"}
@@ -514,7 +508,7 @@ export function ProviderModelsSection({
             onChange={(event) => setFilter(event.target.value)}
             placeholder="Filter models"
             size="sm"
-            className="w-56"
+            className="w-56 max-w-full"
             spellCheck={false}
             aria-label="Filter models"
           />
@@ -540,6 +534,18 @@ export function ProviderModelsSection({
             {hiddenCount > 0 ? ` · ${hiddenCount} hidden` : ""}
           </span>
         </div>
+        {driverKind !== "antigravity" && !isAdding ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost-muted"
+            className="ml-auto"
+            onClick={() => setIsAdding(true)}
+          >
+            <PlusIcon className="size-3" />
+            Add custom model
+          </Button>
+        ) : null}
       </div>
       <div
         ref={listRef}
@@ -619,18 +625,7 @@ export function ProviderModelsSection({
             </Button>
           </div>
         </div>
-      ) : (
-        <Button
-          type="button"
-          size="xs"
-          variant="ghost-muted"
-          className="mt-2 -ml-2"
-          onClick={() => setIsAdding(true)}
-        >
-          <PlusIcon className="size-3" />
-          Add custom model
-        </Button>
-      )}
+      ) : null}
 
       {driverKind !== "antigravity" && error ? (
         <p className="mt-2 text-xs text-destructive">{error}</p>

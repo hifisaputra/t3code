@@ -15,6 +15,7 @@ import {
   BotIcon,
   createLucideIcon,
   GitBranchIcon,
+  HardDriveIcon,
   PanelsTopLeftIcon,
   KeyboardIcon,
   Link2Icon,
@@ -26,7 +27,6 @@ import {
 import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
 import { Kbd } from "../ui/kbd";
 import {
   SidebarContent,
@@ -36,16 +36,19 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   useSidebar,
+  SidebarInput,
 } from "../ui/sidebar";
 import { SidebarUtilityMenu } from "../sidebar/SidebarChrome";
 import { scrollToSettingsTarget } from "./settingsLayout";
 import {
   searchSettings,
+  isSettingsOverviewVisible,
   SETTINGS_SECTION_LABELS,
   type SettingsPath,
   type SettingsSearchItem,
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
+import { validateSettingsScopeSearch } from "./settingsScope";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -81,6 +84,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/providers": BotIcon,
   "/settings/integrations": BlocksIcon,
   "/settings/source-control": GitBranchIcon,
+  "/settings/storage": HardDriveIcon,
   "/settings/connections": Link2Icon,
   "/settings/archived": ArchiveIcon,
 };
@@ -103,6 +107,11 @@ function SettingsSectionIcon({ to }: { to: SettingsPath }) {
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const navigate = useNavigate();
   const currentHash = useLocation({ select: (location) => location.hash });
+  const currentSearch = useLocation({ select: (location) => location.search });
+  const scopeSearch = useMemo(() => validateSettingsScopeSearch(currentSearch), [currentSearch]);
+  const navItems = SETTINGS_NAV_ITEMS.filter(
+    (item) => item.to !== "/settings/projects" || isSettingsOverviewVisible(scopeSearch),
+  );
   const { isMobile, setOpenMobile, open, setOpen } = useSidebar();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
@@ -181,18 +190,12 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
         setOpenMobile(false);
       }
       const targetId = item.targetId ?? item.id;
-      if (
-        item.to !== "/settings/projects" &&
-        pathname === item.to &&
-        currentHash.replace(/^#/, "") === targetId
-      ) {
+      if (pathname === item.to && currentHash.replace(/^#/, "") === targetId) {
         scrollToSettingsTarget(targetId);
         return;
       }
       void navigate({
         to: item.to,
-        search: (previous) =>
-          item.to === "/settings/projects" ? { ...previous, project: undefined } : previous,
         hash: targetId,
         replace: true,
         hashScrollIntoView: false,
@@ -231,13 +234,12 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   return (
     <>
       <SidebarContent className="overflow-x-hidden">
-        <SidebarGroup className="gap-2 p-[var(--sidebar-content-inset)]">
+        <SidebarGroup className="gap-2">
           <div className="flex h-8 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground">
             <SearchIcon className="size-4 shrink-0 text-sidebar-muted-foreground/80" />
-            <Input
+            <SidebarInput
               ref={searchInputRef}
               nativeInput
-              unstyled
               type="search"
               value={query}
               onChange={(event) => {
@@ -256,7 +258,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                   ? `settings-search-result-${results[activeResultIndex].id}`
                   : undefined
               }
-              className="min-w-0 flex-1 [&_[data-slot=input]]:h-auto [&_[data-slot=input]]:p-0 [&_[data-slot=input]]:leading-normal [&_[data-slot=input]]:text-sm [&_[data-slot=input]]:font-medium [&_[data-slot=input]]:text-sidebar-foreground [&_[data-slot=input]]:placeholder:text-sidebar-muted-foreground"
+              className="min-w-0 flex-1"
             />
             {isSearching ? (
               <Button
@@ -273,7 +275,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                 <XIcon className="size-3" />
               </Button>
             ) : (
-              <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px]">/</Kbd>
+              <Kbd>/</Kbd>
             )}
           </div>
           {isSearching && results.length === 0 ? (
@@ -319,9 +321,12 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
             </SidebarMenu>
           ) : (
             <SidebarMenu className="ps-px">
-              {SETTINGS_NAV_ITEMS.map((item) => {
+              {navItems.map((item) => {
                 const Icon = item.icon;
-                const isActive = pathname === item.to || pathname.startsWith(`${item.to}/`);
+                const isGeneralDetailPage =
+                  item.to === "/settings/general" && pathname === "/settings/open-source-licenses";
+                const isActive =
+                  isGeneralDetailPage || pathname === item.to || pathname.startsWith(`${item.to}/`);
                 return (
                   <SidebarMenuItem key={item.to}>
                     <SidebarMenuButton
@@ -338,7 +343,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
           )}
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter className="p-[var(--sidebar-content-inset)]">
+      <SidebarFooter>
         <Suspense fallback={null}>
           <T3ConnectSidebarSignIn />
         </Suspense>

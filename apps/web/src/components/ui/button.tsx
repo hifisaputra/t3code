@@ -33,10 +33,13 @@ const buttonVariants = cva(
         micro:
           "h-5 gap-1 rounded-sm px-[calc(--spacing(1.5)-1px)] text-[11px] before:rounded-[calc(var(--radius-sm)-1px)] sm:text-[11px] [&_svg:not([class*='size-'])]:size-3 sm:[&_svg:not([class*='size-'])]:size-3",
         sm: "h-8 gap-1.5 px-[calc(--spacing(2.5)-1px)] sm:h-7",
+        "sm-multiline":
+          "min-h-8 gap-1.5 px-[calc(--spacing(2.5)-1px)] py-[calc(--spacing(1)-1px)] whitespace-normal sm:min-h-7",
         xl: "h-11 px-[calc(--spacing(4)-1px)] text-lg sm:h-10 sm:text-base [&_svg:not([class*='size-'])]:size-5 sm:[&_svg:not([class*='size-'])]:size-4.5",
         xs: "h-7 gap-1 px-[calc(--spacing(2)-1px)] text-sm sm:h-6 sm:text-xs [&_svg:not([class*='size-'])]:size-4 sm:[&_svg:not([class*='size-'])]:size-3.5",
       },
       variant: {
+        chip: "",
         default:
           "not-disabled:inset-shadow-[0_1px_--theme(--color-white/16%)] border-primary bg-primary text-primary-foreground shadow-primary/24 shadow-xs [:active,[data-pressed]]:inset-shadow-[0_1px_--theme(--color-black/8%)] [:disabled,:active,[data-pressed]]:shadow-none [:hover,[data-pressed]]:bg-primary/90",
         destructive:
@@ -46,10 +49,16 @@ const buttonVariants = cva(
         ghost:
           "[--control-icon-color:var(--contrast-muted-foreground)] border-transparent text-foreground data-pressed:bg-accent [:hover,[data-pressed]]:bg-accent",
         "ghost-muted":
-          "[--control-icon-color:var(--contrast-muted-foreground)] border-transparent text-muted-foreground data-pressed:bg-accent [:hover,[data-pressed]]:bg-accent [:hover,[data-pressed]]:text-foreground",
+          "[--control-icon-color:currentColor] border-transparent text-muted-foreground data-pressed:bg-accent [:hover,[data-pressed]]:bg-accent [:hover,[data-pressed]]:text-foreground",
+        "ghost-destructive":
+          "[--control-icon-color:currentColor] border-transparent text-muted-foreground data-pressed:bg-accent [:hover,[data-pressed]]:bg-accent [:hover,[data-pressed]]:text-destructive",
         glass:
           "surface-glass [--control-icon-color:var(--contrast-muted-foreground)] border-border/60 text-foreground shadow-sm [:hover,[data-pressed]]:border-border",
         link: "border-transparent underline-offset-4 [:hover,[data-pressed]]:underline",
+        "media-close":
+          "[--control-icon-color:currentColor] border-transparent bg-black/65 text-white shadow-sm ring-1 ring-white/20 [:hover,[data-pressed]]:bg-black/80 focus-visible:ring-white",
+        "media-navigation":
+          "[--control-icon-color:currentColor] absolute top-1/2 z-20 -translate-y-1/2 border-transparent text-white/90 [:hover,[data-pressed]]:bg-white/10 [:hover,[data-pressed]]:text-white focus-visible:ring-white",
         outline:
           "[--control-icon-color:var(--contrast-muted-foreground)] border-input bg-popover not-dark:bg-clip-padding text-foreground shadow-xs/5 not-disabled:not-active:not-data-pressed:before:shadow-[0_1px_--theme(--color-black/4%)] dark:bg-input/32 dark:not-disabled:before:shadow-[0_-1px_--theme(--color-white/2%)] dark:not-disabled:not-active:not-data-pressed:before:shadow-[0_-1px_--theme(--color-white/6%)] [:disabled,:active,[data-pressed]]:shadow-none [:hover,[data-pressed]]:bg-accent/50 dark:[:hover,[data-pressed]]:bg-input/64",
         overlay: "border-transparent bg-black/70 text-white/65 [:hover,[data-pressed]]:bg-black/90",
@@ -73,7 +82,8 @@ function Button({ className, variant, size, render, ...props }: ButtonProps) {
     : "button";
 
   const defaultProps = {
-    className: cn(buttonVariants({ className, size, variant })),
+    className:
+      variant === "chip" ? cn(className) : cn(buttonVariants({ className, size, variant })),
     "data-slot": "button",
     type: typeValue,
   };
@@ -87,22 +97,38 @@ function Button({ className, variant, size, render, ...props }: ButtonProps) {
 
 export { Button, buttonVariants };
 
-/** An inline action that keeps the geometry of surrounding text or a graph node. */
+const inlineButtonVariants = cva(
+  "inline-flex shrink-0 cursor-pointer items-center gap-0.5 whitespace-nowrap font-medium underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-64",
+  {
+    defaultVariants: { tone: "default" },
+    variants: {
+      tone: {
+        default: "text-foreground",
+        muted: "text-muted-foreground hover:text-foreground",
+        destructive: "text-destructive/80 hover:text-destructive",
+        /** Opens a menu from inside a sentence; the dotted underline marks it as a choice. */
+        picker:
+          "gap-1.5 text-foreground underline decoration-foreground/30 decoration-dotted decoration-from-font underline-offset-4 hover:decoration-foreground hover:decoration-solid data-popup-open:decoration-foreground data-popup-open:decoration-solid",
+      },
+    },
+  },
+);
+
+/** An inline text action that keeps the size of the surrounding text and underlines on hover. */
 export function InlineButton({
   className,
-  underline = false,
+  tone,
+  render,
   ...props
-}: React.ComponentProps<"button"> & { underline?: boolean }) {
-  return (
-    <button
-      type="button"
-      data-slot="inline-button"
-      className={cn(
-        "inline-flex shrink-0 cursor-pointer items-center gap-0.5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-64",
-        underline && "border-b border-transparent hover:border-current",
-        className,
-      )}
-      {...props}
-    />
-  );
+}: useRender.ComponentProps<"button"> & VariantProps<typeof inlineButtonVariants>) {
+  const defaultProps = {
+    className: cn(inlineButtonVariants({ tone }), className),
+    "data-slot": "inline-button",
+    type: render ? undefined : ("button" as const),
+  };
+  return useRender({
+    defaultTagName: "button",
+    props: mergeProps<"button">(defaultProps, props),
+    render,
+  });
 }

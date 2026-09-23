@@ -37,6 +37,10 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceControlProvider.ts";
 import * as GitLabSourceControlProvider from "../sourceControl/GitLabSourceControlProvider.ts";
+import {
+  ForgejoPullRequestSchema,
+  toForgejoChangeRequest,
+} from "../sourceControl/forgejoPullRequests.ts";
 import type { SourceControlProvider } from "../sourceControl/SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as ServerConfig from "../config.ts";
@@ -46,6 +50,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as GitManager from "./GitManager.ts";
 
 const encodeCliJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeForgejoPullRequest = Schema.decodeEffect(ForgejoPullRequestSchema);
 
 interface FakeGhScenario {
   prListSequence?: string[];
@@ -672,6 +677,7 @@ function makeManager(input?: {
     ).pipe(
       Effect.map((provider) =>
         SourceControlProviderRegistry.SourceControlProviderRegistry.of({
+          resolveLink: (input) => provider.resolveLink?.(input),
           get: () => Effect.succeed(provider),
           resolveHandle: () => Effect.succeed({ provider, context: null }),
           resolve: () => Effect.succeed(provider),
@@ -3851,6 +3857,69 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     20_000,
   );
 
+  it.effect("matches mounted Forgejo heads without confusing forks sharing a branch", () =>
+    Effect.gen(function* () {
+      for (const owner of ["maria", "reviewer"]) {
+        const mapped = toForgejoChangeRequest(
+          yield* decodeForgejoPullRequest({
+            number: 42,
+            title: "Greeting",
+            html_url: "https://forgejo.example/forgejo/maria/project/pulls/42",
+            state: "open",
+            merged: false,
+            base: {
+              ref: "main",
+              sha: "base",
+              repo: { full_name: "maria/project", owner: { login: "maria" } },
+            },
+            head: {
+              ref: "greeting",
+              sha: "head",
+              repo: { full_name: `${owner}/project`, owner: { login: owner } },
+            },
+          }),
+        );
+        const pr = {
+          ...mapped,
+          isDraft: mapped.isDraft ?? false,
+          closedAt: mapped.closedAt ?? null,
+          mergedAt: mapped.mergedAt ?? null,
+        };
+        const repository = GitManager.parseRepositoryNameWithOwnerFromRemoteUrl(
+          `https://forgejo.example/forgejo/${owner}/project.git`,
+          "forgejo",
+        );
+        expect(repository).toBe(`${owner}/project`);
+        const context = {
+          headBranch: "greeting",
+          headRepositoryNameWithOwner: repository,
+          headRepositoryOwnerLogin: repository?.split("/")[0] ?? null,
+          isCrossRepository: owner !== "maria",
+        };
+        expect(GitManager.matchesBranchHeadContext(pr, context)).toBe(true);
+        expect(
+          GitManager.matchesBranchHeadContext(pr, {
+            ...context,
+            headRepositoryNameWithOwner: "other/project",
+            headRepositoryOwnerLogin: "other",
+          }),
+        ).toBe(false);
+      }
+      expect(
+        GitManager.parseRepositoryNameWithOwnerFromRemoteUrl(
+          "git@forgejo.example:maria/project.git",
+          "forgejo",
+        ),
+      ).toBe("maria/project");
+      expect(
+        GitManager.parseRepositoryNameWithOwnerFromRemoteUrl(
+          "https://gitlab.example/group/maria/project.git",
+          "gitlab",
+        ),
+      ).toBe("group/maria/project");
+    }),
+  );
+
   it.effect("rejects same-repo PR metadata when matching a cross-repo head context", () =>
     Effect.sync(() => {
       const headContext = {
@@ -4002,7 +4071,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
-  it.effect("generates PR content against the remote base when the local base is stale", () =>
+  it.effect("generates PR content from branch changes when the remote base advances", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
@@ -4034,7 +4103,15 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       yield* runGit(repoDir, ["push", "-u", "origin", "feature/remote-base"]);
       yield* runGit(repoDir, ["config", "branch.feature/remote-base.gh-merge-base", "main"]);
 
+      NodeFS.writeFileSync(NodePath.join(peerDir, "later-main.txt"), "unrelated\n");
+      yield* runGit(peerDir, ["add", "later-main.txt"]);
+      yield* runGit(peerDir, ["commit", "-m", "Later main commit"]);
+      yield* runGit(peerDir, ["push", "origin", "main"]);
+      yield* runGit(repoDir, ["fetch", "origin"]);
+
       let generatedCommitSummary = "";
+      let generatedDiffSummary = "";
+      let generatedDiffPatch = "";
       const { manager } = yield* makeManager({
         ghScenario: {
           prListSequence: ["[]", "[]"],
@@ -4042,6 +4119,8 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         textGeneration: {
           generatePrContent: (input) => {
             generatedCommitSummary = input.commitSummary;
+            generatedDiffSummary = input.diffSummary;
+            generatedDiffPatch = input.diffPatch;
             return Effect.succeed({ title: "Feature PR", body: "Feature body" });
           },
         },
@@ -4055,6 +4134,11 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(result.pr.status).toBe("created");
       expect(generatedCommitSummary).toContain("Feature commit");
       expect(generatedCommitSummary).not.toContain("Remote base commit");
+      expect(generatedCommitSummary).not.toContain("Later main commit");
+      expect(generatedDiffSummary).toContain("feature.txt");
+      expect(generatedDiffSummary).not.toContain("later-main.txt");
+      expect(generatedDiffPatch).toContain("feature.txt");
+      expect(generatedDiffPatch).not.toContain("later-main.txt");
     }),
   );
 
