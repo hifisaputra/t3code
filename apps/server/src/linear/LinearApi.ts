@@ -66,7 +66,7 @@ export function issueReferenceFromText(text: string): string {
 }
 
 /** Redirectable so tests and workspace proxies can stand in for Linear. */
-const LinearApiBaseUrl = Config.string("T3CODE_LINEAR_API_BASE_URL").pipe(
+const LinearApiBaseUrl = Config.String("T3CODE_LINEAR_API_BASE_URL").pipe(
   Config.withDefault(DEFAULT_API_BASE_URL),
 );
 
@@ -464,7 +464,7 @@ const decodeFileUploadResult = Schema.decodeUnknownEffect(FileUploadResult);
  * A failure that reached Linear, kept internal so an operation can tell a missing
  * issue from a broken request before it turns into a contract error.
  */
-class LinearRequestFailure extends Schema.TaggedErrorClass<LinearRequestFailure>()(
+class LinearRequestFailure extends Schema.TaggedError<LinearRequestFailure>()(
   "LinearRequestFailure",
   {
     operation: Schema.String,

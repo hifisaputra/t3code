@@ -17,7 +17,6 @@ import {
   type AssistantTaskTrack,
   type AssistantThreadRole,
   type EnvironmentId,
-  type ProjectIconOverride,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -33,7 +32,7 @@ import { formatRelativeTimeLabel, formatShortTimestamp } from "../../timestampFo
 import { useUiStateStore } from "../../uiStateStore";
 import { useAssistantThreadAsksYou } from "../assistant/AssistantThreadTag";
 import { threadKind, ThreadKindIcon, ResearchBadge } from "../assistant/threadKinds";
-import { ProjectFavicon } from "../ProjectFavicon";
+import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
 import {
   animateSidebarLayoutChanges,
   hasUnseenCompletion,
@@ -247,10 +246,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
   /** Null while the jump modifier is not held. */
   jumpLabelByKey: ReadonlyMap<string, string> | null;
   currentEnvironmentId: string | null;
-  projectCwd: string | null;
-  projectFaviconPath: string | null;
-  projectIcon: ProjectIconOverride | null;
-  projectTitle: string | null;
+  project: ProjectFaviconProject | null;
   projectDisplayName: string | null;
   timestampFormat: TimestampFormat;
   onThreadClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
@@ -493,14 +489,9 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
                 read as a different species from the rows around it. */}
             <div className="min-w-0 flex-1">
               <div className="flex h-5 min-w-0 items-center gap-1.5">
-                <ProjectFavicon
-                  environmentId={environmentId}
-                  cwd={props.projectCwd ?? ""}
-                  projectName={props.projectTitle ?? ""}
-                  faviconPath={props.projectFaviconPath}
-                  projectIcon={props.projectIcon}
-                  className="size-4 shrink-0"
-                />
+                {props.project ? (
+                  <ProjectFavicon project={props.project} className="size-4 shrink-0" />
+                ) : null}
                 {props.projectDisplayName !== null ? (
                   <span className="min-w-0 truncate text-secondary-label text-xs font-medium">
                     {props.projectDisplayName}

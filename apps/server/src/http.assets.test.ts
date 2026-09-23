@@ -9,6 +9,7 @@ import * as Path from "effect/Path";
 import { HttpClient, HttpRouter } from "effect/unstable/http";
 
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import * as GitHubCli from "./sourceControl/GitHubCli.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ServerConfig from "./config.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
@@ -29,6 +30,8 @@ const testLayer = Layer.mergeAll(
   ),
   NativeAppIconResolver.layer.pipe(Layer.provide(configLayer)),
   ServerSecretStore.layer.pipe(Layer.provide(configLayer)),
+  // The github-media resource kind needs the CLI; this test never requests one.
+  Layer.mock(GitHubCli.GitHubCli)({}),
 ).pipe(Layer.provideMerge(NodeServices.layer), Layer.provideMerge(NodeHttpServer.layerTest));
 
 /** Serve a workspace image and hand back its URL plus a client bound to the test server. */

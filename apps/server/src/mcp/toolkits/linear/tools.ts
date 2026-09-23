@@ -11,7 +11,7 @@ import {
   LinearWorkflowState,
   LinearWorkflowStateType,
   PositiveInt,
-  PreviewAutomationUnavailableError,
+  McpCapabilityUnavailableError,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import * as FileSystem from "effect/FileSystem";
@@ -45,7 +45,7 @@ const uploadDependencies = [
 ];
 
 /**
- * Everything a Linear tool can hand back. `PreviewAutomationUnavailableError`
+ * Everything a Linear tool can hand back. `McpCapabilityUnavailableError`
  * is the shared MCP capability refusal: it is what the agent sees when its
  * credential was issued without Linear access.
  */
@@ -53,7 +53,7 @@ const LinearToolError = Schema.Union([
   LinearUnavailableError,
   LinearIssueNotFoundError,
   LinearOperationError,
-  PreviewAutomationUnavailableError,
+  McpCapabilityUnavailableError,
 ]);
 
 /** Every Linear call leaves the server, and none of them can be replayed blindly. */

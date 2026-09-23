@@ -78,7 +78,7 @@ export const StopAgentProcessResult = Schema.Struct({
 });
 export type StopAgentProcessResult = typeof StopAgentProcessResult.Type;
 
-export class AgentProcessStopError extends Schema.TaggedErrorClass<AgentProcessStopError>()(
+export class AgentProcessStopError extends Schema.TaggedError<AgentProcessStopError>()(
   "AgentProcessStopError",
   {
     rootPid: PositiveInt,

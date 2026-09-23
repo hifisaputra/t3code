@@ -294,7 +294,7 @@ const harness = (options?: { workspaceRoot?: string; claudeHome?: string }) =>
     const starts = () => commands.filter((c) => c.type === "thread.turn.start");
     return { setup, busy, starts };
   });
-const database = NodeSqliteClient.layerMemory;
+const database = () => NodeSqliteClient.layer({ filename: ":memory:" });
 
 it.effect("a reopened setup takes the person's new choices and says what changed", () =>
   Effect.gen(function* () {

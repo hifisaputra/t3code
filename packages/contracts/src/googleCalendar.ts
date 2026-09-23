@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
-export class GoogleCalendarError extends Schema.TaggedErrorClass<GoogleCalendarError>()(
+export class GoogleCalendarError extends Schema.TaggedError<GoogleCalendarError>()(
   "GoogleCalendarError",
   { message: Schema.String },
 ) {}

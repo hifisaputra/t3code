@@ -103,6 +103,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
   className,
 }: ComposerPendingApprovalPanelProps) {
   const [reviewOpen, setReviewOpen] = useState(false);
+  const Detail = approval.requestKind === "mcp-elicitation" ? "span" : "code";
   const fallbackLabel =
     approval.requestKind === "mcp-elicitation"
       ? "App access approval"
@@ -112,7 +113,9 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           ? "Command approval"
           : approval.requestKind === "file-read"
             ? "File read approval"
-            : "File change approval";
+            : approval.requestKind === "permission"
+              ? "App permission approval"
+              : "File change approval";
   const detailAriaLabel =
     approval.requestKind === "mcp-elicitation"
       ? "App access request"
@@ -122,50 +125,50 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           ? "Command"
           : approval.requestKind === "file-read"
             ? "File to read"
-            : "File change";
-  const pendingBadge =
-    pendingCount > 1 ? (
-      <span className="shrink-0 text-[10px] font-medium text-muted-foreground tabular-nums">
-        1/{pendingCount}
-      </span>
-    ) : null;
+            : approval.requestKind === "permission"
+              ? "Permission request"
+              : "File change";
+  const header = (
+    <span className="flex w-full min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+      <span className="shrink-0 font-medium text-warning">{fallbackLabel}</span>
+      {approval.appName ? <span className="min-w-0 truncate">{approval.appName}</span> : null}
+      {pendingCount > 1 ? (
+        <span className="ml-auto shrink-0 tabular-nums">1/{pendingCount}</span>
+      ) : null}
+    </span>
+  );
 
   if (approval.requestKind === "integration") {
     const { headline, preview, record, fields } = integrationApprovalView(approval, fallbackLabel);
     return (
       <span
         aria-label={fallbackLabel}
-        className={cn("flex min-w-0 flex-1 items-center gap-2 py-0.5", className)}
+        className={cn("flex min-w-0 flex-1 flex-col items-start gap-1", className)}
         role="group"
       >
-        {approval.appName ? (
-          <span className="shrink-0 rounded-sm bg-background/60 px-1.5 py-0.5 text-[10px] font-medium text-foreground">
-            {approval.appName}
+        {header}
+        <span className="flex w-full min-w-0 items-center gap-2">
+          <span
+            aria-label={detailAriaLabel}
+            className="flex min-w-0 flex-1 items-baseline gap-1.5 text-xs"
+            data-approval-detail="summary"
+          >
+            <span className="shrink-0 font-medium text-foreground">{headline}</span>
+            {preview ? (
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">{preview}</span>
+            ) : null}
           </span>
-        ) : null}
-        <span
-          aria-label={detailAriaLabel}
-          className="flex min-w-0 flex-1 items-baseline gap-1.5"
-          data-approval-detail="summary"
-        >
-          <span className="shrink-0 text-[11px] font-medium text-foreground">{headline}</span>
-          {preview ? (
-            <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
-              {preview}
-            </span>
-          ) : null}
+          <Button
+            type="button"
+            size="micro"
+            variant="ghost-muted"
+            className="shrink-0"
+            data-approval-review="open"
+            onClick={() => setReviewOpen(true)}
+          >
+            Review
+          </Button>
         </span>
-        <Button
-          type="button"
-          size="micro"
-          variant="ghost-muted"
-          className="shrink-0 font-normal"
-          data-approval-review="open"
-          onClick={() => setReviewOpen(true)}
-        >
-          Review
-        </Button>
-        {pendingBadge}
         <IntegrationApprovalDialog
           open={reviewOpen}
           onOpenChange={setReviewOpen}
@@ -187,23 +190,23 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
   return (
     <span
       aria-label={fallbackLabel}
-      className={cn("flex min-w-0 flex-1 items-center gap-2", className)}
+      className={cn("flex min-w-0 flex-1 flex-col items-start gap-1", className)}
       role="group"
     >
-      {approval.appName ? (
-        <span className="max-w-32 shrink truncate text-[11px] font-medium text-foreground">
-          {approval.appName}
-        </span>
-      ) : null}
-      <code
+      {header}
+      <Detail
         aria-label={detailAriaLabel}
-        className="block max-h-20 min-w-0 flex-1 overflow-auto whitespace-pre font-mono text-[11px] text-foreground/85 [scrollbar-width:thin] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-scrollbar]:h-1.5"
+        className={cn(
+          "block max-h-20 w-full min-w-0 overflow-auto text-xs text-foreground [scrollbar-width:thin] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-scrollbar]:h-1.5",
+          approval.requestKind === "mcp-elicitation"
+            ? "whitespace-pre-wrap font-sans wrap-break-word"
+            : "whitespace-pre font-mono",
+        )}
         data-approval-detail="complete"
         tabIndex={0}
       >
         {approval.detail || fallbackLabel}
-      </code>
-      {pendingBadge}
+      </Detail>
     </span>
   );
 });

@@ -1,5 +1,5 @@
 import * as Stream from "effect/Stream";
-import * as FileSystem from "effect/FileSystem";
+import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
@@ -52,7 +52,7 @@ export const linearRoutes = Layer.unwrap(
               }),
             ),
             maxBytes: 1_048_576,
-          }).pipe(Effect.provideService(HttpServerRequest.MaxBodySize, FileSystem.Size(1_048_576)));
+          }).pipe(Effect.provideService(HttpServerRequest.MaxBodySize, ByteSize.bytes(1_048_576)));
           if (body.invalidUtf8) return HttpServerResponse.empty({ status: 400 });
           if (body.truncated) return HttpServerResponse.empty({ status: 413 });
           return yield* delegation

@@ -80,7 +80,7 @@ it.effect("sends a session's updates in order and stops at the first failure", (
     yield* outbox.send("s");
     yield* outbox.send("s");
     assert.deepEqual(h.sent, ["thought:first", "action:Merged:ephemeral"]);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("resolves a task sync when sent and re-arms it after it was sent", () => {
@@ -108,7 +108,7 @@ it.effect("resolves a task sync when sent and re-arms it after it was sent", () 
     yield* outbox.enqueue("sync-3", "s", { type: "syncTask", taskId: "task" });
     yield* outbox.send("s");
     assert.equal(h.sent.at(-1), "update:Merge=inProgress:https://t3/thread");
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("records a created session against its task and builds thread links", () => {
@@ -135,7 +135,7 @@ it.effect("records a created session against its task and builds thread links", 
       url: "https://t3.example.com/env/thread%201",
     });
     assert.isTrue(yield* outbox.connected);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("hands a team reply to the registered handler and fails without one", () => {
@@ -162,7 +162,7 @@ it.effect("hands a team reply to the registered handler and fails without one", 
       Effect.fail(new LinearOperationError({ operation: "agentSession", detail: "Busy" })),
     );
     assert.isTrue(yield* outbox.teamPrompt(input).pipe(Effect.isFailure));
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("hands a delegated issue to the registered assistant, and to none without one", () => {
@@ -184,7 +184,7 @@ it.effect("hands a delegated issue to the registered assistant, and to none with
       attached: true,
     });
     assert.deepEqual(handled, [input]);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("adopts a delegated session for its team, whichever side records it first", () => {
@@ -209,5 +209,5 @@ it.effect("adopts a delegated session for its team, whichever side records it fi
         { id: "fresh", thread_id: null, status: "active", context: "{}", task_id: "task-2" },
       ],
     );
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });

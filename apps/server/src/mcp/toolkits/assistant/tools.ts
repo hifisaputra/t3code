@@ -13,14 +13,14 @@ import {
   AssistantSetupPlan,
   AssistantThreadRole,
   DeveloperAssistantError,
-  PreviewAutomationUnavailableError,
+  McpCapabilityUnavailableError,
   assistantTaskE2eEnvironment,
 } from "@t3tools/contracts";
 import { DeveloperAssistant } from "../../../assistant/DeveloperAssistant.ts";
 import { McpInvocationContext, requireMcpCapability } from "../../McpInvocationContext.ts";
 
 const dependencies = [DeveloperAssistant, McpInvocationContext];
-const failure = Schema.Union([DeveloperAssistantError, PreviewAutomationUnavailableError]);
+const failure = Schema.Union([DeveloperAssistantError, McpCapabilityUnavailableError]);
 const text = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(20000));
 const smokeCriteria = Schema.Array(Schema.Int).annotate({
   description:

@@ -313,7 +313,7 @@ export type LinearUnavailableReason = typeof LinearUnavailableReason.Type;
  * Linear cannot be talked to right now. The message is a stable sentence the
  * UI shows as-is; `retryAt` is set when Linear said when to come back.
  */
-export class LinearUnavailableError extends Schema.TaggedErrorClass<LinearUnavailableError>()(
+export class LinearUnavailableError extends Schema.TaggedError<LinearUnavailableError>()(
   "LinearUnavailableError",
   {
     reason: LinearUnavailableReason,
@@ -337,7 +337,7 @@ export class LinearUnavailableError extends Schema.TaggedErrorClass<LinearUnavai
   }
 }
 
-export class LinearIssueNotFoundError extends Schema.TaggedErrorClass<LinearIssueNotFoundError>()(
+export class LinearIssueNotFoundError extends Schema.TaggedError<LinearIssueNotFoundError>()(
   "LinearIssueNotFoundError",
   {
     reference: LinearIssueReference,
@@ -353,7 +353,7 @@ export class LinearIssueNotFoundError extends Schema.TaggedErrorClass<LinearIssu
   }
 }
 
-export class LinearOperationError extends Schema.TaggedErrorClass<LinearOperationError>()(
+export class LinearOperationError extends Schema.TaggedError<LinearOperationError>()(
   "LinearOperationError",
   {
     operation: Schema.String,

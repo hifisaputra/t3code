@@ -89,7 +89,8 @@ export function ContextWindowMeter(props: {
         side="top"
         align="end"
         viewportClassName="p-0"
-        className="w-64 max-w-none text-left whitespace-normal"
+        width="sm"
+        className="text-left whitespace-normal"
       >
         <div className="flex flex-col gap-2 p-[var(--floating-content-inset)]">
           <div className="flex items-center justify-between gap-3">
@@ -160,4 +161,9 @@ export function ContextWindowMeter(props: {
       </PopoverPopup>
     </Popover>
   );
+}
+
+/** Holds the meter's footprint while a thread's activities are still loading. */
+export function ContextWindowMeterPlaceholder() {
+  return <span aria-hidden="true" className="size-7 shrink-0" />;
 }

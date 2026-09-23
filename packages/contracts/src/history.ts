@@ -111,7 +111,7 @@ export const ProjectHistory = Schema.Struct({
 });
 export type ProjectHistory = typeof ProjectHistory.Type;
 
-export class ProjectHistoryReadError extends Schema.TaggedErrorClass<ProjectHistoryReadError>()(
+export class ProjectHistoryReadError extends Schema.TaggedError<ProjectHistoryReadError>()(
   "ProjectHistoryReadError",
   {
     reason: Schema.Literals(["invalidWindow", "readFailed"]),

@@ -6,7 +6,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
 import assistantProjectNotes from "./060_AssistantProjectNotes.ts";
 
-it.layer(NodeSqliteClient.layerMemory())("060_AssistantProjectNotes", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("060_AssistantProjectNotes", (it) => {
   it.effect("adds the notes table and keeps existing setups", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

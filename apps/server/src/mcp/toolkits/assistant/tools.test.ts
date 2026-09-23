@@ -112,6 +112,8 @@ it.effect(
           McpSchema.McpServerClient,
           McpSchema.McpServerClient.of({
             clientId: 1,
+            clientCapabilities: {},
+            clientInfo: { name: "assistant-test", version: "1" },
             protocolVersion: "2025-06-18",
             initializePayload: {
               protocolVersion: "2025-06-18",
@@ -171,6 +173,8 @@ it.effect("waiting answers the agent with text instead of an internal error", ()
         McpSchema.McpServerClient,
         McpSchema.McpServerClient.of({
           clientId: 1,
+          clientCapabilities: {},
+          clientInfo: { name: "assistant-test", version: "1" },
           protocolVersion: "2025-06-18",
           initializePayload: {
             protocolVersion: "2025-06-18",
@@ -451,6 +455,8 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
         McpSchema.McpServerClient,
         McpSchema.McpServerClient.of({
           clientId: 1,
+          clientCapabilities: {},
+          clientInfo: { name: "assistant-test", version: "1" },
           protocolVersion: "2025-06-18",
           initializePayload: {
             protocolVersion: "2025-06-18",
@@ -521,6 +527,8 @@ it.effect("adding a project note answers whether it was new, and refuses a long 
         McpSchema.McpServerClient,
         McpSchema.McpServerClient.of({
           clientId: 1,
+          clientCapabilities: {},
+          clientInfo: { name: "assistant-test", version: "1" },
           protocolVersion: "2025-06-18",
           initializePayload: {
             protocolVersion: "2025-06-18",

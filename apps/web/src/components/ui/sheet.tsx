@@ -11,14 +11,6 @@ const Sheet = SheetPrimitive.Root;
 
 const SheetPortal = SheetPrimitive.Portal;
 
-function SheetTrigger(props: SheetPrimitive.Trigger.Props) {
-  return <SheetPrimitive.Trigger data-slot="sheet-trigger" {...props} />;
-}
-
-function SheetClose(props: SheetPrimitive.Close.Props) {
-  return <SheetPrimitive.Close data-slot="sheet-close" {...props} />;
-}
-
 function SheetBackdrop({ className, ...props }: SheetPrimitive.Backdrop.Props) {
   return (
     <SheetPrimitive.Backdrop
@@ -146,6 +138,26 @@ function SheetHeader({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
+function SheetTitle({ className, ...props }: SheetPrimitive.Title.Props) {
+  return (
+    <SheetPrimitive.Title
+      className={cn("font-heading font-semibold text-xl leading-none", className)}
+      data-slot="sheet-title"
+      {...props}
+    />
+  );
+}
+
+function SheetDescription({ className, ...props }: SheetPrimitive.Description.Props) {
+  return (
+    <SheetPrimitive.Description
+      className={cn("text-muted-foreground text-sm", className)}
+      data-slot="sheet-description"
+      {...props}
+    />
+  );
+}
+
 function SheetFooter({
   className,
   variant = "default",
@@ -163,26 +175,6 @@ function SheetFooter({
         className,
       )}
       data-slot="sheet-footer"
-      {...props}
-    />
-  );
-}
-
-function SheetTitle({ className, ...props }: SheetPrimitive.Title.Props) {
-  return (
-    <SheetPrimitive.Title
-      className={cn("font-heading font-semibold text-xl leading-none", className)}
-      data-slot="sheet-title"
-      {...props}
-    />
-  );
-}
-
-function SheetDescription({ className, ...props }: SheetPrimitive.Description.Props) {
-  return (
-    <SheetPrimitive.Description
-      className={cn("text-muted-foreground text-sm", className)}
-      data-slot="sheet-description"
       {...props}
     />
   );
@@ -209,16 +201,14 @@ function SheetPanel({
 
 export {
   Sheet,
-  SheetTrigger,
   SheetPortal,
-  SheetClose,
   SheetBackdrop,
   SheetBackdrop as SheetOverlay,
   SheetPopup,
   SheetPopup as SheetContent,
   SheetHeader,
-  SheetFooter,
   SheetTitle,
   SheetDescription,
+  SheetFooter,
   SheetPanel,
 };

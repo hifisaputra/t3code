@@ -121,6 +121,7 @@ function isRelevantEvent(event: OrchestrationEvent): boolean {
     event.type === "thread.deleted" ||
     (event.type === "thread.meta-updated" &&
       (event.payload.branchPullRequest != null || event.payload.linkedPullRequest != null)) ||
+    event.type === "thread.pull-request-linked" ||
     (event.type === "thread.activity-appended" &&
       [
         "user-input.requested",
@@ -559,19 +560,20 @@ export const make = Effect.gen(function* () {
           body: "The agent stopped before finishing. Open the T3 thread to review its progress, or reply here to continue.",
         });
       } else if (
-        event.type === "thread.meta-updated" &&
-        (event.payload.branchPullRequest || event.payload.linkedPullRequest)
+        event.type === "thread.pull-request-linked" ||
+        (event.type === "thread.meta-updated" &&
+          (event.payload.branchPullRequest || event.payload.linkedPullRequest))
       ) {
+        // Links now arrive as their own event; meta-updated only carries one for
+        // events persisted before that change and for the branch's own PR.
+        const pullRequestUrl =
+          event.type === "thread.pull-request-linked"
+            ? event.payload.link.url
+            : (event.payload.branchPullRequest ?? event.payload.linkedPullRequest)!.url;
         const link = yield* outbox.threadLink(row.thread_id!);
         yield* enqueueOutgoing(id, row.id, {
           type: "links",
-          links: [
-            ...(link ? [link] : []),
-            {
-              label: "Pull request",
-              url: (event.payload.branchPullRequest ?? event.payload.linkedPullRequest)!.url,
-            },
-          ],
+          links: [...(link ? [link] : []), { label: "Pull request", url: pullRequestUrl }],
         });
       } else if (event.type === "thread.activity-appended") {
         const activity = event.payload.activity;

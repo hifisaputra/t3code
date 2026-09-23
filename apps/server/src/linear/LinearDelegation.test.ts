@@ -195,7 +195,7 @@ it.effect(
       yield* service.receive(body, signature, "d4");
       const sql = yield* SqlClient.SqlClient;
       assert.lengthOf(yield* sql`SELECT * FROM linear_agent_deliveries`, 1);
-    }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
   },
 );
 it.effect("deduplicates deliveries and starts one linked thread in a worktree", () => {
@@ -229,7 +229,7 @@ it.effect("deduplicates deliveries and starts one linked thread in a worktree", 
       assert.notInclude(start.message.text, issue.description!);
       assert.notInclude(start.message.text, original.agentSession.comment.body);
     }
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 it.effect("asks which repository to use and resumes with the original issue context", () => {
   const h = harness(true);
@@ -259,7 +259,7 @@ it.effect("asks which repository to use and resumes with the original issue cont
       assert.notInclude(start.message.text, original.promptContext);
       assert.notInclude(start.message.text, original.agentSession.comment.body);
     }
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("forwards follow-up replies without copying prompt context", () => {
@@ -289,7 +289,7 @@ it.effect("forwards follow-up replies without copying prompt context", () => {
         assert.notInclude(start.message.text, original.agentSession.comment.body);
       }
     }
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("re-delegation resumes the same thread and stop prevents later prompts", () => {
@@ -323,7 +323,7 @@ it.effect("re-delegation resumes the same thread and stop prevents later prompts
       h.commands.map((c) => c.type),
       ["thread.create", "thread.turn.start", "thread.turn.start", "thread.turn.interrupt"],
     );
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("does not replay a signed event under a changed delivery header", () => {
@@ -335,7 +335,7 @@ it.effect("does not replay a signed event under a changed delivery header", () =
     yield* service.receive(first.body, first.signature, "different-header");
     const sql = yield* SqlClient.SqlClient;
     assert.lengthOf(yield* sql`SELECT * FROM linear_agent_deliveries`, 1);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect(
@@ -406,7 +406,7 @@ it.effect(
         pending_question: string | null;
       }>`SELECT pending_question FROM linear_agent_sessions`;
       assert.isNull(rows[0]?.pending_question);
-    }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
   },
 );
 
@@ -419,7 +419,7 @@ it.effect("refuses teams outside the allowlist before preparing a worktree", () 
     assert.isTrue(yield* service.process("d1").pipe(Effect.isFailure));
     assert.lengthOf(h.prepared, 0);
     assert.lengthOf(h.commands, 0);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("acknowledges a delegation at once before processing it", () => {
@@ -430,7 +430,7 @@ it.effect("acknowledges a delegation at once before processing it", () => {
     yield* service.receive(first.body, first.signature, "d1");
     yield* service.acknowledge("d1");
     assert.deepEqual(h.outgoing, ["Picking this up on the T3 Code environment."]);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 /** A team's session the app opened, and a reply the person wrote on it. */
@@ -504,7 +504,7 @@ it.effect("hands replies on a team's session to the assistant and never starts a
     assert.deepEqual(yield* sql`SELECT thread_id, task_id FROM linear_agent_sessions`, [
       { thread_id: null, task_id: "task-1" },
     ]);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("keeps a team reply pending until the assistant handled it", () => {
@@ -532,7 +532,7 @@ it.effect("keeps a team reply pending until the assistant handled it", () => {
     assert.equal(yield* processedOf("d1"), 1);
     assert.deepEqual(handled, ["Blue, please"]);
     assert.deepEqual(h.outgoing, []);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it("keeps what the person wrote when delegating, without the app's mention", () => {
@@ -601,7 +601,7 @@ it.effect("a delegated issue an assistant takes goes to its team, not a thread",
     assert.deepEqual(handled, ["Also the header"]);
     assert.lengthOf(dispatched, 1);
     assert.lengthOf(h.commands, 0);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("a delegated issue no assistant takes starts today's thread", () => {
@@ -632,7 +632,7 @@ it.effect("a delegated issue no assistant takes starts today's thread", () => {
     yield* service.receive(reply.body, reply.signature, "d2");
     yield* service.process("d2");
     assert.equal(asked, 1);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("an assistant refusing a delegated issue fails it with the reason and no thread", () => {
@@ -657,7 +657,7 @@ it.effect("an assistant refusing a delegated issue fails it with the reason and 
     assert.lengthOf(h.commands, 0);
     const sql = yield* SqlClient.SqlClient;
     assert.lengthOf(yield* sql`SELECT * FROM linear_agent_sessions`, 0);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 
 it.effect("a delegated session that only points at another team's session is not a team's", () => {
@@ -687,5 +687,5 @@ it.effect("a delegated session that only points at another team's session is not
     yield* service.process("d2");
     assert.equal(prompted, 0);
     assert.lengthOf(h.commands, 0);
-  }).pipe(Effect.provide(NodeSqliteClient.layerMemory()), Effect.scoped);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });

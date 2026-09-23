@@ -19,6 +19,7 @@ import { useComposerHandleContext } from "~/composerHandleContext";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { useTheme } from "~/hooks/useTheme";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
+import { useFileContextMenu, type FileContextMenuAction } from "~/fileContextMenu";
 import { readLocalApi } from "~/localApi";
 import { T3_PIERRE_ICONS } from "~/pierre-icons";
 import { PIERRE_TREE_UNSAFE_CSS, pierreTreeStyle } from "~/pierre-tree-theme";
@@ -29,7 +30,8 @@ import { FileDownloadButton } from "./FileDownloadButton";
 import { createFileTreeDragMentionController } from "./fileTreeDragMention";
 import { areAllDirectoriesExpanded, setAllDirectoriesExpanded } from "./fileTreeExpansion";
 import { buildFileTreePathUpdates } from "./fileTreePathReconciliation";
-import { useProjectEntriesQuery } from "./projectFilesQueryState";
+import { useDirectoryEntries } from "./useDirectoryEntries";
+import { useProjectPathSearch } from "~/state/queries";
 
 /** Skip uploads larger than this; base64 over the websocket makes big files impractical. */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -44,7 +46,7 @@ interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
   cwd: string;
   projectName: string;
-  /** File currently open in the preview pane; revealed and selected in the tree. */
+  /** Entry currently open in the surface; revealed and selected in the tree. A directory is expanded. */
   selectedPath: string | null;
   /** Bumped when the same path should be revealed again (e.g. re-opened from search). */
   selectedPathRevealId: number;
@@ -118,7 +120,32 @@ export default function FileBrowserPanel({
 }: FileBrowserPanelProps) {
   const { resolvedTheme } = useTheme();
   const composerRef = useComposerHandleContext();
-  const entriesQuery = useProjectEntriesQuery(environmentId, cwd);
+  const fileContextMenu = useFileContextMenu(environmentId);
+  const {
+    entries: directoryEntries,
+    load,
+    refresh,
+    ready,
+    error,
+    isPending,
+  } = useDirectoryEntries(environmentId, cwd);
+  const [query, setQuery] = useState("");
+  const [expandAll, setExpandAll] = useState(false);
+  const pathSearch = useProjectPathSearch({ environmentId, cwd, query: query.slice(0, 256) }, 200);
+  const entries = useMemo(() => {
+    const result = new Map(directoryEntries.map((entry) => [entry.path, entry]));
+    if (query.trim() && !pathSearch.isPending) {
+      for (const entry of pathSearch.entries) {
+        if (!result.has(entry.path)) result.set(entry.path, entry);
+        const segments = entry.path.split("/");
+        for (let index = 1; index < segments.length; index++) {
+          const path = segments.slice(0, index).join("/");
+          if (!result.has(path)) result.set(path, { path, kind: "directory" });
+        }
+      }
+    }
+    return [...result.values()];
+  }, [directoryEntries, pathSearch.entries, pathSearch.isPending, query]);
   const writeFile = useAtomCommand(projectEnvironment.writeFile);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -154,7 +181,8 @@ export default function FileBrowserPanel({
             skipped.push(file.name);
           }
         }
-        entriesQuery.refresh();
+        // Folders load on demand, so only the one the files landed in needs re-reading.
+        void load(uploadDirectory, true);
         setUploadError(
           skipped.length > 0
             ? `Could not upload ${skipped.length === files.length ? "" : "some "}${
@@ -166,9 +194,8 @@ export default function FileBrowserPanel({
         setIsUploading(false);
       }
     },
-    [cwd, entriesQuery, environmentId, uploadDirectory, writeFile],
+    [cwd, environmentId, load, uploadDirectory, writeFile],
   );
-  const entries = entriesQuery.data?.entries ?? [];
   const entryKinds = useMemo(
     () => new Map(entries.map((entry) => [entry.path, entry.kind] as const)),
     [entries],
@@ -196,6 +223,7 @@ export default function FileBrowserPanel({
     return () => document.removeEventListener("contextmenu", capturePointer, true);
   }, []);
 
+  /** Combines the file actions (open/reveal/open with) with the panel's own mention actions. */
   const showEntryContextMenu = async (
     item: TreeContextMenuItem,
     context: TreeContextMenuOpenContext,
@@ -213,14 +241,26 @@ export default function FileBrowserPanel({
     const position = pointerIsFresh
       ? { x: pointer.x, y: pointer.y }
       : { x: anchorRect.left, y: anchorRect.bottom };
+    const fileTarget = { environmentId, filePath: relativePath, workspaceRoot: cwd };
+    const fileMenuItems = fileContextMenu.buildItems(fileTarget);
     try {
       const clicked = await api.contextMenu.show(
         [
+          ...fileMenuItems,
           { id: "copy-mention", label: "Copy mention" },
           { id: "add-to-chat", label: "Add to chat" },
         ],
         position,
       );
+      if (clicked === null) return;
+      // "Open with" submenu selections report the child id ("editor:<id>"),
+      // which is not present in the top-level item list.
+      const isFileMenuAction =
+        fileMenuItems.some((entry) => entry.id === clicked) || clicked.startsWith("editor:");
+      if (isFileMenuAction) {
+        await fileContextMenu.activate(clicked as FileContextMenuAction, fileTarget);
+        return;
+      }
       if (clicked === "copy-mention") {
         try {
           await writeTextToClipboard(mention);
@@ -319,6 +359,7 @@ export default function FileBrowserPanel({
     },
     paths: [],
     search: false,
+    onSearchChange: (value) => setQuery(value ?? ""),
     unsafeCSS: PIERRE_TREE_UNSAFE_CSS,
   });
   const search = useFileTreeSearch(model);
@@ -326,9 +367,63 @@ export default function FileBrowserPanel({
     areAllDirectoriesExpanded(currentModel, directoryPaths),
   );
   const toggleAllDirectories = () => {
-    setAllDirectoriesExpanded(model, directoryPaths, !allDirectoriesExpanded);
+    const expanded = !(expandAll || allDirectoriesExpanded);
+    setExpandAll(expanded);
+    setAllDirectoriesExpanded(model, directoryPaths, expanded);
   };
+  const closeSearch = () => {
+    setQuery("");
+    search.close();
+  };
+  const expandedPathsRef = useRef(new Set<string>());
+  useEffect(() => {
+    const currentPaths = new Set(directoryPaths);
+    for (const path of expandedPathsRef.current) {
+      if (!currentPaths.has(path)) expandedPathsRef.current.delete(path);
+    }
+    const loadExpanded = () => {
+      if (model.isSearchOpen()) return;
+      for (const path of directoryPaths) {
+        const item = model.getItem(path);
+        if (item?.isDirectory() && "isExpanded" in item && item.isExpanded()) {
+          if (!expandedPathsRef.current.has(path)) {
+            expandedPathsRef.current.add(path);
+            void load(path.replace(/\/$/, ""));
+          }
+        } else {
+          if (item?.isDirectory() && expandedPathsRef.current.has(path)) setExpandAll(false);
+          expandedPathsRef.current.delete(path);
+        }
+      }
+    };
+    loadExpanded();
+    return model.subscribe(loadExpanded);
+  }, [directoryPaths, load, model]);
+  useEffect(() => {
+    model.setGitStatus(
+      entries
+        .filter((entry) => entry.ignored)
+        .map((entry) => ({
+          path: treePath(entry),
+          status: "ignored",
+        })),
+    );
+  }, [entries, model]);
+  useEffect(() => {
+    if (!selectedPath) return;
+    const controller = new AbortController();
+    void (async () => {
+      const segments = selectedPath.split("/");
+      for (let index = 0; index < segments.length && !controller.signal.aborted; index++) {
+        await load(segments.slice(0, index).join("/"));
+      }
+    })();
+    return () => {
+      controller.abort();
+    };
+  }, [load, selectedPath]);
   const handleSearchValueChange = (value: string) => {
+    setQuery(value);
     if (value.trim().length === 0) {
       search.close();
       return;
@@ -336,17 +431,21 @@ export default function FileBrowserPanel({
     search.setValue(value);
   };
   const handleRefresh = () => {
-    entriesQuery.refresh();
+    refresh();
+    if (query.trim()) pathSearch.refresh();
     onRefreshSelectedFile?.();
   };
   useWorkspaceMutationRefresh({
     mutationId: workspaceMutationId,
-    refresh: entriesQuery.refresh,
+    refresh: () => {
+      refresh();
+      if (query.trim()) pathSearch.refresh();
+    },
     resourceKey: `files:${environmentId}:${cwd}`,
   });
 
   useEffect(() => {
-    if (entriesQuery.data === null) return;
+    if (!ready) return;
     if (previousTreePathsRef.current === treePaths) return;
     entryKindsRef.current = entryKinds;
     const previousTreePaths = previousTreePathsRef.current;
@@ -357,7 +456,11 @@ export default function FileBrowserPanel({
     }
     const updates = buildFileTreePathUpdates(previousTreePaths, treePaths);
     if (updates.length > 0) model.batch(updates);
-  }, [entriesQuery.data, entryKinds, model, treePaths]);
+  }, [ready, entryKinds, model, treePaths]);
+
+  useEffect(() => {
+    if (expandAll && !query.trim()) setAllDirectoriesExpanded(model, directoryPaths, true);
+  }, [directoryPaths, expandAll, model, query]);
 
   // Reset selection-derived state when switching projects so it never points into a stale tree.
   useEffect(() => {
@@ -367,6 +470,13 @@ export default function FileBrowserPanel({
 
   useEffect(() => {
     if (!selectedPath) {
+      handledRevealRef.current = null;
+      return;
+    }
+    const selectedKind = entryKinds.get(selectedPath);
+    // An unloaded entry has no row to reveal yet; folders do, and chat links can
+    // point at them.
+    if (selectedKind === undefined) {
       handledRevealRef.current = null;
       return;
     }
@@ -380,8 +490,9 @@ export default function FileBrowserPanel({
     ) {
       return;
     }
-    if (entryKinds.get(selectedPath) !== "file") return;
-    const selectedItem = model.getItem(selectedPath);
+    // Directory rows are registered with a trailing slash (see treePath).
+    const selectedTreePath = selectedKind === "directory" ? `${selectedPath}/` : selectedPath;
+    const selectedItem = model.getItem(selectedTreePath);
     if (!selectedItem) return;
 
     // A selection that originated inside the tree (clicking a row, possibly
@@ -400,6 +511,7 @@ export default function FileBrowserPanel({
     handledRevealRef.current = revealRequest;
 
     syncingSelectionRef.current = true;
+    setQuery("");
     model.closeSearch();
     for (const path of model.getSelectedPaths()) {
       model.getItem(path)?.deselect();
@@ -415,14 +527,23 @@ export default function FileBrowserPanel({
       if (item && "expand" in item) item.expand();
     }
 
-    setSelectedFile(selectedPath);
-    setUploadDirectory(parentDirectory(selectedPath));
+    if (selectedKind === "directory") {
+      setSelectedFile(null);
+      setUploadDirectory(selectedPath);
+    } else {
+      setSelectedFile(selectedPath);
+      setUploadDirectory(parentDirectory(selectedPath));
+    }
+    if ("expand" in selectedItem) selectedItem.expand();
     selectedItem.select();
-    model.scrollToPath(selectedPath, { focus: true, offset: "center" });
+    model.scrollToPath(selectedTreePath, {
+      focus: true,
+      offset: "center",
+    });
     queueMicrotask(() => {
       syncingSelectionRef.current = false;
     });
-  }, [entryKinds, model, selectedPath, selectedPathRevealId, treePaths]);
+  }, [entryKinds, model, selectedPath, selectedPathRevealId]);
 
   // Tag tree drags with the composer mention payload. The row is read from
   // the composed event path (the tree's shadow root is open), so this does
@@ -459,7 +580,7 @@ export default function FileBrowserPanel({
         className="flex h-10 min-h-10 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2 in-data-[preview-panel-mode=inline]:mb-1 in-data-[preview-panel-mode=inline]:h-9 in-data-[preview-panel-mode=inline]:min-h-9 in-data-[preview-panel-mode=inline]:border-b-transparent"
         data-surface-subheader
       >
-        <RefreshFilesButton isPending={entriesQuery.isPending} onRefresh={handleRefresh} />
+        <RefreshFilesButton isPending={isPending} onRefresh={handleRefresh} />
         <input
           ref={uploadInputRef}
           type="file"
@@ -495,7 +616,7 @@ export default function FileBrowserPanel({
           ariaLabel={`Search ${projectName} files`}
           value={search.value}
           onValueChange={handleSearchValueChange}
-          onClose={search.close}
+          onClose={closeSearch}
         />
         {directoryPaths.length > 0 ? (
           <Tooltip>
@@ -506,7 +627,9 @@ export default function FileBrowserPanel({
                   size="icon-xs"
                   variant="ghost"
                   aria-label={
-                    allDirectoriesExpanded ? "Collapse all folders" : "Expand all folders"
+                    expandAll || allDirectoriesExpanded
+                      ? "Collapse all folders"
+                      : "Expand all folders"
                   }
                   onClick={toggleAllDirectories}
                 />
@@ -519,7 +642,7 @@ export default function FileBrowserPanel({
               )}
             </TooltipTrigger>
             <TooltipPopup>
-              {allDirectoriesExpanded ? "Collapse all folders" : "Expand all folders"}
+              {expandAll || allDirectoriesExpanded ? "Collapse all folders" : "Expand all folders"}
             </TooltipPopup>
           </Tooltip>
         ) : null}
@@ -529,16 +652,31 @@ export default function FileBrowserPanel({
           {uploadError}
         </div>
       )}
-      {entriesQuery.error && entriesQuery.data === null ? (
-        <div className="p-4 text-xs leading-relaxed text-destructive">{entriesQuery.error}</div>
-      ) : (
-        <FileTree
-          model={model}
-          aria-label={`${projectName} files`}
-          className="min-h-0 flex-1 overflow-hidden"
-          style={pierreTreeStyle(resolvedTheme)}
-        />
+      {error || pathSearch.error ? (
+        <button
+          type="button"
+          onClick={handleRefresh}
+          className="p-4 text-left text-xs leading-relaxed text-destructive"
+        >
+          {error ?? pathSearch.error} Click to retry.
+        </button>
+      ) : null}
+      {query.trim() && pathSearch.truncated && !pathSearch.isPending ? (
+        <div className="px-3 py-1 text-xs text-muted-foreground">
+          More matches available. Refine your search.
+        </div>
+      ) : null}
+      {(isPending || pathSearch.isPending) && (
+        <div role="status" className="px-3 py-1 text-xs text-muted-foreground">
+          Loading files…
+        </div>
       )}
+      <FileTree
+        model={model}
+        aria-label={`${projectName} files`}
+        className="min-h-0 flex-1 overflow-hidden"
+        style={pierreTreeStyle(resolvedTheme)}
+      />
     </div>
   );
 }

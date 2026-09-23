@@ -6,7 +6,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
 import linearAgentSessionTask from "./058_LinearAgentSessionTask.ts";
 
-it.layer(NodeSqliteClient.layerMemory())("058_LinearAgentSessionTask", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("058_LinearAgentSessionTask", (it) => {
   it.effect("adds an indexed task id and keeps existing delegated sessions", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

@@ -21,13 +21,13 @@ import {
   CircleXIcon,
   EllipsisIcon,
   ExternalLinkIcon,
-  GitPullRequestIcon,
   HandIcon,
   RotateCcwIcon,
   SkipForwardIcon,
   UndoIcon,
   XIcon,
 } from "lucide-react";
+import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { useState, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
@@ -683,7 +683,7 @@ export function ActiveTaskCard({
             rel="noreferrer"
             className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
           >
-            <GitPullRequestIcon aria-hidden className="size-3.5" />
+            <PullRequestGlyph.pullRequest aria-hidden className="size-3.5" />
             PR #{pullRequest.number}
           </a>
         ) : null}
@@ -889,7 +889,7 @@ function HistoryRecord({
             rel="noreferrer"
             className="inline-flex items-center gap-1 hover:text-foreground hover:underline"
           >
-            <GitPullRequestIcon aria-hidden className="size-3.5" />
+            <PullRequestGlyph.pullRequest aria-hidden className="size-3.5" />
             PR #{pullRequest.number}
           </a>
         ) : null}

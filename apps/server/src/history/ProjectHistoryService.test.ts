@@ -10,7 +10,9 @@ import { runMigrations } from "../persistence/Migrations.ts";
 import * as ProjectHistoryService from "./ProjectHistoryService.ts";
 
 const layer = it.layer(
-  ProjectHistoryService.layer.pipe(Layer.provideMerge(NodeSqliteClient.layerMemory())),
+  ProjectHistoryService.layer.pipe(
+    Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
+  ),
 );
 
 const MODEL_SELECTION = '{"instanceId":"codex","model":"gpt-5.6-sol"}';

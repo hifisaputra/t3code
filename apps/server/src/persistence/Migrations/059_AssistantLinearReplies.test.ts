@@ -6,7 +6,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
 import assistantLinearReplies from "./059_AssistantLinearReplies.ts";
 
-it.layer(NodeSqliteClient.layerMemory())("059_AssistantLinearReplies", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("059_AssistantLinearReplies", (it) => {
   it.effect("records each handled delivery once", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

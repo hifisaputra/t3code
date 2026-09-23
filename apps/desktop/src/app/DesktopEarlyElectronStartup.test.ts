@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - tests use POSIX path joining to match the Linux startup boundary.
 import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
+import * as Option from "effect/Option";
 
 import {
   resolveEarlyLinuxElectronOptions,
@@ -81,7 +82,10 @@ describe("DesktopEarlyElectronStartup", () => {
     });
 
     assert.deepEqual(options, {
+      isDevelopment: true,
+      distributionId: Option.none(),
       linuxWmClass: "t3code-dev",
+      linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
       passwordStore: "gnome-libsecret",
     });
   });

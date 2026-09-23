@@ -1,4 +1,5 @@
 import {
+  desktopDistributionLabel,
   desktopDistributionScheme,
   resolveDesktopDistributionNames,
 } from "@t3tools/shared/desktopDistribution";
@@ -30,9 +31,28 @@ interface EarlyDesktopSettingsInput {
 type EarlyLinuxElectronOptionsInput = EarlyDesktopSettingsInput;
 
 export interface EarlyLinuxElectronOptions {
+  readonly isDevelopment: boolean;
+  readonly distributionId: Option.Option<string>;
   readonly linuxWmClass: string;
+  readonly linuxDesktopEntryName: string;
   readonly passwordStore: LinuxPasswordStoreSwitch | null;
 }
+
+// The reverse-DNS desktop entry doubles as the portal identity for window
+// capture, so a distribution build gets its own segment and never claims the
+// official app's entry: com.t3tools.T3Code.Fork.desktop,
+// com.t3tools.T3Code.Fork.Development.desktop.
+export const resolveLinuxDesktopEntryName = (
+  isDevelopment: boolean,
+  distributionId: Option.Option<string> = Option.none(),
+): string => {
+  const segments = ["com.t3tools.T3Code"];
+  if (Option.isSome(distributionId)) {
+    segments.push(desktopDistributionLabel(distributionId.value).replace(/ /g, ""));
+  }
+  if (isDevelopment) segments.push("Development");
+  return `${segments.join(".")}.desktop`;
+};
 
 const trimNonEmpty = (value: string | undefined): string | null => {
   const trimmed = value?.trim();
@@ -87,11 +107,13 @@ export function resolveEarlyLinuxElectronOptions(
   input: EarlyLinuxElectronOptionsInput,
 ): EarlyLinuxElectronOptions {
   const preference = resolveEarlyLinuxPasswordStorePreference(input);
+  const isDevelopment = isDevelopmentEnvironment(input.env);
+  const distributionId = input.distributionId ?? Option.none();
   return {
-    linuxWmClass: desktopDistributionScheme(
-      input.distributionId ?? Option.none(),
-      isDevelopmentEnvironment(input.env),
-    ),
+    isDevelopment,
+    distributionId,
+    linuxWmClass: desktopDistributionScheme(distributionId, isDevelopment),
+    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment, distributionId),
     passwordStore: resolveLinuxPasswordStoreSwitch({
       preference,
       env: input.env,

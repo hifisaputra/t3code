@@ -6,7 +6,7 @@ import {
   LinearOperationError,
   OrchestrationProjectShell,
   OrchestrationThreadShell,
-  PreviewAutomationUnavailableError,
+  McpCapabilityUnavailableError,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -43,8 +43,8 @@ function operationError(error: unknown): LinearOperationError {
   return error;
 }
 
-function unavailableError(error: unknown): PreviewAutomationUnavailableError {
-  assert.instanceOf(error, PreviewAutomationUnavailableError);
+function unavailableError(error: unknown): McpCapabilityUnavailableError {
+  assert.instanceOf(error, McpCapabilityUnavailableError);
   return error;
 }
 
@@ -64,6 +64,8 @@ const invocation = (capabilities: ReadonlyArray<McpInvocationContext.McpCapabili
 
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
+  clientCapabilities: {},
+  clientInfo: { name: "linear-mcp-test", version: "1.0.0" },
   protocolVersion: "2025-06-18",
   initializePayload: {
     protocolVersion: "2025-06-18",
@@ -215,6 +217,9 @@ const projectionLayer = (
   Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
     getTurnStartMessage: () => Effect.die("unused"),
     getImportedAgentSessionSources: () => Effect.die("unused"),
+    listActivitiesByKind: () => Effect.die("unused"),
+    getDeletedWorktreeThreads: () => Effect.die("unused"),
+    getProjectShells: () => Effect.die("unused"),
     getUserInputActivity: () => Effect.die("unused"),
     getCommandReadModel: () => Effect.die("unused"),
     getSnapshot: () => Effect.die("unused"),

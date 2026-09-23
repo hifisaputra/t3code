@@ -70,6 +70,8 @@ export function requestKindFromRequestType(requestType: unknown): ProviderReques
       return "mcp-elicitation";
     case "integration_write_approval":
       return "integration";
+    case "permission_approval":
+      return "permission";
     default:
       return null;
   }

@@ -13,6 +13,7 @@ export interface ProjectScriptInput {
   readonly command: ProjectScript["command"];
   readonly icon: ProjectScript["icon"];
   readonly runOnWorktreeCreate: ProjectScript["runOnWorktreeCreate"];
+  readonly waitForSetup: boolean;
   readonly previewUrl: Exclude<ProjectScript["previewUrl"], undefined> | null;
   readonly autoOpenPreview: boolean;
   /** Working directory for the command, relative to the project root (or absolute). */
@@ -27,6 +28,7 @@ export function buildProjectScript(id: string, input: ProjectScriptInput): Proje
     icon: input.icon,
     runOnWorktreeCreate: input.runOnWorktreeCreate,
     ...(input.cwd ? { cwd: input.cwd } : {}),
+    ...(input.runOnWorktreeCreate && input.waitForSetup ? { async: false } : {}),
     ...(input.previewUrl === null
       ? {}
       : {

@@ -1,6 +1,7 @@
-import Mime from "@effect/platform-node/Mime";
+import * as Option from "effect/Option";
+import * as Mime from "effect/unstable/http/Mime";
 
-export const IMAGE_EXTENSION_BY_MIME_TYPE: Record<string, string> = {
+const IMAGE_EXTENSION_BY_MIME_TYPE: Record<string, string> = {
   "image/avif": ".avif",
   "image/bmp": ".bmp",
   "image/gif": ".gif",
@@ -121,9 +122,10 @@ export function inferImageExtension(input: { mimeType: string; fileName?: string
     return fromMime;
   }
 
-  const fromMimeExtension = Mime.getExtension(input.mimeType);
-  if (fromMimeExtension && SAFE_IMAGE_FILE_EXTENSIONS.has(fromMimeExtension)) {
-    return fromMimeExtension;
+  // The registry returns bare extensions ("png"); the safe list is dotted.
+  const fromMimeExtension = Option.map(Mime.getExtension(input.mimeType), (ext) => `.${ext}`);
+  if (Option.isSome(fromMimeExtension) && SAFE_IMAGE_FILE_EXTENSIONS.has(fromMimeExtension.value)) {
+    return fromMimeExtension.value;
   }
 
   const fileName = input.fileName?.trim() ?? "";
@@ -146,6 +148,6 @@ export function imageMimeTypeForFileName(fileName: string): string | undefined {
   const extension = extensionMatch ? `.${extensionMatch[1]!.toLowerCase()}` : "";
   if (!SAFE_IMAGE_FILE_EXTENSIONS.has(extension)) return undefined;
 
-  const mimeType = Mime.getType(extension);
-  return mimeType !== null && mimeType.startsWith("image/") ? mimeType : undefined;
+  const mimeType = Option.getOrUndefined(Mime.getType(extension));
+  return mimeType !== undefined && mimeType.startsWith("image/") ? mimeType : undefined;
 }

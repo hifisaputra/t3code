@@ -644,7 +644,7 @@ function harness() {
     },
   };
 }
-const database = NodeSqliteClient.layerMemory;
+const database = () => NodeSqliteClient.layer({ filename: ":memory:" });
 type Harness = ReturnType<typeof harness>;
 type Service = Effect.Success<typeof Assistant.make>;
 

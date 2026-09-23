@@ -61,10 +61,10 @@ import Migration0046 from "./Migrations/046_RepairAutomaticSettlementTimestamps.
 import Migration0047 from "./Migrations/047_ProjectionProjectIcon.ts";
 import Migration0048 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts";
 import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
+import Migration0050 from "./Migrations/050_ProjectionThreadLinkedIssue.ts";
 import Migration0051 from "./Migrations/051_LinearDelegation.ts";
 import Migration0052 from "./Migrations/052_DeveloperAssistant.ts";
 import Migration0053 from "./Migrations/053_AssistantSetup.ts";
-import Migration0050 from "./Migrations/050_ProjectionThreadLinkedIssue.ts";
 import Migration0054 from "./Migrations/054_AssistantHotQueryIndexes.ts";
 import Migration0055 from "./Migrations/055_AssistantParallelIssues.ts";
 import Migration0056 from "./Migrations/056_AssistantUsageLimit.ts";
@@ -73,6 +73,11 @@ import Migration0058 from "./Migrations/058_LinearAgentSessionTask.ts";
 import Migration0059 from "./Migrations/059_AssistantLinearReplies.ts";
 import Migration0060 from "./Migrations/060_AssistantProjectNotes.ts";
 import Migration0061 from "./Migrations/061_AssistantCoordinatorStageTasks.ts";
+// Upstream shipped these as 050-053; this fork already used those ids, so they run after ours.
+import Migration0062 from "./Migrations/062_ProjectionThreadPullRequests.ts";
+import Migration0063 from "./Migrations/063_ProjectionThreadMessageContext.ts";
+import Migration0064 from "./Migrations/064_ProjectionThreadTitleState.ts";
+import Migration0065 from "./Migrations/065_PullRequestFilesViewed.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -84,7 +89,7 @@ import Migration0061 from "./Migrations/061_AssistantCoordinatorStageTasks.ts";
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  */
-export const migrationEntries = [
+const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],
@@ -146,11 +151,15 @@ export const migrationEntries = [
   [59, "AssistantLinearReplies", Migration0059],
   [60, "AssistantProjectNotes", Migration0060],
   [61, "AssistantCoordinatorStageTasks", Migration0061],
+  [62, "ProjectionThreadPullRequests", Migration0062],
+  [63, "ProjectionThreadMessageContext", Migration0063],
+  [64, "ProjectionThreadTitleState", Migration0064],
+  [65, "PullRequestFilesViewed", Migration0065],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
 
-export const makeMigrationLoader = (throughId?: number) =>
+const makeMigrationLoader = (throughId?: number) =>
   Migrator.fromRecord(
     Object.fromEntries(
       migrationEntries

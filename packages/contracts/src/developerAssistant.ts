@@ -5,7 +5,7 @@ import { IsoDateTime, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseS
 import { ModelSelection, RuntimeMode } from "./orchestration.ts";
 import { LinearIssueSummary } from "./linear.ts";
 
-export class DeveloperAssistantError extends Schema.TaggedErrorClass<DeveloperAssistantError>()(
+export class DeveloperAssistantError extends Schema.TaggedError<DeveloperAssistantError>()(
   "DeveloperAssistantError",
   { detail: Schema.String },
 ) {

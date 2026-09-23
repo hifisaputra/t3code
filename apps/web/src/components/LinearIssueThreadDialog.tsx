@@ -24,6 +24,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { createModelSelection } from "@t3tools/shared/model";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -287,12 +288,16 @@ export function LinearIssueThreadDialog({
   // Worktree unless the project, or the server, says threads start locally —
   // or unless no branch is being cut, since git will not put a second worktree
   // on the branch the root checkout already holds.
+  // The shared resolver folds the project override over the environment
+  // setting and fills the built-in default, so an unset tier never leaks null.
+  const defaultThreadEnvMode = useMemo(
+    () =>
+      resolveProjectSettings(serverSettings, targetProject?.id ?? null, targetProject ?? null, null)
+        .settings.defaultThreadEnvMode,
+    [serverSettings, targetProject],
+  );
   const mode: ThreadMode =
-    branchMode === "current"
-      ? "local"
-      : (modeOverride ??
-        targetProject?.defaultThreadEnvMode ??
-        serverSettings.defaultThreadEnvMode);
+    branchMode === "current" ? "local" : (modeOverride ?? defaultThreadEnvMode);
 
   // What "Current branch" will run on. The same subscription the chat view
   // reads, so the dialog costs no extra status call on the way in.
