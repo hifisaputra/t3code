@@ -59,7 +59,7 @@ function singleToolCallLabel(entry: WorkLogEntry): string {
  * breaks out of the reading column keeps that much clear on *both* sides —
  * symmetric so the broken-out block stays centred on the column it came from.
  */
-export const TIMELINE_WIDE_CONTENT_SIDE_RESERVE = 72;
+const TIMELINE_WIDE_CONTENT_SIDE_RESERVE = 72;
 
 /**
  * Cap for content that breaks out of the reading column (wide tables). Falls

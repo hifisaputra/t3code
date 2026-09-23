@@ -29,7 +29,7 @@ import { Textarea } from "../ui/textarea";
 import { useAssistantAction } from "./assistantUi";
 
 /** When a dispatched issue would start, given what the project is doing now. */
-export function dispatchTiming(
+function dispatchTiming(
   project: AssistantProject,
   activeTasks: ReadonlyArray<AssistantTaskSummary>,
 ) {

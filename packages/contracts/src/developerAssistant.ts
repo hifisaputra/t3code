@@ -1082,7 +1082,7 @@ export type PipelineStepDef = {
   readonly kind: AssistantThreadKind;
 };
 
-export const TO_STAGING: ReadonlyArray<PipelineStepDef> = [
+const TO_STAGING: ReadonlyArray<PipelineStepDef> = [
   { key: "code", label: "Code", kind: "implement" },
   { key: "review", label: "Code review", kind: "review" },
   { key: "merge", label: "Merge", kind: "implement" },
@@ -1091,22 +1091,19 @@ export const TO_STAGING: ReadonlyArray<PipelineStepDef> = [
 ];
 // With the e2e check in the team's worktree it runs on the approved commit,
 // before the merge; staging is then only the deploy to verify.
-export const TO_STAGING_WORKTREE_E2E: ReadonlyArray<PipelineStepDef> = [
+const TO_STAGING_WORKTREE_E2E: ReadonlyArray<PipelineStepDef> = [
   { key: "code", label: "Code", kind: "implement" },
   { key: "review", label: "Code review", kind: "review" },
   { key: "e2e", label: "E2E test", kind: "e2e" },
   { key: "merge", label: "Merge", kind: "implement" },
   { key: "staging", label: "Staging", kind: "lead" },
 ];
-export const TAKE_ON: PipelineStepDef = { key: "take", label: "Take on", kind: "lead" };
-export const LED_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING];
-export const LED_WORKTREE_PIPELINE: ReadonlyArray<PipelineStepDef> = [
-  TAKE_ON,
-  ...TO_STAGING_WORKTREE_E2E,
-];
+const TAKE_ON: PipelineStepDef = { key: "take", label: "Take on", kind: "lead" };
+const LED_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING];
+const LED_WORKTREE_PIPELINE: ReadonlyArray<PipelineStepDef> = [TAKE_ON, ...TO_STAGING_WORKTREE_E2E];
 
 // A research issue has no merge, staging or tester: the report is delivered once fact-checked.
-export const RESEARCH_PIPELINE: ReadonlyArray<PipelineStepDef> = [
+const RESEARCH_PIPELINE: ReadonlyArray<PipelineStepDef> = [
   TAKE_ON,
   { key: "research", label: "Research", kind: "implement" },
   { key: "fact-check", label: "Fact check", kind: "review" },
@@ -1284,7 +1281,7 @@ export interface AssistantLinearPlanStep {
 }
 
 /** The last step of every plan: the person accepts the work or sends it back. */
-export const ASSISTANT_LINEAR_PLAN_CHECK = "Your check";
+const ASSISTANT_LINEAR_PLAN_CHECK = "Your check";
 
 /**
  * The checklist a Linear agent session shows for a managed issue: the steps of

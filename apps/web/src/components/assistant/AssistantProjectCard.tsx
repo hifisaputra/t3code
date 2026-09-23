@@ -395,7 +395,7 @@ export function ProjectMenu({
 }
 
 /** Where the project's work lands: its base branch and the staging host. */
-export function DeliveryChip({
+function DeliveryChip({
   baseBranch,
   stagingUrl,
   className,

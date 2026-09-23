@@ -89,9 +89,7 @@ export interface LinearIssueResolutionTarget {
 }
 
 /** The last answer for this identifier, so retyping the same reference does not blank the row. */
-export function readCachedLinearIssue(
-  target: LinearIssueResolutionTarget,
-): LinearIssueDetail | null {
+function readCachedLinearIssue(target: LinearIssueResolutionTarget): LinearIssueDetail | null {
   if (target.environmentId === null || target.reference === null) {
     return null;
   }

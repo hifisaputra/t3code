@@ -121,7 +121,7 @@ export class LinearThreadService extends Context.Service<
   }
 >()("t3/linear/LinearThreadService") {}
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const linear = yield* LinearApi;
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const projectFiles = yield* T3ProjectFileLoader.T3ProjectFileLoader;

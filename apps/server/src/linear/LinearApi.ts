@@ -659,7 +659,7 @@ export class LinearAppCredential extends Context.Reference<
   defaultValue: () => undefined as Effect.Effect<string, LinearOperationError> | undefined,
 }) {}
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const baseUrl = yield* LinearApiBaseUrl;
   const httpClient = yield* HttpClient.HttpClient;
   const serverSettings = yield* ServerSettingsService;

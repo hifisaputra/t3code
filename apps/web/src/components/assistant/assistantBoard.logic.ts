@@ -357,7 +357,7 @@ export function engineeringChecksLine(task: AssistantTaskSummary): string | null
   return `Team is confirming ${count} engineering check${count === 1 ? "" : "s"}`;
 }
 
-export const taskRoundsExhausted = (task: AssistantTaskSummary) => task.turns >= task.turnLimit;
+const taskRoundsExhausted = (task: AssistantTaskSummary) => task.turns >= task.turnLimit;
 
 export {
   assistantTaskPipeline as taskPipeline,

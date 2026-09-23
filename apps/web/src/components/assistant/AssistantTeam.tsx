@@ -67,7 +67,7 @@ export function teamHolder(
  * a worker only once it was briefed, and a team leader only for led work; a
  * thread that never existed has nothing to restore.
  */
-export function teamThreadEverRan(
+function teamThreadEverRan(
   task: Pick<AssistantTaskSummary, "leader" | "turns" | "codeReview" | "e2e" | "research">,
   role: AssistantThreadRole,
 ): boolean {

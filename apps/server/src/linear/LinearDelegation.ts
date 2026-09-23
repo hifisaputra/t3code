@@ -96,7 +96,7 @@ const decodeRequestedInput = Schema.decodeUnknownEffect(
   }),
 );
 
-export function validLinearSignature(body: Uint8Array, signature: string, secret: string): boolean {
+function validLinearSignature(body: Uint8Array, signature: string, secret: string): boolean {
   if (!secret || !/^[a-f\d]{64}$/i.test(signature)) return false;
   return NodeCrypto.timingSafeEqual(
     NodeCrypto.createHmac("sha256", secret).update(body).digest(),

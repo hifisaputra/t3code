@@ -48,7 +48,7 @@ export type IssueListPreferencePatch = {
   [Key in keyof IssueListPreferences]?: IssueListPreferences[Key] | undefined;
 };
 
-export const DEFAULT_ISSUE_LIST_PREFERENCES = {
+const DEFAULT_ISSUE_LIST_PREFERENCES = {
   state: "open",
 } as const satisfies IssueListPreferences;
 

@@ -132,7 +132,7 @@ export interface AggregateHistoryOptions {
  * The zone database lives in Intl, so an unknown zone is only discoverable by
  * trying to build a formatter with it. `en-CA` yields ISO-ordered parts.
  */
-export function makeDayFormat(timeZone: string): Intl.DateTimeFormat | null {
+function makeDayFormat(timeZone: string): Intl.DateTimeFormat | null {
   try {
     return new Intl.DateTimeFormat("en-CA", {
       timeZone,
@@ -178,7 +178,7 @@ function toTurnSpan(
  * less than {@link INTERVAL_MERGE_GAP_MS} apart become a single interval, so a
  * chatty hour renders as one bar rather than forty.
  */
-export function mergeSpans(spans: readonly TurnSpan[]): ProjectHistoryInterval[] {
+function mergeSpans(spans: readonly TurnSpan[]): ProjectHistoryInterval[] {
   const ordered = [...spans].sort(
     (left, right) => left.startMs - right.startMs || left.turnId.localeCompare(right.turnId),
   );
@@ -201,7 +201,7 @@ export function mergeSpans(spans: readonly TurnSpan[]): ProjectHistoryInterval[]
  * Folds turn rows into `(day, thread)` rows for the requested window. Days
  * come back newest first; threads inside a day come back earliest first.
  */
-export function aggregateHistoryDays(
+function aggregateHistoryDays(
   rows: readonly ProjectHistoryTurnRow[],
   options: AggregateHistoryOptions,
 ): ProjectHistoryDay[] {
@@ -304,7 +304,7 @@ export const layerTest = Layer.succeed(
 const readFailed = (detail: string) => (cause: Cause.Cause<unknown>) =>
   new ProjectHistoryReadError({ reason: "readFailed", detail, cause: Cause.squash(cause) });
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const listWindowTurns = SqlSchema.findAll({

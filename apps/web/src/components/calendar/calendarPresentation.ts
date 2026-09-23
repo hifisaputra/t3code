@@ -48,7 +48,7 @@ export function formatWeekRangeLabel(days: ReadonlyArray<string>): string {
  * One colour per calendar, by its position in the calendar list. Blocks wear
  * the tinted background and border; dots and legends wear the solid colour.
  */
-export const CALENDAR_COLOR_CLASSES = [
+const CALENDAR_COLOR_CLASSES = [
   {
     block: "border-blue-500/50 bg-blue-500/15 text-blue-950 dark:text-blue-100",
     dot: "bg-blue-500",

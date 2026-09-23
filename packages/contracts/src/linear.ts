@@ -410,7 +410,7 @@ export function defaultLinearBranchPrefix(
  * workspace's format put something else there, the slug is rebuilt from the
  * title so the identifier is always present.
  */
-export function linearIssueBranchSuffix(
+function linearIssueBranchSuffix(
   issue: Pick<LinearBranchNameIssue, "identifier" | "title" | "branchName">,
 ): string {
   const identifier = issue.identifier.trim().toLowerCase();

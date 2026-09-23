@@ -76,7 +76,7 @@ export function formatLinearIssueForComposer(issue: LinearIssueDetail): string {
 }
 
 /** The runbook a thread started from an issue should follow when it is installed. */
-export const LINEAR_WORK_SKILL_NAME = "linear-work";
+const LINEAR_WORK_SKILL_NAME = "linear-work";
 
 const INSTRUCTION =
   "Restate what done looks like in one to three lines. If a product decision is missing or the brief is unclear, ask me and stop. Otherwise start.";

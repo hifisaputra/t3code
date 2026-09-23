@@ -98,7 +98,7 @@ export interface ResolvedFileAsset {
  * Resolve a workspace file to an absolute, backend-served asset URL and the token's
  * expiry — callers that cache the URL need to know how long it stays usable.
  */
-export async function resolveWorkspaceFileAsset<AssetError>(input: {
+async function resolveWorkspaceFileAsset<AssetError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
   readonly httpBaseUrl: string;

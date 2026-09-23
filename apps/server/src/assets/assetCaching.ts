@@ -5,7 +5,7 @@ import * as Option from "effect/Option";
  * Asset URLs are signed and bound to a single file, so they are safe to keep in the
  * browser's private cache for the lifetime of a token bucket.
  */
-export const ASSET_CACHE_CONTROL = "private, max-age=3600";
+const ASSET_CACHE_CONTROL = "private, max-age=3600";
 
 /** Cache validators for a served asset, matching what `HttpServerResponse.file` emits. */
 export interface AssetValidators {

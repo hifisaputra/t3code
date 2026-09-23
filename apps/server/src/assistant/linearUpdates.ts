@@ -353,7 +353,7 @@ export function noE2eComment(input: {
  * The most characters T3 puts in one research comment. Linear refuses a comment
  * over 100,000 characters; the margin covers what Linear counts differently.
  */
-export const RESEARCH_COMMENT_MAX_CHARS = 90_000;
+const RESEARCH_COMMENT_MAX_CHARS = 90_000;
 
 const RESEARCH_RESULTS: Record<AssistantResearchCheck["result"], string> = {
   answered: "✅ answered",
@@ -556,7 +556,7 @@ export function linearFailureDetail(error: unknown): string {
  * the text after it goes into the next send-back, without the marker, so a
  * new team's feedback never carries one.
  */
-export const SESSION_NOTES_MARKER = "Replies on the Linear agent session, for a send-back:";
+const SESSION_NOTES_MARKER = "Replies on the Linear agent session, for a send-back:";
 
 /** The task's feedback with a reply from its Linear session added for a send-back. */
 export function withSessionNote(feedback: string, note: string): string {

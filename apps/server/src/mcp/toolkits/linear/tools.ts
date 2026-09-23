@@ -84,7 +84,7 @@ const IssueRef = Schema.Struct({
   url: Schema.String,
 });
 
-export const GetIssueTool = readonlyLinearTool(
+const GetIssueTool = readonlyLinearTool(
   Tool.make("get_issue", {
     description:
       "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, and its most recent comments. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
@@ -95,7 +95,7 @@ export const GetIssueTool = readonlyLinearTool(
   }).annotate(Tool.Title, "Get Linear issue"),
 );
 
-export const ListCommentsTool = readonlyLinearTool(
+const ListCommentsTool = readonlyLinearTool(
   Tool.make("list_comments", {
     description:
       "List the most recent comments on a Linear issue, newest activity included, with each comment's author and URL. Pass issueId as an identifier such as DEL-123 or a Linear UUID; omit it and the issue this thread is linked to is used.",
@@ -109,7 +109,7 @@ export const ListCommentsTool = readonlyLinearTool(
   }).annotate(Tool.Title, "List Linear comments"),
 );
 
-export const ListIssueStatusesTool = readonlyLinearTool(
+const ListIssueStatusesTool = readonlyLinearTool(
   Tool.make("list_issue_statuses", {
     description:
       "List the workflow states a team's issues can be moved to, in board order, so a status can be named exactly when saving an issue. Pass team as a team id, a key such as DEL, or a team name; omit it and the team of the issue this thread is linked to is used.",
@@ -129,7 +129,7 @@ export const ListIssueStatusesTool = readonlyLinearTool(
   }).annotate(Tool.Title, "List Linear issue statuses"),
 );
 
-export const ListMyIssuesTool = readonlyLinearTool(
+const ListMyIssuesTool = readonlyLinearTool(
   Tool.make("list_my_issues", {
     description:
       "List the Linear issues assigned to the connected user, most recently updated first, filtered by team, workflow state type, or project. Useful for finding the identifier of an issue before reading or saving it.",
@@ -158,7 +158,7 @@ export const ListMyIssuesTool = readonlyLinearTool(
   }).annotate(Tool.Title, "List my Linear issues"),
 );
 
-export const SaveCommentTool = linearTool(
+const SaveCommentTool = linearTool(
   Tool.make("save_comment", {
     description:
       "Create or edit a Linear comment as the connected identity. Pass id from list_comments to replace an existing comment body; omit id to create a comment. For creation, issueId defaults to the issue this thread is linked to. For editing, the comment identifies its issue; an optional issueId must match. Linear enforces permission to edit the comment.",
@@ -183,7 +183,7 @@ export const SaveCommentTool = linearTool(
     .annotate(Tool.Idempotent, false),
 );
 
-export const UploadImageTool = linearTool(
+const UploadImageTool = linearTool(
   Tool.make("upload_image", {
     description:
       "Upload an image from this thread's workspace to Linear and get back a URL to embed. Use it for screenshots and other visual evidence of the work: save the image in the workspace, upload it here, then put the returned markdown in a save_comment body or a save_issue description. The URL belongs to the Linear workspace, so one upload can be embedded in as many comments and issues as you like.",
@@ -259,7 +259,7 @@ const IssuePlanningFields = {
   ),
 };
 
-export const SaveIssueTool = linearTool(
+const SaveIssueTool = linearTool(
   Tool.make("save_issue", {
     description:
       "Update a Linear issue's title, description, workflow state, labels, assignee, project, milestone, estimate, cycle, priority, or due date, leaving every field you omit untouched. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is saved.",
@@ -296,7 +296,7 @@ export const SaveIssueTool = linearTool(
     .annotate(Tool.Idempotent, true),
 );
 
-export const CreateIssueTool = linearTool(
+const CreateIssueTool = linearTool(
   Tool.make("create_issue", {
     description:
       "Create a Linear issue. By default it lands on the team of the issue this thread is linked to, as a sub-issue of it; pass team to file it elsewhere, and parentId null to create a standalone issue instead.",

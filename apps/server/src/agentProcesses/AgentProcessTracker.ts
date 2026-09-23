@@ -124,7 +124,7 @@ const chunk = <A>(values: ReadonlyArray<A>, size: number): ReadonlyArray<Readonl
   return chunks;
 };
 
-export const make = Effect.gen(function* AgentProcessTrackerMake() {
+const make = Effect.gen(function* AgentProcessTrackerMake() {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const hostPlatform = yield* HostProcessPlatform;
   const serverPid = process.pid;

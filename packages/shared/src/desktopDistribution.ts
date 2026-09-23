@@ -8,8 +8,8 @@ import * as Option from "effect/Option";
  * the bundle id, the product name, the renderer scheme and the Linux binary.
  * No id means the official names, so the default build is unchanged.
  */
-export const DESKTOP_DISTRIBUTION_ENV = "T3CODE_DESKTOP_DISTRIBUTION";
-export const DESKTOP_DISTRIBUTION_PACKAGE_FIELD = "t3codeDistribution";
+const DESKTOP_DISTRIBUTION_ENV = "T3CODE_DESKTOP_DISTRIBUTION";
+const DESKTOP_DISTRIBUTION_PACKAGE_FIELD = "t3codeDistribution";
 
 // Lowercase words joined by single dashes. The id ends up in a URL scheme, a
 // bundle id, a directory name and a file name, so it stays that simple.

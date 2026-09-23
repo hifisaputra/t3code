@@ -626,7 +626,7 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
  * above them in `server.ts` — the broker especially, since the runtime has to
  * see the same instance the write approvals are raised on.
  */
-export const LinearToolkitRegistrationLive = McpServer.toolkit(LinearToolkit).pipe(
+const LinearToolkitRegistrationLive = McpServer.toolkit(LinearToolkit).pipe(
   Layer.provide(LinearToolkitHandlersLive),
   Layer.provide(LinearApi.layer),
 );
@@ -671,4 +671,4 @@ export const makeLayer = (options: { readonly preview: boolean }) =>
       : DeviceToolkitRegistrationLive,
   ).pipe(Layer.provideMerge(McpTransportLive));
 
-export const layer = makeLayer({ preview: true });
+const layer = makeLayer({ preview: true });

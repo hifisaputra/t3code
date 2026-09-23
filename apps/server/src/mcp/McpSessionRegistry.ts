@@ -245,8 +245,6 @@ const make = (options: McpSessionRegistryOptions = {}) =>
 export const layerWithOptions = (options: McpSessionRegistryOptions) =>
   Layer.effect(McpSessionRegistry, make(options));
 
-export const layer = layerWithOptions({});
-
 /**
  * Issues a credential for the capabilities the caller wants and this server
  * offers. The old credential for the thread is revoked either way, so a
