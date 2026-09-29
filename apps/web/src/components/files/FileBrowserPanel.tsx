@@ -648,7 +648,7 @@ export default function FileBrowserPanel({
         ) : null}
       </div>
       {uploadError && (
-        <div className="shrink-0 border-b border-border/60 px-3 py-1.5 text-[10px] leading-relaxed text-destructive">
+        <div className="shrink-0 border-b border-border/60 px-3 py-1.5 text-3xs leading-relaxed text-destructive">
           {uploadError}
         </div>
       )}

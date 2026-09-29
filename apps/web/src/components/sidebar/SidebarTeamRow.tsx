@@ -205,7 +205,7 @@ function JumpHintBadge({ label }: { label: string }) {
   return (
     <span
       aria-hidden
-      className="pointer-events-none absolute right-1.5 top-1/2 z-10 inline-flex h-5 -translate-y-1/2 items-center rounded-full border border-border/80 bg-background/95 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
+      className="pointer-events-none absolute right-1.5 top-1/2 z-10 inline-flex h-5 -translate-y-1/2 items-center rounded-full border border-border/80 bg-background/95 px-1.5 font-mono text-3xs font-medium tracking-tight text-foreground shadow-sm"
     >
       {label}
     </span>
@@ -468,7 +468,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
                 onKeyDown={handleHeaderKeyDown}
                 // The open member's own row carries the route tint; a second
                 // solid fill here would read as one undifferentiated block.
-                className="group/sidebar-row relative flex w-full cursor-pointer gap-1.5 overflow-hidden rounded-md bg-transparent px-[var(--sidebar-row-content-inset)] py-1.5 text-left text-sidebar-foreground outline-none select-none hover:bg-sidebar-row-hover"
+                className="group/sidebar-row relative flex w-full cursor-pointer gap-1.5 overflow-hidden rounded-md bg-transparent px-(--sidebar-row-content-inset) py-1.5 text-left text-sidebar-foreground outline-none select-none hover:bg-sidebar-row-hover"
               />
             }
           >
@@ -512,7 +512,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
                 {issueStatus !== null ? (
                   <IssueStatusChip status={issueStatus} onOpen={handleOpenIssue} />
                 ) : identifier !== "" ? (
-                  <span className="shrink-0 font-mono text-[10px] font-medium text-sidebar-muted-foreground">
+                  <span className="shrink-0 font-mono text-3xs font-medium text-sidebar-muted-foreground">
                     {identifier}
                   </span>
                 ) : null}
@@ -609,7 +609,7 @@ const SidebarTeamMemberRow = memo(function SidebarTeamMemberRow(props: {
           // they belong to, and the indent lands their labels under the issue
           // title rather than under the header's chevron. Members are support
           // for the header, so they sit a size class below a real thread row.
-          "group/sidebar-row relative ml-4 flex h-7 cursor-pointer items-center gap-2 overflow-hidden rounded-r-md border-l border-sidebar-border/60 pl-3.5 pr-[var(--sidebar-row-content-inset)] text-left outline-none select-none",
+          "group/sidebar-row relative ml-4 flex h-7 cursor-pointer items-center gap-2 overflow-hidden rounded-r-md border-l border-sidebar-border/60 pl-3.5 pr-(--sidebar-row-content-inset) text-left outline-none select-none",
           props.isActive
             ? "bg-sidebar-row-active text-sidebar-foreground"
             : props.isSelected

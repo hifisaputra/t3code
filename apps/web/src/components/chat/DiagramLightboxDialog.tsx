@@ -279,8 +279,8 @@ export const DiagramLightboxDialog = memo(function DiagramLightboxDialog({
           <Button
             type="button"
             size="icon"
-            variant="ghost"
-            className="size-8 rounded-full text-white/90 hover:bg-white/10 hover:text-white"
+            variant="media-navigation"
+            className="relative top-auto size-8 translate-y-0"
             aria-label="Zoom out"
             disabled={transform.scale <= MIN_DIAGRAM_SCALE}
             onClick={() => zoomBy(1 / ZOOM_STEP)}
@@ -298,8 +298,8 @@ export const DiagramLightboxDialog = memo(function DiagramLightboxDialog({
           <Button
             type="button"
             size="icon"
-            variant="ghost"
-            className="size-8 rounded-full text-white/90 hover:bg-white/10 hover:text-white"
+            variant="media-navigation"
+            className="relative top-auto size-8 translate-y-0"
             aria-label="Zoom in"
             disabled={transform.scale >= MAX_DIAGRAM_SCALE}
             onClick={() => zoomBy(ZOOM_STEP)}
@@ -309,8 +309,8 @@ export const DiagramLightboxDialog = memo(function DiagramLightboxDialog({
           <Button
             type="button"
             size="icon"
-            variant="ghost"
-            className="size-8 rounded-full text-white/90 hover:bg-white/10 hover:text-white"
+            variant="media-navigation"
+            className="relative top-auto size-8 translate-y-0"
             aria-label="Fit diagram to screen"
             disabled={!zoomedIn}
             onClick={resetZoom}
@@ -323,8 +323,8 @@ export const DiagramLightboxDialog = memo(function DiagramLightboxDialog({
       <Button
         type="button"
         size="icon"
-        variant="ghost"
-        className="absolute right-2 top-2 z-10 text-white/90 hover:bg-white/10 hover:text-white sm:right-4 sm:top-4"
+        variant="media-close"
+        className="absolute right-2 top-2 z-10 sm:right-4 sm:top-4"
         onClick={onClose}
         aria-label="Close diagram preview"
       >

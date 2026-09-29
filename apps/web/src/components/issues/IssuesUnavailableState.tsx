@@ -4,14 +4,7 @@ import { CircleDotIcon, SettingsIcon } from "lucide-react";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 
 import { Button } from "../ui/button";
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "../ui/empty";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 
 /**
  * What the page shows instead of rows when Linear cannot answer: no key on any
@@ -32,7 +25,7 @@ export function IssuesUnavailableState({
   showSettingsLink?: boolean;
 }) {
   return (
-    <Empty className="px-4 py-16 md:px-4">
+    <Empty>
       <EmptyMedia variant="icon">
         <CircleDotIcon />
       </EmptyMedia>
@@ -41,7 +34,7 @@ export function IssuesUnavailableState({
         <EmptyDescription className="max-w-sm">{message}</EmptyDescription>
       </EmptyHeader>
       {onRetry || showSettingsLink ? (
-        <EmptyContent className="flex-row flex-wrap justify-center gap-2">
+        <div className="flex flex-wrap justify-center gap-2">
           {showSettingsLink ? (
             <Button size="sm" render={<Link to="/settings/integrations" />}>
               <SettingsIcon aria-hidden className="size-3.5" />
@@ -60,7 +53,7 @@ export function IssuesUnavailableState({
               Retry
             </Button>
           ) : null}
-        </EmptyContent>
+        </div>
       ) : null}
     </Empty>
   );

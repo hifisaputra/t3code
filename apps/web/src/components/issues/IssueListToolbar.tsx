@@ -189,8 +189,8 @@ export function IssueListToolbar({
           <ListFilterIcon aria-hidden />
           <span className="sr-only sm:not-sr-only">Filters</span>
           {filterCount > 0 ? (
-            <Badge size="sm" variant="secondary" className="tabular-nums">
-              {filterCount}
+            <Badge size="sm" variant="secondary">
+              <span className="tabular-nums">{filterCount}</span>
             </Badge>
           ) : null}
         </MenuTrigger>

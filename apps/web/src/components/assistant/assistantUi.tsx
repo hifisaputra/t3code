@@ -89,7 +89,7 @@ export function SectionHeading({
         {children}
       </h2>
       {count !== undefined && count > 0 ? (
-        <span className="rounded-full bg-muted px-1.5 font-medium text-[11px] text-muted-foreground tabular-nums">
+        <span className="rounded-full bg-muted px-1.5 font-medium text-2xs text-muted-foreground tabular-nums">
           {count}
         </span>
       ) : null}
@@ -188,7 +188,7 @@ export function CommitChip({ revision }: { revision: string }) {
           <button
             type="button"
             onClick={() => copyToClipboard(revision, undefined)}
-            className="inline-flex items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="inline-flex items-center gap-1 rounded-md border border-border/60 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground hover:bg-accent hover:text-foreground"
           />
         }
       >

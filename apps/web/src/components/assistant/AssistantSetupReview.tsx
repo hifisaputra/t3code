@@ -240,7 +240,7 @@ function SetupProposal({
                 </span>
                 <span
                   className={cn(
-                    "ml-auto flex shrink-0 items-center gap-1 text-[11px] tabular-nums",
+                    "ml-auto flex shrink-0 items-center gap-1 text-2xs tabular-nums",
                     section.over && "font-medium text-warning-foreground",
                   )}
                 >
@@ -323,8 +323,8 @@ export function AssistantSetupSheet({
     <Sheet open={open && setup !== null} onOpenChange={(next) => !pending && onOpenChange(next)}>
       <SheetPopup side="right" className="max-w-xl">
         <SheetHeader>
-          <SheetTitle className="flex items-center gap-2">
-            <SparklesIcon className="size-4" />
+          <SheetTitle className="flex items-center">
+            <SparklesIcon className="me-2 size-4" />
             Review {title} setup
           </SheetTitle>
           <SheetDescription>

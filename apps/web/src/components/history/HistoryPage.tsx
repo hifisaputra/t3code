@@ -214,7 +214,7 @@ export function HistoryPage({ environmentParam, projectParam, onScopeChange }: H
   );
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         <WorkspacePageHeader electron={isElectron} className="h-auto">
           {topbarContent}
@@ -257,7 +257,7 @@ export function HistoryPage({ environmentParam, projectParam, onScopeChange }: H
                       <HistoryDayBarColumn key={bar.day} bar={bar} />
                     ))}
                   </div>
-                  <div className="flex items-center justify-between text-[10px] text-muted-foreground tabular-nums">
+                  <div className="flex items-center justify-between text-3xs text-muted-foreground tabular-nums">
                     <span>{formatDayShort(historyWindow.sinceDay)}</span>
                     <span>{formatDayShort(historyWindow.untilDay)}</span>
                   </div>
@@ -301,7 +301,7 @@ function HistoryDayBarColumn({ bar }: { readonly bar: HistoryDayBar }) {
           >
             <div
               className={cn(
-                "w-full rounded-t-[2px]",
+                "w-full rounded-t-xs",
                 bar.heightPercent === 0 ? "bg-muted" : bar.isToday ? "bg-primary" : "bg-primary/60",
               )}
               style={{ height: `${Math.max(bar.heightPercent, 2)}%` }}

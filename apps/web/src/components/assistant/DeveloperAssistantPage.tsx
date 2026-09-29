@@ -56,7 +56,7 @@ export function DeveloperAssistantPage() {
     environments.find((e) => e.serverConfig?.settings.linear.apiKey) ??
     environments[0];
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
       {environment ? (
         <AssistantEnvironment
           key={environment.environmentId}
@@ -592,7 +592,7 @@ function Onboarding({
   const agentAccess = Boolean(linear?.agentAccess);
   return (
     <div className="mx-auto flex w-full max-w-xl flex-col gap-6 px-4 py-12 sm:py-16">
-      <Empty className="flex-none p-0 md:p-0">
+      <Empty className="flex-none">
         <EmptyMedia variant="icon">
           <BotIcon />
         </EmptyMedia>
@@ -641,15 +641,15 @@ function BoardGhost() {
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-8 px-4 py-5 sm:px-6 lg:py-6">
       <div className="flex flex-col gap-3">
         <Skeleton className="h-4 w-20" />
-        <Skeleton className="h-28 rounded-xl" />
+        <Skeleton shape="card" className="h-28" />
       </div>
       <div className="flex flex-col gap-3">
         <Skeleton className="h-4 w-24" />
-        <Skeleton className="h-20 rounded-xl" />
+        <Skeleton shape="card" className="h-20" />
       </div>
       <div className="flex flex-col gap-3">
         <Skeleton className="h-4 w-16" />
-        <Skeleton className="h-40 rounded-xl" />
+        <Skeleton shape="card" className="h-40" />
       </div>
     </div>
   );

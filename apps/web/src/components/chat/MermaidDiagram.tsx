@@ -129,27 +129,25 @@ export function MermaidDiagram({ code, theme, isStreaming, children }: MermaidDi
 
   return (
     <div
-      className="chat-markdown-codeblock border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"
+      className="chat-markdown-codeblock my-[0.65rem] overflow-hidden rounded-lg border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"
       data-language="mermaid"
       data-view={showsDiagram ? "diagram" : "source"}
     >
-      <div className="chat-markdown-codeblock-header select-none">
-        <span className="chat-markdown-codeblock-title">
+      <div className="chat-markdown-codeblock-header flex items-center justify-between gap-2 pt-1.5 pr-1.5 pb-0 pl-3 select-none">
+        <span className="inline-flex min-w-0 items-center gap-1.5 font-mono text-2xs">
           <WorkflowIcon className="size-3.5 shrink-0" aria-hidden />
           <span className="truncate">Diagram</span>
           {showsFailure ? (
             <Tooltip>
               <TooltipTrigger
                 render={
-                  <span className="inline-flex shrink-0 items-center gap-1 text-amber-600 dark:text-amber-500" />
+                  <span className="inline-flex shrink-0 items-center gap-1 text-warning-foreground" />
                 }
               >
                 <TriangleAlertIcon className="size-3 shrink-0" aria-hidden />
                 unrenderable
               </TooltipTrigger>
-              <TooltipPopup side="top" className="max-w-80 whitespace-normal leading-tight">
-                {state.error}
-              </TooltipPopup>
+              <TooltipPopup side="top">{state.error}</TooltipPopup>
             </Tooltip>
           ) : null}
         </span>
@@ -160,9 +158,8 @@ export function MermaidDiagram({ code, theme, isStreaming, children }: MermaidDi
                 render={
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant={showSource ? "secondary" : "ghost-muted"}
                     size="icon-xs"
-                    className="chat-markdown-chrome-action"
                     aria-pressed={showSource}
                     onClick={() => setShowSource((value) => !value)}
                     aria-label={toggleLabel}
@@ -180,9 +177,8 @@ export function MermaidDiagram({ code, theme, isStreaming, children }: MermaidDi
                 render={
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="ghost-muted"
                     size="icon-xs"
-                    className="chat-markdown-chrome-action"
                     onClick={handleExpand}
                     aria-label={expandLabel}
                   />
@@ -198,9 +194,8 @@ export function MermaidDiagram({ code, theme, isStreaming, children }: MermaidDi
               render={
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="ghost-muted"
                   size="icon-xs"
-                  className="chat-markdown-chrome-action"
                   onClick={handleCopy}
                   aria-label={copyLabel}
                 />

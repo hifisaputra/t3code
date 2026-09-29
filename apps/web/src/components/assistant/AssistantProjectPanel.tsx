@@ -128,12 +128,12 @@ function PanelContents({
   const notesCount = project.notes?.length ?? 0;
   return (
     <>
-      <SheetHeader className="gap-3 pb-3 pr-12">
+      <SheetHeader className="me-6">
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-          <SheetTitle className="flex min-w-0 flex-1 items-center gap-2.5 text-lg">
-            <StatusDot tone={activity.tone} pulse={activity.tone === "active"} />
+          <SheetTitle className="flex min-w-0 flex-1 items-center">
+            <StatusDot tone={activity.tone} pulse={activity.tone === "active"} className="me-2.5" />
             <span className="sr-only">{activity.status}:</span>
-            <span className="truncate">{title}</span>
+            <span className="truncate text-lg">{title}</span>
           </SheetTitle>
           <div className="flex shrink-0 items-center gap-1.5">
             <ProjectDispatchButton
@@ -145,10 +145,10 @@ function PanelContents({
             <ProjectRunButton project={project} title={title} control={control} />
           </div>
         </div>
-        <SheetDescription
-          className={activity.tone === "attention" ? "text-warning-foreground" : undefined}
-        >
-          {linearProjectName ?? "Linear project"} · {activityLine(activity)}
+        <SheetDescription>
+          <span className={activity.tone === "attention" ? "text-warning-foreground" : undefined}>
+            {linearProjectName ?? "Linear project"} · {activityLine(activity)}
+          </span>
         </SheetDescription>
         <ToggleGroup
           aria-label={`${title} details`}

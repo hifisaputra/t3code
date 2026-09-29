@@ -202,7 +202,7 @@ function PipelineStepButton({
               {step.label}
             </span>
           </span>
-          <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+          <span className="flex min-w-0 items-center gap-1 text-2xs text-muted-foreground">
             <kind.icon aria-hidden className={cn("size-3 shrink-0", kind.className)} />
             <span className="truncate">{note ?? kind.label}</span>
           </span>
@@ -228,7 +228,7 @@ function DispatchedChip({ fromLinear }: { fromLinear: boolean }) {
     <Tooltip>
       <TooltipTrigger
         render={
-          <span className="shrink-0 rounded-md border border-border/60 px-1.5 py-0.5 text-[11px] text-muted-foreground" />
+          <span className="shrink-0 rounded-md border border-border/60 px-1.5 py-0.5 text-2xs text-muted-foreground" />
         }
       >
         {fromLinear ? "From Linear" : "Dispatched by you"}
@@ -444,11 +444,11 @@ function CheckRunLine({
       {(output) => (
         <>
           {checks.command.trim() ? (
-            <p className="mb-1 break-all font-mono text-[11px] text-muted-foreground">
+            <p className="mb-1 break-all font-mono text-2xs text-muted-foreground">
               {checks.command}
             </p>
           ) : null}
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px]">
+          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-2xs">
             {output}
           </pre>
         </>
@@ -665,7 +665,7 @@ export function ActiveTaskCard({
           <Tooltip>
             <TooltipTrigger
               render={
-                <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[11px]" />
+                <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-2xs" />
               }
             >
               Slot {slot}
@@ -688,7 +688,7 @@ export function ActiveTaskCard({
           </a>
         ) : null}
         {task.track !== "research" && worker?.branch ? (
-          <span className="min-w-0 truncate font-mono text-[11px]">{worker.branch}</span>
+          <span className="min-w-0 truncate font-mono text-2xs">{worker.branch}</span>
         ) : null}
         {!pipeline ? (
           <button
@@ -894,7 +894,7 @@ function HistoryRecord({
           </a>
         ) : null}
         {task.track !== "research" && worker?.branch ? (
-          <span className="min-w-0 truncate font-mono text-[11px]">{worker.branch}</span>
+          <span className="min-w-0 truncate font-mono text-2xs">{worker.branch}</span>
         ) : null}
         {task.deployment ? (
           <>
@@ -915,7 +915,7 @@ function HistoryRecord({
         ) : null}
         {task.e2e ? <span>{inWorktree ? "E2E in the worktree" : "E2E on staging"}</span> : null}
         {task.slot !== undefined ? (
-          <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[11px]">
+          <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-2xs">
             Slot {task.slot}
           </span>
         ) : null}

@@ -375,7 +375,7 @@ function DecisionCard({
                 <span className="font-medium tabular-nums">{option.number}</span>
                 <span className="min-w-0 truncate">{option.label}</span>
                 {option.recommended ? (
-                  <span className="shrink-0 font-medium text-[10px] text-info-foreground uppercase tracking-wide">
+                  <span className="shrink-0 font-medium text-3xs text-info-foreground uppercase tracking-wide">
                     Suggested
                   </span>
                 ) : null}

@@ -92,8 +92,8 @@ export function AssistantDispatchDialog({
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
       <DialogPopup className="max-w-lg">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <SendIcon className="size-4" />
+          <DialogTitle className="flex items-center">
+            <SendIcon className="me-2 size-4" />
             {chosen ? `Dispatch ${chosen} to a team` : "Dispatch an issue to a team"}
           </DialogTitle>
           <DialogDescription>
@@ -101,7 +101,7 @@ export function AssistantDispatchDialog({
             . The leader takes the issue or asks you; it does not decline an issue you picked.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="grid gap-4">
+        <DialogPanel>
           {chosen ? null : (
             <label className="grid gap-1.5">
               <span className="font-medium text-sm">Issue</span>

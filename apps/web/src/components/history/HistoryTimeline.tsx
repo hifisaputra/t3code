@@ -142,7 +142,7 @@ function DayStrip({
           </div>
         </div>
       </div>
-      <div aria-hidden className="relative h-3 text-[10px] text-muted-foreground tabular-nums">
+      <div aria-hidden className="relative h-3 text-3xs text-muted-foreground tabular-nums">
         {HISTORY_HOUR_TICKS.map((hour) => (
           <span
             key={hour}
@@ -189,7 +189,7 @@ function ThreadLane({
             aria-hidden
             key={`${interval.start}-${interval.end}`}
             className={cn(
-              "absolute inset-y-0 min-w-[2px] rounded-[2px]",
+              "absolute inset-y-0 min-w-[2px] rounded-xs",
               laneColorClass(laneIndex),
               thread.archivedAt !== null && "opacity-50",
             )}
@@ -226,7 +226,7 @@ const HistoryThreadRow = memo(function HistoryThreadRow({
     <li className="flex min-w-0 items-start gap-3 border-b border-border/50 py-2 last:border-b-0">
       <span
         aria-hidden
-        className={cn("mt-1.5 size-2 shrink-0 rounded-[2px]", laneColorClass(laneIndex))}
+        className={cn("mt-1.5 size-2 shrink-0 rounded-xs", laneColorClass(laneIndex))}
       />
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
@@ -242,7 +242,7 @@ const HistoryThreadRow = memo(function HistoryThreadRow({
           </Link>
           {thread.linkedIssue ? (
             <a
-              className="shrink-0 rounded-sm border border-border px-1.5 py-px text-[11px] text-muted-foreground outline-hidden ring-ring hover:text-foreground focus-visible:ring-2"
+              className="shrink-0 rounded-sm border border-border px-1.5 py-px text-2xs text-muted-foreground outline-hidden ring-ring hover:text-foreground focus-visible:ring-2"
               href={thread.linkedIssue.url}
               rel="noreferrer"
               target="_blank"
@@ -251,18 +251,18 @@ const HistoryThreadRow = memo(function HistoryThreadRow({
             </a>
           ) : null}
           {thread.branch ? (
-            <span className="min-w-0 max-w-48 shrink-0 truncate rounded-sm bg-muted px-1.5 py-px text-[11px] text-muted-foreground">
+            <span className="min-w-0 max-w-48 shrink-0 truncate rounded-sm bg-muted px-1.5 py-px text-2xs text-muted-foreground">
               {thread.branch}
             </span>
           ) : null}
           {thread.running ? (
-            <span className="flex shrink-0 items-center gap-1 text-[11px] text-info">
+            <span className="flex shrink-0 items-center gap-1 text-2xs text-info">
               <span aria-hidden className="size-1.5 rounded-full bg-info" />
               running
             </span>
           ) : null}
           {archived ? (
-            <span className="shrink-0 text-[11px] text-muted-foreground">archived</span>
+            <span className="shrink-0 text-2xs text-muted-foreground">archived</span>
           ) : null}
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground tabular-nums">

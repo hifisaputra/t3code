@@ -2903,7 +2903,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
     if (galleryCount >= 2) {
       return (
         <div
-          className="chat-markdown-image-gallery my-2 grid gap-1.5"
+          className="my-2 grid gap-1.5"
           style={{ gridTemplateColumns: galleryGridColumns(galleryCount) }}
         >
           {children}

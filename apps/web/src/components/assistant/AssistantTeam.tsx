@@ -86,7 +86,7 @@ function teamThreadEverRan(
 type ChipSize = "sm" | "md";
 
 const CHIP_SIZE: Record<ChipSize, string> = {
-  sm: "gap-1 px-1.5 py-0.5 text-[11px]",
+  sm: "gap-1 px-1.5 py-0.5 text-2xs",
   md: "gap-1.5 px-2 py-1 text-xs",
 };
 
@@ -266,7 +266,7 @@ export function TeamThreads({
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       {label ? (
-        <span className="mr-0.5 shrink-0 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
+        <span className="mr-0.5 shrink-0 font-medium text-2xs text-muted-foreground uppercase tracking-wide">
           {label}
         </span>
       ) : null}

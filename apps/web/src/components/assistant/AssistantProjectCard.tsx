@@ -69,16 +69,16 @@ function StartOption({
 }) {
   return (
     <div className={cn(disabled === true && "opacity-56")}>
-      <Label className="items-start gap-2.5 font-normal">
+      <Label className="items-start">
         <Checkbox
           className="mt-0.5"
           checked={checked}
           disabled={disabled ?? false}
           onCheckedChange={(next) => onCheckedChange(next === true)}
         />
-        <span className="min-w-0 flex-1">{label}</span>
+        <span className="min-w-0 flex-1 font-normal">{label}</span>
       </Label>
-      <p className="mt-1 pl-7 text-muted-foreground text-xs">{hint}</p>
+      <p className="mt-1 pl-6.5 text-muted-foreground text-xs">{hint}</p>
     </div>
   );
 }
@@ -123,7 +123,7 @@ function StartButton({
         Start
       </PopoverTrigger>
       <PopoverPopup align="start" className="w-80 max-w-[calc(100vw-2rem)]">
-        <PopoverTitle className="font-medium text-sm">Start {title}</PopoverTitle>
+        <PopoverTitle>Start {title}</PopoverTitle>
         <div className="mt-3 flex flex-col gap-3">
           <StartOption
             label="Pick issues from Linear automatically"
@@ -408,7 +408,7 @@ function DeliveryChip({
   return (
     <span
       className={cn(
-        "inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-[11px] text-muted-foreground",
+        "inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-border/60 px-2 py-0.5 text-2xs text-muted-foreground",
         className,
       )}
     >
@@ -428,7 +428,7 @@ function RowShell({ tone, children }: { tone: StatusTone; children: ReactNode })
     <li
       className={cn(
         "flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5 sm:flex-nowrap",
-        tone === "attention" && "bg-warning/8 shadow-[inset_3px_0_0_var(--color-warning)]",
+        tone === "attention" && "border-s-3 border-s-warning bg-warning/8 ps-2.25",
       )}
     >
       {children}

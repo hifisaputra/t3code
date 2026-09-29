@@ -173,13 +173,8 @@ export function CalendarToday({
           </span>
         ) : null}
         {dismissed.length ? (
-          <Button
-            className="ms-auto normal-case tracking-normal"
-            size="xs"
-            variant="ghost"
-            onClick={() => setDismissed([])}
-          >
-            Restore dismissed
+          <Button className="ms-auto" size="xs" variant="ghost" onClick={() => setDismissed([])}>
+            <span className="normal-case tracking-normal">Restore dismissed</span>
           </Button>
         ) : null}
       </div>

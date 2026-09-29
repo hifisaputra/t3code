@@ -565,9 +565,9 @@ export function LinearIssueThreadDialog({
       }}
     >
       <DialogPopup className="max-w-5xl sm:h-[48rem]">
-        <DialogHeader className="pb-3">
-          <DialogTitle className="flex items-center gap-2">
-            <CircleDotIcon className="size-4" />
+        <DialogHeader>
+          <DialogTitle className="flex items-center">
+            <CircleDotIcon className="me-2 size-4" />
             Start thread from issue
           </DialogTitle>
           <DialogDescription>
@@ -633,8 +633,8 @@ export function LinearIssueThreadDialog({
           ) : null}
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col">
-          <ScrollArea scrollFade className="min-h-0 flex-1 border-border/60 border-t">
+        <div className="flex min-h-0 flex-1 flex-col border-border/60 border-t">
+          <ScrollArea scrollFade className="min-h-0 flex-1">
             <div className="px-6 py-4">
               {resolvedIssue ? (
                 <IssueReader
@@ -943,11 +943,12 @@ function LaunchPanel({
                   </SelectPopup>
                 </Select>
                 <Input
-                  size="sm"
+                  size="compact"
+                  font="mono"
                   spellCheck={false}
                   aria-label="Branch name"
                   aria-invalid={issueBranch.problem !== null}
-                  className="min-w-0 flex-1 font-mono text-xs"
+                  className="min-w-0 flex-1"
                   value={issueBranch.name}
                   disabled={disabled}
                   onChange={(event) => issueBranch.onEdit({ branch: event.target.value })}
@@ -1090,7 +1091,7 @@ function IssueReader({
           {issue.labels.map((label) => (
             <span
               key={label.id}
-              className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 py-0.5 pr-2 pl-1.5 text-[10px] text-muted-foreground"
+              className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 py-0.5 pr-2 pl-1.5 text-3xs text-muted-foreground"
             >
               <IssueStateDot color={label.color} className="size-1.5" />
               {label.name}
@@ -1170,7 +1171,7 @@ function IssueSuggestions({
   }
   if (issues === null || issues.length === 0) {
     return (
-      <AutocompleteEmpty className="px-3 py-2 text-left text-xs">
+      <AutocompleteEmpty className="text-left">
         {filtered
           ? "None of your issues match. Paste an identifier or link to start from any issue."
           : "No issues are assigned to you right now."}
@@ -1180,13 +1181,13 @@ function IssueSuggestions({
   return (
     <AutocompleteList className="max-h-80">
       {issues.map((issue) => (
-        <AutocompleteItem key={issue.id} value={issue} className="gap-2">
+        <AutocompleteItem key={issue.id} value={issue}>
           <IssueStateDot color={issue.state.color} className="size-2 shrink-0" />
-          <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+          <span className="shrink-0 font-mono text-2xs text-muted-foreground">
             {issue.identifier}
           </span>
           <span className="min-w-0 flex-1 truncate text-sm">{issue.title}</span>
-          <span className="shrink-0 text-[11px] text-muted-foreground">{issue.state.name}</span>
+          <span className="shrink-0 text-2xs text-muted-foreground">{issue.state.name}</span>
         </AutocompleteItem>
       ))}
     </AutocompleteList>

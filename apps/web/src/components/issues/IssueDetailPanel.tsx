@@ -161,7 +161,7 @@ export function IssueDetailPanel({
             {issue.labels.map((label) => (
               <span
                 key={label.id}
-                className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 py-0.5 pr-2 pl-1.5 text-[11px] text-muted-foreground"
+                className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/40 py-0.5 pr-2 pl-1.5 text-2xs text-muted-foreground"
               >
                 <IssueStateDot color={label.color} className="size-1.5" />
                 {label.name}

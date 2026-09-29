@@ -60,7 +60,7 @@ export function AgentProcessesPage() {
   );
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         <WorkspacePageHeader electron={isElectron}>
           <WorkspaceBreadcrumb ariaLabel="Processes breadcrumb" className="min-w-0">
@@ -149,7 +149,7 @@ const ThreadGroupSection = memo(function ThreadGroupSection({
           </Link>
         )}
         {thread.providerSessionId === null ? null : (
-          <span className="shrink-0 font-mono text-[10px] text-muted-foreground/70">
+          <span className="shrink-0 font-mono text-3xs text-muted-foreground/70">
             {thread.providerSessionId.slice(0, 8)}
           </span>
         )}
@@ -197,7 +197,7 @@ const AgentProcessRow = memo(function AgentProcessRow({
               </code>
             }
           />
-          <TooltipPopup className="max-w-100 font-mono break-all" side="top">
+          <TooltipPopup side="top" variant="code">
             {process.command}
           </TooltipPopup>
         </Tooltip>

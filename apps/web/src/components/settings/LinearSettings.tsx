@@ -354,7 +354,7 @@ function LinearRepositoriesSetting({ environmentId }: { readonly environmentId: 
       }
     >
       {repositories.length === 0 ? (
-        <p className="pb-3 text-[13px] text-muted-foreground/80">
+        <p className="pb-3 text-xs text-muted-foreground/80">
           {workspace.error !== null && workspace.data === null
             ? workspace.error
             : projects.length === 0
@@ -641,7 +641,7 @@ function LinearLabelPrefixesSetting({
       }
     >
       {labelPrefixes.length === 0 ? (
-        <p className="pb-3 text-[13px] text-muted-foreground/80">
+        <p className="pb-3 text-xs text-muted-foreground/80">
           No label rules. Every issue starts on the first prefix.
         </p>
       ) : (

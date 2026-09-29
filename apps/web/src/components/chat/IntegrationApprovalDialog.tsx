@@ -74,9 +74,11 @@ export const IntegrationApprovalDialog = memo(function IntegrationApprovalDialog
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-2xl">
-        <DialogHeader className="pb-3">
-          <DialogTitle className="truncate">{headline}</DialogTitle>
-          <DialogDescription className="flex min-w-0 items-center gap-1.5">
+        <DialogHeader>
+          <DialogTitle>
+            <span className="block truncate">{headline}</span>
+          </DialogTitle>
+          <DialogDescription className="flex min-w-0 items-center">
             <span className="truncate">
               {appName ? `${appName} is asking to make this change.` : "Review this change."}
             </span>
@@ -85,7 +87,7 @@ export const IntegrationApprovalDialog = memo(function IntegrationApprovalDialog
                 href={record.url}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex shrink-0 items-center gap-1 underline underline-offset-2"
+                className="ms-1.5 inline-flex shrink-0 items-center gap-1 underline underline-offset-2"
               >
                 {record.label}
                 <ExternalLinkIcon className="size-3" />
@@ -94,43 +96,47 @@ export const IntegrationApprovalDialog = memo(function IntegrationApprovalDialog
           </DialogDescription>
         </DialogHeader>
 
-        <ScrollArea scrollFade className="min-h-0 flex-1 border-border/60 border-t">
-          <div className="grid gap-4 px-6 py-4">
-            {fields.length === 0 ? (
-              <p className="text-muted-foreground text-sm">
-                This change carries no details to review.
-              </p>
-            ) : (
-              fields.map((field) => (
-                <div key={`${field.label}:${field.value}`} className="grid min-w-0 gap-1.5">
-                  <span className="font-medium text-muted-foreground text-xs">{field.label}</span>
-                  {field.format === "markdown" ? (
-                    <ChatMarkdown
-                      text={field.value}
-                      cwd={undefined}
-                      environmentId={environmentId}
-                      className="text-sm"
-                    />
-                  ) : (
-                    <p className="min-w-0 text-sm break-words whitespace-pre-wrap">{field.value}</p>
-                  )}
-                  {field.format === "image" && threadId !== undefined ? (
-                    // The bytes have not left the machine yet, so the picture
-                    // comes from the thread's workspace, the same root the
-                    // server read the path against.
-                    <ChatMarkdownAssetImage
-                      environmentId={environmentId}
-                      resource={{ _tag: "workspace-file", threadId, path: field.value }}
-                      alt={field.value}
-                      standalone
-                      maxHeightRem={20}
-                    />
-                  ) : null}
-                </div>
-              ))
-            )}
-          </div>
-        </ScrollArea>
+        <div className="flex min-h-0 flex-1 flex-col border-border/60 border-t">
+          <ScrollArea scrollFade className="min-h-0 flex-1">
+            <div className="grid gap-4 px-6 py-4">
+              {fields.length === 0 ? (
+                <p className="text-muted-foreground text-sm">
+                  This change carries no details to review.
+                </p>
+              ) : (
+                fields.map((field) => (
+                  <div key={`${field.label}:${field.value}`} className="grid min-w-0 gap-1.5">
+                    <span className="font-medium text-muted-foreground text-xs">{field.label}</span>
+                    {field.format === "markdown" ? (
+                      <ChatMarkdown
+                        text={field.value}
+                        cwd={undefined}
+                        environmentId={environmentId}
+                        className="text-sm"
+                      />
+                    ) : (
+                      <p className="min-w-0 text-sm break-words whitespace-pre-wrap">
+                        {field.value}
+                      </p>
+                    )}
+                    {field.format === "image" && threadId !== undefined ? (
+                      // The bytes have not left the machine yet, so the picture
+                      // comes from the thread's workspace, the same root the
+                      // server read the path against.
+                      <ChatMarkdownAssetImage
+                        environmentId={environmentId}
+                        resource={{ _tag: "workspace-file", threadId, path: field.value }}
+                        alt={field.value}
+                        standalone
+                        maxHeightRem={20}
+                      />
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </div>
+          </ScrollArea>
+        </div>
 
         <DialogFooter className="items-center">
           <p className="min-w-0 flex-1 truncate text-muted-foreground text-xs">
@@ -145,10 +151,9 @@ export const IntegrationApprovalDialog = memo(function IntegrationApprovalDialog
                 option.decision === "accept"
                   ? "default"
                   : option.decision === "decline"
-                    ? "outline"
+                    ? "destructive-outline"
                     : "ghost"
               }
-              className={option.decision === "decline" ? "text-destructive" : undefined}
               disabled={isResponding}
               aria-description={option.warning}
               onClick={() => respond(option.decision)}

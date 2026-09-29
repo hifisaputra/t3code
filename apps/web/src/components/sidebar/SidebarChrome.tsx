@@ -143,7 +143,7 @@ function SidebarUtilityItem({
               {count > 0 ? (
                 <span
                   aria-hidden
-                  className="-top-0.5 -right-0.5 absolute flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-info px-1 font-medium text-[10px] text-white tabular-nums leading-none"
+                  className="-top-0.5 -right-0.5 absolute flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-info px-1 font-medium text-3xs text-white tabular-nums leading-none"
                 >
                   {count > 9 ? "9+" : count}
                 </span>

@@ -294,7 +294,7 @@ export function CalendarPlanner({
         </div>
       );
     return (
-      <Empty className="px-4 py-16 md:px-4">
+      <Empty>
         <EmptyMedia variant="icon">
           <CalendarOffIcon />
         </EmptyMedia>
@@ -304,7 +304,7 @@ export function CalendarPlanner({
             Connect it in Settings → Integrations to plan your week.
           </EmptyDescription>
         </EmptyHeader>
-        <EmptyContent className="gap-2">
+        <EmptyContent>
           <div className="flex flex-wrap justify-center gap-2">
             <Button size="sm" render={<Link to="/settings/integrations" />}>
               <SettingsIcon aria-hidden className="size-3.5" />
@@ -394,20 +394,11 @@ export function CalendarPlanner({
           Today
         </Button>
         <Popover>
-          <PopoverTrigger
-            render={
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                className="px-2 font-medium text-sm tabular-nums"
-              />
-            }
-          >
-            {formatWeekRangeLabel(days)}
+          <PopoverTrigger render={<Button size="sm" variant="ghost" disabled={busy} />}>
+            <span className="tabular-nums">{formatWeekRangeLabel(days)}</span>
           </PopoverTrigger>
           <PopoverPopup align="start" className="w-64" padding="compact">
-            <PopoverTitle className="text-sm">Jump to week</PopoverTitle>
+            <PopoverTitle>Jump to week</PopoverTitle>
             <Input
               className="mt-2 w-full"
               aria-label="Week containing date"
@@ -481,9 +472,9 @@ export function CalendarPlanner({
       {calendars.error || errors.length || (!writeId && calendars.data !== null) ? (
         <div className="space-y-2 border-b border-border/60 px-3 py-2 sm:px-5">
           {calendars.error || errors.length ? (
-            <Alert variant="error" className="py-2">
-              <AlertTitle className="text-xs">Some calendars did not load</AlertTitle>
-              <AlertDescription className="text-xs">
+            <Alert variant="error">
+              <AlertTitle>Some calendars did not load</AlertTitle>
+              <AlertDescription>
                 {calendars.error ? <span>{calendars.error}</span> : null}
                 {errors.map((error) => (
                   <span key={error}>{error}</span>
@@ -492,10 +483,8 @@ export function CalendarPlanner({
             </Alert>
           ) : null}
           {!writeId && calendars.data !== null ? (
-            <Alert variant="warning" className="py-2">
-              <AlertTitle className="text-xs">
-                No writable calendar available, so blocks cannot be saved.
-              </AlertTitle>
+            <Alert variant="warning">
+              <AlertTitle>No writable calendar available, so blocks cannot be saved.</AlertTitle>
             </Alert>
           ) : null}
         </div>

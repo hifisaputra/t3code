@@ -68,8 +68,8 @@ export function CalendarPlanningPreferences({
         <TooltipPopup>Planning preferences</TooltipPopup>
       </Tooltip>
       <PopoverPopup align="end" className="w-80 max-w-[calc(100vw-2rem)]">
-        <PopoverTitle className="text-sm font-medium">Planning preferences</PopoverTitle>
-        <PopoverDescription className="mt-1 text-xs text-muted-foreground">
+        <PopoverTitle>Planning preferences</PopoverTitle>
+        <PopoverDescription className="mt-1">
           Saved on this device for this server.
         </PopoverDescription>
 
@@ -81,7 +81,6 @@ export function CalendarPlanningPreferences({
                 type="number"
                 min={5}
                 max={1440}
-                className="tabular-nums"
                 aria-label="New block length in minutes"
                 value={minutes}
                 disabled={disabled}
@@ -91,7 +90,7 @@ export function CalendarPlanningPreferences({
                 }}
               />
               <InputGroupAddon align="inline-end">
-                <InputGroupText className="text-xs">min</InputGroupText>
+                <InputGroupText>min</InputGroupText>
               </InputGroupAddon>
             </InputGroup>
           </label>
@@ -159,13 +158,12 @@ export function CalendarPlanningPreferences({
                     type="number"
                     min={0}
                     max={120}
-                    className="tabular-nums"
                     value={hours.breakMinutes}
                     disabled={disabled}
                     onChange={(e) => onHours({ ...hours, breakMinutes: Number(e.target.value) })}
                   />
                   <InputGroupAddon align="inline-end">
-                    <InputGroupText className="text-xs">min</InputGroupText>
+                    <InputGroupText>min</InputGroupText>
                   </InputGroupAddon>
                 </InputGroup>
               </label>
@@ -177,13 +175,12 @@ export function CalendarPlanningPreferences({
                     type="number"
                     min={5}
                     max={1440}
-                    className="tabular-nums"
                     value={hours.focusMinutes}
                     disabled={disabled}
                     onChange={(e) => onHours({ ...hours, focusMinutes: Number(e.target.value) })}
                   />
                   <InputGroupAddon align="inline-end">
-                    <InputGroupText className="text-xs">min</InputGroupText>
+                    <InputGroupText>min</InputGroupText>
                   </InputGroupAddon>
                 </InputGroup>
               </label>

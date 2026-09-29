@@ -254,8 +254,8 @@ export function AssistantSetupDialog({
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
       <DialogPopup className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <SparklesIcon className="size-4" />
+          <DialogTitle className="flex items-center">
+            <SparklesIcon className="me-2 size-4" />
             {initial
               ? `Revise ${project?.title ?? "project"} setup`
               : prefill
@@ -268,7 +268,7 @@ export function AssistantSetupDialog({
             you to review. It reads only: nothing changes and nothing deploys.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="grid gap-5">
+        <DialogPanel>
           <Group title="Work">
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Repository">

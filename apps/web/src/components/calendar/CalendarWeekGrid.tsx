@@ -109,7 +109,7 @@ export function CalendarWeekGrid({
                     <p
                       key={`${event.calendarId}:${event.id}`}
                       className={cn(
-                        "truncate rounded-md border px-1.5 py-0.5 text-left text-[11px]",
+                        "truncate rounded-md border px-1.5 py-0.5 text-left text-2xs",
                         colorOf(event),
                       )}
                       aria-label={`${event.calendarTitle}: ${event.title}`}
@@ -126,7 +126,7 @@ export function CalendarWeekGrid({
           {Array.from({ length: 24 }, (_, hour) => (
             <span
               key={hour}
-              className="-translate-y-1/2 absolute right-1.5 text-[11px] tabular-nums text-muted-foreground/70"
+              className="-translate-y-1/2 absolute right-1.5 text-2xs tabular-nums text-muted-foreground/70"
               style={{ top: hour * 60 }}
             >
               {String(hour).padStart(2, "0")}:00
@@ -222,7 +222,7 @@ export function CalendarWeekGrid({
                     }}
                     onDragEnd={onDragEnd}
                     className={cn(
-                      "group absolute overflow-hidden rounded-md border px-1.5 py-1 text-[11px] leading-tight shadow-xs/5",
+                      "group absolute overflow-hidden rounded-md border px-1.5 py-1 text-2xs leading-tight shadow-xs/5",
                       colorOf(event),
                       event.blocksTime === false && "border-dashed bg-transparent",
                       movable && "cursor-grab active:cursor-grabbing",
@@ -285,7 +285,7 @@ export function CalendarWeekGrid({
                       key="preview"
                       role="status"
                       className={cn(
-                        "pointer-events-none absolute inset-x-0.5 z-10 overflow-hidden rounded-md border-2 border-dashed px-1.5 py-1 text-[11px] leading-tight",
+                        "pointer-events-none absolute inset-x-0.5 z-10 overflow-hidden rounded-md border-2 border-dashed px-1.5 py-1 text-2xs leading-tight",
                         preview.overlaps
                           ? "border-warning bg-warning-surface text-warning-foreground"
                           : "border-primary bg-primary/10 text-foreground",

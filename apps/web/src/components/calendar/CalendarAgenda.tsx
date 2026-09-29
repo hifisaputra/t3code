@@ -230,7 +230,7 @@ export function CalendarAgenda({
         </div>
       );
     return (
-      <Empty className="px-4 py-12 md:px-4">
+      <Empty>
         <EmptyMedia variant="icon">
           <CalendarOffIcon />
         </EmptyMedia>
@@ -241,21 +241,23 @@ export function CalendarAgenda({
               "Connect it in Settings → Integrations to see your day and schedule issues."}
           </EmptyDescription>
         </EmptyHeader>
-        <EmptyContent className="flex-row flex-wrap justify-center gap-2">
-          <Button size="sm" render={<Link to="/settings/integrations" />}>
-            <SettingsIcon aria-hidden className="size-3.5" />
-            Open Integrations
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={status.refresh}
-            disabled={status.isPending}
-            aria-busy={status.isPending}
-          >
-            <RefreshIcon className="size-3.5" refreshing={status.isPending} />
-            Check connection
-          </Button>
+        <EmptyContent>
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button size="sm" render={<Link to="/settings/integrations" />}>
+              <SettingsIcon aria-hidden className="size-3.5" />
+              Open Integrations
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={status.refresh}
+              disabled={status.isPending}
+              aria-busy={status.isPending}
+            >
+              <RefreshIcon className="size-3.5" refreshing={status.isPending} />
+              Check connection
+            </Button>
+          </div>
         </EmptyContent>
       </Empty>
     );
@@ -324,7 +326,7 @@ export function CalendarAgenda({
         ) : (
           <Input
             aria-label="Date"
-            className="w-40 text-sm"
+            className="w-40"
             size="sm"
             type="date"
             value={day}
@@ -419,13 +421,13 @@ export function CalendarAgenda({
           {loading ? (
             <AgendaGhost />
           ) : calendars.data?.length === 0 ? (
-            <Empty className="p-6 md:p-8">
+            <Empty>
               <EmptyHeader>
                 <EmptyDescription>No readable calendars were found.</EmptyDescription>
               </EmptyHeader>
             </Empty>
           ) : events.data?.length === 0 ? (
-            <Empty className="p-6 md:p-8">
+            <Empty>
               <EmptyHeader>
                 <EmptyDescription>No events on this day.</EmptyDescription>
               </EmptyHeader>
@@ -460,9 +462,7 @@ export function CalendarAgenda({
                           </Badge>
                         ) : null}
                         {event.createdByT3 ? (
-                          <span className="text-[11px] text-muted-foreground">
-                            Scheduled from T3
-                          </span>
+                          <span className="text-2xs text-muted-foreground">Scheduled from T3</span>
                         ) : null}
                         {event.recurring ? (
                           <Tooltip>
@@ -604,7 +604,7 @@ export function CalendarAgenda({
                 <span className="text-xs text-muted-foreground">Date</span>
                 <Input
                   aria-label="Date"
-                  className="w-40 text-sm"
+                  className="w-40"
                   size="sm"
                   type="date"
                   value={day}
@@ -620,7 +620,7 @@ export function CalendarAgenda({
               <span className="text-xs text-muted-foreground">Start</span>
               <Input
                 aria-label="Start time"
-                className="w-28 text-sm"
+                className="w-28"
                 size="sm"
                 type="time"
                 value={time}
@@ -636,7 +636,7 @@ export function CalendarAgenda({
               <span className="flex items-center gap-1.5">
                 <Input
                   aria-label="Duration in minutes"
-                  className="w-20 text-sm"
+                  className="w-20"
                   size="sm"
                   type="number"
                   min={5}

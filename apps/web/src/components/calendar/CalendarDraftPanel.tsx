@@ -111,14 +111,13 @@ export function CalendarDraftPanel({
               type="number"
               min={5}
               max={1440}
-              className="tabular-nums"
               aria-label="Duration in minutes"
               value={draft.minutes}
               disabled={busy}
               onChange={(e) => onChange({ minutes: Number(e.target.value) })}
             />
             <InputGroupAddon align="inline-end">
-              <InputGroupText className="text-xs">min</InputGroupText>
+              <InputGroupText>min</InputGroupText>
             </InputGroupAddon>
           </InputGroup>
         </label>
@@ -131,7 +130,7 @@ export function CalendarDraftPanel({
               onValueChange={(value) => onCalendarChange(value as string)}
             >
               <SelectTrigger size="sm" aria-label="Calendar to save the block to">
-                <SelectValue className="truncate">
+                <SelectValue>
                   {(value: string) =>
                     calendars.find((c) => c.id === value)?.title ?? "No writable calendar"
                   }
@@ -158,12 +157,12 @@ export function CalendarDraftPanel({
         </p>
       ) : null}
       {conflicts.length ? (
-        <Alert variant="warning" className="py-2">
-          <AlertTitle className="text-xs">
+        <Alert variant="warning">
+          <AlertTitle>
             Overlaps{" "}
             {conflicts.map((event) => `${event.title} (${event.calendarTitle})`).join(", ")}.
           </AlertTitle>
-          <AlertDescription className="text-xs">
+          <AlertDescription>
             Free events and calendars not checked for conflicts do not warn.
           </AlertDescription>
         </Alert>

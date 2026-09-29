@@ -723,7 +723,6 @@ export function BranchToolbarBranchSelector({
           key={itemValue}
           index={index}
           value={itemValue}
-          className="pe-2"
           onClick={() => {
             if (!issueReference || !onStartIssueThreadRequest) {
               return;

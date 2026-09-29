@@ -337,7 +337,7 @@ function IssuesRouteView() {
         )}
       >
         {visibleIssues.length === 0 ? (
-          <Empty className="py-16">
+          <Empty>
             <EmptyHeader>
               <EmptyTitle>{filtered ? "No issues match" : "Nothing assigned"}</EmptyTitle>
               <EmptyDescription>
@@ -411,7 +411,7 @@ function IssuesRouteView() {
   );
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
       <WorkspacePageHeader electron={isElectron} className="border-border border-b">
         <h1 className="truncate font-medium text-sm">Issues</h1>
         <ToggleGroup

@@ -379,7 +379,7 @@ export function IssueStatusChip({
             type="button"
             aria-label={status.tooltip}
             onClick={onOpen}
-            className="inline-flex shrink-0 items-center gap-1 text-[10px]"
+            className="inline-flex shrink-0 items-center gap-1 text-3xs"
             style={{ color: status.color }}
           />
         }

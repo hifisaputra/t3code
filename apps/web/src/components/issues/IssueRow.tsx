@@ -101,40 +101,35 @@ function IssueRowImpl({
       </span>
       <span className="relative flex items-center gap-2">
         {linkedThread ? (
-          <Badge variant="info" size="sm" className="gap-1">
+          <Badge variant="info" size="sm">
             <MessageSquareIcon aria-hidden />
             Thread
           </Badge>
         ) : null}
-        <span className="shrink-0 text-[11px] text-muted-foreground/70 tabular-nums">
+        <span className="shrink-0 text-2xs text-muted-foreground/70 tabular-nums">
           {formatRelativeTimeLabel(issue.updatedAt)}
         </span>
         {/* The action is the row's second verb, so it stays out of the way
             until the row is under a pointer or holds focus. A coarse pointer
             has neither, and keeps it. */}
-        {linkedThread ? (
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost"
-            className="opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100"
-            onClick={() => onOpenThread(linkedThread)}
-          >
-            <ArrowUpRightIcon aria-hidden />
-            Open thread
-          </Button>
-        ) : (
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost"
-            className="opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100"
-            onClick={() => onStartThread(issue)}
-          >
-            <PlayIcon aria-hidden />
-            Start thread
-          </Button>
-        )}
+        <span className="flex shrink-0 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100">
+          {linkedThread ? (
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              onClick={() => onOpenThread(linkedThread)}
+            >
+              <ArrowUpRightIcon aria-hidden />
+              Open thread
+            </Button>
+          ) : (
+            <Button type="button" size="xs" variant="ghost" onClick={() => onStartThread(issue)}>
+              <PlayIcon aria-hidden />
+              Start thread
+            </Button>
+          )}
+        </span>
       </span>
     </div>
   );

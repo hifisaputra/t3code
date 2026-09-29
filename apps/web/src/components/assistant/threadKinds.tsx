@@ -81,7 +81,7 @@ export function threadKind(kind: AssistantThreadKind, track?: AssistantTaskTrack
 
 export function ResearchBadge({ track }: { track?: AssistantTaskTrack | undefined }) {
   return track === "research" ? (
-    <span className="shrink-0 rounded border border-info/25 bg-info/5 px-1.5 py-0.5 text-[10px] font-medium text-info-foreground">
+    <span className="shrink-0 rounded border border-info/25 bg-info/5 px-1.5 py-0.5 text-3xs font-medium text-info-foreground">
       Research
     </span>
   ) : null;

@@ -60,13 +60,13 @@ export function CalendarPickerPopover({
       <PopoverTrigger render={<Button size="sm" variant="outline" disabled={disabled} />}>
         <CalendarIcon aria-hidden className="size-3.5" />
         Calendars
-        <Badge size="sm" variant="secondary" className="tabular-nums">
-          {shownCount}
+        <Badge size="sm" variant="secondary">
+          <span className="tabular-nums">{shownCount}</span>
         </Badge>
       </PopoverTrigger>
       <PopoverPopup align="end" className="w-88 max-w-[calc(100vw-2rem)]" padding="compact">
-        <PopoverTitle className="text-sm font-medium">Calendars</PopoverTitle>
-        <PopoverDescription className="mt-1 text-xs text-muted-foreground">
+        <PopoverTitle>Calendars</PopoverTitle>
+        <PopoverDescription className="mt-1">
           Shown calendars appear in the week. Busy events on calendars checked for conflicts warn
           before you save over them.
         </PopoverDescription>
@@ -81,7 +81,7 @@ export function CalendarPickerPopover({
           />
         ) : null}
         <div
-          className="mt-2 grid grid-cols-[minmax(0,1fr)_3rem_4.25rem] items-center px-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+          className="mt-2 grid grid-cols-[minmax(0,1fr)_3rem_4.25rem] items-center px-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground"
           aria-hidden
         >
           <span>Calendar</span>

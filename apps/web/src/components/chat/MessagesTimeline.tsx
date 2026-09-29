@@ -1130,8 +1130,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       // Published for content that breaks out of the reading column (wide
       // tables). The scroll view's own padding and scrollbar gutter are
       // already out of clientWidth, so this is the widest a row may paint.
-      const scroller =
-        timelineViewportElement.querySelector<HTMLElement>(".chat-timeline-scroller");
+      const scroller = listRef.current?.getScrollableNode() ?? null;
       timelineViewportElement.style.setProperty(
         "--chat-wide-content-width",
         `${resolveTimelineWideContentWidth(
@@ -1150,7 +1149,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [timelineViewportElement, rows.length, reportContentOverflow, chatWidth]);
+  }, [timelineViewportElement, rows.length, reportContentOverflow, chatWidth, listRef]);
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
@@ -1339,7 +1338,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             onScroll={handleScroll}
             onItemSizeChanged={reportContentOverflow}
             className={cn(
-              "chat-timeline-scroller scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
+              "scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
               topFadeEnabled && "topbar-scroll-fade",
             )}
             ListHeaderComponent={
