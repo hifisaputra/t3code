@@ -64,7 +64,7 @@ export function CalendarPickerPopover({
           {shownCount}
         </Badge>
       </PopoverTrigger>
-      <PopoverPopup align="end" className="w-88 max-w-[calc(100vw-2rem)]" viewportClassName="p-3">
+      <PopoverPopup align="end" className="w-88 max-w-[calc(100vw-2rem)]" padding="compact">
         <PopoverTitle className="text-sm font-medium">Calendars</PopoverTitle>
         <PopoverDescription className="mt-1 text-xs text-muted-foreground">
           Shown calendars appear in the week. Busy events on calendars checked for conflicts warn

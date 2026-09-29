@@ -891,7 +891,6 @@ function LaunchPanel({
               instanceEntries={model.entries}
               modelOptionsByInstance={model.optionsByInstance}
               size="xs"
-              triggerVariant="outline"
               disabled={disabled}
               onOpenProviderSetup={model.onOpenProviderSetup}
               onInstanceModelChange={model.onChange}

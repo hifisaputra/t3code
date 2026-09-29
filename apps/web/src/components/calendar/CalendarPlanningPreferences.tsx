@@ -67,7 +67,7 @@ export function CalendarPlanningPreferences({
         </TooltipTrigger>
         <TooltipPopup>Planning preferences</TooltipPopup>
       </Tooltip>
-      <PopoverPopup align="end" className="w-80 max-w-[calc(100vw-2rem)]" viewportClassName="p-4">
+      <PopoverPopup align="end" className="w-80 max-w-[calc(100vw-2rem)]">
         <PopoverTitle className="text-sm font-medium">Planning preferences</PopoverTitle>
         <PopoverDescription className="mt-1 text-xs text-muted-foreground">
           Saved on this device for this server.

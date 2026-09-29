@@ -33,7 +33,6 @@ import {
   shouldPreserveAssistantLineBreaks,
   type MessagesTimelineRow,
   type MessagesTimelineRowsProjection,
-  TIMELINE_CONTENT_MAX_WIDTH,
   WORKTREE_SETUP_ROW_ID,
   workEntryDisplayLabel,
 } from "./MessagesTimeline.logic";
@@ -1102,7 +1101,12 @@ describe("deriveMessagesTimelineRows", () => {
     terminalContexts: [],
     previewAnnotations: [],
     reviewComments: [],
-    submissionIntent: "foreground" as const,
+    sendSettings: {
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+      promptEffort: null,
+    },
     queuedAfterToolActivityId: null,
     createdAt: "2026-01-01T00:00:01Z",
   });
@@ -3894,23 +3898,28 @@ describe("computeStableMessagesTimelineRows", () => {
 });
 
 describe("resolveTimelineWideContentWidth", () => {
+  // The default Chat width column; wider settings are measured the same way.
+  const column = 768;
+
   it("stays on the reading column when the gutters cannot clear the minimap", () => {
-    expect(resolveTimelineWideContentWidth(900)).toBe(TIMELINE_CONTENT_MAX_WIDTH);
-    expect(resolveTimelineWideContentWidth(TIMELINE_CONTENT_MAX_WIDTH)).toBe(
-      TIMELINE_CONTENT_MAX_WIDTH,
-    );
+    expect(resolveTimelineWideContentWidth(900, column)).toBe(column);
+    expect(resolveTimelineWideContentWidth(column, column)).toBe(column);
   });
 
   it("never exceeds the pane when it is narrower than the reading column", () => {
-    expect(resolveTimelineWideContentWidth(420)).toBe(420);
+    expect(resolveTimelineWideContentWidth(420, column)).toBe(420);
   });
 
   it("breaks out to the content width less the minimap reserve on both sides", () => {
-    expect(resolveTimelineWideContentWidth(1400)).toBe(1256);
+    expect(resolveTimelineWideContentWidth(1400, column)).toBe(1256);
+  });
+
+  it("never caps below a wider reading column", () => {
+    expect(resolveTimelineWideContentWidth(1200, 1152)).toBe(1152);
   });
 
   it("falls back to the reading column for an unmeasured pane", () => {
-    expect(resolveTimelineWideContentWidth(0)).toBe(TIMELINE_CONTENT_MAX_WIDTH);
-    expect(resolveTimelineWideContentWidth(Number.NaN)).toBe(TIMELINE_CONTENT_MAX_WIDTH);
+    expect(resolveTimelineWideContentWidth(0, column)).toBe(column);
+    expect(resolveTimelineWideContentWidth(Number.NaN, column)).toBe(column);
   });
 });

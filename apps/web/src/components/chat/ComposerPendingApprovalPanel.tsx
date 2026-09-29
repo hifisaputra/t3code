@@ -129,7 +129,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
               ? "Permission request"
               : "File change";
   const header = (
-    <span className="flex w-full min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+    <span className="flex w-full min-w-0 items-center gap-2 text-2xs text-muted-foreground">
       <span className="shrink-0 font-medium text-warning">{fallbackLabel}</span>
       {approval.appName ? <span className="min-w-0 truncate">{approval.appName}</span> : null}
       {pendingCount > 1 ? (

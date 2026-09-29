@@ -182,7 +182,7 @@ export const make = Effect.gen(function* () {
       Effect.map((bytes) => Option.some(Uint8Array.from(bytes))),
       Effect.catch((cause) =>
         cause.reason._tag === "NotFound"
-          ? Effect.succeed(Option.none())
+          ? Effect.succeedNone
           : Effect.fail(
               new SecretStoreReadError({
                 resource: `secret ${name}`,

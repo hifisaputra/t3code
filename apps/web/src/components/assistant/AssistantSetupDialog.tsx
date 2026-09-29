@@ -205,7 +205,6 @@ export function AssistantSetupDialog({
           selection.model,
         )}
         size="sm"
-        triggerVariant="outline"
         triggerClassName="w-full justify-between"
         triggerAriaLabel={label}
         disabled={busy}

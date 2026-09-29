@@ -406,7 +406,7 @@ export function CalendarPlanner({
           >
             {formatWeekRangeLabel(days)}
           </PopoverTrigger>
-          <PopoverPopup align="start" className="w-64" viewportClassName="p-3">
+          <PopoverPopup align="start" className="w-64" padding="compact">
             <PopoverTitle className="text-sm">Jump to week</PopoverTitle>
             <Input
               className="mt-2 w-full"

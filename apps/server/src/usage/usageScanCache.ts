@@ -25,7 +25,8 @@ import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 // re-parses only its appended bytes instead of starting over.
 // v4: records carry agent attribution so subagent spend can be broken out per
 // thread; v3 entries would report every subagent's tokens as the main agent's.
-const USAGE_SCAN_CACHE_VERSION = 4 as const;
+// v5: records carry Claude fast mode, which v4 rows never captured.
+const USAGE_SCAN_CACHE_VERSION = 5 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -66,6 +67,7 @@ type SerializedRecord = readonly [
    * the `agents` table.
    */
   agentIndex: number | null,
+  fast: 0 | 1,
 ];
 
 interface SerializedFile {
@@ -128,6 +130,7 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
       : record.subagent.name === null
         ? UNNAMED_SUBAGENT_INDEX
         : intern(agents, agentIndex, record.subagent.name),
+    record.fast ? 1 : 0,
   ];
 
   const files: Record<string, SerializedFile> = {};
@@ -187,7 +190,7 @@ export function decodeScanCache(document: unknown): ScanCache {
   ): UsageRecord[] | null => {
     const records: UsageRecord[] = [];
     for (const row of rows) {
-      if (!isRecordArray(row) || row.length < 11) return null;
+      if (!isRecordArray(row) || row.length < 12) return null;
       const [
         timestampMs,
         modelIndex,
@@ -200,6 +203,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         dedupeKey,
         reportedCostUsd,
         agentSlot,
+        fast,
       ] = row as SerializedRecord;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
@@ -211,7 +215,8 @@ export function decodeScanCache(document: unknown): ScanCache {
         !Number.isFinite(cached) ||
         !Number.isFinite(cacheCreation) ||
         !Number.isFinite(output) ||
-        !Number.isFinite(reasoning)
+        !Number.isFinite(reasoning) ||
+        (fast !== 0 && fast !== 1)
       ) {
         return null;
       }
@@ -229,6 +234,7 @@ export function decodeScanCache(document: unknown): ScanCache {
           reasoningTokens: reasoning,
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
+        fast: fast === 1,
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
         subagent:
           typeof agentSlot !== "number"

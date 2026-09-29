@@ -47,6 +47,7 @@ function record(input: {
       reasoningTokens: 0,
     },
     reportedCostUsd: input.reportedCostUsd ?? null,
+    fast: false,
     dedupeKey: input.dedupeKey === undefined ? `d${nextDedupe++}` : input.dedupeKey,
   };
 }

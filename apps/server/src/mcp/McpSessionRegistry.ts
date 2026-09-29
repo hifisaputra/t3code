@@ -254,7 +254,7 @@ export const issueActiveMcpCredential = (
   request: McpCredentialRequest,
 ): Effect.Effect<McpIssuedCredential | undefined> => {
   const registry = activeMcpSessionRegistry;
-  if (!registry) return Effect.sync((): McpIssuedCredential | undefined => undefined);
+  if (!registry) return Effect.undefined;
   const capabilities = new Set(
     Array.from(request.capabilities).filter((capability) =>
       registry.offeredCapabilities.has(capability),
@@ -264,9 +264,7 @@ export const issueActiveMcpCredential = (
     .revokeThread(request.threadId)
     .pipe(
       Effect.andThen(
-        capabilities.size === 0
-          ? Effect.sync((): McpIssuedCredential | undefined => undefined)
-          : registry.issue({ ...request, capabilities }),
+        capabilities.size === 0 ? Effect.undefined : registry.issue({ ...request, capabilities }),
       ),
     );
 };

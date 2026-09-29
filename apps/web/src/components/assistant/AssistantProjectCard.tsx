@@ -122,7 +122,7 @@ function StartButton({
         {pending === "start" ? <Spinner className="size-3.5" /> : <PlayIcon />}
         Start
       </PopoverTrigger>
-      <PopoverPopup align="start" className="w-80 max-w-[calc(100vw-2rem)]" viewportClassName="p-4">
+      <PopoverPopup align="start" className="w-80 max-w-[calc(100vw-2rem)]">
         <PopoverTitle className="font-medium text-sm">Start {title}</PopoverTitle>
         <div className="mt-3 flex flex-col gap-3">
           <StartOption
