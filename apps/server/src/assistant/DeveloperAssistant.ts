@@ -4021,7 +4021,7 @@ export const make = Effect.gen(function* () {
         );
       return yield* notifyLead(
         t,
-        `The ${ROLE_NAMES[role]} for ${id} ended its turn without handing off. Read it with assistant_read_thread (thread "${role}") and decide the next step.`,
+        `The ${ROLE_NAMES[role]} for ${id} ended its turn without handing off. Read it with assistant_read_thread (thread "${role}") and decide the next step. If it stopped only to report progress or to offer to go on, tell it to continue with assistant_message_worker (thread "${role}").`,
       );
     }
     if (t.stage !== "lead") return;

@@ -153,6 +153,46 @@ describe("the project's check command", () => {
   });
 });
 
+describe("pacing an unattended run", () => {
+  const research: AssistantTask = { ...withCriteria, track: "research" };
+  const everyRole = {
+    lead: leadInstructions(config, withCriteria),
+    implement: workerInstructions(config, withCriteria),
+    review: reviewerInstructions(config, withCriteria),
+    e2e: e2eInstructions(config, withCriteria, "/evidence", "Test the export."),
+    researchWorker: researchWorkerInstructions(config, research, "/evidence"),
+    factChecker: researchReviewerInstructions(config, research),
+  };
+
+  it("tells every team thread to keep going and when to stop", () => {
+    for (const [role, text] of Object.entries(everyRole)) {
+      expect(text, role).toContain("Nobody replies to the message a turn ends with");
+      expect(text, role).toContain("an offer to continue");
+      expect(text, role).toContain("cannot continue without someone else");
+      expect(text, role).toContain("Before anything destructive the issue does not call for");
+    }
+  });
+
+  it("has the team leader treat its earlier calls as settled", () => {
+    expect(everyRole.lead).toContain("treat your earlier calls as settled");
+  });
+
+  it("has a stuck worker open with what it needs", () => {
+    for (const text of [everyRole.implement, everyRole.researchWorker])
+      expect(text).toContain("opens with what you need to continue");
+  });
+
+  it("has the reviewer block only with a way to show the failure", () => {
+    expect(everyRole.review).toContain("only the findings you would block the merge for");
+    expect(everyRole.review).toContain("how to show it fails");
+  });
+
+  it("hands the web rules to research subagents", () => {
+    for (const text of [everyRole.researchWorker, everyRole.factChecker])
+      expect(text).toContain("pass it these web rules word for word");
+  });
+});
+
 describe("role skills", () => {
   it("tells only the roles with a skill which one wins", () => {
     const written = prompts({ ...config, roleSkills: { implement: "worker-method" } });

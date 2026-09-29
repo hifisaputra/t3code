@@ -182,7 +182,7 @@ export const AssistantToolkit = Toolkit.make(
       }),
       checks: Schema.Array(AssistantResearchCheck).annotate({
         description:
-          "One entry per question (the criteria the brief lists numbered), in order: result answered, partly or not-answered; evidence, where the report answers it or what could not be found; screenshot, the 1-based position in screenshots of the one that shows it, when one does.",
+          "One entry per question (the criteria the brief lists numbered), in order: result answered, partly or not-answered; evidence, where the report answers it or what could not be found and where it was looked for; screenshot, the 1-based position in screenshots of the one that shows it, when one does.",
       }),
       screenshots: Schema.Array(
         Schema.Struct({
@@ -205,7 +205,7 @@ export const AssistantToolkit = Toolkit.make(
       verdict: Schema.Literals(["approved", "changes-requested"]),
       findings: text.annotate({
         description:
-          "For the implementer: each finding with file and line, the problem and what to do. On approval, anything to watch while merging.",
+          "For the implementer: only what you would block the merge for, each finding with file and line, why it is wrong, how to show it fails and what to do. On approval, anything to watch while merging.",
       }),
       summary: Schema.String.check(Schema.isMaxLength(4000)).annotate({
         description:
