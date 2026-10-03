@@ -1094,6 +1094,29 @@ it.effect("passes issue search filters and pagination through to Linear", () => 
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("filters issues by labels, milestone, cycle and priority", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { issues: { nodes: [] } } }),
+  });
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+    yield* api.listIssues({
+      assignedToMe: false,
+      labelIds: ["label-1", "label-2"],
+      projectMilestoneId: "milestone-1",
+      cycleId: "cycle-1",
+      priorities: [1, 2],
+    });
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables.filter, {
+      state: { type: { in: ["unstarted", "started"] } },
+      labels: { some: { id: { in: ["label-1", "label-2"] } } },
+      projectMilestone: { id: { eq: "milestone-1" } },
+      cycle: { id: { eq: "cycle-1" } },
+      priority: { in: [1, 2] },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect(
   "finds every word of a query in the title or description, and identifiers by number",
   () => {

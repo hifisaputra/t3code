@@ -250,6 +250,12 @@ export const LinearListIssuesInput = Schema.Struct({
   /** Defaults to `unstarted` and `started` when absent. */
   stateTypes: Schema.optional(Schema.Array(LinearWorkflowStateType)),
   projectId: Schema.optional(TrimmedNonEmptyString),
+  /** Issues carrying at least one of these labels. */
+  labelIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  projectMilestoneId: Schema.optional(TrimmedNonEmptyString),
+  cycleId: Schema.optional(TrimmedNonEmptyString),
+  /** Issues with any of these priorities, numbered as on the summary. */
+  priorities: Schema.optional(Schema.Array(Schema.Int)),
   /** Server clamps to its own maximum. */
   limit: Schema.optional(PositiveInt),
 });

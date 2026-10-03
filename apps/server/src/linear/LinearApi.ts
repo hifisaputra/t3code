@@ -1025,6 +1025,12 @@ const make = Effect.gen(function* () {
           state: { type: { in: stateTypes } },
           ...(input.teamKey !== undefined ? { team: { key: { eq: input.teamKey } } } : {}),
           ...(input.projectId !== undefined ? { project: { id: { eq: input.projectId } } } : {}),
+          ...(input.labelIds?.length ? { labels: { some: { id: { in: input.labelIds } } } } : {}),
+          ...(input.projectMilestoneId !== undefined
+            ? { projectMilestone: { id: { eq: input.projectMilestoneId } } }
+            : {}),
+          ...(input.cycleId !== undefined ? { cycle: { id: { eq: input.cycleId } } } : {}),
+          ...(input.priorities?.length ? { priority: { in: input.priorities } } : {}),
         },
         first: Math.min(input.limit ?? DEFAULT_ISSUE_LIMIT, MAX_ISSUE_LIMIT),
         ...(input.cursor !== undefined ? { after: input.cursor } : {}),

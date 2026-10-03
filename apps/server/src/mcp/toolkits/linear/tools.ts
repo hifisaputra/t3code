@@ -237,6 +237,8 @@ const UploadImageTool = linearTool(
     .annotate(Tool.Idempotent, false),
 );
 
+const IssuePriority = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 4 }));
+
 const IssuePlanningFields = {
   assignee: Schema.optional(
     Schema.NullOr(
@@ -273,7 +275,7 @@ const IssuePlanningFields = {
     }),
   ),
   priority: Schema.optional(
-    Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 4 })).annotate({
+    IssuePriority.annotate({
       description: "Priority: 0 none, 1 urgent, 2 high, 3 medium, 4 low. Omit to keep it.",
     }),
   ),
@@ -425,7 +427,7 @@ const ListProjectsTool = readonlyLinearTool(
 const ListIssuesTool = readonlyLinearTool(
   Tool.make("list_issues", {
     description:
-      "Search Linear issues across assignees by text, team, project, assignee, or workflow state type, most recently updated first. query matches issues whose title or description contains every word of it, case aside, and an identifier such as DEL-123 matches that issue. Defaults to open issues; pass stateTypes for completed or canceled work. Supports pagination.",
+      "Search Linear issues across assignees by text, team, project, milestone, cycle, labels, priority, assignee, or workflow state type, most recently updated first. query matches issues whose title or description contains every word of it, case aside, and an identifier such as DEL-123 matches that issue. Defaults to open issues; pass stateTypes for completed or canceled work. Supports pagination.",
     parameters: Schema.Struct({
       ...ResourceListFields,
       query: Schema.optional(
@@ -435,6 +437,28 @@ const ListIssuesTool = readonlyLinearTool(
       ),
       team: OptionalTeam,
       project: Schema.optional(ResourceId),
+      milestone: Schema.optional(
+        describedText(
+          "Only issues in this project milestone, by ID or exact name. A name is looked up in project, or in the linked issue's project when project is omitted.",
+        ),
+      ),
+      cycle: Schema.optional(
+        describedText(
+          "Only issues in this cycle: its ID, number, exact name, or current/next/previous. Anything but an ID is looked up in team, or in the linked issue's team when team is omitted.",
+        ),
+      ),
+      labels: Schema.optional(
+        Schema.Array(Schema.String).annotate({
+          description:
+            "Only issues carrying at least one of these labels, by name or ID. Names are matched within team when it is given, and across every team otherwise.",
+        }),
+      ),
+      priority: Schema.optional(
+        Schema.Union([IssuePriority, Schema.Array(IssuePriority)]).annotate({
+          description:
+            "Only issues with this priority, or with any of several: 0 none, 1 urgent, 2 high, 3 medium, 4 low.",
+        }),
+      ),
       assignee: IssuePlanningFields.assignee,
       stateTypes: Schema.optional(
         Schema.Array(LinearWorkflowStateType).annotate({

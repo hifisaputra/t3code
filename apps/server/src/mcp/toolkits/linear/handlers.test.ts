@@ -1284,6 +1284,139 @@ it.effect("searches issues across assignees with a title and cursor", () => {
   );
 });
 
+it.effect(
+  "filters issues by labels, milestone, cycle and priority resolved within the team",
+  () => {
+    const lookups: unknown[] = [];
+    const listed: unknown[] = [];
+    return callTool("list_issues", {
+      team: "DEL",
+      project: "Launch",
+      milestone: "Beta",
+      cycle: "current",
+      labels: ["Urgent"],
+      priority: 1,
+    }).pipe(
+      Effect.map(() => {
+        assert.deepStrictEqual(lookups, [
+          { kind: "project", exact: "Launch", teamId: "team-1", limit: 2 },
+          { kind: "milestone", exact: "Beta", projectId: "project-1", limit: 2 },
+          { kind: "cycle", exact: "current", teamId: "team-1", limit: 2 },
+        ]);
+        assert.deepStrictEqual(listed, [
+          {
+            assignedToMe: false,
+            teamKey: "DEL",
+            projectId: "project-1",
+            projectMilestoneId: "milestone-1",
+            cycleId: "cycle-1",
+            labelIds: ["label-2"],
+            priorities: [1],
+          },
+        ]);
+      }),
+      Effect.provide(
+        testLayer({
+          linear: {
+            workspace: Effect.succeed({ teams: [{ ...issue.team, projects: [] }] }),
+            labels: () => Effect.succeed(labels),
+            listResources: (input) =>
+              Effect.sync(() => {
+                lookups.push(input);
+                return {
+                  nodes: [{ id: `${input.kind}-1`, name: input.exact ?? null }],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                };
+              }),
+            listIssues: (input) =>
+              Effect.sync(() => {
+                listed.push(input);
+                return { issues: [] };
+              }),
+          },
+        }),
+      ),
+    );
+  },
+);
+
+it.effect("matches label names across teams and finds a cycle by name in the linked team", () => {
+  const milestoneId = "12345678-1234-1234-1234-123456789abc";
+  const lookups: unknown[] = [];
+  const listed: unknown[] = [];
+  return callTool("list_issues", {
+    milestone: milestoneId,
+    cycle: "Sprint 4",
+    labels: ["bug", "regression"],
+    priority: [1, 2],
+  }).pipe(
+    Effect.map(() => {
+      // The milestone's id needs no project, and the cycle's name falls back to
+      // the linked issue's team; label names are not narrowed to any team.
+      assert.deepStrictEqual(lookups, [
+        { kind: "milestone", exact: milestoneId, limit: 2 },
+        { kind: "cycle", exact: "Sprint 4", teamId: issue.team.id, limit: 2 },
+        { kind: "label", exact: "bug", limit: 100 },
+        { kind: "label", exact: "regression", limit: 100 },
+      ]);
+      assert.deepStrictEqual(listed, [
+        {
+          assignedToMe: false,
+          projectMilestoneId: milestoneId,
+          cycleId: "cycle-1",
+          labelIds: ["bug-team-1", "bug-team-2", "regression-1"],
+          priorities: [1, 2],
+        },
+      ]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          listResources: (input) =>
+            Effect.sync(() => {
+              lookups.push(input);
+              const ids =
+                input.kind === "milestone"
+                  ? [milestoneId]
+                  : input.exact === "bug"
+                    ? ["bug-team-1", "bug-team-2"]
+                    : [`${input.exact === "regression" ? "regression" : input.kind}-1`];
+              return {
+                nodes: ids.map((id) => ({ id, name: input.exact ?? null })),
+                pageInfo: { hasNextPage: false, endCursor: null },
+              };
+            }),
+          listIssues: (input) =>
+            Effect.sync(() => {
+              listed.push(input);
+              return { issues: [] };
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("names a label filter that matches nothing instead of listing no issues", () =>
+  Effect.flip(callTool("list_issues", { labels: ["nope"] })).pipe(
+    Effect.map((error) =>
+      assert.strictEqual(
+        operationError(error).detail,
+        'Linear has no label matching "nope". Use list_issue_labels to find it.',
+      ),
+    ),
+    Effect.provide(
+      testLayer({
+        linear: {
+          listResources: () =>
+            Effect.succeed({ nodes: [], pageInfo: { hasNextPage: false, endCursor: null } }),
+        },
+      }),
+    ),
+  ),
+);
+
 it.effect("rejects impossible due dates without writing", () =>
   Effect.flip(callTool("save_issue", { dueDate: "2026-02-30" })).pipe(
     Effect.map((error) => assert.include(operationError(error).detail, "valid YYYY-MM-DD")),

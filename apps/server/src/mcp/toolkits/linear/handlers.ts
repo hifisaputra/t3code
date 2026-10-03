@@ -170,6 +170,36 @@ const resolveLabels = Effect.fn("LinearToolkit.resolveLabels")(function* (
   return resolved;
 });
 
+/**
+ * Label ids to filter a list by. With a team the names resolve as they do for
+ * a write; without one, a name such as "Bug" can belong to several teams, and
+ * an issue carrying any label of that name counts.
+ */
+const resolveLabelFilter = Effect.fn("LinearToolkit.resolveLabelFilter")(function* (
+  operation: string,
+  teamId: string | undefined,
+  labels: ReadonlyArray<string>,
+) {
+  if (teamId !== undefined) {
+    return (yield* resolveLabels(operation, teamId, labels)).map((label) => label.id);
+  }
+  const linear = yield* LinearApi.LinearApi;
+  return yield* Effect.forEach(labels, (label) =>
+    linear.listResources({ kind: "label", exact: label, limit: 100 }).pipe(
+      Effect.flatMap((page) =>
+        page.nodes.length > 0
+          ? Effect.succeed(page.nodes.map((node) => node.id))
+          : Effect.fail(
+              new LinearOperationError({
+                operation,
+                detail: `Linear has no label matching "${label}". Use list_issue_labels to find it.`,
+              }),
+            ),
+      ),
+    ),
+  ).pipe(Effect.map((ids) => ids.flat()));
+});
+
 type RelationInput = { readonly type: LinearIssueRelationType; readonly issue: string };
 
 const relationPhrases: Record<LinearIssueRelationType, string> = {
@@ -865,7 +895,7 @@ const saveResource = Effect.fn("LinearToolkit.saveResource")(function* (
 export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
   list_issues: (input) =>
     Effect.gen(function* () {
-      yield* McpInvocationContext.requireMcpCapability("linear");
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
       const team = input.team ? yield* lookupTeam("list_issues", input.team) : undefined;
       const project = input.project
@@ -873,10 +903,51 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         : undefined;
       const assignee =
         input.assignee == null ? input.assignee : yield* linear.resolveAssignee(input.assignee);
+      // A milestone or cycle named by anything but its id is looked up where
+      // the write tools look: the project or team given, else the linked issue's.
+      const milestoneReference = named(input.milestone);
+      const milestone =
+        milestoneReference === undefined
+          ? undefined
+          : yield* resolveResource(
+              "milestone",
+              milestoneReference,
+              project
+                ? { projectId: project.id }
+                : isResourceId(milestoneReference)
+                  ? {}
+                  : { projectId: yield* issueProject(scope) },
+            );
+      const cycleReference = named(input.cycle);
+      const cycle =
+        cycleReference === undefined
+          ? undefined
+          : yield* resolveResource(
+              "cycle",
+              cycleReference,
+              team
+                ? { teamId: team.id }
+                : isResourceId(cycleReference)
+                  ? {}
+                  : { teamId: (yield* resolveTeam("list_issues", scope, undefined)).id },
+            );
+      const labelIds = input.labels?.length
+        ? yield* resolveLabelFilter("list_issues", team?.id, input.labels)
+        : undefined;
+      const priorities =
+        input.priority === undefined
+          ? undefined
+          : typeof input.priority === "number"
+            ? [input.priority]
+            : input.priority;
       return yield* linear.listIssues({
         assignedToMe: false,
         ...(team ? { teamKey: team.key } : {}),
         ...(project ? { projectId: project.id } : {}),
+        ...(milestone ? { projectMilestoneId: milestone.id } : {}),
+        ...(cycle ? { cycleId: cycle.id } : {}),
+        ...(labelIds ? { labelIds } : {}),
+        ...(priorities?.length ? { priorities } : {}),
         ...(assignee !== undefined ? { assigneeId: assignee?.id ?? null } : {}),
         ...(input.query !== undefined ? { query: input.query } : {}),
         ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
