@@ -574,7 +574,7 @@ const decodeAttachmentDeleteResult = Schema.decodeUnknownEffect(
 );
 
 const DOCUMENT_SUMMARY_FIELDS = "id title url updatedAt project { id name }";
-const DOCUMENT_FIELDS = `${DOCUMENT_SUMMARY_FIELDS} content`;
+const DOCUMENT_FIELDS = `${DOCUMENT_SUMMARY_FIELDS} content trashed`;
 
 const LIST_DOCUMENTS_QUERY = `
   query T3CodeDocuments($filter: DocumentFilter!, $first: Int!, $after: String) {
@@ -604,26 +604,50 @@ const UPDATE_DOCUMENT_MUTATION = `
   }
 `;
 
-/** Linear trashes the document rather than erasing it; it can be restored in Linear. */
+/** Linear trashes the document rather than erasing it; `documentUnarchive` restores it. */
 const DELETE_DOCUMENT_MUTATION = `
   mutation T3CodeDeleteDocument($id: String!) {
     documentDelete(id: $id) { success }
   }
 `;
 
+const RESTORE_DOCUMENT_MUTATION = `
+  mutation T3CodeRestoreDocument($id: String!) {
+    documentUnarchive(id: $id) { success entity { ${DOCUMENT_FIELDS} } }
+  }
+`;
+
+/** Linear's `trashed` is null rather than false on a document that is not in the trash. */
+const RawDocument = Schema.Struct({
+  ...LinearDocument.fields,
+  trashed: Schema.NullOr(Schema.Boolean),
+});
+const toDocument = (raw: typeof RawDocument.Type): LinearDocument => ({
+  ...raw,
+  trashed: raw.trashed === true,
+});
+
 const decodeDocumentPage = Schema.decodeUnknownEffect(
   Schema.Struct({ documents: LinearDocumentPage }),
 );
 const decodeDocumentResult = Schema.decodeUnknownEffect(
-  Schema.Struct({ document: Schema.NullOr(LinearDocument) }),
+  Schema.Struct({ document: Schema.NullOr(RawDocument) }),
 );
 const decodeDocumentMutation = Schema.decodeUnknownEffect(
   Schema.Struct({
-    result: Schema.Struct({ success: Schema.Boolean, document: Schema.NullOr(LinearDocument) }),
+    result: Schema.Struct({ success: Schema.Boolean, document: Schema.NullOr(RawDocument) }),
   }),
 );
 const decodeDocumentDeleteResult = Schema.decodeUnknownEffect(
   Schema.Struct({ documentDelete: Schema.Struct({ success: Schema.Boolean }) }),
+);
+const decodeDocumentRestoreResult = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    documentUnarchive: Schema.Struct({
+      success: Schema.Boolean,
+      entity: Schema.NullOr(RawDocument),
+    }),
+  }),
 );
 
 /**
@@ -945,6 +969,10 @@ export class LinearApi extends Context.Service<
     readonly deleteDocument: (
       id: string,
     ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    /** Bring a trashed document back, as it now reads. */
+    readonly restoreDocument: (
+      id: string,
+    ) => Effect.Effect<LinearDocument, LinearUnavailableError | LinearOperationError>;
   }
 >()("t3/linear/LinearApi") {}
 
@@ -1790,7 +1818,7 @@ const make = Effect.gen(function* () {
       ),
     );
     if (result.document === null) return yield* notFound;
-    return result.document;
+    return toDocument(result.document);
   });
 
   const saveDocument = Effect.fn("LinearApi.saveDocument")(function* (input: {
@@ -1816,7 +1844,7 @@ const make = Effect.gen(function* () {
         detail: "Linear refused to save the document.",
       });
     }
-    return result.result.document;
+    return toDocument(result.result.document);
   });
 
   const deleteDocument = Effect.fn("LinearApi.deleteDocument")(function* (id: string) {
@@ -1832,6 +1860,22 @@ const make = Effect.gen(function* () {
         detail: "Linear refused to delete the document.",
       });
     }
+  });
+
+  const restoreDocument = Effect.fn("LinearApi.restoreDocument")(function* (id: string) {
+    const result = yield* request({
+      operation: "restoreDocument",
+      query: RESTORE_DOCUMENT_MUTATION,
+      variables: { id },
+      decode: decodeDocumentRestoreResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.documentUnarchive.success || result.documentUnarchive.entity === null) {
+      return yield* new LinearOperationError({
+        operation: "restoreDocument",
+        detail: "Linear refused to restore the document.",
+      });
+    }
+    return toDocument(result.documentUnarchive.entity);
   });
 
   return LinearApi.of({
@@ -1862,6 +1906,7 @@ const make = Effect.gen(function* () {
     getDocument,
     saveDocument,
     deleteDocument,
+    restoreDocument,
   });
 });
 

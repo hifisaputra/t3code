@@ -168,6 +168,7 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       getDocument: () => Effect.die("unused"),
       saveDocument: () => Effect.die("unused"),
       deleteDocument: () => Effect.die("unused"),
+      restoreDocument: () => Effect.die("unused"),
       ...overrides,
     }),
   );
@@ -2156,6 +2157,7 @@ const launchPlan = {
   updatedAt: "2026-09-02T10:00:00.000Z",
   project: { id: "project-1", name: "Launch" },
   content: "# Launch",
+  trashed: false,
 };
 const launchProject = {
   id: "project-1",
@@ -2298,3 +2300,64 @@ for (const decision of ["accept", "decline"] as const) {
     );
   });
 }
+
+for (const decision of ["accept", "decline"] as const) {
+  it.effect(`restores a trashed document only after approval: ${decision}`, () => {
+    const restored: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          Effect.result(callTool("restore_document", { id: launchPlan.url })),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        assert.strictEqual(
+          review.detail,
+          "Restore document: Launch plan\nTitle: Launch plan\nProject: Launch",
+        );
+        assert.deepStrictEqual(review.args, { id: "document-uuid" });
+        assert.deepStrictEqual(restored, []);
+        yield* answer(opened, decision);
+        const result = yield* Fiber.join(pending);
+        assert.deepStrictEqual(restored, decision === "accept" ? ["document-uuid"] : []);
+        assert.deepStrictEqual(
+          result._tag === "Success" ? result.success : undefined,
+          decision === "accept" ? launchPlan : undefined,
+        );
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getDocument: () => Effect.succeed({ ...launchPlan, trashed: true }),
+            restoreDocument: (id) =>
+              Effect.sync(() => {
+                restored.push(id);
+                return launchPlan;
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
+
+it.effect("refuses to restore a document that is not in the trash, without asking", () =>
+  Effect.gen(function* () {
+    const error = operationError(
+      yield* Effect.flip(callTool("restore_document", { id: "document-uuid" })),
+    );
+    assert.include(error.detail, "not in Linear's trash");
+  }).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getDocument: () => Effect.succeed(launchPlan),
+          restoreDocument: () => Effect.die("Linear must not be called"),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  ),
+);

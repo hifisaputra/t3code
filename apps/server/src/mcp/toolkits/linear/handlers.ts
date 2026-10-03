@@ -1065,6 +1065,39 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       return { id: document.id, title: document.title };
     }),
 
+  restore_document: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const document = yield* linear.getDocument(input.id);
+      // Nothing to bring back, so nothing to ask the user about.
+      if (!document.trashed) {
+        return yield* new LinearOperationError({
+          operation: "restore_document",
+          detail: `"${document.title}" is not in Linear's trash.`,
+        });
+      }
+      return yield* confirmedWrite(
+        "restore_document",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Restore document: ${document.title}`,
+            record: { label: document.title, url: document.url },
+            fields: [
+              { label: "Title", value: document.title },
+              ...(document.project === null
+                ? []
+                : [{ label: "Project", value: document.project.name ?? document.project.id }]),
+            ],
+          },
+          args: { id: document.id },
+        },
+        linear.restoreDocument(document.id),
+      );
+    }),
+
   get_issue: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");

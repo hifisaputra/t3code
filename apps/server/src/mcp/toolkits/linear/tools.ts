@@ -705,7 +705,7 @@ const ListDocumentsTool = readonlyLinearTool(
 const GetDocumentTool = readonlyLinearTool(
   Tool.make("get_document", {
     description:
-      "Read one Linear document in full: its title, markdown content, project, URL, and when it was last updated.",
+      "Read one Linear document in full: its title, markdown content, project, URL, when it was last updated, and whether it is in Linear's trash.",
     parameters: Schema.Struct({ id: DocumentId }),
     success: LinearDocument,
     failure: LinearToolError,
@@ -744,13 +744,26 @@ const SaveDocumentTool = linearTool(
 const DeleteDocumentTool = destructiveLinearTool(
   Tool.make("delete_document", {
     description:
-      "Delete a Linear document. Linear moves it to its trash, where someone can restore it from Linear; it cannot be restored from here.",
+      "Delete a Linear document. Linear moves it to its trash rather than erasing it, and restore_document brings it back.",
     parameters: Schema.Struct({ id: DocumentId }),
     success: Schema.Struct({ id: Schema.String, title: Schema.String }),
     failure: LinearToolError,
     dependencies,
   })
     .annotate(Tool.Title, "Delete Linear document")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
+);
+const RestoreDocumentTool = linearTool(
+  Tool.make("restore_document", {
+    description:
+      "Restore a Linear document from Linear's trash, such as one removed with delete_document. get_document reports trashed: true for a document that can be restored.",
+    parameters: Schema.Struct({ id: DocumentId }),
+    success: LinearDocument,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Restore Linear document")
     .annotate(Tool.Readonly, false)
     .annotate(Tool.Idempotent, true),
 );
@@ -786,4 +799,5 @@ export const LinearToolkit = Toolkit.make(
   GetDocumentTool,
   SaveDocumentTool,
   DeleteDocumentTool,
+  RestoreDocumentTool,
 );

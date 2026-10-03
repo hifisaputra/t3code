@@ -1370,10 +1370,14 @@ const launchPlan = {
   updatedAt: "2026-09-02T10:00:00.000Z",
   project: { id: "project-1", name: "Linear" },
   content: "# Launch\n\nShip it.",
+  // Linear sends null, not false, for a document outside the trash.
+  trashed: null,
 };
+/** `launchPlan` as the API hands it back. */
+const launchPlanRead = { ...launchPlan, trashed: false };
 
 it.effect("finds documents by title or content in a project, newest first, without content", () => {
-  const { content: _content, ...summary } = launchPlan;
+  const { content: _content, trashed: _trashed, ...summary } = launchPlan;
   const { execute, layer } = makeLayer({
     response: () =>
       Response.json({
@@ -1424,7 +1428,7 @@ it.effect("reads a document by the slug id at the end of a pasted link", () => {
   });
   return Effect.gen(function* () {
     const linear = yield* LinearApi.LinearApi;
-    assert.deepStrictEqual(yield* linear.getDocument(launchPlan.url), launchPlan);
+    assert.deepStrictEqual(yield* linear.getDocument(launchPlan.url), launchPlanRead);
     assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
       id: "0f1e2d3c4b5a",
     });
@@ -1471,7 +1475,7 @@ for (const id of [undefined, "document-uuid"]) {
         ...(id ? { id } : { title: "Launch plan", projectId: "project-1" }),
         content: launchPlan.content,
       });
-      assert.deepStrictEqual(saved, launchPlan);
+      assert.deepStrictEqual(saved, launchPlanRead);
       const request = sentGraphQL(execute.mock.calls[0]![0]);
       assert.include(request.query, id ? "documentUpdate" : "documentCreate");
       assert.deepStrictEqual(
@@ -1498,5 +1502,43 @@ it.effect("trashes a document by id and fails when Linear refuses", () => {
     const request = sentGraphQL(execute.mock.calls[0]![0]);
     assert.include(request.query, "documentDelete");
     assert.deepStrictEqual(request.variables, { id: "document-uuid" });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads a trashed document as trashed", () => {
+  const { layer } = makeLayer({
+    response: () => Response.json({ data: { document: { ...launchPlan, trashed: true } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const document = yield* linear.getDocument("document-uuid");
+    assert.isTrue(document.trashed);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("restores a trashed document and returns it as it now reads", () => {
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({ data: { documentUnarchive: { success: true, entity: launchPlan } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(yield* linear.restoreDocument("document-uuid"), launchPlanRead);
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "documentUnarchive");
+    assert.deepStrictEqual(request.variables, { id: "document-uuid" });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("fails a restore Linear refuses", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({ data: { documentUnarchive: { success: false, entity: null } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.restoreDocument("document-uuid"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "restoreDocument");
   }).pipe(Effect.provide(layer));
 });

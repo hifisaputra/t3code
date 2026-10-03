@@ -113,6 +113,8 @@ export const LinearDocument = Schema.Struct({
   ...LinearDocumentSummary.fields,
   /** Markdown, as Linear stores it. */
   content: Schema.NullOr(Schema.String),
+  /** In Linear's trash after `delete_document`, until `restore_document` brings it back. */
+  trashed: Schema.Boolean,
 });
 export type LinearDocument = typeof LinearDocument.Type;
 export const LinearDocumentPage = Schema.Struct({

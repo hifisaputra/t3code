@@ -162,7 +162,7 @@ The tools are:
 - `list_cycles` finds a team's cycles; `update_cycle` edits an existing cycle's name, description, or dates. Linear schedules new cycles automatically.
 - `list_issue_labels` and `save_issue_label` find, create, or edit issue labels.
 - `list_users`, `get_user`, `list_teams`, and `get_team` find people and teams.
-- `list_documents`, `get_document`, and `save_document` find, read, create, or edit Linear documents such as project specs; `delete_document` moves one to Linear's trash. A new document goes in the linked issue's project unless the agent names another.
+- `list_documents`, `get_document`, and `save_document` find, read, create, or edit Linear documents such as project specs; `delete_document` moves one to Linear's trash and `restore_document` brings it back. A new document goes in the linked issue's project unless the agent names another.
 
 Use exact names or IDs for projects and milestones, and names, emails, or IDs for assignees.
 Cycles accept an ID, name, number, or `current`, `next`, or `previous`. Ambiguous names need

@@ -68,6 +68,7 @@ it("mirrors the Linear MCP tool names so an existing skill keeps working", () =>
       "get_document",
       "save_document",
       "delete_document",
+      "restore_document",
       "save_issue",
       // Linear's own MCP server cannot reach the agent's workspace, so the
       // upload has no name over there to mirror.
@@ -104,6 +105,7 @@ it("marks only the reads as readonly and repeatable", () => {
     get_document: true,
     save_document: false,
     delete_document: false,
+    restore_document: false,
     save_issue: false,
     upload_image: false,
     create_issue: false,
