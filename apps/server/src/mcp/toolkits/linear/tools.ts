@@ -20,6 +20,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
 
+import { AssistantEvidence } from "../../../assistant/AssistantEvidence.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
@@ -37,12 +38,16 @@ const dependencies = [
   McpApprovalBroker,
 ];
 
-/** Reading a file the agent named needs the workspace on top of the rest. */
+/**
+ * Reading a file the agent named needs the workspace on top of the rest, and
+ * the assistant's evidence folder for a team thread's screenshots.
+ */
 const uploadDependencies = [
   ...dependencies,
   FileSystem.FileSystem,
   Path.Path,
   WorkspacePaths.WorkspacePaths,
+  AssistantEvidence,
 ];
 
 /**
@@ -204,7 +209,7 @@ const UploadImageTool = linearTool(
       "Upload an image from this thread's workspace to Linear and get back a URL to embed. Use it for screenshots and other visual evidence of the work: save the image in the workspace, upload it here, then put the returned markdown in a save_comment body or a save_issue description. The URL belongs to the Linear workspace, so one upload can be embedded in as many comments and issues as you like.",
     parameters: Schema.Struct({
       path: describedText(
-        "Path to the image file, relative to this thread's workspace root. PNG, JPEG, GIF, WebP, AVIF, BMP, TIFF, HEIC, ICO, and SVG are accepted, up to 20 MB.",
+        "Path to the image file, relative to this thread's workspace root. A developer assistant team thread may also pass an absolute path inside its task's evidence folder. PNG, JPEG, GIF, WebP, AVIF, BMP, TIFF, HEIC, ICO, and SVG are accepted, up to 20 MB.",
       ),
       alt: Schema.optional(
         describedText(
