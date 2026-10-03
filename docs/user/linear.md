@@ -151,7 +151,7 @@ you started from. Pass one, such as `DEL-123`, to reach a different issue.
 The tools are:
 
 - `get_issue` reads an issue, including its assignee, project, milestone, cycle, estimate, and labels.
-- `list_issues` searches across assignees by title, team, project, assignee, or workflow state, with pagination. `list_my_issues` lists your open issues.
+- `list_issues` searches across assignees by words in the title or description, issue identifier, team, project, assignee, or workflow state, with pagination. `list_my_issues` lists your open issues.
 - `list_comments` reads the comment thread; `save_comment` posts or edits a comment.
 - `upload_image` puts a screenshot on the issue. See [Screenshots on issues](#screenshots-on-issues).
 - `list_issue_statuses` lists a team's workflow states.

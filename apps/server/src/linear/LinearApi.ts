@@ -549,6 +549,37 @@ function retryAtFromResetHeader(value: string | undefined, now: number): number 
   return Number.isSafeInteger(parsed) && parsed > now ? parsed : undefined;
 }
 
+/**
+ * What a list `query` matches: every word in it appears in the issue's title
+ * or description, case aside, and a word shaped like `DEL-123` also matches
+ * that issue by identifier. Linear's `searchIssues` would rank by relevance
+ * with a vector search mixed in, and is limited to 30 requests a minute, so it
+ * gives up both the newest-first order this list pages by and the "no matches"
+ * answer someone checking for an existing issue relies on.
+ */
+function issueTextFilter(query: string) {
+  const words = query.split(/\s+/u).filter((word) => word.length > 0);
+  return {
+    and: words.map((word) => {
+      const identifier = /^([A-Za-z0-9]+)-(\d+)$/u.exec(word);
+      return {
+        or: [
+          { title: { containsIgnoreCase: word } },
+          { description: { containsIgnoreCase: word } },
+          ...(identifier
+            ? [
+                {
+                  team: { key: { eqIgnoreCase: identifier[1] } },
+                  number: { eq: Number(identifier[2]) },
+                },
+              ]
+            : []),
+        ],
+      };
+    }),
+  };
+}
+
 function toIssueRelative(raw: typeof RawIssueRelative.Type): LinearIssueRelative {
   return {
     id: raw.id,
@@ -990,7 +1021,7 @@ const make = Effect.gen(function* () {
             : input.assignedToMe !== false
               ? { assignee: { isMe: { eq: true } } }
               : {}),
-          ...(input.query !== undefined ? { title: { containsIgnoreCase: input.query } } : {}),
+          ...(input.query !== undefined ? issueTextFilter(input.query) : {}),
           state: { type: { in: stateTypes } },
           ...(input.teamKey !== undefined ? { team: { key: { eq: input.teamKey } } } : {}),
           ...(input.projectId !== undefined ? { project: { id: { eq: input.projectId } } } : {}),

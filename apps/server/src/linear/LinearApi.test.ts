@@ -1078,7 +1078,14 @@ it.effect("passes issue search filters and pagination through to Linear", () => 
     assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
       filter: {
         assignee: { null: true },
-        title: { containsIgnoreCase: "retry" },
+        and: [
+          {
+            or: [
+              { title: { containsIgnoreCase: "retry" } },
+              { description: { containsIgnoreCase: "retry" } },
+            ],
+          },
+        ],
         state: { type: { in: ["unstarted", "started"] } },
       },
       first: 20,
@@ -1086,6 +1093,43 @@ it.effect("passes issue search filters and pagination through to Linear", () => 
     });
   }).pipe(Effect.provide(layer));
 });
+
+it.effect(
+  "finds every word of a query in the title or description, and identifiers by number",
+  () => {
+    const { execute, layer } = makeLayer({
+      response: () => Response.json({ data: { issues: { nodes: [] } } }),
+    });
+    return Effect.gen(function* () {
+      const api = yield* LinearApi.LinearApi;
+      yield* api.listIssues({ assignedToMe: false, query: "renderer  media spi-210" });
+      const filter = sentGraphQL(execute.mock.calls[0]![0]).variables.filter as {
+        readonly and: unknown;
+      };
+      assert.deepStrictEqual(filter.and, [
+        {
+          or: [
+            { title: { containsIgnoreCase: "renderer" } },
+            { description: { containsIgnoreCase: "renderer" } },
+          ],
+        },
+        {
+          or: [
+            { title: { containsIgnoreCase: "media" } },
+            { description: { containsIgnoreCase: "media" } },
+          ],
+        },
+        {
+          or: [
+            { title: { containsIgnoreCase: "spi-210" } },
+            { description: { containsIgnoreCase: "spi-210" } },
+            { team: { key: { eqIgnoreCase: "spi" } }, number: { eq: 210 } },
+          ],
+        },
+      ]);
+    }).pipe(Effect.provide(layer));
+  },
+);
 
 const signedUpload = {
   fileUpload: {

@@ -243,6 +243,7 @@ export const LinearListIssuesInput = Schema.Struct({
   /** Defaults to true; false includes other assignees and unassigned issues. */
   assignedToMe: Schema.optional(Schema.Boolean),
   assigneeId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  /** Every word must appear in the title or description; `DEL-123` also matches by identifier. */
   query: Schema.optional(TrimmedNonEmptyString),
   cursor: Schema.optional(TrimmedNonEmptyString),
   teamKey: Schema.optional(TrimmedNonEmptyString),

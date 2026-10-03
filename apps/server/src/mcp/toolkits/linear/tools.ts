@@ -425,9 +425,14 @@ const ListProjectsTool = readonlyLinearTool(
 const ListIssuesTool = readonlyLinearTool(
   Tool.make("list_issues", {
     description:
-      "Search Linear issues across assignees by title, team, project, assignee, or workflow state type. Defaults to open issues; pass stateTypes for completed or canceled work. Supports pagination.",
+      "Search Linear issues across assignees by text, team, project, assignee, or workflow state type, most recently updated first. query matches issues whose title or description contains every word of it, case aside, and an identifier such as DEL-123 matches that issue. Defaults to open issues; pass stateTypes for completed or canceled work. Supports pagination.",
     parameters: Schema.Struct({
       ...ResourceListFields,
+      query: Schema.optional(
+        describedText(
+          "Words to find in the issue's title or description; every word must appear in one of them. An identifier such as DEL-123 also matches that issue. Omit to list without a text filter.",
+        ),
+      ),
       team: OptionalTeam,
       project: Schema.optional(ResourceId),
       assignee: IssuePlanningFields.assignee,
