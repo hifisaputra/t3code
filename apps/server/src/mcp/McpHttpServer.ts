@@ -660,10 +660,11 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
 /**
  * The Linear half of the per-thread MCP server. The API key stays here: the
  * handlers call `LinearApi` in-process, so nothing the agent can read carries
- * a credential. `ProjectionSnapshotQuery`, `ServerSettingsService` and
- * `McpApprovalBroker` are left as requirements because the routes already run
- * above them in `server.ts` — the broker especially, since the runtime has to
- * see the same instance the write approvals are raised on.
+ * a credential. `ProjectionSnapshotQuery`, `ServerSettingsService`,
+ * `McpApprovalBroker`, `LinearAgentOutbox` and `LinearOAuth` are left as
+ * requirements because the routes already run above them in `server.ts` — the
+ * broker especially, since the runtime has to see the same instance the write
+ * approvals are raised on.
  */
 const LinearToolkitRegistrationLive = McpServer.toolkit(LinearToolkit).pipe(
   Layer.provide(LinearToolkitHandlersLive),

@@ -28,7 +28,9 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { McpSchema, McpServer, Tool } from "effect/unstable/ai";
 
+import { LinearAgentOutbox } from "../../../linear/LinearAgentOutbox.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
+import { LinearOAuth } from "../../../linear/LinearOAuth.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
 import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
@@ -52,10 +54,13 @@ const environmentId = EnvironmentId.make("environment-linear-mcp");
 const threadId = ThreadId.make("thread-linear-mcp");
 const projectId = ProjectId.make("project-linear-mcp");
 
-const invocation = (capabilities: ReadonlyArray<McpInvocationContext.McpCapability>) =>
+const invocation = (
+  capabilities: ReadonlyArray<McpInvocationContext.McpCapability>,
+  thread: ThreadId = threadId,
+) =>
   McpInvocationContext.McpInvocationContext.of({
     environmentId,
-    threadId,
+    threadId: thread,
     providerSessionId: "provider-session-linear-mcp",
     providerInstanceId: ProviderInstanceId.make("codex"),
     capabilities: new Set(capabilities),
@@ -255,6 +260,8 @@ const testLayer = (input: {
   readonly session?: boolean;
   /** Set for the tools that read files the agent named, unset for the rest. */
   readonly workspaceRoot?: string;
+  /** Whether the Linear app is connected with delegation on; off by default. */
+  readonly appConnected?: boolean;
 }) =>
   // `provideMerge` because the toolkit's own `handle` keeps the tool
   // dependencies in its requirements; the layer has to satisfy both sides.
@@ -272,6 +279,10 @@ const testLayer = (input: {
           linear: { confirmAgentWrites: input.confirmAgentWrites ?? false },
         }),
         WorkspacePaths.layer.pipe(Layer.provide(NodeServices.layer)),
+        Layer.mock(LinearAgentOutbox)({
+          connected: Effect.succeed(input.appConnected ?? false),
+        }),
+        Layer.mock(LinearOAuth)({ accessToken: () => Effect.succeed("app-token") }),
       ),
     ),
     Layer.provideMerge(NodeServices.layer),
@@ -281,6 +292,7 @@ const callTool = <Name extends keyof typeof LinearToolkit.tools>(
   name: Name,
   params: Tool.Parameters<(typeof LinearToolkit.tools)[Name]>,
   capabilities: ReadonlyArray<McpInvocationContext.McpCapability> = ["linear"],
+  thread: ThreadId = threadId,
 ) =>
   Effect.gen(function* () {
     const built = yield* LinearToolkit;
@@ -293,7 +305,7 @@ const callTool = <Name extends keyof typeof LinearToolkit.tools>(
   }).pipe(
     Effect.provideService(
       McpInvocationContext.McpInvocationContext,
-      invocation(capabilities) as McpInvocationContext.McpInvocationScope,
+      invocation(capabilities, thread) as McpInvocationContext.McpInvocationScope,
     ),
   );
 
@@ -606,6 +618,89 @@ it.effect("writes without asking when the run is delegated", () => {
             }),
         },
         confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
+
+/** The identity a stubbed Linear call ran under: the app's token, or the person's key. */
+const author = Effect.gen(function* () {
+  const credential = yield* LinearApi.LinearAppCredential;
+  return credential === undefined ? "person" : yield* credential.pipe(Effect.orDie);
+});
+
+const teamThreadId = ThreadId.make("assistant-review-task-1");
+
+const commentAuthors = (input: {
+  readonly thread: ThreadId;
+  readonly appConnected: boolean;
+  readonly confirmAgentWrites?: boolean;
+}) => {
+  const authors: Array<string> = [];
+  return callTool("save_comment", { body: "Reviewed." }, ["linear"], input.thread).pipe(
+    Effect.map(() => authors),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          createComment: () =>
+            author.pipe(
+              Effect.map((name) => {
+                authors.push(name);
+                return { id: "comment-4", url: "https://linear.app/acme/issue/DEL-123#comment-4" };
+              }),
+            ),
+        },
+        appConnected: input.appConnected,
+        confirmAgentWrites: input.confirmAgentWrites ?? false,
+      }),
+    ),
+  );
+};
+
+// Completing with confirmation on is part of the proof: a write that goes out
+// as the app has no borrowed identity to approve, as for a delegated run.
+it.effect("posts a team thread's comment as the Linear app while it is connected", () =>
+  commentAuthors({ thread: teamThreadId, appConnected: true, confirmAgentWrites: true }).pipe(
+    Effect.map((authors) => assert.deepStrictEqual(authors, ["app-token"])),
+  ),
+);
+
+it.effect("posts a team thread's comment as the person when the app is not connected", () =>
+  commentAuthors({ thread: teamThreadId, appConnected: false }).pipe(
+    Effect.map((authors) => assert.deepStrictEqual(authors, ["person"])),
+  ),
+);
+
+it.effect("posts an ordinary thread's comment as the person even with the app connected", () =>
+  commentAuthors({ thread: threadId, appConnected: true }).pipe(
+    Effect.map((authors) => assert.deepStrictEqual(authors, ["person"])),
+  ),
+);
+
+it.effect("files a team thread's issue as the app and keeps its reads on the person", () => {
+  const calls: Array<string> = [];
+  return callTool("create_issue", { title: "Follow up" }, ["linear"], teamThreadId).pipe(
+    Effect.map(() => assert.deepStrictEqual(calls, ["getIssue:person", "createIssue:app-token"])),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () =>
+            author.pipe(
+              Effect.map((name) => {
+                calls.push(`getIssue:${name}`);
+                return issue;
+              }),
+            ),
+          createIssue: () =>
+            author.pipe(
+              Effect.map((name) => {
+                calls.push(`createIssue:${name}`);
+                return createdIssue;
+              }),
+            ),
+        },
+        appConnected: true,
       }),
     ),
   );

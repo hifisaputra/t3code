@@ -19,7 +19,9 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
 
+import { LinearAgentOutbox } from "../../../linear/LinearAgentOutbox.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
+import { LinearOAuth } from "../../../linear/LinearOAuth.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
 import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
@@ -34,6 +36,9 @@ const dependencies = [
   // call so the confirmation setting can change mid-session.
   ServerSettingsService,
   McpApprovalBroker,
+  // A team thread's writes go out as the Linear app while it is connected.
+  LinearAgentOutbox,
+  LinearOAuth,
 ];
 
 /** Reading a file the agent named needs the workspace on top of the rest. */
@@ -161,7 +166,7 @@ const ListMyIssuesTool = readonlyLinearTool(
 const SaveCommentTool = linearTool(
   Tool.make("save_comment", {
     description:
-      "Create or edit a Linear comment as the connected identity. Pass id from list_comments to replace an existing comment body; omit id to create a comment. For creation, issueId defaults to the issue this thread is linked to. For editing, the comment identifies its issue; an optional issueId must match. Linear enforces permission to edit the comment.",
+      "Create or edit a Linear comment. On a developer assistant team thread it is posted as the Linear app while the app is connected; otherwise as the connected Linear account. Pass id from list_comments to replace an existing comment body; omit id to create a comment. For creation, issueId defaults to the issue this thread is linked to. For editing, the comment identifies its issue; an optional issueId must match. Linear only lets a comment's author edit it.",
     parameters: Schema.Struct({
       id: Schema.optional(
         describedText("Existing comment UUID to edit. Omit to create a new comment."),

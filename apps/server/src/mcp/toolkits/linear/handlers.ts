@@ -4,6 +4,7 @@ import type {
   LinearResourceSaveInput,
 } from "../../../linear/LinearResources.ts";
 import {
+  assistantTeamThread,
   isProviderDriverKind,
   LinearOperationError,
   type IntegrationApprovalChange,
@@ -15,7 +16,9 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import { imageMimeTypeForFileName } from "../../../imageMime.ts";
+import { LinearAgentOutbox } from "../../../linear/LinearAgentOutbox.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
+import { LinearOAuth } from "../../../linear/LinearOAuth.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
 import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
@@ -197,11 +200,11 @@ const describeChange = (change: IntegrationApprovalChange): string => {
 
 /**
  * Asks the user before a Linear write lands, unless
- * `settings.linear.confirmAgentWrites` is off or the run is delegated and
- * writes as the app rather than as the user. Call it once every lookup has
- * resolved and immediately before the mutation, so a mistyped state or label
- * fails on its own terms instead of interrupting the user for a write that
- * could never happen.
+ * `settings.linear.confirmAgentWrites` is off or the write goes out as the app
+ * rather than as the user (see `confirmedWrite`). Call it once every lookup
+ * has resolved and immediately before the mutation, so a mistyped state or
+ * label fails on its own terms instead of interrupting the user for a write
+ * that could never happen.
  *
  * An `acceptForSession` grant is keyed to the provider session, so a user who
  * allowed one write is not asked again for the rest of that agent run.
@@ -227,9 +230,9 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
     ),
   );
   if (!settings.linear.confirmAgentWrites) return;
-  // A delegated run writes as the Linear app, not as the user, so there is no
-  // borrowed identity to approve. The credential that decides the author
-  // decides the prompt, so the two cannot drift apart.
+  // A write that goes out as the Linear app borrows no identity to approve.
+  // The credential that decides the author decides the prompt, so the two
+  // cannot drift apart.
   if ((yield* LinearApi.LinearAppCredential) !== undefined) return;
 
   const projections = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
@@ -280,6 +283,47 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
     });
   }
 });
+
+/**
+ * Runs a write tool's confirmation and mutation under the identity the write
+ * should carry. A delegated run already carries the app credential. A
+ * developer assistant team thread writes as the app too while it is connected,
+ * like the assistant's own updates on the issue, so what its agents post does
+ * not read as the person's. Every other thread, and every read, keeps the
+ * connected account.
+ */
+const confirmedWrite = <A, E, R>(
+  operation: string,
+  scope: Scope,
+  input: Parameters<typeof confirmWrite>[2],
+  mutation: Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const write = confirmWrite(operation, scope, input).pipe(Effect.andThen(mutation));
+    if (
+      (yield* LinearApi.LinearAppCredential) !== undefined ||
+      assistantTeamThread(scope.threadId) === null
+    ) {
+      return yield* write;
+    }
+    const outbox = yield* LinearAgentOutbox;
+    // An unreadable connection fails the write rather than posting it under
+    // the person's name.
+    const asApp = yield* outbox.connected.pipe(
+      Effect.mapError(
+        () =>
+          new LinearOperationError({
+            operation,
+            detail: "Could not read the Linear app connection.",
+          }),
+      ),
+    );
+    if (!asApp) return yield* write;
+    const oauth = yield* LinearOAuth;
+    return yield* write.pipe(
+      Effect.provideService(LinearApi.LinearAppCredential, oauth.accessToken(false)),
+    );
+  });
 
 /**
  * Large enough for a full-page screenshot, small enough that a mistyped path
@@ -662,29 +706,41 @@ const saveResource = Effect.fn("LinearToolkit.saveResource")(function* (
     endsAt: "Ends at",
     color: "Color",
   };
-  yield* confirmWrite(`save_${kind}`, scope, {
-    appName: "Linear",
-    change: {
-      summary: `${current ? "Update" : "Create"} ${kind}${current ? `: ${current.name ?? current.id}` : ""}`,
-      ...(current?.url ? { record: { label: current.name ?? current.id, url: current.url } } : {}),
-      fields: [
-        ...Object.entries(patch).map(([key, value]) => ({
-          label: labels[key] ?? key,
-          value: value === null ? "None" : Array.isArray(value) ? value.join(", ") : String(value),
-        })),
-        ...(!current && kind === "label"
-          ? [{ label: "Team", value: input.team ?? "Workspace-wide" }]
-          : []),
-      ],
+  return yield* confirmedWrite(
+    `save_${kind}`,
+    scope,
+    {
+      appName: "Linear",
+      change: {
+        summary: `${current ? "Update" : "Create"} ${kind}${current ? `: ${current.name ?? current.id}` : ""}`,
+        ...(current?.url
+          ? { record: { label: current.name ?? current.id, url: current.url } }
+          : {}),
+        fields: [
+          ...Object.entries(patch).map(([key, value]) => ({
+            label: labels[key] ?? key,
+            value:
+              value === null ? "None" : Array.isArray(value) ? value.join(", ") : String(value),
+          })),
+          ...(!current && kind === "label"
+            ? [{ label: "Team", value: input.team ?? "Workspace-wide" }]
+            : []),
+        ],
+      },
+      args: {
+        kind,
+        ...patch,
+        ...(current ? { id: current.id } : {}),
+        ...(teamId ? { teamId } : {}),
+      },
     },
-    args: { kind, ...patch, ...(current ? { id: current.id } : {}), ...(teamId ? { teamId } : {}) },
-  });
-  return yield* linear.saveResource({
-    kind,
-    ...patch,
-    ...(current ? { id: current.id } : {}),
-    ...(teamId ? { teamId } : {}),
-  });
+    linear.saveResource({
+      kind,
+      ...patch,
+      ...(current ? { id: current.id } : {}),
+      ...(teamId ? { teamId } : {}),
+    }),
+  );
 });
 
 export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
@@ -817,20 +873,24 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
           detail: "Comment body and supplied comment id must not be blank.",
         });
       }
-      yield* confirmWrite("save_comment", scope, {
-        appName: "Linear",
-        change: {
-          summary: `${comment === undefined ? "Comment on" : "Edit comment on"} ${issue.identifier}`,
-          record: { label: issue.identifier, url: comment?.url ?? issue.url },
-          // The comment lands as the agent wrote it, so it is reviewed the
-          // same way: as the markdown Linear will render.
-          fields: [{ label: "Comment", value: body, format: "markdown" }],
+      return yield* confirmedWrite(
+        "save_comment",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `${comment === undefined ? "Comment on" : "Edit comment on"} ${issue.identifier}`,
+            record: { label: issue.identifier, url: comment?.url ?? issue.url },
+            // The comment lands as the agent wrote it, so it is reviewed the
+            // same way: as the markdown Linear will render.
+            fields: [{ label: "Comment", value: body, format: "markdown" }],
+          },
+          args: { ...input, issueId: issue.id },
         },
-        args: { ...input, issueId: issue.id },
-      });
-      return yield* comment === undefined
-        ? linear.createComment({ issueId: issue.id, body })
-        : linear.updateComment({ id: comment.id, body });
+        comment === undefined
+          ? linear.createComment({ issueId: issue.id, body })
+          : linear.updateComment({ id: comment.id, body }),
+      );
     }),
 
   upload_image: (input) =>
@@ -839,22 +899,30 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const linear = yield* LinearApi.LinearApi;
       const image = yield* inspectWorkspaceImage("upload_image", scope, input.path.trim());
       const alt = named(input.alt) ?? image.fileName;
-      yield* confirmWrite("upload_image", scope, {
-        appName: "Linear",
-        change: {
-          summary: `Upload ${image.fileName} to Linear`,
-          fields: [
-            { label: "File", value: image.relativePath, format: "image" },
-            { label: "Type", value: `${image.contentType}, ${formatBytes(image.sizeBytes)}` },
-          ],
+      const { url } = yield* confirmedWrite(
+        "upload_image",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Upload ${image.fileName} to Linear`,
+            fields: [
+              { label: "File", value: image.relativePath, format: "image" },
+              { label: "Type", value: `${image.contentType}, ${formatBytes(image.sizeBytes)}` },
+            ],
+          },
+          args: input,
         },
-        args: input,
-      });
-      const { url } = yield* linear.uploadFile({
-        fileName: image.fileName,
-        contentType: image.contentType,
-        bytes: yield* image.read,
-      });
+        image.read.pipe(
+          Effect.flatMap((bytes) =>
+            linear.uploadFile({
+              fileName: image.fileName,
+              contentType: image.contentType,
+              bytes,
+            }),
+          ),
+        ),
+      );
       return { url, name: image.fileName, markdown: `![${alt}](${url})` };
     }),
 
@@ -900,65 +968,71 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const planning = yield* resolveIssuePlanning(input, issue.team.id, issue.project?.id ?? null);
       const stateId = resolvedState?.id;
       const labelIds = resolvedLabels?.map((label) => label.id);
-      yield* confirmWrite("save_issue", scope, {
-        appName: "Linear",
-        change: {
-          summary: `Update ${issue.identifier}`,
-          record: { label: issue.identifier, url: issue.url },
-          fields: [
-            ...planning.fields,
-            ...(resolvedAssignee === undefined
-              ? []
-              : [
-                  {
-                    label: "Assignee",
-                    value:
-                      resolvedAssignee === null
-                        ? "Unassigned"
-                        : `${resolvedAssignee.displayName} (${resolvedAssignee.id})`,
-                  },
-                ]),
-            ...(title === undefined ? [] : [{ label: "Title", value: title }]),
-            ...(resolvedState === undefined ? [] : [{ label: "State", value: resolvedState.name }]),
-            ...(resolvedLabels === undefined
-              ? []
-              : [
-                  {
-                    label: "Labels",
-                    value: resolvedLabels.map((label) => label.name).join(", "),
-                  },
-                ]),
-            // The description replaces what the issue says now, so it is shown
-            // whole. A character count is not something anyone can approve.
-            ...(input.description === undefined
-              ? []
-              : [
-                  {
-                    label: "Description",
-                    value: input.description,
-                    format: "markdown" as const,
-                  },
-                ]),
-          ],
+      yield* confirmedWrite(
+        "save_issue",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Update ${issue.identifier}`,
+            record: { label: issue.identifier, url: issue.url },
+            fields: [
+              ...planning.fields,
+              ...(resolvedAssignee === undefined
+                ? []
+                : [
+                    {
+                      label: "Assignee",
+                      value:
+                        resolvedAssignee === null
+                          ? "Unassigned"
+                          : `${resolvedAssignee.displayName} (${resolvedAssignee.id})`,
+                    },
+                  ]),
+              ...(title === undefined ? [] : [{ label: "Title", value: title }]),
+              ...(resolvedState === undefined
+                ? []
+                : [{ label: "State", value: resolvedState.name }]),
+              ...(resolvedLabels === undefined
+                ? []
+                : [
+                    {
+                      label: "Labels",
+                      value: resolvedLabels.map((label) => label.name).join(", "),
+                    },
+                  ]),
+              // The description replaces what the issue says now, so it is shown
+              // whole. A character count is not something anyone can approve.
+              ...(input.description === undefined
+                ? []
+                : [
+                    {
+                      label: "Description",
+                      value: input.description,
+                      format: "markdown" as const,
+                    },
+                  ]),
+            ],
+          },
+          args: {
+            ...input,
+            issueId: issue.id,
+            ...planning.patch,
+            ...(assigneeId !== undefined ? { assigneeId } : {}),
+            ...(stateId ? { stateId } : {}),
+            ...(labelIds ? { labelIds } : {}),
+          },
         },
-        args: {
-          ...input,
+        linear.updateIssue({
           issueId: issue.id,
           ...planning.patch,
           ...(assigneeId !== undefined ? { assigneeId } : {}),
-          ...(stateId ? { stateId } : {}),
-          ...(labelIds ? { labelIds } : {}),
-        },
-      });
-      yield* linear.updateIssue({
-        issueId: issue.id,
-        ...planning.patch,
-        ...(assigneeId !== undefined ? { assigneeId } : {}),
-        ...(title !== undefined ? { title } : {}),
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        ...(stateId !== undefined ? { stateId } : {}),
-        ...(labelIds !== undefined ? { labelIds } : {}),
-      });
+          ...(title !== undefined ? { title } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(stateId !== undefined ? { stateId } : {}),
+          ...(labelIds !== undefined ? { labelIds } : {}),
+        }),
+      );
       // Re-read so the agent sees what Linear actually stored, including the
       // state and label names it just resolved by name.
       return yield* linear.getIssue({ reference: issue.id });
@@ -998,65 +1072,73 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const stateId = resolvedState?.id;
       const labelIds = resolvedLabels?.map((label) => label.id);
       const title = input.title.trim();
-      yield* confirmWrite("create_issue", scope, {
-        appName: "Linear",
-        change: {
-          summary: `Create issue in ${team.key}`,
-          ...(parent === undefined
-            ? {}
-            : { record: { label: parent.identifier, url: parent.url } }),
-          fields: [
-            ...planning.fields,
-            ...(assignee === undefined
-              ? []
-              : [
-                  {
-                    label: "Assignee",
-                    value:
-                      assignee === null ? "Unassigned" : `${assignee.displayName} (${assignee.id})`,
-                  },
-                ]),
-            { label: "Title", value: title },
-            ...(parent === undefined ? [] : [{ label: "Parent", value: parent.identifier }]),
-            ...(resolvedState === undefined ? [] : [{ label: "State", value: resolvedState.name }]),
-            ...(resolvedLabels === undefined
-              ? []
-              : [
-                  {
-                    label: "Labels",
-                    value: resolvedLabels.map((label) => label.name).join(", "),
-                  },
-                ]),
-            ...(input.description === undefined
-              ? []
-              : [
-                  {
-                    label: "Description",
-                    value: input.description,
-                    format: "markdown" as const,
-                  },
-                ]),
-          ],
+      return yield* confirmedWrite(
+        "create_issue",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Create issue in ${team.key}`,
+            ...(parent === undefined
+              ? {}
+              : { record: { label: parent.identifier, url: parent.url } }),
+            fields: [
+              ...planning.fields,
+              ...(assignee === undefined
+                ? []
+                : [
+                    {
+                      label: "Assignee",
+                      value:
+                        assignee === null
+                          ? "Unassigned"
+                          : `${assignee.displayName} (${assignee.id})`,
+                    },
+                  ]),
+              { label: "Title", value: title },
+              ...(parent === undefined ? [] : [{ label: "Parent", value: parent.identifier }]),
+              ...(resolvedState === undefined
+                ? []
+                : [{ label: "State", value: resolvedState.name }]),
+              ...(resolvedLabels === undefined
+                ? []
+                : [
+                    {
+                      label: "Labels",
+                      value: resolvedLabels.map((label) => label.name).join(", "),
+                    },
+                  ]),
+              ...(input.description === undefined
+                ? []
+                : [
+                    {
+                      label: "Description",
+                      value: input.description,
+                      format: "markdown" as const,
+                    },
+                  ]),
+            ],
+          },
+          args: {
+            ...input,
+            teamId: team.id,
+            ...planning.patch,
+            ...(assigneeId !== undefined ? { assigneeId } : {}),
+            ...(parentId ? { parentId } : {}),
+            ...(stateId ? { stateId } : {}),
+            ...(labelIds ? { labelIds } : {}),
+          },
         },
-        args: {
-          ...input,
+        linear.createIssue({
           teamId: team.id,
           ...planning.patch,
           ...(assigneeId !== undefined ? { assigneeId } : {}),
-          ...(parentId ? { parentId } : {}),
-          ...(stateId ? { stateId } : {}),
-          ...(labelIds ? { labelIds } : {}),
-        },
-      });
-      return yield* linear.createIssue({
-        teamId: team.id,
-        ...planning.patch,
-        ...(assigneeId !== undefined ? { assigneeId } : {}),
-        title,
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        ...(parentId !== undefined ? { parentId } : {}),
-        ...(stateId !== undefined ? { stateId } : {}),
-        ...(labelIds !== undefined ? { labelIds } : {}),
-      });
+          title,
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(parentId !== undefined ? { parentId } : {}),
+          ...(stateId !== undefined ? { stateId } : {}),
+          ...(labelIds !== undefined ? { labelIds } : {}),
+        }),
+      );
     }),
 });
