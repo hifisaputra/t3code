@@ -1,5 +1,6 @@
 import { LinearResource, LinearResourcePage } from "../../../linear/LinearResources.ts";
 import {
+  LinearIssueAttachment,
   LinearIssueComment,
   LinearIssueDetail,
   LinearIssueNotFoundError,
@@ -116,7 +117,7 @@ const IssueRef = Schema.Struct({
 const GetIssueTool = readonlyLinearTool(
   Tool.make("get_issue", {
     description:
-      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, relations to other issues, and its most recent comments. Each relation reads from this issue's side: blocks, blockedBy, related, duplicateOf, or duplicatedBy. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
+      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, relations to other issues, attachments (the links in its sidebar, such as pull requests), and its most recent comments. Each relation reads from this issue's side: blocks, blockedBy, related, duplicateOf, or duplicatedBy. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
     parameters: Schema.Struct({ id: IssueIdParameter }),
     success: LinearIssueDetail,
     failure: LinearToolError,
@@ -263,6 +264,46 @@ const UploadImageTool = linearTool(
     .annotate(Tool.Title, "Upload image to Linear")
     .annotate(Tool.Readonly, false)
     .annotate(Tool.Idempotent, false),
+);
+
+const CreateAttachmentTool = linearTool(
+  Tool.make("create_attachment", {
+    description:
+      "Attach a link to a Linear issue, such as a pull request, a staging page, or a dashboard. Linear shows it in the issue's sidebar with its title and subtitle. Attaching a URL the issue already has updates that attachment instead of adding a second one. Pass issueId as an identifier such as DEL-123 or a Linear UUID; omit it and the issue this thread is linked to is used.",
+    parameters: Schema.Struct({
+      issueId: IssueIdParameter,
+      url: describedText("The http or https URL to attach."),
+      title: describedText("The title Linear shows for the link, such as Staging preview."),
+      subtitle: Schema.optional(
+        describedText("A second line under the title, such as the environment or build."),
+      ),
+    }),
+    success: LinearIssueAttachment,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Attach link to Linear issue")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
+);
+
+const DeleteAttachmentTool = destructiveLinearTool(
+  Tool.make("delete_attachment", {
+    description:
+      "Remove an attachment from a Linear issue by the id get_issue lists for it. Only the link leaves the issue; the page it points at is untouched.",
+    parameters: Schema.Struct({
+      id: describedText("Attachment UUID to remove, from get_issue."),
+    }),
+    success: Schema.Struct({
+      id: TrimmedNonEmptyString,
+      issue: IssueRef,
+    }),
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Remove Linear attachment")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
 );
 
 const IssuePlanningFields = {
@@ -643,6 +684,8 @@ export const LinearToolkit = Toolkit.make(
   SaveCommentTool,
   DeleteCommentTool,
   UploadImageTool,
+  CreateAttachmentTool,
+  DeleteAttachmentTool,
   SaveIssueTool,
   CreateIssueTool,
   ListIssuesTool,

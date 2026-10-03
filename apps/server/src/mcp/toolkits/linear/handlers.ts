@@ -567,6 +567,16 @@ const inspectWorkspaceImage = Effect.fn("LinearToolkit.inspectWorkspaceImage")(f
   };
 });
 
+/** An attachment is a link someone opens from Linear, so only web addresses qualify. */
+const isWebUrl = (value: string): boolean => {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
 const isResourceId = (value: string | undefined) =>
   value !== undefined &&
   /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value.trim());
@@ -1107,6 +1117,79 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         ),
       );
       return { url, name: image.fileName, markdown: `![${alt}](${url})` };
+    }),
+
+  create_attachment: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const url = input.url.trim();
+      if (!isWebUrl(url)) {
+        return yield* new LinearOperationError({
+          operation: "create_attachment",
+          detail: `"${url}" is not a link Linear can open. Pass a full http or https URL.`,
+        });
+      }
+      const title = named(input.title);
+      if (title === undefined) {
+        return yield* new LinearOperationError({
+          operation: "create_attachment",
+          detail: "Pass a non-empty title for the link.",
+        });
+      }
+      const subtitle = named(input.subtitle);
+      const issue = yield* resolveIssue("create_attachment", scope, named(input.issueId));
+      // Linear keys an attachment by issue and URL, so this one replaces its
+      // match rather than adding a second; the approval says which happens.
+      const replaces = issue.attachments?.some((attachment) => attachment.url === url) ?? false;
+      return yield* confirmedWrite(
+        "create_attachment",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `${replaces ? "Update link on" : "Attach link to"} ${issue.identifier}`,
+            record: { label: issue.identifier, url: issue.url },
+            fields: [
+              { label: "Title", value: title },
+              { label: "URL", value: url },
+              ...(subtitle === undefined ? [] : [{ label: "Subtitle", value: subtitle }]),
+            ],
+          },
+          args: { ...input, issueId: issue.id },
+        },
+        linear.createAttachment({
+          issueId: issue.id,
+          url,
+          title,
+          ...(subtitle === undefined ? {} : { subtitle }),
+        }),
+      );
+    }),
+
+  delete_attachment: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const attachment = yield* linear.getAttachment(input.id.trim());
+      yield* confirmedWrite(
+        "delete_attachment",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Remove link from ${attachment.issue.identifier}`,
+            record: { label: attachment.issue.identifier, url: attachment.issue.url },
+            fields: [
+              { label: "Title", value: attachment.title },
+              { label: "URL", value: attachment.url },
+            ],
+          },
+          args: { id: attachment.id, issueId: attachment.issue.id },
+        },
+        linear.deleteAttachment(attachment.id),
+      );
+      return { id: attachment.id, issue: attachment.issue };
     }),
 
   save_issue: (input) =>

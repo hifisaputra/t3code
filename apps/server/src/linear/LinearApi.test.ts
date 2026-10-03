@@ -148,6 +148,17 @@ const issueDetail = {
       },
     ],
   },
+  attachments: {
+    nodes: [
+      {
+        id: "attachment-1",
+        title: "Staging preview",
+        subtitle: null,
+        url: "https://staging.example.com/del-123",
+        sourceType: null,
+      },
+    ],
+  },
 };
 
 function makeLayer(input: {
@@ -338,6 +349,7 @@ it.effect("decodes an issue with a null assignee and its nested connections", ()
       [undefined, "comment-1"],
     );
     assert.isFalse("parentId" in issue.comments[0]!);
+    assert.deepStrictEqual(issue.attachments, issueDetail.attachments.nodes);
     assert.strictEqual(issue.project?.name, "Linear");
     assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, { id: "DEL-123" });
   }).pipe(Effect.provide(layer));
@@ -1265,3 +1277,88 @@ for (const [payload, expected] of [
     }).pipe(Effect.provide(layer));
   });
 }
+
+it.effect("attaches a link with its title and subtitle", () => {
+  const attachment = {
+    id: "attachment-2",
+    title: "Dashboard",
+    subtitle: "Production",
+    url: "https://grafana.example.com/d/1",
+    sourceType: null,
+  };
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { attachmentCreate: { success: true, attachment } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(
+      yield* linear.createAttachment({
+        issueId: "issue-uuid",
+        url: attachment.url,
+        title: "Dashboard",
+        subtitle: "Production",
+      }),
+      attachment,
+    );
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "attachmentCreate");
+    assert.deepStrictEqual(request.variables, {
+      input: {
+        issueId: "issue-uuid",
+        url: attachment.url,
+        title: "Dashboard",
+        subtitle: "Production",
+      },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads an attachment with the issue it hangs on", () => {
+  const attachment = {
+    id: "attachment-1",
+    title: "Staging preview",
+    subtitle: null,
+    url: "https://staging.example.com/del-123",
+    sourceType: null,
+    issue: {
+      id: "issue-uuid",
+      identifier: "DEL-123",
+      url: "https://linear.app/acme/issue/DEL-123",
+    },
+  };
+  const { layer } = makeLayer({ response: () => Response.json({ data: { attachment } }) });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(yield* linear.getAttachment("attachment-1"), attachment);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reports a missing attachment in plain words", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({
+        errors: [{ message: "Entity not found", extensions: { code: "ENTITY_NOT_FOUND" } }],
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.getAttachment("attachment-9"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.detail, "Attachment not found or inaccessible.");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("removes an attachment by id and fails when Linear refuses", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { attachmentDelete: { success: false } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.deleteAttachment("attachment-1"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "deleteAttachment");
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "attachmentDelete");
+    assert.deepStrictEqual(request.variables, { id: "attachment-1" });
+  }).pipe(Effect.provide(layer));
+});

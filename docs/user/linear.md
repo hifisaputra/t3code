@@ -150,10 +150,11 @@ you started from. Pass one, such as `DEL-123`, to reach a different issue.
 
 The tools are:
 
-- `get_issue` reads an issue, including its assignee, project, milestone, cycle, estimate, and labels.
+- `get_issue` reads an issue, including its assignee, project, milestone, cycle, estimate, labels, and attachments.
 - `list_issues` searches across assignees by title, team, project, assignee, or workflow state, with pagination. `list_my_issues` lists your open issues.
 - `list_comments` reads the comments, and each reply names the comment that starts its thread. `save_comment` posts a comment, replies in a thread, or edits a comment; `delete_comment` deletes one. Linear only lets a comment's author edit or delete it.
 - `upload_image` puts a screenshot on the issue. See [Screenshots on issues](#screenshots-on-issues).
+- `create_attachment` attaches a link, such as a staging page or a dashboard, to the issue's sidebar; `delete_attachment` removes one.
 - `list_issue_statuses` lists a team's workflow states.
 - `save_issue` updates an issue's title, description, state, labels, assignee, project, milestone, cycle, estimate, priority, or due date. `create_issue` accepts these fields when filing a new issue.
 - `list_projects`, `get_project`, and `save_project` find, read, create, or edit projects.
@@ -172,8 +173,8 @@ the complete label set. Changing the project clears its old milestone unless a n
 supplied. Estimates use the team's numeric scale and dates use `YYYY-MM-DD`.
 
 These tools cover issue planning and common resource management; they do not provide every
-operation from Linear's official MCP server. Agent delegation is not exposed, and comments are
-the only thing an agent can delete.
+operation from Linear's official MCP server. Agent delegation is not exposed, and comments and
+attachments are the only things an agent can delete.
 
 ### Screenshots on issues
 

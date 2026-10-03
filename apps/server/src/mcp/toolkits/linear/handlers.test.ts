@@ -161,6 +161,9 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       updateComment: () => Effect.die("unused"),
       uploadFile: () => Effect.die("unused"),
       deleteComment: () => Effect.die("unused"),
+      createAttachment: () => Effect.die("unused"),
+      getAttachment: () => Effect.die("unused"),
+      deleteAttachment: () => Effect.die("unused"),
       ...overrides,
     }),
   );
@@ -546,9 +549,9 @@ const nextApprovalEvent = Effect.gen(function* () {
   return event as ProviderRuntimeEvent;
 });
 
-/** The parts of an approval a deletion test reads: its one-line summary and the call it guards. */
+/** The parts of an approval a test reads: its one-line summary, the change, and the call it guards. */
 const decodeApprovalReview = Schema.decodeUnknownEffect(
-  Schema.Struct({ detail: Schema.String, args: Schema.Unknown }),
+  Schema.Struct({ detail: Schema.String, change: Schema.Unknown, args: Schema.Unknown }),
 );
 
 const answer = (event: ProviderRuntimeEvent, decision: "accept" | "acceptForSession" | "decline") =>
@@ -2023,3 +2026,121 @@ it.effect("still confines a thread outside the assistant's team to its workspace
     }),
   ),
 );
+
+const stagingLink = {
+  id: "attachment-1",
+  title: "Staging preview",
+  subtitle: null,
+  url: "https://staging.example.com/del-123",
+  sourceType: null,
+};
+
+for (const [current, summary] of [
+  [[], "Attach link to DEL-123"],
+  // Linear updates the attachment it already has for this URL.
+  [[stagingLink], "Update link on DEL-123"],
+] as const) {
+  it.effect(`attaches a link only after approval: ${summary}`, () => {
+    const created: Array<unknown> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          callTool("create_attachment", {
+            url: ` ${stagingLink.url} `,
+            title: "Staging preview",
+            subtitle: "Build 42",
+          }),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        assert.deepStrictEqual(review.change, {
+          summary,
+          record: { label: "DEL-123", url: issue.url },
+          fields: [
+            { label: "Title", value: "Staging preview" },
+            { label: "URL", value: stagingLink.url },
+            { label: "Subtitle", value: "Build 42" },
+          ],
+        });
+        assert.deepStrictEqual(created, []);
+        yield* answer(opened, "accept");
+        yield* Fiber.join(pending);
+        assert.deepStrictEqual(created, [
+          {
+            issueId: issue.id,
+            url: stagingLink.url,
+            title: "Staging preview",
+            subtitle: "Build 42",
+          },
+        ]);
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getIssue: () => Effect.succeed({ ...issue, attachments: current }),
+            createAttachment: (input) =>
+              Effect.sync(() => {
+                created.push(input);
+                return { ...stagingLink, subtitle: input.subtitle ?? null };
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
+
+it.effect("refuses to attach something that is not a web link, before asking", () =>
+  Effect.gen(function* () {
+    const error = operationError(
+      yield* Effect.flip(
+        callTool("create_attachment", { url: "file:///etc/passwd", title: "Secrets" }),
+      ),
+    );
+    assert.include(error.detail, "http or https");
+  }).pipe(Effect.provide(testLayer({ linear: {}, confirmAgentWrites: true }))),
+);
+
+for (const decision of ["accept", "decline"] as const) {
+  it.effect(`removes an attachment only after approval: ${decision}`, () => {
+    const deleted: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          Effect.result(callTool("delete_attachment", { id: "attachment-1" })),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        assert.strictEqual(
+          review.detail,
+          `Remove link from DEL-123\nTitle: Staging preview\nURL: ${stagingLink.url}`,
+        );
+        assert.deepStrictEqual(review.args, { id: "attachment-1", issueId: issue.id });
+        assert.deepStrictEqual(deleted, []);
+        yield* answer(opened, decision);
+        const result = yield* Fiber.join(pending);
+        assert.deepStrictEqual(deleted, decision === "accept" ? ["attachment-1"] : []);
+        assert.strictEqual(result._tag, decision === "accept" ? "Success" : "Failure");
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getAttachment: () =>
+              Effect.succeed({
+                ...stagingLink,
+                issue: { id: issue.id, identifier: issue.identifier, url: issue.url },
+              }),
+            deleteAttachment: (id) =>
+              Effect.sync(() => {
+                deleted.push(id);
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}

@@ -14,6 +14,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 import {
+  LinearIssueAttachment,
   LinearIssueNotFoundError,
   LinearOperationError,
   LinearUnavailableError,
@@ -204,6 +205,7 @@ const RawIssueDetail = Schema.Struct({
       }),
     ),
   }),
+  attachments: Schema.Struct({ nodes: Schema.Array(LinearIssueAttachment) }),
 });
 
 const ViewerResult = Schema.Struct({
@@ -350,6 +352,8 @@ const ISSUE_SUMMARY_FIELDS = `
   cycle { id number name }
 `;
 
+const ATTACHMENT_FIELDS = "id title subtitle url sourceType";
+
 const ISSUE_DETAIL_FIELDS = `
   ${ISSUE_SUMMARY_FIELDS}
   description
@@ -359,6 +363,7 @@ const ISSUE_DETAIL_FIELDS = `
   inverseRelations(first: 50) { nodes { id type issue { id identifier title url state { name } } } }
   labels { nodes { id name color } }
   comments(first: 50) { nodes { id body url createdAt user { id name displayName app } parentId } }
+  attachments(first: 50) { nodes { ${ATTACHMENT_FIELDS} } }
 `;
 
 const VIEWER_QUERY = `
@@ -521,6 +526,52 @@ const FileUploadResult = Schema.Struct({
 const decodeFileUploadResult = Schema.decodeUnknownEffect(FileUploadResult);
 
 /**
+ * `attachmentCreate` rather than `attachmentLinkURL`: it takes any URL with a
+ * subtitle, and the same URL on the same issue updates the attachment that is
+ * already there instead of adding a second one.
+ */
+const CREATE_ATTACHMENT_MUTATION = `
+  mutation T3CodeCreateAttachment($input: AttachmentCreateInput!) {
+    attachmentCreate(input: $input) { success attachment { ${ATTACHMENT_FIELDS} } }
+  }
+`;
+
+const GET_ATTACHMENT_QUERY = `
+  query T3CodeAttachment($id: String!) {
+    attachment(id: $id) { ${ATTACHMENT_FIELDS} issue { id identifier url } }
+  }
+`;
+
+const DELETE_ATTACHMENT_MUTATION = `
+  mutation T3CodeDeleteAttachment($id: String!) {
+    attachmentDelete(id: $id) { success }
+  }
+`;
+
+const decodeAttachmentCreateResult = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    attachmentCreate: Schema.Struct({
+      success: Schema.Boolean,
+      attachment: Schema.NullOr(LinearIssueAttachment),
+    }),
+  }),
+);
+const AttachmentWithIssue = Schema.Struct({
+  ...LinearIssueAttachment.fields,
+  issue: Schema.Struct({
+    id: TrimmedNonEmptyString,
+    identifier: TrimmedNonEmptyString,
+    url: Schema.String,
+  }),
+});
+const decodeAttachmentResult = Schema.decodeUnknownEffect(
+  Schema.Struct({ attachment: Schema.NullOr(AttachmentWithIssue) }),
+);
+const decodeAttachmentDeleteResult = Schema.decodeUnknownEffect(
+  Schema.Struct({ attachmentDelete: Schema.Struct({ success: Schema.Boolean }) }),
+);
+
+/**
  * A failure that reached Linear, kept internal so an operation can tell a missing
  * issue from a broken request before it turns into a contract error.
  */
@@ -614,6 +665,7 @@ function toIssueDetail(raw: typeof RawIssueDetail.Type): LinearIssueDetail {
     relations,
     inverseRelations,
     labels,
+    attachments,
     ...summary
   } = raw;
   return {
@@ -643,6 +695,7 @@ function toIssueDetail(raw: typeof RawIssueDetail.Type): LinearIssueDetail {
       ),
     ],
     labels: labels.nodes,
+    attachments: attachments.nodes,
   };
 }
 
@@ -778,6 +831,22 @@ export class LinearApi extends Context.Service<
     }) => Effect.Effect<{ readonly url: string }, LinearUnavailableError | LinearOperationError>;
     /** Delete a comment. Linear lets only its author do this. */
     readonly deleteComment: (
+      id: string,
+    ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    /** Attach a link to an issue, or retitle the one already there for the same URL. */
+    readonly createAttachment: (input: {
+      readonly issueId: string;
+      readonly url: string;
+      readonly title: string;
+      readonly subtitle?: string;
+    }) => Effect.Effect<LinearIssueAttachment, LinearUnavailableError | LinearOperationError>;
+    readonly getAttachment: (
+      id: string,
+    ) => Effect.Effect<
+      typeof AttachmentWithIssue.Type,
+      LinearUnavailableError | LinearOperationError
+    >;
+    readonly deleteAttachment: (
       id: string,
     ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
   }
@@ -1514,6 +1583,68 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const createAttachment = Effect.fn("LinearApi.createAttachment")(function* (input: {
+    readonly issueId: string;
+    readonly url: string;
+    readonly title: string;
+    readonly subtitle?: string;
+  }) {
+    const result = yield* request({
+      operation: "createAttachment",
+      query: CREATE_ATTACHMENT_MUTATION,
+      variables: {
+        input: {
+          issueId: input.issueId,
+          url: input.url,
+          title: input.title,
+          ...(input.subtitle !== undefined ? { subtitle: input.subtitle } : {}),
+        },
+      },
+      decode: decodeAttachmentCreateResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.attachmentCreate.success || result.attachmentCreate.attachment === null) {
+      return yield* new LinearOperationError({
+        operation: "createAttachment",
+        detail: "Linear refused to attach the link.",
+      });
+    }
+    return result.attachmentCreate.attachment;
+  });
+
+  const getAttachment = Effect.fn("LinearApi.getAttachment")(function* (id: string) {
+    const notFound = new LinearOperationError({
+      operation: "getAttachment",
+      detail: "Attachment not found or inaccessible.",
+    });
+    const result = yield* request({
+      operation: "getAttachment",
+      query: GET_ATTACHMENT_QUERY,
+      variables: { id },
+      decode: decodeAttachmentResult,
+    }).pipe(
+      Effect.catchTag("LinearRequestFailure", (failure) =>
+        isEntityNotFound(failure) ? Effect.fail(notFound) : failOperation(failure),
+      ),
+    );
+    if (result.attachment === null) return yield* notFound;
+    return result.attachment;
+  });
+
+  const deleteAttachment = Effect.fn("LinearApi.deleteAttachment")(function* (id: string) {
+    const result = yield* request({
+      operation: "deleteAttachment",
+      query: DELETE_ATTACHMENT_MUTATION,
+      variables: { id },
+      decode: decodeAttachmentDeleteResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.attachmentDelete.success) {
+      return yield* new LinearOperationError({
+        operation: "deleteAttachment",
+        detail: "Linear refused to remove the attachment.",
+      });
+    }
+  });
+
   return LinearApi.of({
     getComment,
     updateComment,
@@ -1535,6 +1666,9 @@ const make = Effect.gen(function* () {
     createComment,
     uploadFile,
     deleteComment,
+    createAttachment,
+    getAttachment,
+    deleteAttachment,
   });
 });
 
