@@ -3,6 +3,7 @@ import {
   LinearIssueComment,
   LinearIssueDetail,
   LinearIssueNotFoundError,
+  LinearIssueRelationType,
   LinearIssueSummary,
   LinearListIssuesResult,
   LinearOperationError,
@@ -78,6 +79,20 @@ const IssueIdParameter = Schema.optional(
   ),
 );
 
+/** A relation to another issue, named from the side of the issue being written. */
+const IssueRelationsParameter = (description: string) =>
+  Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        type: LinearIssueRelationType.annotate({
+          description:
+            "How the other issue relates to this one, from this issue's side: blocks (this issue must be done first), blockedBy (the other must be done first), related, duplicateOf, or duplicatedBy.",
+        }),
+        issue: describedText("The other issue, as an identifier such as DEL-123 or a Linear UUID."),
+      }),
+    ).annotate({ description }),
+  );
+
 const IssueRef = Schema.Struct({
   id: TrimmedNonEmptyString,
   identifier: TrimmedNonEmptyString,
@@ -87,7 +102,7 @@ const IssueRef = Schema.Struct({
 const GetIssueTool = readonlyLinearTool(
   Tool.make("get_issue", {
     description:
-      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, and its most recent comments. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
+      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, relations to other issues, and its most recent comments. Each relation reads from this issue's side: blocks, blockedBy, related, duplicateOf, or duplicatedBy. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
     parameters: Schema.Struct({ id: IssueIdParameter }),
     success: LinearIssueDetail,
     failure: LinearToolError,
@@ -262,7 +277,7 @@ const IssuePlanningFields = {
 const SaveIssueTool = linearTool(
   Tool.make("save_issue", {
     description:
-      "Update a Linear issue's title, description, workflow state, labels, assignee, project, milestone, estimate, cycle, priority, or due date, leaving every field you omit untouched. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is saved.",
+      "Update a Linear issue's title, description, workflow state, labels, assignee, project, milestone, estimate, cycle, priority, or due date, or add and remove its relations to other issues, leaving every field you omit untouched. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is saved.",
     parameters: Schema.Struct({
       id: IssueIdParameter,
       ...IssuePlanningFields,
@@ -285,6 +300,12 @@ const SaveIssueTool = linearTool(
           description:
             "The issue's complete label set, by name or id. This replaces the existing labels, so include the ones to keep.",
         }),
+      ),
+      addRelations: IssueRelationsParameter(
+        "Relations to add, such as blockedBy DEL-120. Relations the issue already has are left as they are.",
+      ),
+      removeRelations: IssueRelationsParameter(
+        "Relations to remove, named as get_issue reports them. A relation the issue does not have is skipped.",
       ),
     }),
     success: LinearIssueDetail,
@@ -328,6 +349,9 @@ const CreateIssueTool = linearTool(
         Schema.Array(Schema.String).annotate({
           description: "Labels to put on the new issue, by name or id.",
         }),
+      ),
+      relations: IssueRelationsParameter(
+        "Relations to set on the new issue, such as blockedBy DEL-120 or related DEL-98.",
       ),
     }),
     success: LinearIssueSummary,

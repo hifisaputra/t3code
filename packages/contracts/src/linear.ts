@@ -115,6 +115,29 @@ export const LinearIssueRelative = Schema.Struct({
 });
 export type LinearIssueRelative = typeof LinearIssueRelative.Type;
 
+/**
+ * How another issue relates to this one, read from this issue's side: `blocks`
+ * means this issue blocks the other, `blockedBy` that the other blocks this
+ * one. Linear stores one relation per pair, so the same link reads as `blocks`
+ * on one issue and `blockedBy` on the other.
+ */
+export const LinearIssueRelationType = Schema.Literals([
+  "blocks",
+  "blockedBy",
+  "related",
+  "duplicateOf",
+  "duplicatedBy",
+]);
+export type LinearIssueRelationType = typeof LinearIssueRelationType.Type;
+
+export const LinearIssueRelation = Schema.Struct({
+  /** Linear's relation id, shared by both issues it links. */
+  id: TrimmedNonEmptyString,
+  type: LinearIssueRelationType,
+  issue: LinearIssueRelative,
+});
+export type LinearIssueRelation = typeof LinearIssueRelation.Type;
+
 export const LinearIssueComment = Schema.Struct({
   id: TrimmedNonEmptyString,
   body: Schema.String,
@@ -134,6 +157,8 @@ export const LinearIssueDetail = Schema.Struct({
   comments: Schema.Array(LinearIssueComment),
   parent: Schema.NullOr(LinearIssueRelative),
   children: Schema.Array(LinearIssueRelative),
+  /** Optional so a client can still read an issue from a server that predates relations. */
+  relations: Schema.optional(Schema.Array(LinearIssueRelation)),
   labels: Schema.Array(LinearIssueLabel),
 });
 export type LinearIssueDetail = typeof LinearIssueDetail.Type;

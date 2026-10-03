@@ -64,6 +64,69 @@ const issueDetail = {
       },
     ],
   },
+  relations: {
+    nodes: [
+      {
+        id: "relation-blocks",
+        type: "blocks",
+        relatedIssue: {
+          id: "issue-130",
+          identifier: "DEL-130",
+          title: "Ship the integration",
+          url: "https://linear.app/acme/issue/DEL-130",
+          state: { name: "Todo" },
+        },
+      },
+      {
+        id: "relation-similar",
+        type: "similar",
+        relatedIssue: {
+          id: "issue-131",
+          identifier: "DEL-131",
+          title: "Looks alike",
+          url: "https://linear.app/acme/issue/DEL-131",
+          state: { name: "Todo" },
+        },
+      },
+    ],
+  },
+  inverseRelations: {
+    nodes: [
+      {
+        id: "relation-blocked-by",
+        type: "blocks",
+        issue: {
+          id: "issue-110",
+          identifier: "DEL-110",
+          title: "Store the key",
+          url: "https://linear.app/acme/issue/DEL-110",
+          state: { name: "In Progress" },
+        },
+      },
+      {
+        id: "relation-duplicated-by",
+        type: "duplicate",
+        issue: {
+          id: "issue-140",
+          identifier: "DEL-140",
+          title: "Linear wiring",
+          url: "https://linear.app/acme/issue/DEL-140",
+          state: null,
+        },
+      },
+      {
+        id: "relation-related",
+        type: "related",
+        issue: {
+          id: "issue-98",
+          identifier: "DEL-98",
+          title: "Integrations page",
+          url: "https://linear.app/acme/issue/DEL-98",
+          state: { name: "Done" },
+        },
+      },
+    ],
+  },
   labels: { nodes: [{ id: "label-1", name: "integration", color: "#5e6ad2" }] },
   comments: {
     nodes: [
@@ -269,6 +332,84 @@ it.effect("decodes an issue with a null assignee and its nested connections", ()
     );
     assert.strictEqual(issue.project?.name, "Linear");
     assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, { id: "DEL-123" });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads relations in both directions from the issue's own side", () => {
+  const { layer } = makeLayer({
+    response: () => Response.json({ data: { issue: issueDetail } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const issue = yield* linear.getIssue({ reference: "DEL-123" });
+
+    // A relation stored on another issue reads inverted here, and Linear's
+    // own `similar` suggestions are left out.
+    assert.deepStrictEqual(
+      issue.relations?.map((relation) => [relation.id, relation.type, relation.issue.identifier]),
+      [
+        ["relation-blocks", "blocks", "DEL-130"],
+        ["relation-blocked-by", "blockedBy", "DEL-110"],
+        ["relation-duplicated-by", "duplicatedBy", "DEL-140"],
+        ["relation-related", "related", "DEL-98"],
+      ],
+    );
+    assert.deepStrictEqual(issue.relations?.[1]?.issue, {
+      id: "issue-110",
+      identifier: "DEL-110",
+      title: "Store the key",
+      url: "https://linear.app/acme/issue/DEL-110",
+      stateName: "In Progress",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("stores a blocked-by relation on the issue that does the blocking", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { issueRelationCreate: { success: true } } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    yield* linear.addIssueRelation({
+      issueId: "issue-uuid",
+      type: "blockedBy",
+      otherIssueId: "issue-110",
+    });
+    yield* linear.addIssueRelation({
+      issueId: "issue-uuid",
+      type: "duplicateOf",
+      otherIssueId: "issue-140",
+    });
+
+    assert.deepStrictEqual(
+      execute.mock.calls.map(([request]) => sentGraphQL(request).variables),
+      [
+        { input: { type: "blocks", issueId: "issue-110", relatedIssueId: "issue-uuid" } },
+        { input: { type: "duplicate", issueId: "issue-uuid", relatedIssueId: "issue-140" } },
+      ],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("deletes a relation by id and fails when Linear refuses", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { issueRelationDelete: { success: false } } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const error = yield* Effect.flip(linear.removeIssueRelation("relation-blocks"));
+
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "removeIssueRelation");
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      id: "relation-blocks",
+    });
   }).pipe(Effect.provide(layer));
 });
 
