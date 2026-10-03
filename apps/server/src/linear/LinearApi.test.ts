@@ -1,6 +1,7 @@
 import { assert, it, vi } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
@@ -149,12 +150,16 @@ const issueDetail = {
 };
 
 function makeLayer(input: {
-  readonly response: (request: HttpClientRequest.HttpClientRequest) => Response;
+  /** `null` is a request Linear never answers. */
+  readonly response: (request: HttpClientRequest.HttpClientRequest) => Response | null;
   readonly apiKey?: string;
 }) {
-  const execute = vi.fn((request: HttpClientRequest.HttpClientRequest) =>
-    Effect.succeed(HttpClientResponse.fromWeb(request, input.response(request))),
-  );
+  const execute = vi.fn((request: HttpClientRequest.HttpClientRequest) => {
+    const response = input.response(request);
+    return response === null
+      ? Effect.never
+      : Effect.succeed(HttpClientResponse.fromWeb(request, response));
+  });
 
   const layer = LinearApi.layer.pipe(
     Layer.provide(
@@ -183,6 +188,16 @@ function sentGraphQL(request: HttpClientRequest.HttpClientRequest): {
     throw new Error(`expected a JSON body, got ${body._tag}`);
   }
   return JSON.parse(new TextDecoder().decode(body.body));
+}
+
+const UUID = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/;
+
+/** A create's variables without the client id it generated, once that id is checked to be a UUID. */
+function withoutClientId(variables: Record<string, unknown>): Record<string, unknown> {
+  const nested = typeof variables.input === "object" && variables.input !== null;
+  const { id, ...rest } = (nested ? variables.input : variables) as Record<string, unknown>;
+  assert.match(String(id), UUID);
+  return nested ? { ...variables, input: rest } : rest;
 }
 
 it.effect("reports an unconfigured status without calling Linear when no key is stored", () => {
@@ -281,6 +296,99 @@ it.effect("turns a GraphQL error into an operation error that never repeats the 
     assert.strictEqual(error.operation, "listIssues");
     assert.include(error.detail, "Argument Validation Error");
     assert.notInclude(error.message, API_KEY);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("names the field Linear rejected and its explanation", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json(
+        {
+          errors: [
+            {
+              message: "Argument Validation Error",
+              path: ["projectCreate"],
+              extensions: {
+                code: "INVALID_INPUT",
+                type: "invalid input",
+                userError: true,
+                userPresentableMessage: "name must be shorter than or equal to 80 characters",
+                validationErrors: [
+                  {
+                    target: { name: "x".repeat(120), teamIds: ["team-1"] },
+                    value: "x".repeat(120),
+                    property: "name",
+                    children: [],
+                    constraints: {
+                      maxLength: "name must be shorter than or equal to 80 characters",
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+          data: null,
+        },
+        { status: 400 },
+      ),
+  });
+
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+
+    const error = yield* Effect.flip(
+      api.saveResource({ kind: "project", name: "x".repeat(120), teamIds: ["team-1"] }),
+    );
+
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(
+      error.message,
+      "Linear operation saveResource failed: Linear rejected the request: Argument Validation Error. name must be shorter than or equal to 80 characters. Rejected field: name",
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads nested rejected fields and keeps a long rejection short", () => {
+  const constraint = (property: string) => ({
+    property,
+    children: [],
+    constraints: {
+      isUuid: `${property} must be a UUID${property === "teamId" ? "" : ` ${"because ".repeat(30)}`}`,
+    },
+  });
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({
+        errors: [
+          {
+            message: "Argument Validation Error",
+            extensions: {
+              code: "INVALID_INPUT",
+              validationErrors: [
+                {
+                  property: "input",
+                  children: ["teamId", "stateId", "projectId", "cycleId"].map(constraint),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const error = yield* Effect.flip(linear.createIssue({ teamId: "DEL", title: "Broken" }));
+
+    assert.instanceOf(error, LinearOperationError);
+    assert.isTrue(
+      error.detail.startsWith(
+        "Linear rejected the request: Argument Validation Error. Rejected fields: input.teamId (teamId must be a UUID), input.stateId (stateId must be a UUID because",
+      ),
+    );
+    assert.isTrue(error.detail.endsWith("…"));
+    assert.isAtMost(error.detail.length, 400);
   }).pipe(Effect.provide(layer));
 });
 
@@ -389,7 +497,7 @@ it.effect("stores a blocked-by relation on the issue that does the blocking", ()
     });
 
     assert.deepStrictEqual(
-      execute.mock.calls.map(([request]) => sentGraphQL(request).variables),
+      execute.mock.calls.map(([request]) => withoutClientId(sentGraphQL(request).variables)),
       [
         { input: { type: "blocks", issueId: "issue-110", relatedIssueId: "issue-uuid" } },
         { input: { type: "duplicate", issueId: "issue-uuid", relatedIssueId: "issue-140" } },
@@ -812,7 +920,7 @@ it.effect("returns the created comment", () => {
       id: "comment-3",
       url: "https://linear.app/acme/issue/DEL-123#comment-3",
     });
-    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+    assert.deepStrictEqual(withoutClientId(sentGraphQL(execute.mock.calls[0]![0]).variables), {
       issueId: "issue-uuid",
       body: "On it.",
     });
@@ -874,7 +982,7 @@ it.effect("returns the created issue summary", () => {
     });
 
     assert.strictEqual(created.identifier, "DEL-123");
-    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+    assert.deepStrictEqual(withoutClientId(sentGraphQL(execute.mock.calls[0]![0]).variables), {
       input: { teamId: "team-1", title: "Wire up Linear", parentId: "issue-parent" },
     });
   }).pipe(Effect.provide(layer));
@@ -1169,7 +1277,7 @@ it.effect("preserves resource creation scope and distinguishes create from updat
     yield* api.saveResource({ kind: "milestone", name: "Ready", projectId: "project-1" });
     yield* api.saveResource({ kind: "label", name: "Ready", teamId: "team-1" });
     assert.deepStrictEqual(
-      execute.mock.calls.map((call) => sentGraphQL(call[0]).variables),
+      execute.mock.calls.map((call) => withoutClientId(sentGraphQL(call[0]).variables)),
       [
         { input: { name: "Ready", teamIds: ["team-1"] } },
         { input: { name: "Ready", projectId: "project-1" } },
@@ -1379,5 +1487,139 @@ it.effect("passes a caller-owned UUID when creating a retryable comment", () => 
       issueId: "issue-uuid",
       body: "Report",
     });
+  }).pipe(Effect.provide(layer));
+});
+
+/** Runs `effect` while moving the test clock, so backoff and attempt timeouts never wait in real time. */
+const withTestClock = <A, E>(effect: Effect.Effect<A, E>) =>
+  Effect.gen(function* () {
+    const fiber = yield* Effect.forkChild(effect);
+    for (let step = 0; step < 20; step += 1) yield* TestClock.adjust("5 seconds");
+    return yield* Fiber.join(fiber);
+  });
+
+it.effect("retries a brief Linear outage and returns the answer", () => {
+  let calls = 0;
+  const { execute, layer } = makeLayer({
+    response: () =>
+      (calls += 1) === 1
+        ? new Response("upstream unavailable", { status: 503 })
+        : Response.json({ data: { issue: issueDetail } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const issue = yield* withTestClock(linear.getIssue({ reference: "DEL-123" }));
+
+    assert.strictEqual(issue.identifier, "DEL-123");
+    assert.strictEqual(execute.mock.calls.length, 2);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("waits out a short rate limit before retrying", () => {
+  let calls = 0;
+  const { execute, layer } = makeLayer({
+    response: () =>
+      (calls += 1) === 1
+        ? new Response("slow down", { status: 429, headers: { "Retry-After": "3" } })
+        : Response.json({ data: { issueUpdate: { success: true } } }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    yield* withTestClock(linear.updateIssue({ issueId: "issue-uuid", title: "Renamed" }));
+
+    assert.strictEqual(execute.mock.calls.length, 2);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("does not retry a rejected key", () => {
+  const { execute, layer } = makeLayer({
+    response: () => new Response("unauthorized", { status: 401 }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const error = yield* withTestClock(Effect.flip(linear.getIssue({ reference: "DEL-123" })));
+
+    assert.instanceOf(error, LinearUnavailableError);
+    assert.strictEqual(error.reason, "unauthenticated");
+    assert.strictEqual(execute.mock.calls.length, 1);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect(
+  "retries a timed-out comment with the same id and reads it back once Linear has it",
+  () => {
+    const url = "https://linear.app/acme/issue/DEL-123#comment-9";
+    const { execute, layer } = makeLayer({
+      response: (request) => {
+        const { query, variables } = sentGraphQL(request);
+        if (query.includes("T3CodeGetComment")) {
+          return Response.json({
+            data: {
+              comment: { id: variables.id, body: "On it.", url, issue: { id: "issue-uuid" } },
+            },
+          });
+        }
+        // The first post lands but its answer never arrives; the retry finds the id taken.
+        return execute.mock.calls.length === 1
+          ? null
+          : Response.json({
+              errors: [
+                {
+                  message: "Entity with the given id already exists",
+                  extensions: { code: "INVALID_INPUT" },
+                },
+              ],
+            });
+      },
+    });
+
+    return Effect.gen(function* () {
+      const linear = yield* LinearApi.LinearApi;
+
+      const comment = yield* withTestClock(
+        linear.createComment({ issueId: "issue-uuid", body: "On it." }),
+      );
+
+      const sent = execute.mock.calls.map(([request]) => sentGraphQL(request));
+      assert.strictEqual(sent.length, 3);
+      const id = sent[0]!.variables.id;
+      assert.match(String(id), UUID);
+      assert.strictEqual(sent[1]!.variables.id, id);
+      assert.include(sent[2]!.query, "T3CodeGetComment");
+      assert.deepStrictEqual(comment, { id, url });
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect("does not repeat an upload Linear may already have signed", () => {
+  const { execute, layer } = makeLayer({
+    response: () => new Response("upstream unavailable", { status: 503 }),
+  });
+
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+
+    const error = yield* withTestClock(
+      Effect.flip(
+        api.uploadFile({
+          fileName: "after.png",
+          contentType: "image/png",
+          bytes: Uint8Array.from([1]),
+        }),
+      ),
+    );
+
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(
+      error.detail,
+      "Linear returned HTTP 503. Linear may have applied it, so it was not sent again.",
+    );
+    assert.strictEqual(execute.mock.calls.length, 1);
   }).pipe(Effect.provide(layer));
 });
