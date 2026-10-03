@@ -156,6 +156,7 @@ The tools are:
 - `upload_image` puts a screenshot on the issue. See [Screenshots on issues](#screenshots-on-issues).
 - `list_issue_statuses` lists a team's workflow states.
 - `save_issue` updates an issue's title, description, state, labels, assignee, project, milestone, cycle, estimate, priority, or due date. `create_issue` accepts these fields when filing a new issue.
+- `archive_issue` archives an issue, or restores an archived one. An archived issue leaves boards and lists but can still be read.
 - `list_projects`, `get_project`, and `save_project` find, read, create, or edit projects.
 - `list_milestones`, `get_milestone`, and `save_milestone` find, read, create, or edit project milestones.
 - `list_cycles` finds a team's cycles; `update_cycle` edits an existing cycle's name, description, or dates. Linear schedules new cycles automatically.

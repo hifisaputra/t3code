@@ -112,7 +112,7 @@ const IssueRef = Schema.Struct({
 const GetIssueTool = readonlyLinearTool(
   Tool.make("get_issue", {
     description:
-      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, relations to other issues, and its most recent comments. Each relation reads from this issue's side: blocks, blockedBy, related, duplicateOf, or duplicatedBy. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
+      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, relations to other issues, and its most recent comments. An archived issue still reads, with archivedAt set. Each relation reads from this issue's side: blocks, blockedBy, related, duplicateOf, or duplicatedBy. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
     parameters: Schema.Struct({ id: IssueIdParameter }),
     success: LinearIssueDetail,
     failure: LinearToolError,
@@ -325,6 +325,27 @@ const SaveIssueTool = linearTool(
     dependencies,
   })
     .annotate(Tool.Title, "Save Linear issue")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
+);
+
+const ArchiveIssueTool = linearTool(
+  Tool.make("archive_issue", {
+    description:
+      "Archive a Linear issue, or restore an archived one with archived false. Archiving takes an issue off boards and lists without deleting it, so it is the way to take back an issue filed by mistake; get_issue still reads an archived issue, with archivedAt set. Name the issue explicitly: this tool never falls back to the thread's own issue.",
+    parameters: Schema.Struct({
+      id: describedText("Issue identifier such as DEL-123, or a Linear issue UUID."),
+      archived: Schema.optional(
+        Schema.Boolean.annotate({
+          description: "true archives the issue, false restores it. Defaults to true.",
+        }),
+      ),
+    }),
+    success: LinearIssueDetail,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Archive Linear issue")
     .annotate(Tool.Readonly, false)
     .annotate(Tool.Idempotent, true),
 );
@@ -644,6 +665,7 @@ export const LinearToolkit = Toolkit.make(
   SaveCommentTool,
   UploadImageTool,
   SaveIssueTool,
+  ArchiveIssueTool,
   CreateIssueTool,
   ListIssuesTool,
   ListProjectsTool,

@@ -160,6 +160,8 @@ export const LinearIssueDetail = Schema.Struct({
   /** Optional so a client can still read an issue from a server that predates relations. */
   relations: Schema.optional(Schema.Array(LinearIssueRelation)),
   labels: Schema.Array(LinearIssueLabel),
+  /** ISO 8601, set while the issue is archived. Optional for servers that predate archiving. */
+  archivedAt: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type LinearIssueDetail = typeof LinearIssueDetail.Type;
 

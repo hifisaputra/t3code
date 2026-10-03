@@ -413,6 +413,51 @@ it.effect("deletes a relation by id and fails when Linear refuses", () => {
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("archives with issueArchive and restores with issueUnarchive", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { result: { success: true } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    yield* linear.archiveIssue({ issueId: "issue-uuid", archived: true });
+    yield* linear.archiveIssue({ issueId: "issue-uuid", archived: false });
+    const [archive, restore] = execute.mock.calls.map(([request]) => sentGraphQL(request));
+    assert.include(archive!.query, "issueArchive(id: $id)");
+    assert.include(restore!.query, "issueUnarchive(id: $id)");
+    assert.deepStrictEqual(archive!.variables, { id: "issue-uuid" });
+    assert.deepStrictEqual(restore!.variables, { id: "issue-uuid" });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("fails the archive when Linear reports no success", () => {
+  const { layer } = makeLayer({
+    response: () => Response.json({ data: { result: { success: false } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(
+      linear.archiveIssue({ issueId: "issue-uuid", archived: true }),
+    );
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.detail, "Linear refused to archive the issue.");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads when an issue was archived", () => {
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({
+        data: { issue: { ...issueDetail, archivedAt: "2026-09-02T00:00:00.000Z" } },
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const issue = yield* linear.getIssue({ reference: "DEL-123" });
+    assert.strictEqual(issue.archivedAt, "2026-09-02T00:00:00.000Z");
+    assert.include(sentGraphQL(execute.mock.calls[0]![0]).query, "archivedAt");
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("looks an issue up by the identifier in a pasted Linear link", () => {
   const { execute, layer } = makeLayer({
     response: () => Response.json({ data: { issue: issueDetail } }),

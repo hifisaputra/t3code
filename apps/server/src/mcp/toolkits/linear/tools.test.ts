@@ -40,6 +40,8 @@ it("exports provider-compatible object schemas with described parameters", () =>
 it("mirrors the Linear MCP tool names so an existing skill keeps working", () => {
   expect(Object.keys(LinearToolkit.tools).sort()).toEqual(
     [
+      // This server's own addition: the way back from an issue filed by mistake.
+      "archive_issue",
       "create_issue",
       "get_milestone",
       "get_project",
@@ -84,6 +86,7 @@ it("marks only the reads as readonly and repeatable", () => {
   );
 
   expect(readonlyByTool).toEqual({
+    archive_issue: false,
     get_issue: true,
     list_comments: true,
     list_issue_statuses: true,
@@ -117,6 +120,7 @@ it("marks only the reads as readonly and repeatable", () => {
 
   // Saving the same patch twice lands the same issue; creating twice does not.
   expect(Context.get(LinearToolkit.tools.save_issue.annotations, Tool.Idempotent)).toBe(true);
+  expect(Context.get(LinearToolkit.tools.archive_issue.annotations, Tool.Idempotent)).toBe(true);
   expect(Context.get(LinearToolkit.tools.create_issue.annotations, Tool.Idempotent)).toBe(false);
   expect(Context.get(LinearToolkit.tools.save_comment.annotations, Tool.Idempotent)).toBe(false);
 });

@@ -1269,6 +1269,40 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       return yield* linear.getIssue({ reference: issue.id });
     }),
 
+  archive_issue: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      // The id is required, so an agent that forgot it cannot archive the
+      // thread's own issue, which a team thread would do without asking.
+      const reference = named(input.id);
+      if (reference === undefined) {
+        return yield* new LinearOperationError({
+          operation: "archive_issue",
+          detail: "Pass the issue to archive, such as DEL-123.",
+        });
+      }
+      const issue = yield* linear.getIssue({ reference });
+      const archived = input.archived ?? true;
+      // Already where the agent wants it: nothing to ask about.
+      if ((issue.archivedAt != null) === archived) return issue;
+      yield* confirmedWrite(
+        "archive_issue",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `${archived ? "Archive" : "Restore"} ${issue.identifier}`,
+            record: { label: issue.identifier, url: issue.url },
+            fields: [{ label: "Title", value: issue.title }],
+          },
+          args: { ...input, issueId: issue.id, archived },
+        },
+        linear.archiveIssue({ issueId: issue.id, archived }),
+      );
+      return yield* linear.getIssue({ reference: issue.id });
+    }),
+
   create_issue: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");

@@ -155,6 +155,7 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       createIssue: () => Effect.die("unused"),
       addIssueRelation: () => Effect.die("unused"),
       removeIssueRelation: () => Effect.die("unused"),
+      archiveIssue: () => Effect.die("unused"),
       labels: () => Effect.die("unused"),
       createComment: () => Effect.die("unused"),
       getComment: () => Effect.die("unused"),
@@ -1416,6 +1417,86 @@ it.effect("names a label filter that matches nothing instead of listing no issue
     ),
   ),
 );
+
+it.effect("archives an issue only once the user approves, then reads it back", () => {
+  const archived: unknown[] = [];
+  let stored: LinearIssueDetail = issue;
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const pending = yield* Effect.forkScoped(callTool("archive_issue", { id: "DEL-123" }));
+      const opened = yield* nextApprovalEvent;
+      assert.deepStrictEqual((opened.payload as { change: unknown }).change, {
+        summary: "Archive DEL-123",
+        record: { label: "DEL-123", url: issue.url },
+        fields: [{ label: "Title", value: issue.title }],
+      });
+      assert.deepStrictEqual(archived, []);
+      yield* answer(opened, "accept");
+      const result = yield* Fiber.join(pending);
+      assert.deepStrictEqual(archived, [{ issueId: issue.id, archived: true }]);
+      assert.strictEqual((result as LinearIssueDetail).archivedAt, "2026-09-02T00:00:00.000Z");
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.sync(() => stored),
+          archiveIssue: (input) =>
+            Effect.sync(() => {
+              archived.push(input);
+              stored = { ...issue, archivedAt: "2026-09-02T00:00:00.000Z" };
+            }),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
+
+it.effect("restores an archived issue, and leaves one already in place without asking", () => {
+  const archived: unknown[] = [];
+  const archivedIssue: LinearIssueDetail = { ...issue, archivedAt: "2026-09-02T00:00:00.000Z" };
+  return Effect.gen(function* () {
+    yield* callTool("archive_issue", { id: "DEL-123", archived: false });
+    // Archiving an issue that is already archived writes nothing; with
+    // confirmation off a write would land, so the empty list is the proof.
+    yield* callTool("archive_issue", { id: "DEL-123", archived: true });
+    assert.deepStrictEqual(archived, [{ issueId: issue.id, archived: false }]);
+  }).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(archivedIssue),
+          archiveIssue: (input) => Effect.sync(() => void archived.push(input)),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("does not archive when the user declines", () => {
+  const archived: unknown[] = [];
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const pending = yield* Effect.forkScoped(
+        Effect.flip(callTool("archive_issue", { id: "DEL-123" })),
+      );
+      yield* answer(yield* nextApprovalEvent, "decline");
+      assert.include(operationError(yield* Fiber.join(pending)).detail, "declined");
+      assert.deepStrictEqual(archived, []);
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed(issue),
+          archiveIssue: (input) => Effect.sync(() => void archived.push(input)),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
 
 it.effect("rejects impossible due dates without writing", () =>
   Effect.flip(callTool("save_issue", { dueDate: "2026-02-30" })).pipe(

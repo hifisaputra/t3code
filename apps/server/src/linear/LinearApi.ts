@@ -162,6 +162,7 @@ const RawIssueRelative = Schema.Struct({
 const RawIssueDetail = Schema.Struct({
   ...RawIssueSummary.fields,
   description: Schema.NullOr(Schema.String),
+  archivedAt: Schema.optional(Schema.NullOr(Schema.String)),
   parent: Schema.NullOr(RawIssueRelative),
   children: Schema.Struct({ nodes: Schema.Array(RawIssueRelative) }),
   // Relation types are read as plain strings: `similar` (Linear's own
@@ -325,6 +326,9 @@ const decodeIssueCreateResult = Schema.decodeUnknownEffect(IssueCreateResult);
 const decodeLabelsResult = Schema.decodeUnknownEffect(LabelsResult);
 const decodeIssueRelationCreateResult = Schema.decodeUnknownEffect(IssueRelationCreateResult);
 const decodeIssueRelationDeleteResult = Schema.decodeUnknownEffect(IssueRelationDeleteResult);
+const decodeIssueArchiveResult = Schema.decodeUnknownEffect(
+  Schema.Struct({ result: Schema.Struct({ success: Schema.Boolean }) }),
+);
 
 const ISSUE_SUMMARY_FIELDS = `
   id
@@ -346,6 +350,7 @@ const ISSUE_SUMMARY_FIELDS = `
 const ISSUE_DETAIL_FIELDS = `
   ${ISSUE_SUMMARY_FIELDS}
   description
+  archivedAt
   parent { id identifier title url state { name } }
   children { nodes { id identifier title url state { name } } }
   relations(first: 50) { nodes { id type relatedIssue { id identifier title url state { name } } } }
@@ -424,6 +429,23 @@ const CREATE_ISSUE_RELATION_MUTATION = `
 const DELETE_ISSUE_RELATION_MUTATION = `
   mutation T3CodeDeleteIssueRelation($id: String!) {
     issueRelationDelete(id: $id) { success }
+  }
+`;
+
+/**
+ * Archiving hides an issue from lists without deleting it; `issue(id:)` still
+ * reads it, with `archivedAt` set. Both mutations answer under one alias so a
+ * single decoder reads either.
+ */
+const ARCHIVE_ISSUE_MUTATION = `
+  mutation T3CodeArchiveIssue($id: String!) {
+    result: issueArchive(id: $id) { success }
+  }
+`;
+
+const UNARCHIVE_ISSUE_MUTATION = `
+  mutation T3CodeUnarchiveIssue($id: String!) {
+    result: issueUnarchive(id: $id) { success }
   }
 `;
 
@@ -752,6 +774,11 @@ export class LinearApi extends Context.Service<
     readonly removeIssueRelation: (
       relationId: string,
     ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    /** Archive an issue, or with `archived: false` restore an archived one. */
+    readonly archiveIssue: (input: {
+      readonly issueId: string;
+      readonly archived: boolean;
+    }) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
     /** Labels an issue on this team may carry, team-owned plus workspace-wide, sorted by name. */
     readonly labels: (
       teamId: string,
@@ -1367,6 +1394,26 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const archiveIssue = Effect.fn("LinearApi.archiveIssue")(function* (input: {
+    readonly issueId: string;
+    readonly archived: boolean;
+  }) {
+    const result = yield* request({
+      operation: "archiveIssue",
+      query: input.archived ? ARCHIVE_ISSUE_MUTATION : UNARCHIVE_ISSUE_MUTATION,
+      variables: { id: input.issueId },
+      decode: decodeIssueArchiveResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.result.success) {
+      return yield* new LinearOperationError({
+        operation: "archiveIssue",
+        detail: input.archived
+          ? "Linear refused to archive the issue."
+          : "Linear refused to restore the issue.",
+      });
+    }
+  });
+
   const labels = Effect.fn("LinearApi.labels")(function* (teamId: string) {
     const result = yield* request({
       operation: "labels",
@@ -1512,6 +1559,7 @@ const make = Effect.gen(function* () {
     createIssue,
     addIssueRelation,
     removeIssueRelation,
+    archiveIssue,
     labels,
     createComment,
     uploadFile,
