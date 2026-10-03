@@ -112,7 +112,7 @@ const IssueRef = Schema.Struct({
 const GetIssueTool = readonlyLinearTool(
   Tool.make("get_issue", {
     description:
-      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, relations to other issues, and its most recent comments. An archived issue still reads, with archivedAt set. Each relation reads from this issue's side: blocks, blockedBy, related, duplicateOf, or duplicatedBy. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
+      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, relations to other issues, and its comments. Up to 250 comments, sub-issues, and relations each are read; when an issue has more, truncated names the lists that were cut short. An archived issue still reads, with archivedAt set. Each relation reads from this issue's side: blocks, blockedBy, related, duplicateOf, or duplicatedBy. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
     parameters: Schema.Struct({ id: IssueIdParameter }),
     success: LinearIssueDetail,
     failure: LinearToolError,
@@ -123,11 +123,12 @@ const GetIssueTool = readonlyLinearTool(
 const ListCommentsTool = readonlyLinearTool(
   Tool.make("list_comments", {
     description:
-      "List the most recent comments on a Linear issue, newest activity included, with each comment's author and URL. Pass issueId as an identifier such as DEL-123 or a Linear UUID; omit it and the issue this thread is linked to is used.",
+      "List the comments on a Linear issue, with each comment's author and URL. Up to 250 are read; truncated is true when the issue has more. Pass issueId as an identifier such as DEL-123 or a Linear UUID; omit it and the issue this thread is linked to is used.",
     parameters: Schema.Struct({ issueId: IssueIdParameter }),
     success: Schema.Struct({
       issue: IssueRef,
       comments: Schema.Array(LinearIssueComment),
+      truncated: Schema.optionalKey(Schema.Boolean),
     }),
     failure: LinearToolError,
     dependencies,

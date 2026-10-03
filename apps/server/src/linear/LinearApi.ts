@@ -23,6 +23,7 @@ import {
   type LinearConnectionStatus,
   type LinearGetIssueInput,
   type LinearIssueDetail,
+  type LinearIssueDetailList,
   type LinearIssueLabel,
   type LinearIssueRelation,
   type LinearIssueRelationType,
@@ -159,29 +160,51 @@ const RawIssueRelative = Schema.Struct({
   state: Schema.NullOr(Schema.Struct({ name: TrimmedNonEmptyString })),
 });
 
+// Relation types are read as plain strings: `similar` (Linear's own
+// suggestion) and any type this build does not know are dropped in
+// `toIssueRelation` rather than failing the whole read.
+const RawIssueRelationNode = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  type: Schema.String,
+  relatedIssue: RawIssueRelative,
+});
+
+const RawIssueInverseRelationNode = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  type: Schema.String,
+  issue: RawIssueRelative,
+});
+
+const RawIssueCommentNode = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  body: Schema.String,
+  url: Schema.String,
+  createdAt: Schema.String,
+  user: Schema.NullOr(Schema.Struct({ ...RawUser.fields, app: Schema.optional(Schema.Boolean) })),
+});
+
+type IssueListPage<A> = {
+  readonly nodes: ReadonlyArray<A>;
+  readonly pageInfo?:
+    | { readonly hasNextPage: boolean; readonly endCursor: string | null }
+    | undefined;
+};
+
+/** One page of a list on an issue; no `pageInfo` reads as the last page. */
+const RawIssueConnection = <S extends Schema.Top>(node: S) =>
+  Schema.Struct({
+    nodes: Schema.Array(node),
+    pageInfo: Schema.optional(LinearResourcePage.fields.pageInfo),
+  });
+
 const RawIssueDetail = Schema.Struct({
   ...RawIssueSummary.fields,
   description: Schema.NullOr(Schema.String),
   archivedAt: Schema.optional(Schema.NullOr(Schema.String)),
   parent: Schema.NullOr(RawIssueRelative),
-  children: Schema.Struct({ nodes: Schema.Array(RawIssueRelative) }),
-  // Relation types are read as plain strings: `similar` (Linear's own
-  // suggestion) and any type this build does not know are dropped in
-  // `toIssueRelation` rather than failing the whole read.
-  relations: Schema.Struct({
-    nodes: Schema.Array(
-      Schema.Struct({
-        id: TrimmedNonEmptyString,
-        type: Schema.String,
-        relatedIssue: RawIssueRelative,
-      }),
-    ),
-  }),
-  inverseRelations: Schema.Struct({
-    nodes: Schema.Array(
-      Schema.Struct({ id: TrimmedNonEmptyString, type: Schema.String, issue: RawIssueRelative }),
-    ),
-  }),
+  children: RawIssueConnection(RawIssueRelative),
+  relations: RawIssueConnection(RawIssueRelationNode),
+  inverseRelations: RawIssueConnection(RawIssueInverseRelationNode),
   labels: Schema.Struct({
     nodes: Schema.Array(
       Schema.Struct({
@@ -191,20 +214,14 @@ const RawIssueDetail = Schema.Struct({
       }),
     ),
   }),
-  comments: Schema.Struct({
-    nodes: Schema.Array(
-      Schema.Struct({
-        id: TrimmedNonEmptyString,
-        body: Schema.String,
-        url: Schema.String,
-        createdAt: Schema.String,
-        user: Schema.NullOr(
-          Schema.Struct({ ...RawUser.fields, app: Schema.optional(Schema.Boolean) }),
-        ),
-      }),
-    ),
-  }),
+  comments: RawIssueConnection(RawIssueCommentNode),
 });
+
+/** A later page of one list on an issue, under the alias the page queries use. */
+const decodeIssuePage = <S extends Schema.Top>(node: S) =>
+  Schema.decodeUnknownEffect(
+    Schema.Struct({ issue: Schema.NullOr(Schema.Struct({ page: RawIssueConnection(node) })) }),
+  );
 
 const ViewerResult = Schema.Struct({
   viewer: Schema.Struct({
@@ -347,17 +364,64 @@ const ISSUE_SUMMARY_FIELDS = `
   cycle { id number name }
 `;
 
+/**
+ * The lists on an issue that can outgrow one page, and what each reads per
+ * node. The issue query takes the first page of each; `getIssue` follows the
+ * rest, up to `MAX_ISSUE_LIST_NODES`, only for an issue that has more.
+ */
+const ISSUE_LIST_FIELDS = {
+  children: "id identifier title url state { name }",
+  relations: "id type relatedIssue { id identifier title url state { name } }",
+  inverseRelations: "id type issue { id identifier title url state { name } }",
+  comments: "id body url createdAt user { id name displayName app }",
+} as const;
+type IssueListName = keyof typeof ISSUE_LIST_FIELDS;
+
+const ISSUE_LIST_FIRST_PAGE = 50;
+const ISSUE_LIST_NEXT_PAGE = 100;
+/** A few hundred keeps a busy issue readable without one read ballooning into megabytes. */
+const MAX_ISSUE_LIST_NODES = 250;
+
+const issueListSelection = (name: IssueListName, first: number, after = "") =>
+  `${name}(first: ${first}${after}) { nodes { ${ISSUE_LIST_FIELDS[name]} } pageInfo { hasNextPage endCursor } }`;
+
 const ISSUE_DETAIL_FIELDS = `
   ${ISSUE_SUMMARY_FIELDS}
   description
   archivedAt
   parent { id identifier title url state { name } }
-  children { nodes { id identifier title url state { name } } }
-  relations(first: 50) { nodes { id type relatedIssue { id identifier title url state { name } } } }
-  inverseRelations(first: 50) { nodes { id type issue { id identifier title url state { name } } } }
+  ${issueListSelection("children", ISSUE_LIST_FIRST_PAGE)}
+  ${issueListSelection("relations", ISSUE_LIST_FIRST_PAGE)}
+  ${issueListSelection("inverseRelations", ISSUE_LIST_FIRST_PAGE)}
   labels { nodes { id name color } }
-  comments(first: 50) { nodes { id body url createdAt user { id name displayName app } } }
+  ${issueListSelection("comments", ISSUE_LIST_FIRST_PAGE)}
 `;
+
+/** The page after `$after` of one list on an issue, aliased so one decoder shape reads any of them. */
+const issueListPageQuery = (name: IssueListName) => `
+  query T3CodeIssueListPage($id: String!, $after: String!) {
+    issue(id: $id) { page: ${issueListSelection(name, ISSUE_LIST_NEXT_PAGE, ", after: $after")} }
+  }
+`;
+
+const ISSUE_LIST_PAGE = {
+  children: {
+    query: issueListPageQuery("children"),
+    decode: decodeIssuePage(RawIssueRelative),
+  },
+  relations: {
+    query: issueListPageQuery("relations"),
+    decode: decodeIssuePage(RawIssueRelationNode),
+  },
+  inverseRelations: {
+    query: issueListPageQuery("inverseRelations"),
+    decode: decodeIssuePage(RawIssueInverseRelationNode),
+  },
+  comments: {
+    query: issueListPageQuery("comments"),
+    decode: decodeIssuePage(RawIssueCommentNode),
+  },
+} as const;
 
 const VIEWER_QUERY = `
   query T3CodeViewer {
@@ -645,7 +709,10 @@ function toIssueRelation(
   return [{ id: relation.id, type: readings[direction], issue: toIssueRelative(other) }];
 }
 
-function toIssueDetail(raw: typeof RawIssueDetail.Type): LinearIssueDetail {
+function toIssueDetail(
+  raw: typeof RawIssueDetail.Type,
+  truncated: ReadonlyArray<LinearIssueDetailList>,
+): LinearIssueDetail {
   const {
     description,
     comments,
@@ -682,6 +749,7 @@ function toIssueDetail(raw: typeof RawIssueDetail.Type): LinearIssueDetail {
       ),
     ],
     labels: labels.nodes,
+    ...(truncated.length > 0 ? { truncated } : {}),
   };
 }
 
@@ -1007,6 +1075,41 @@ const make = Effect.gen(function* () {
     }),
   );
 
+  /**
+   * One list on an issue read to its end, or to `MAX_ISSUE_LIST_NODES`, from
+   * the first page the issue query already holds. The common issue fits that
+   * page and costs nothing more; `truncated` says the list was cut short.
+   */
+  const readIssueList = <A>(
+    issueId: string,
+    page: {
+      readonly query: string;
+      readonly decode: (
+        data: unknown,
+      ) => Effect.Effect<
+        { readonly issue: { readonly page: IssueListPage<A> } | null },
+        Schema.SchemaError
+      >;
+    },
+    first: IssueListPage<A>,
+  ) =>
+    Effect.gen(function* () {
+      const nodes = [...first.nodes];
+      let pageInfo = first.pageInfo;
+      while (pageInfo?.hasNextPage && pageInfo.endCursor && nodes.length < MAX_ISSUE_LIST_NODES) {
+        const next = yield* request({
+          operation: "getIssue",
+          query: page.query,
+          variables: { id: issueId, after: pageInfo.endCursor },
+          decode: page.decode,
+        }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+        if (next.issue === null) break;
+        nodes.push(...next.issue.page.nodes);
+        pageInfo = next.issue.page.pageInfo;
+      }
+      return { nodes, truncated: pageInfo?.hasNextPage === true };
+    });
+
   const getIssue = Effect.fn("LinearApi.getIssue")(function* (input: LinearGetIssueInput) {
     const reference = issueReferenceFromText(input.reference);
     const result = yield* request({
@@ -1027,7 +1130,20 @@ const make = Effect.gen(function* () {
     if (result.issue === null) {
       return yield* new LinearIssueNotFoundError({ reference });
     }
-    return toIssueDetail(result.issue);
+    const raw = result.issue;
+    const children = yield* readIssueList(raw.id, ISSUE_LIST_PAGE.children, raw.children);
+    const relations = yield* readIssueList(raw.id, ISSUE_LIST_PAGE.relations, raw.relations);
+    const inverseRelations = yield* readIssueList(
+      raw.id,
+      ISSUE_LIST_PAGE.inverseRelations,
+      raw.inverseRelations,
+    );
+    const comments = yield* readIssueList(raw.id, ISSUE_LIST_PAGE.comments, raw.comments);
+    return toIssueDetail({ ...raw, children, relations, inverseRelations, comments }, [
+      ...(comments.truncated ? ["comments" as const] : []),
+      ...(children.truncated ? ["children" as const] : []),
+      ...(relations.truncated || inverseRelations.truncated ? ["relations" as const] : []),
+    ]);
   });
 
   const listIssues = Effect.fn("LinearApi.listIssues")(function* (input: LinearListIssuesInput) {

@@ -501,6 +501,19 @@ it.effect("returns the issue's comments with the issue they belong to", () =>
   ),
 );
 
+it.effect("says when the issue has more comments than it read", () =>
+  callTool("list_comments", {}).pipe(
+    Effect.map((result) => {
+      assert.isTrue((result as { readonly truncated?: boolean }).truncated);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: { getIssue: () => Effect.succeed({ ...issue, truncated: ["comments"] }) },
+      }),
+    ),
+  ),
+);
+
 it.effect("advertises the Linear tools on the MCP server itself", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;

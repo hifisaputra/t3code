@@ -1006,6 +1006,7 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       return {
         issue: { id: issue.id, identifier: issue.identifier, url: issue.url },
         comments: issue.comments,
+        ...(issue.truncated?.includes("comments") ? { truncated: true } : {}),
       };
     }),
 

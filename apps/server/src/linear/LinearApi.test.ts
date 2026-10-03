@@ -331,6 +331,9 @@ it.effect("decodes an issue with a null assignee and its nested connections", ()
       ["ada", null],
     );
     assert.strictEqual(issue.project?.name, "Linear");
+    assert.strictEqual(issue.truncated, undefined);
+    // An issue whose lists fit their first page is one request.
+    assert.strictEqual(execute.mock.calls.length, 1);
     assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, { id: "DEL-123" });
   }).pipe(Effect.provide(layer));
 });
@@ -455,6 +458,80 @@ it.effect("reads when an issue was archived", () => {
     const issue = yield* linear.getIssue({ reference: "DEL-123" });
     assert.strictEqual(issue.archivedAt, "2026-09-02T00:00:00.000Z");
     assert.include(sentGraphQL(execute.mock.calls[0]![0]).query, "archivedAt");
+  }).pipe(Effect.provide(layer));
+});
+
+const commentNode = (index: number) => ({
+  id: `comment-page-${index}`,
+  body: `Comment ${index}`,
+  url: `https://linear.app/acme/issue/DEL-123#comment-page-${index}`,
+  createdAt: "2026-09-01T09:00:00.000Z",
+  user: null,
+});
+
+const commentPage = (from: number, count: number, endCursor: string | null) => ({
+  nodes: Array.from({ length: count }, (_, offset) => commentNode(from + offset)),
+  pageInfo: { hasNextPage: endCursor !== null, endCursor },
+});
+
+it.effect("reads the rest of a list that outgrows its first page", () => {
+  const { execute, layer } = makeLayer({
+    response: (request) =>
+      sentGraphQL(request).query.includes("T3CodeIssueListPage")
+        ? Response.json({ data: { issue: { page: commentPage(2, 1, null) } } })
+        : Response.json({
+            data: {
+              issue: {
+                ...issueDetail,
+                comments: {
+                  ...issueDetail.comments,
+                  pageInfo: { hasNextPage: true, endCursor: "after-2" },
+                },
+              },
+            },
+          }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const issue = yield* linear.getIssue({ reference: "DEL-123" });
+
+    assert.deepStrictEqual(
+      issue.comments.map((comment) => comment.id),
+      ["comment-1", "comment-2", "comment-page-2"],
+    );
+    assert.strictEqual(issue.truncated, undefined);
+    const [first, next] = execute.mock.calls.map(([request]) => sentGraphQL(request));
+    assert.include(first!.query, "comments(first: 50) {");
+    assert.include(next!.query, "page: comments(first: 100, after: $after)");
+    // The follow-up addresses the issue by its UUID, not the reference typed.
+    assert.deepStrictEqual(next!.variables, { id: "issue-uuid", after: "after-2" });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("stops at a few hundred and says which list it cut short", () => {
+  let pages = 0;
+  const { execute, layer } = makeLayer({
+    response: (request) => {
+      if (!sentGraphQL(request).query.includes("T3CodeIssueListPage")) {
+        return Response.json({
+          data: { issue: { ...issueDetail, comments: commentPage(0, 50, "page-0") } },
+        });
+      }
+      pages += 1;
+      return Response.json({
+        data: { issue: { page: commentPage(pages * 100 - 50, 100, `page-${pages}`) } },
+      });
+    },
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const issue = yield* linear.getIssue({ reference: "DEL-123" });
+
+    assert.strictEqual(issue.comments.length, 250);
+    assert.deepStrictEqual(issue.truncated, ["comments"]);
+    assert.strictEqual(execute.mock.calls.length, 3);
   }).pipe(Effect.provide(layer));
 });
 

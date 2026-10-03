@@ -150,6 +150,10 @@ export const LinearIssueComment = Schema.Struct({
 });
 export type LinearIssueComment = typeof LinearIssueComment.Type;
 
+/** The lists on an issue detail that can be longer than one read returns. */
+export const LinearIssueDetailList = Schema.Literals(["comments", "children", "relations"]);
+export type LinearIssueDetailList = typeof LinearIssueDetailList.Type;
+
 export const LinearIssueDetail = Schema.Struct({
   ...LinearIssueSummaryFields,
   /** Markdown, as Linear stores it. */
@@ -162,6 +166,11 @@ export const LinearIssueDetail = Schema.Struct({
   labels: Schema.Array(LinearIssueLabel),
   /** ISO 8601, set while the issue is archived. Optional for servers that predate archiving. */
   archivedAt: Schema.optional(Schema.NullOr(Schema.String)),
+  /**
+   * The lists that were too long to read whole. The server reads a few
+   * hundred of each; absent when every list is complete.
+   */
+  truncated: Schema.optionalKey(Schema.Array(LinearIssueDetailList)),
 });
 export type LinearIssueDetail = typeof LinearIssueDetail.Type;
 
