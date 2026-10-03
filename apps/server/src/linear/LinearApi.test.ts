@@ -1362,3 +1362,141 @@ it.effect("removes an attachment by id and fails when Linear refuses", () => {
     assert.deepStrictEqual(request.variables, { id: "attachment-1" });
   }).pipe(Effect.provide(layer));
 });
+
+const launchPlan = {
+  id: "document-uuid",
+  title: "Launch plan",
+  url: "https://linear.app/acme/document/launch-plan-0f1e2d3c4b5a",
+  updatedAt: "2026-09-02T10:00:00.000Z",
+  project: { id: "project-1", name: "Linear" },
+  content: "# Launch\n\nShip it.",
+};
+
+it.effect("finds documents by title or content in a project, newest first, without content", () => {
+  const { content: _content, ...summary } = launchPlan;
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({
+        data: {
+          documents: {
+            nodes: [summary],
+            pageInfo: { hasNextPage: true, endCursor: "cursor-2" },
+          },
+        },
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const page = yield* linear.listDocuments({
+      query: " launch ",
+      projectId: "project-1",
+      cursor: "cursor-1",
+      limit: 500,
+    });
+    assert.deepStrictEqual(page, {
+      nodes: [summary],
+      pageInfo: { hasNextPage: true, endCursor: "cursor-2" },
+    });
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "orderBy: updatedAt");
+    assert.notInclude(request.query, "content");
+    assert.deepStrictEqual(request.variables, {
+      filter: {
+        and: [
+          {
+            or: [
+              { title: { containsIgnoreCase: "launch" } },
+              { searchableContent: { contains: "launch" } },
+            ],
+          },
+          { project: { id: { eq: "project-1" } } },
+        ],
+      },
+      first: 100,
+      after: "cursor-1",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads a document by the slug id at the end of a pasted link", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { document: launchPlan } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(yield* linear.getDocument(launchPlan.url), launchPlan);
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      id: "0f1e2d3c4b5a",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it("reduces document links to slug ids and leaves other references alone", () => {
+  assert.strictEqual(
+    LinearApi.documentReferenceFromText(
+      "https://linear.app/acme/document/launch-plan-0f1e2d3c4b5a",
+    ),
+    "0f1e2d3c4b5a",
+  );
+  assert.strictEqual(LinearApi.documentReferenceFromText(" document-uuid "), "document-uuid");
+  assert.strictEqual(
+    LinearApi.documentReferenceFromText("https://example.com/notes"),
+    "https://example.com/notes",
+  );
+});
+
+it.effect("reports a missing document in plain words", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({
+        errors: [{ message: "Entity not found", extensions: { code: "ENTITY_NOT_FOUND" } }],
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.getDocument("missing"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.detail, "Document not found or inaccessible.");
+  }).pipe(Effect.provide(layer));
+});
+
+for (const id of [undefined, "document-uuid"]) {
+  it.effect(`${id ? "updates" : "creates"} a document with only the fields given`, () => {
+    const { execute, layer } = makeLayer({
+      response: () => Response.json({ data: { result: { success: true, document: launchPlan } } }),
+    });
+    return Effect.gen(function* () {
+      const linear = yield* LinearApi.LinearApi;
+      const saved = yield* linear.saveDocument({
+        ...(id ? { id } : { title: "Launch plan", projectId: "project-1" }),
+        content: launchPlan.content,
+      });
+      assert.deepStrictEqual(saved, launchPlan);
+      const request = sentGraphQL(execute.mock.calls[0]![0]);
+      assert.include(request.query, id ? "documentUpdate" : "documentCreate");
+      assert.deepStrictEqual(
+        request.variables,
+        id
+          ? { id, input: { content: launchPlan.content } }
+          : {
+              input: { title: "Launch plan", content: launchPlan.content, projectId: "project-1" },
+            },
+      );
+    }).pipe(Effect.provide(layer));
+  });
+}
+
+it.effect("trashes a document by id and fails when Linear refuses", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { documentDelete: { success: false } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.deleteDocument("document-uuid"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "deleteDocument");
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "documentDelete");
+    assert.deepStrictEqual(request.variables, { id: "document-uuid" });
+  }).pipe(Effect.provide(layer));
+});

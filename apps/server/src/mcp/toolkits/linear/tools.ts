@@ -1,4 +1,9 @@
-import { LinearResource, LinearResourcePage } from "../../../linear/LinearResources.ts";
+import {
+  LinearDocument,
+  LinearDocumentPage,
+  LinearResource,
+  LinearResourcePage,
+} from "../../../linear/LinearResources.ts";
 import {
   LinearIssueAttachment,
   LinearIssueComment,
@@ -676,6 +681,80 @@ const GetTeamTool = readonlyLinearTool(
   }),
 );
 
+const DocumentId = describedText(
+  "Document UUID, the slug id at the end of its URL, or the Linear document URL itself. Use list_documents to find it.",
+);
+const ListDocumentsTool = readonlyLinearTool(
+  Tool.make("list_documents", {
+    description:
+      "Find Linear documents, such as project specs and notes, most recently updated first. Filter by text in the title or content and by project. Returns IDs, titles, and URLs without the content; read one with get_document. Supports pagination.",
+    parameters: Schema.Struct({
+      ...ResourceListFields,
+      query: Schema.optional(
+        describedText("Text to find in document titles or content. Omit to list every document."),
+      ),
+      project: Schema.optional(
+        describedText("Only documents in this project, by ID or exact name. Omit for all."),
+      ),
+    }),
+    success: LinearDocumentPage,
+    failure: LinearToolError,
+    dependencies,
+  }).annotate(Tool.Title, "List Linear documents"),
+);
+const GetDocumentTool = readonlyLinearTool(
+  Tool.make("get_document", {
+    description:
+      "Read one Linear document in full: its title, markdown content, project, URL, and when it was last updated.",
+    parameters: Schema.Struct({ id: DocumentId }),
+    success: LinearDocument,
+    failure: LinearToolError,
+    dependencies,
+  }).annotate(Tool.Title, "Get Linear document"),
+);
+const SaveDocumentTool = linearTool(
+  Tool.make("save_document", {
+    description:
+      "Create or update a Linear document. Omit id to create one, which needs a title and lands in the project given, or the project of the issue this thread is linked to. Pass id to update only the fields provided.",
+    parameters: Schema.Struct({
+      id: Schema.optional(DocumentId),
+      title: Schema.optional(
+        describedText("Document title. Required when creating; omit to keep it when updating."),
+      ),
+      content: Schema.optional(
+        Schema.String.annotate({
+          description:
+            "Document body, in markdown. Replaces the whole content, so send the full text. Omit to leave it alone.",
+        }),
+      ),
+      project: Schema.optional(
+        describedText(
+          "Project ID or exact name the document belongs to. On create, defaults to the linked issue's project; on update, omit to keep it.",
+        ),
+      ),
+    }),
+    success: LinearDocument,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Save Linear document")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, false),
+);
+const DeleteDocumentTool = destructiveLinearTool(
+  Tool.make("delete_document", {
+    description:
+      "Delete a Linear document. Linear moves it to its trash, where someone can restore it from Linear; it cannot be restored from here.",
+    parameters: Schema.Struct({ id: DocumentId }),
+    success: Schema.Struct({ id: Schema.String, title: Schema.String }),
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Delete Linear document")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
+);
+
 export const LinearToolkit = Toolkit.make(
   GetIssueTool,
   ListCommentsTool,
@@ -703,4 +782,8 @@ export const LinearToolkit = Toolkit.make(
   GetUserTool,
   ListTeamsTool,
   GetTeamTool,
+  ListDocumentsTool,
+  GetDocumentTool,
+  SaveDocumentTool,
+  DeleteDocumentTool,
 );

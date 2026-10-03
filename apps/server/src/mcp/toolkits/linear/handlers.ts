@@ -617,6 +617,21 @@ const issueProject = Effect.fn("LinearToolkit.issueProject")(function* (
   return issue.project.id;
 });
 
+/** The linked issue's project, named and linked, for writes that default to it. */
+const linkedIssueProject = Effect.fn("LinearToolkit.linkedIssueProject")(function* (
+  operation: string,
+  scope: Scope,
+) {
+  const issue = yield* resolveIssue(operation, scope, undefined);
+  if (issue.project === null) {
+    return yield* new LinearOperationError({
+      operation,
+      detail: `${issue.identifier} has no project. Pass a project explicitly.`,
+    });
+  }
+  return issue.project;
+});
+
 function validDate(value: string): boolean {
   const date = DateTime.make(value);
   return (
@@ -932,6 +947,124 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
   save_milestone: (input) => saveResource("milestone", input),
   update_cycle: (input) => saveResource("cycle", input),
   save_issue_label: (input) => saveResource("label", input),
+
+  list_documents: (input) =>
+    Effect.gen(function* () {
+      yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const project = named(input.project);
+      return yield* linear.listDocuments({
+        query: input.query,
+        cursor: input.cursor,
+        limit: input.limit,
+        ...(project ? { projectId: (yield* resolveResource("project", project)).id } : {}),
+      });
+    }),
+
+  get_document: (input) =>
+    Effect.gen(function* () {
+      yield* McpInvocationContext.requireMcpCapability("linear");
+      return yield* (yield* LinearApi.LinearApi).getDocument(input.id);
+    }),
+
+  save_document: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const title = named(input.title);
+      if (input.title !== undefined && title === undefined) {
+        return yield* new LinearOperationError({
+          operation: "save_document",
+          detail: "A document title must not be blank.",
+        });
+      }
+      // Reading the document first turns a slug or link into its UUID, and
+      // gives the approval the title and link of what is being changed.
+      const current = input.id === undefined ? undefined : yield* linear.getDocument(input.id);
+      if (current === undefined && title === undefined) {
+        return yield* new LinearOperationError({
+          operation: "save_document",
+          detail: "A new document needs a title.",
+        });
+      }
+      const requestedProject = named(input.project);
+      const project =
+        requestedProject !== undefined
+          ? yield* resolveResource("project", requestedProject)
+          : current === undefined
+            ? yield* linkedIssueProject("save_document", scope)
+            : undefined;
+      if (
+        current !== undefined &&
+        title === undefined &&
+        input.content === undefined &&
+        project === undefined
+      ) {
+        return yield* new LinearOperationError({
+          operation: "save_document",
+          detail: "Pass at least one field to update.",
+        });
+      }
+      const patch = {
+        ...(title !== undefined ? { title } : {}),
+        ...(input.content !== undefined ? { content: input.content } : {}),
+        ...(project !== undefined ? { projectId: project.id } : {}),
+      };
+      return yield* confirmedWrite(
+        "save_document",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary:
+              current === undefined ? "Create document" : `Update document: ${current.title}`,
+            ...(current === undefined
+              ? {}
+              : { record: { label: current.title, url: current.url } }),
+            fields: [
+              ...(title === undefined ? [] : [{ label: "Title", value: title }]),
+              ...(project === undefined
+                ? []
+                : [{ label: "Project", value: project.name ?? project.id }]),
+              // Content replaces the whole document, so it is reviewed whole.
+              ...(input.content === undefined
+                ? []
+                : [{ label: "Content", value: input.content, format: "markdown" as const }]),
+            ],
+          },
+          args: { ...patch, ...(current === undefined ? {} : { id: current.id }) },
+        },
+        linear.saveDocument({ ...patch, ...(current === undefined ? {} : { id: current.id }) }),
+      );
+    }),
+
+  delete_document: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const document = yield* linear.getDocument(input.id);
+      yield* confirmedWrite(
+        "delete_document",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Delete document: ${document.title}`,
+            record: { label: document.title, url: document.url },
+            fields: [
+              { label: "Title", value: document.title },
+              ...(document.project === null
+                ? []
+                : [{ label: "Project", value: document.project.name ?? document.project.id }]),
+            ],
+          },
+          args: { id: document.id },
+        },
+        linear.deleteDocument(document.id),
+      );
+      return { id: document.id, title: document.title };
+    }),
+
   get_issue: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");

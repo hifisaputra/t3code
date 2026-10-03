@@ -164,6 +164,10 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       createAttachment: () => Effect.die("unused"),
       getAttachment: () => Effect.die("unused"),
       deleteAttachment: () => Effect.die("unused"),
+      listDocuments: () => Effect.die("unused"),
+      getDocument: () => Effect.die("unused"),
+      saveDocument: () => Effect.die("unused"),
+      deleteDocument: () => Effect.die("unused"),
       ...overrides,
     }),
   );
@@ -2134,6 +2138,156 @@ for (const decision of ["accept", "decline"] as const) {
                 issue: { id: issue.id, identifier: issue.identifier, url: issue.url },
               }),
             deleteAttachment: (id) =>
+              Effect.sync(() => {
+                deleted.push(id);
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
+
+const launchPlan = {
+  id: "document-uuid",
+  title: "Launch plan",
+  url: "https://linear.app/acme/document/launch-plan-0f1e2d3c4b5a",
+  updatedAt: "2026-09-02T10:00:00.000Z",
+  project: { id: "project-1", name: "Launch" },
+  content: "# Launch",
+};
+const launchProject = {
+  id: "project-1",
+  name: "Launch",
+  url: "https://linear.app/acme/project/launch",
+};
+
+it.effect("lists documents in a project the agent named", () => {
+  const listed: Array<unknown> = [];
+  return callTool("list_documents", { project: "Launch", query: "plan" }).pipe(
+    Effect.map(() => {
+      assert.deepStrictEqual(listed, [
+        { query: "plan", cursor: undefined, limit: undefined, projectId: "project-1" },
+      ]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          listResources: () =>
+            Effect.succeed({
+              nodes: [{ id: "project-1", name: "Launch" }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            }),
+          listDocuments: (input) =>
+            Effect.sync(() => {
+              listed.push(input);
+              return { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("creates a document in the linked issue's project once approved", () => {
+  const saved: Array<unknown> = [];
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const pending = yield* Effect.forkScoped(
+        callTool("save_document", { title: " Launch plan ", content: "# Launch" }),
+      );
+      const opened = yield* nextApprovalEvent;
+      const review = yield* decodeApprovalReview(opened.payload);
+      assert.deepStrictEqual(review.change, {
+        summary: "Create document",
+        fields: [
+          { label: "Title", value: "Launch plan" },
+          { label: "Project", value: "Launch" },
+          { label: "Content", value: "# Launch", format: "markdown" },
+        ],
+      });
+      assert.deepStrictEqual(saved, []);
+      yield* answer(opened, "accept");
+      assert.deepStrictEqual(yield* Fiber.join(pending), launchPlan);
+      assert.deepStrictEqual(saved, [
+        { title: "Launch plan", content: "# Launch", projectId: "project-1" },
+      ]);
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed({ ...issue, project: launchProject }),
+          saveDocument: (input) =>
+            Effect.sync(() => {
+              saved.push(input);
+              return launchPlan;
+            }),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
+
+it.effect("updates only the fields given, addressing the document by its UUID", () => {
+  const saved: Array<unknown> = [];
+  return callTool("save_document", { id: launchPlan.url, content: "# Launch v2" }).pipe(
+    Effect.map(() => {
+      assert.deepStrictEqual(saved, [{ id: "document-uuid", content: "# Launch v2" }]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getDocument: () => Effect.succeed(launchPlan),
+          saveDocument: (input) =>
+            Effect.sync(() => {
+              saved.push(input);
+              return launchPlan;
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("refuses a new document without a title before reading anything", () =>
+  Effect.gen(function* () {
+    const error = operationError(
+      yield* Effect.flip(callTool("save_document", { content: "# Untitled" })),
+    );
+    assert.include(error.detail, "needs a title");
+  }).pipe(Effect.provide(testLayer({ linear: {} }))),
+);
+
+for (const decision of ["accept", "decline"] as const) {
+  it.effect(`deletes a document only after approval: ${decision}`, () => {
+    const deleted: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          Effect.result(callTool("delete_document", { id: "0f1e2d3c4b5a" })),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        assert.strictEqual(
+          review.detail,
+          "Delete document: Launch plan\nTitle: Launch plan\nProject: Launch",
+        );
+        assert.deepStrictEqual(review.args, { id: "document-uuid" });
+        assert.deepStrictEqual(deleted, []);
+        yield* answer(opened, decision);
+        const result = yield* Fiber.join(pending);
+        assert.deepStrictEqual(deleted, decision === "accept" ? ["document-uuid"] : []);
+        assert.strictEqual(result._tag, decision === "accept" ? "Success" : "Failure");
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getDocument: () => Effect.succeed(launchPlan),
+            deleteDocument: (id) =>
               Effect.sync(() => {
                 deleted.push(id);
               }),

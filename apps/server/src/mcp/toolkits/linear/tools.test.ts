@@ -64,6 +64,10 @@ it("mirrors the Linear MCP tool names so an existing skill keeps working", () =>
       "delete_comment",
       "create_attachment",
       "delete_attachment",
+      "list_documents",
+      "get_document",
+      "save_document",
+      "delete_document",
       "save_issue",
       // Linear's own MCP server cannot reach the agent's workspace, so the
       // upload has no name over there to mirror.
@@ -96,6 +100,10 @@ it("marks only the reads as readonly and repeatable", () => {
     delete_comment: false,
     create_attachment: false,
     delete_attachment: false,
+    list_documents: true,
+    get_document: true,
+    save_document: false,
+    delete_document: false,
     save_issue: false,
     upload_image: false,
     create_issue: false,
@@ -115,7 +123,7 @@ it("marks only the reads as readonly and repeatable", () => {
     update_cycle: false,
   });
 
-  const destructive = new Set<string>(["delete_comment", "delete_attachment"]);
+  const destructive = new Set<string>(["delete_comment", "delete_attachment", "delete_document"]);
   for (const tool of Object.values(LinearToolkit.tools)) {
     // Every call leaves the server, and only the deletions remove anything.
     expect(Context.get(tool.annotations, Tool.OpenWorld), tool.name).toBe(true);

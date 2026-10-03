@@ -1,4 +1,6 @@
 import {
+  LinearDocument,
+  LinearDocumentPage,
   LinearResource,
   LinearResourcePage,
   resourceDefinitions,
@@ -571,6 +573,78 @@ const decodeAttachmentDeleteResult = Schema.decodeUnknownEffect(
   Schema.Struct({ attachmentDelete: Schema.Struct({ success: Schema.Boolean }) }),
 );
 
+const DOCUMENT_SUMMARY_FIELDS = "id title url updatedAt project { id name }";
+const DOCUMENT_FIELDS = `${DOCUMENT_SUMMARY_FIELDS} content`;
+
+const LIST_DOCUMENTS_QUERY = `
+  query T3CodeDocuments($filter: DocumentFilter!, $first: Int!, $after: String) {
+    documents(filter: $filter, first: $first, after: $after, orderBy: updatedAt) {
+      nodes { ${DOCUMENT_SUMMARY_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+/** Linear's `document(id:)` takes a document's UUID or the slug id that ends its URL. */
+const GET_DOCUMENT_QUERY = `
+  query T3CodeDocument($id: String!) {
+    document(id: $id) { ${DOCUMENT_FIELDS} }
+  }
+`;
+
+const CREATE_DOCUMENT_MUTATION = `
+  mutation T3CodeCreateDocument($input: DocumentCreateInput!) {
+    result: documentCreate(input: $input) { success document { ${DOCUMENT_FIELDS} } }
+  }
+`;
+
+const UPDATE_DOCUMENT_MUTATION = `
+  mutation T3CodeUpdateDocument($id: String!, $input: DocumentUpdateInput!) {
+    result: documentUpdate(id: $id, input: $input) { success document { ${DOCUMENT_FIELDS} } }
+  }
+`;
+
+/** Linear trashes the document rather than erasing it; it can be restored in Linear. */
+const DELETE_DOCUMENT_MUTATION = `
+  mutation T3CodeDeleteDocument($id: String!) {
+    documentDelete(id: $id) { success }
+  }
+`;
+
+const decodeDocumentPage = Schema.decodeUnknownEffect(
+  Schema.Struct({ documents: LinearDocumentPage }),
+);
+const decodeDocumentResult = Schema.decodeUnknownEffect(
+  Schema.Struct({ document: Schema.NullOr(LinearDocument) }),
+);
+const decodeDocumentMutation = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    result: Schema.Struct({ success: Schema.Boolean, document: Schema.NullOr(LinearDocument) }),
+  }),
+);
+const decodeDocumentDeleteResult = Schema.decodeUnknownEffect(
+  Schema.Struct({ documentDelete: Schema.Struct({ success: Schema.Boolean }) }),
+);
+
+/**
+ * A pasted document link names the document by the slug id that ends its last
+ * path segment (`/document/launch-plan-0f1e2d3c4b5a`); anything else is passed
+ * on as typed, like `issueReferenceFromText`.
+ */
+export function documentReferenceFromText(text: string): string {
+  const trimmed = text.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed;
+  try {
+    const segments = new URL(trimmed).pathname.split("/").filter((segment) => segment.length > 0);
+    const documentAt = segments.indexOf("document");
+    const slugId = documentAt >= 0 ? segments[documentAt + 1]?.split("-").at(-1) : undefined;
+    if (slugId) return slugId;
+  } catch {
+    // Not a URL after all: let Linear decide what it is.
+  }
+  return trimmed;
+}
+
 /**
  * A failure that reached Linear, kept internal so an operation can tell a missing
  * issue from a broken request before it turns into a contract error.
@@ -847,6 +921,28 @@ export class LinearApi extends Context.Service<
       LinearUnavailableError | LinearOperationError
     >;
     readonly deleteAttachment: (
+      id: string,
+    ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    /** Documents by newest update, matched on title or content, without their content. */
+    readonly listDocuments: (input: {
+      readonly query?: string | undefined;
+      readonly projectId?: string | undefined;
+      readonly cursor?: string | undefined;
+      readonly limit?: number | undefined;
+    }) => Effect.Effect<LinearDocumentPage, LinearUnavailableError | LinearOperationError>;
+    /** A document by UUID, slug id, or pasted link, content included. */
+    readonly getDocument: (
+      reference: string,
+    ) => Effect.Effect<LinearDocument, LinearUnavailableError | LinearOperationError>;
+    /** Create a document without `id`; with it, patch only the fields present. */
+    readonly saveDocument: (input: {
+      readonly id?: string | undefined;
+      readonly title?: string | undefined;
+      readonly content?: string | undefined;
+      readonly projectId?: string | undefined;
+    }) => Effect.Effect<LinearDocument, LinearUnavailableError | LinearOperationError>;
+    /** Move a document to Linear's trash. */
+    readonly deleteDocument: (
       id: string,
     ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
   }
@@ -1645,6 +1741,99 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const listDocuments = Effect.fn("LinearApi.listDocuments")(function* (input: {
+    readonly query?: string | undefined;
+    readonly projectId?: string | undefined;
+    readonly cursor?: string | undefined;
+    readonly limit?: number | undefined;
+  }) {
+    const query = input.query?.trim();
+    const filters = [
+      ...(query
+        ? [
+            {
+              or: [
+                { title: { containsIgnoreCase: query } },
+                { searchableContent: { contains: query } },
+              ],
+            },
+          ]
+        : []),
+      ...(input.projectId ? [{ project: { id: { eq: input.projectId } } }] : []),
+    ];
+    const result = yield* request({
+      operation: "listDocuments",
+      query: LIST_DOCUMENTS_QUERY,
+      variables: {
+        filter: filters.length ? { and: filters } : {},
+        first: Math.max(1, Math.min(input.limit ?? 50, 100)),
+        after: input.cursor ?? null,
+      },
+      decode: decodeDocumentPage,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    return result.documents;
+  });
+
+  const getDocument = Effect.fn("LinearApi.getDocument")(function* (reference: string) {
+    const notFound = new LinearOperationError({
+      operation: "getDocument",
+      detail: "Document not found or inaccessible.",
+    });
+    const result = yield* request({
+      operation: "getDocument",
+      query: GET_DOCUMENT_QUERY,
+      variables: { id: documentReferenceFromText(reference) },
+      decode: decodeDocumentResult,
+    }).pipe(
+      Effect.catchTag("LinearRequestFailure", (failure) =>
+        isEntityNotFound(failure) ? Effect.fail(notFound) : failOperation(failure),
+      ),
+    );
+    if (result.document === null) return yield* notFound;
+    return result.document;
+  });
+
+  const saveDocument = Effect.fn("LinearApi.saveDocument")(function* (input: {
+    readonly id?: string | undefined;
+    readonly title?: string | undefined;
+    readonly content?: string | undefined;
+    readonly projectId?: string | undefined;
+  }) {
+    const fields = {
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.content !== undefined ? { content: input.content } : {}),
+      ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+    };
+    const result = yield* request({
+      operation: "saveDocument",
+      query: input.id ? UPDATE_DOCUMENT_MUTATION : CREATE_DOCUMENT_MUTATION,
+      variables: { ...(input.id ? { id: input.id } : {}), input: fields },
+      decode: decodeDocumentMutation,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.result.success || result.result.document === null) {
+      return yield* new LinearOperationError({
+        operation: "saveDocument",
+        detail: "Linear refused to save the document.",
+      });
+    }
+    return result.result.document;
+  });
+
+  const deleteDocument = Effect.fn("LinearApi.deleteDocument")(function* (id: string) {
+    const result = yield* request({
+      operation: "deleteDocument",
+      query: DELETE_DOCUMENT_MUTATION,
+      variables: { id },
+      decode: decodeDocumentDeleteResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.documentDelete.success) {
+      return yield* new LinearOperationError({
+        operation: "deleteDocument",
+        detail: "Linear refused to delete the document.",
+      });
+    }
+  });
+
   return LinearApi.of({
     getComment,
     updateComment,
@@ -1669,6 +1858,10 @@ const make = Effect.gen(function* () {
     createAttachment,
     getAttachment,
     deleteAttachment,
+    listDocuments,
+    getDocument,
+    saveDocument,
+    deleteDocument,
   });
 });
 
