@@ -200,6 +200,7 @@ const RawIssueDetail = Schema.Struct({
         user: Schema.NullOr(
           Schema.Struct({ ...RawUser.fields, app: Schema.optional(Schema.Boolean) }),
         ),
+        parentId: Schema.NullOr(Schema.String),
       }),
     ),
   }),
@@ -285,8 +286,14 @@ const CommentResult = Schema.Struct({
       body: Schema.String,
       url: Schema.String,
       issue: Schema.NullOr(Schema.Struct({ id: TrimmedNonEmptyString })),
+      /** Set on a reply: the comment it was posted under. */
+      parentId: Schema.optional(Schema.NullOr(Schema.String)),
     }),
   ),
+});
+
+const CommentDeleteResult = Schema.Struct({
+  commentDelete: Schema.Struct({ success: Schema.Boolean }),
 });
 
 const IssueCreateResult = Schema.Struct({
@@ -351,7 +358,7 @@ const ISSUE_DETAIL_FIELDS = `
   relations(first: 50) { nodes { id type relatedIssue { id identifier title url state { name } } } }
   inverseRelations(first: 50) { nodes { id type issue { id identifier title url state { name } } } }
   labels { nodes { id name color } }
-  comments(first: 50) { nodes { id body url createdAt user { id name displayName app } } }
+  comments(first: 50) { nodes { id body url createdAt user { id name displayName app } parentId } }
 `;
 
 const VIEWER_QUERY = `
@@ -453,7 +460,12 @@ const LABELS_QUERY = `
 
 const GET_COMMENT_QUERY = `
   query T3CodeGetComment($id: String!) {
-    comment(id: $id) { id body url issue { id } }
+    comment(id: $id) { id body url issue { id } parentId }
+  }
+`;
+const DELETE_COMMENT_MUTATION = `
+  mutation T3CodeDeleteComment($id: String!) {
+    commentDelete(id: $id) { success }
   }
 `;
 const UPDATE_COMMENT_MUTATION = `
@@ -465,9 +477,10 @@ const UPDATE_COMMENT_MUTATION = `
   }
 `;
 
+/** An unsent `$id` or `$parentId` is left out of the input; `$parentId` makes a reply. */
 const CREATE_COMMENT_MUTATION = `
-  mutation T3CodeCreateComment($issueId: String!, $body: String!, $id: String) {
-    commentCreate(input: { issueId: $issueId, body: $body, id: $id }) {
+  mutation T3CodeCreateComment($issueId: String!, $body: String!, $id: String, $parentId: String) {
+    commentCreate(input: { issueId: $issueId, body: $body, id: $id, parentId: $parentId }) {
       success
       comment { id url }
     }
@@ -617,6 +630,7 @@ function toIssueDetail(raw: typeof RawIssueDetail.Type): LinearIssueDetail {
         displayName: comment.user.displayName,
       },
       ...(comment.user?.app ? { authorIsApp: true } : {}),
+      ...(comment.parentId ? { parentId: comment.parentId } : {}),
     })),
     parent: parent === null ? null : toIssueRelative(parent),
     children: children.nodes.map(toIssueRelative),
@@ -746,6 +760,8 @@ export class LinearApi extends Context.Service<
       readonly id?: string;
       readonly issueId: string;
       readonly body: string;
+      /** The comment to reply under; the new comment joins its thread. */
+      readonly parentId?: string;
     }) => Effect.Effect<
       { readonly id: string; readonly url: string },
       LinearUnavailableError | LinearOperationError
@@ -760,6 +776,10 @@ export class LinearApi extends Context.Service<
       readonly contentType: string;
       readonly bytes: Uint8Array;
     }) => Effect.Effect<{ readonly url: string }, LinearUnavailableError | LinearOperationError>;
+    /** Delete a comment. Linear lets only its author do this. */
+    readonly deleteComment: (
+      id: string,
+    ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
   }
 >()("t3/linear/LinearApi") {}
 
@@ -1346,6 +1366,7 @@ const make = Effect.gen(function* () {
     readonly id?: string;
     readonly issueId: string;
     readonly body: string;
+    readonly parentId?: string;
   }) {
     const result = yield* request({
       operation: "createComment",
@@ -1354,6 +1375,7 @@ const make = Effect.gen(function* () {
         issueId: input.issueId,
         body: input.body,
         ...(input.id ? { id: input.id } : {}),
+        ...(input.parentId ? { parentId: input.parentId } : {}),
       },
       decode: decodeCommentCreateResult,
     }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
@@ -1458,6 +1480,40 @@ const make = Effect.gen(function* () {
     return { url: upload.assetUrl };
   });
 
+  const deleteComment = Effect.fn("LinearApi.deleteComment")(function* (id: string) {
+    const notAuthor = "Linear lets only a comment's author delete it.";
+    const result = yield* request({
+      operation: "deleteComment",
+      query: DELETE_COMMENT_MUTATION,
+      variables: { id },
+      decode: Schema.decodeUnknownEffect(CommentDeleteResult),
+    }).pipe(
+      Effect.catchTag("LinearRequestFailure", (failure) =>
+        isEntityNotFound(failure)
+          ? Effect.fail(
+              new LinearOperationError({
+                operation: failure.operation,
+                detail: "Comment not found or inaccessible.",
+              }),
+            )
+          : failure.code === "FORBIDDEN"
+            ? Effect.fail(
+                new LinearOperationError({
+                  operation: failure.operation,
+                  detail: `${failure.detail} ${notAuthor}`,
+                }),
+              )
+            : failOperation(failure),
+      ),
+    );
+    if (!result.commentDelete.success) {
+      return yield* new LinearOperationError({
+        operation: "deleteComment",
+        detail: `Linear refused to delete the comment. ${notAuthor}`,
+      });
+    }
+  });
+
   return LinearApi.of({
     getComment,
     updateComment,
@@ -1478,6 +1534,7 @@ const make = Effect.gen(function* () {
     labels,
     createComment,
     uploadFile,
+    deleteComment,
   });
 });
 

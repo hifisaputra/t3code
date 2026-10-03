@@ -160,6 +160,7 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       getComment: () => Effect.die("unused"),
       updateComment: () => Effect.die("unused"),
       uploadFile: () => Effect.die("unused"),
+      deleteComment: () => Effect.die("unused"),
       ...overrides,
     }),
   );
@@ -544,6 +545,11 @@ const nextApprovalEvent = Effect.gen(function* () {
   const [event] = yield* Stream.runCollect(Stream.take(broker.streamEvents, 1));
   return event as ProviderRuntimeEvent;
 });
+
+/** The parts of an approval a deletion test reads: its one-line summary and the call it guards. */
+const decodeApprovalReview = Schema.decodeUnknownEffect(
+  Schema.Struct({ detail: Schema.String, args: Schema.Unknown }),
+);
 
 const answer = (event: ProviderRuntimeEvent, decision: "accept" | "acceptForSession" | "decline") =>
   Effect.gen(function* () {
@@ -970,6 +976,135 @@ it.effect("rejects a comment from a different issue before approval or mutation"
     ),
   ),
 );
+
+it.effect("replies at the root of the thread the agent named, on that comment's issue", () => {
+  const created: Array<unknown> = [];
+  const read: Array<string> = [];
+  return callTool("save_comment", { parentId: "reply-1", body: "Agreed." }).pipe(
+    Effect.map(() => {
+      // The parent's issue wins over the thread's link, and a reply to a reply
+      // joins the thread its parent belongs to.
+      assert.deepStrictEqual(read, [issue.id]);
+      assert.deepStrictEqual(created, [
+        { issueId: issue.id, body: "Agreed.", parentId: "comment-1" },
+      ]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getComment: (id) =>
+            Effect.succeed({
+              id,
+              body: "Should we ship?",
+              url: `${issue.url}#${id}`,
+              issue: { id: issue.id },
+              parentId: "comment-1",
+            }),
+          getIssue: ({ reference }) => {
+            read.push(reference);
+            return Effect.succeed(issue);
+          },
+          createComment: (input) =>
+            Effect.sync(() => {
+              created.push(input);
+              return { id: "reply-2", url: `${issue.url}#reply-2` };
+            }),
+        },
+        linkedIssue: { id: "linked-elsewhere" },
+      }),
+    ),
+  );
+});
+
+it.effect("replies under a top-level comment directly", () => {
+  const created: Array<unknown> = [];
+  return callTool("save_comment", { parentId: "comment-1", body: "Agreed." }).pipe(
+    Effect.map(() => {
+      assert.deepStrictEqual(created, [
+        { issueId: issue.id, body: "Agreed.", parentId: "comment-1" },
+      ]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getComment: (id) =>
+            Effect.succeed({
+              id,
+              body: "Started on this.",
+              url: `${issue.url}#${id}`,
+              issue: { id: issue.id },
+              parentId: null,
+            }),
+          getIssue: () => Effect.succeed(issue),
+          createComment: (input) =>
+            Effect.sync(() => {
+              created.push(input);
+              return { id: "reply-2", url: `${issue.url}#reply-2` };
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("refuses to move an edited comment into another thread", () =>
+  Effect.gen(function* () {
+    const error = operationError(
+      yield* Effect.flip(
+        callTool("save_comment", { id: "comment-1", parentId: "comment-2", body: "Moved." }),
+      ),
+    );
+    assert.include(error.detail, "only when creating a reply");
+  }).pipe(Effect.provide(testLayer({ linear: {} }))),
+);
+
+for (const decision of ["accept", "decline"] as const) {
+  it.effect(`deletes a comment only after approval: ${decision}`, () => {
+    const deleted: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          Effect.result(callTool("delete_comment", { id: "old-comment" })),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        // The person sees what disappears before it does.
+        assert.strictEqual(review.detail, "Delete comment on DEL-123\n\nWrong finding.");
+        assert.deepStrictEqual(review.args, { id: "old-comment", issueId: issue.id });
+        assert.deepStrictEqual(deleted, []);
+        yield* answer(opened, decision);
+        const result = yield* Fiber.join(pending);
+        assert.deepStrictEqual(deleted, decision === "accept" ? ["old-comment"] : []);
+        if (decision === "accept") {
+          assert.deepStrictEqual(result._tag === "Success" ? result.success : undefined, {
+            id: "old-comment",
+            issue: { id: issue.id, identifier: issue.identifier, url: issue.url },
+          });
+        }
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getComment: () =>
+              Effect.succeed({
+                id: "old-comment",
+                body: "Wrong finding.",
+                url: issue.url + "#old-comment",
+                issue: { id: issue.id },
+              }),
+            getIssue: () => Effect.succeed(issue),
+            deleteComment: (id) =>
+              Effect.sync(() => {
+                deleted.push(id);
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
 
 for (const assignee of ["Ada", null]) {
   it.effect(`updates assignment with ${assignee}`, () => {

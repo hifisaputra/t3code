@@ -967,8 +967,19 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
       const id = named(input.id);
+      const parentId = named(input.parentId);
+      if (id !== undefined && parentId !== undefined) {
+        return yield* new LinearOperationError({
+          operation: "save_comment",
+          detail:
+            "Pass parentId only when creating a reply; an edited comment stays in its thread.",
+        });
+      }
       const comment = id === undefined ? undefined : yield* linear.getComment(id);
-      if (comment !== undefined && comment.issue === null) {
+      const parent = parentId === undefined ? undefined : yield* linear.getComment(parentId);
+      // The comment being edited, or the one being replied to, decides the issue.
+      const anchor = comment ?? parent;
+      if (anchor !== undefined && anchor.issue === null) {
         return yield* new LinearOperationError({
           operation: "save_comment",
           detail: "This comment does not belong to an issue.",
@@ -977,39 +988,88 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const issue = yield* resolveIssue(
         "save_comment",
         scope,
-        named(input.issueId) ?? comment?.issue?.id,
+        named(input.issueId) ?? anchor?.issue?.id,
       );
-      if (comment !== undefined && comment.issue?.id !== issue.id) {
+      if (anchor !== undefined && anchor.issue?.id !== issue.id) {
         return yield* new LinearOperationError({
           operation: "save_comment",
           detail: "The comment does not belong to the specified issue.",
         });
       }
       const body = input.body.trim();
-      if (body.length === 0 || (input.id !== undefined && id === undefined)) {
+      if (
+        body.length === 0 ||
+        (input.id !== undefined && id === undefined) ||
+        (input.parentId !== undefined && parentId === undefined)
+      ) {
         return yield* new LinearOperationError({
           operation: "save_comment",
-          detail: "Comment body and supplied comment id must not be blank.",
+          detail: "Comment body and supplied comment ids must not be blank.",
         });
       }
+      // Linear threads are one level deep, so a reply to a reply is posted
+      // under the comment that starts the thread.
+      const threadRoot = parent === undefined ? undefined : (parent.parentId ?? parent.id);
       return yield* confirmedWrite(
         "save_comment",
         scope,
         {
           appName: "Linear",
           change: {
-            summary: `${comment === undefined ? "Comment on" : "Edit comment on"} ${issue.identifier}`,
-            record: { label: issue.identifier, url: comment?.url ?? issue.url },
+            summary: `${comment !== undefined ? "Edit comment on" : parent !== undefined ? "Reply on" : "Comment on"} ${issue.identifier}`,
+            record: { label: issue.identifier, url: comment?.url ?? parent?.url ?? issue.url },
             // The comment lands as the agent wrote it, so it is reviewed the
             // same way: as the markdown Linear will render.
             fields: [{ label: "Comment", value: body, format: "markdown" }],
           },
-          args: { ...input, issueId: issue.id },
+          args: {
+            ...input,
+            issueId: issue.id,
+            ...(threadRoot === undefined ? {} : { parentId: threadRoot }),
+          },
         },
-        comment === undefined
-          ? linear.createComment({ issueId: issue.id, body })
-          : linear.updateComment({ id: comment.id, body }),
+        comment !== undefined
+          ? linear.updateComment({ id: comment.id, body })
+          : linear.createComment({
+              issueId: issue.id,
+              body,
+              ...(threadRoot === undefined ? {} : { parentId: threadRoot }),
+            }),
       );
+    }),
+
+  delete_comment: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const comment = yield* linear.getComment(input.id.trim());
+      if (comment.issue === null) {
+        return yield* new LinearOperationError({
+          operation: "delete_comment",
+          detail: "This comment does not belong to an issue.",
+        });
+      }
+      const issue = yield* resolveIssue("delete_comment", scope, comment.issue.id);
+      // Whether the caller wrote the comment is Linear's call: it refuses
+      // anyone else, and the refusal reaches the agent as it is.
+      yield* confirmedWrite(
+        "delete_comment",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Delete comment on ${issue.identifier}`,
+            record: { label: issue.identifier, url: comment.url },
+            fields: [{ label: "Comment", value: comment.body, format: "markdown" }],
+          },
+          args: { id: comment.id, issueId: issue.id },
+        },
+        linear.deleteComment(comment.id),
+      );
+      return {
+        id: comment.id,
+        issue: { id: issue.id, identifier: issue.identifier, url: issue.url },
+      };
     }),
 
   upload_image: (input) =>

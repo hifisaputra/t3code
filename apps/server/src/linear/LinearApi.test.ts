@@ -136,6 +136,7 @@ const issueDetail = {
         url: "https://linear.app/acme/issue/DEL-123#comment-1",
         createdAt: "2026-09-01T09:00:00.000Z",
         user: { id: "user-1", name: "Ada Lovelace", displayName: "ada" },
+        parentId: null,
       },
       {
         id: "comment-2",
@@ -143,6 +144,7 @@ const issueDetail = {
         url: "https://linear.app/acme/issue/DEL-123#comment-2",
         createdAt: "2026-09-01T09:30:00.000Z",
         user: null,
+        parentId: "comment-1",
       },
     ],
   },
@@ -330,6 +332,12 @@ it.effect("decodes an issue with a null assignee and its nested connections", ()
       issue.comments.map((comment) => comment.author?.displayName ?? null),
       ["ada", null],
     );
+    // A reply names the comment it answers; a top-level comment has no key at all.
+    assert.deepStrictEqual(
+      issue.comments.map((comment) => comment.parentId),
+      [undefined, "comment-1"],
+    );
+    assert.isFalse("parentId" in issue.comments[0]!);
     assert.strictEqual(issue.project?.name, "Linear");
     assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, { id: "DEL-123" });
   }).pipe(Effect.provide(layer));
@@ -1192,3 +1200,68 @@ it.effect("passes a caller-owned UUID when creating a retryable comment", () => 
     });
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("posts a reply under the comment it names", () => {
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({
+        data: {
+          commentCreate: { success: true, comment: { id: "reply-1", url: "https://linear.app/r" } },
+        },
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    yield* linear.createComment({ issueId: "issue-uuid", body: "Agreed.", parentId: "comment-1" });
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "parentId: $parentId");
+    assert.deepStrictEqual(request.variables, {
+      issueId: "issue-uuid",
+      body: "Agreed.",
+      parentId: "comment-1",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("deletes a comment by id", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { commentDelete: { success: true } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    yield* linear.deleteComment("comment-3");
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "commentDelete");
+    assert.deepStrictEqual(request.variables, { id: "comment-3" });
+  }).pipe(Effect.provide(layer));
+});
+
+for (const [payload, expected] of [
+  [
+    {
+      errors: [
+        { message: "You can only delete your own comments", extensions: { code: "FORBIDDEN" } },
+      ],
+    },
+    "Linear lets only a comment's author delete it.",
+  ],
+  [
+    { data: { commentDelete: { success: false } } },
+    "Linear lets only a comment's author delete it.",
+  ],
+  [
+    { errors: [{ message: "Entity not found", extensions: { code: "ENTITY_NOT_FOUND" } }] },
+    "Comment not found or inaccessible.",
+  ],
+] as const) {
+  it.effect(`tells the agent why Linear refused a deletion: ${expected}`, () => {
+    const { layer } = makeLayer({ response: () => Response.json(payload) });
+    return Effect.gen(function* () {
+      const linear = yield* LinearApi.LinearApi;
+      const error = yield* Effect.flip(linear.deleteComment("comment-3"));
+      assert.instanceOf(error, LinearOperationError);
+      assert.strictEqual(error.operation, "deleteComment");
+      assert.include(error.detail, expected);
+    }).pipe(Effect.provide(layer));
+  });
+}

@@ -147,6 +147,8 @@ export const LinearIssueComment = Schema.Struct({
   author: Schema.NullOr(LinearUser),
   /** Written by an app user, such as T3 Code's own agent session replies. */
   authorIsApp: Schema.optionalKey(Schema.Boolean),
+  /** On a reply, the comment that starts its thread. Absent on a top-level comment. */
+  parentId: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type LinearIssueComment = typeof LinearIssueComment.Type;
 
