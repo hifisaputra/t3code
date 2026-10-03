@@ -73,6 +73,20 @@ describe("reviewSummary", () => {
     expect(reviewOutcomeLine(summary)).toBe("Partly passed e2e on staging · 1 check for you");
   });
 
+  it("withholds the quick accept for a failed run delivered with its failures handed on", () => {
+    const summary = reviewSummary(
+      task({
+        e2e: e2e({
+          verdict: "failed",
+          checks: [{ criterion: 1, result: "failed", evidence: "" }],
+        }),
+      }),
+    );
+    expect(summary.kind).toBe("Check and accept");
+    expect(summary.nothingToCheck).toBe(false);
+    expect(reviewOutcomeLine(summary)).toBe("Failed e2e on staging · 0 of 1 criteria passed");
+  });
+
   it("withholds the quick accept for an unchecked criterion", () => {
     const summary = reviewSummary(
       task({

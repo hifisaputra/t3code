@@ -332,11 +332,11 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_deliver", {
     description:
-      'Team leader only: move the issue on once you have settled the engineering checks an e2e run listed. T3 holds a passed or partial run with engineeringChecks until you call this; settle each check first with the code reviewer (assistant_message_worker, thread "review") and read its answer with assistant_read_thread, or send a defect to the worker instead. In staging mode T3 then puts the issue in review with the tester\'s result; in worktree mode it tells the worker to merge the tested commit. Fails when no engineering checks are waiting. End your turn afterward.',
+      "Team leader only: move the issue on once you have settled the engineering checks an e2e run listed. T3 holds a passed or partial run with engineeringChecks until you call this; settle each check first with the code reviewer (assistant_message_worker, thread \"review\") and read its answer with assistant_read_thread, or send a defect to the worker instead. In staging mode T3 then puts the issue in review with the tester's result; in worktree mode it tells the worker to merge the tested commit. Also after a run that failed on staging, when every failure is a defect outside this issue's change that you filed as its own issue: T3 puts the issue in review with the failed result and where each failure went, instead of a fix. Fails when neither is waiting. End your turn afterward.",
     parameters: Schema.Struct({
       settled: text.annotate({
         description:
-          "How each engineering check was settled: what was checked, by whom, and what it showed. It goes on the Linear issue with the tester's report. No first person.",
+          "How each engineering check was settled: what was checked, by whom, and what it showed. After a failed run: each failure and where it went (the issue filed for it). It goes on the Linear issue with the tester's report. No first person.",
       }),
     }),
     success: AssistantTask,

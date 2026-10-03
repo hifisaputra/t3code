@@ -76,7 +76,7 @@ export function reviewSummary(task: AssistantTaskSummary): ReviewSummary {
   const settled = e2e?.engineeringChecks?.length && e2e.engineeringSettled !== undefined;
   const pending = engineeringChecksLine(task);
   return {
-    kind: humanChecks > 0 ? "Check and accept" : "Ready to accept",
+    kind: humanChecks > 0 || e2e?.verdict === "failed" ? "Check and accept" : "Ready to accept",
     verdict: { label: verdictLabel(task, e2e), tone: e2e?.verdict ?? "verified" },
     criteria:
       ran.length > 0

@@ -350,6 +350,26 @@ export function noE2eComment(input: {
 }
 
 /**
+ * The card for an issue delivered after its e2e test failed on staging, because
+ * the team leader handed every failure on, usually as an issue of its own. The
+ * failed run's card is already on the issue, so this one says where each went.
+ */
+export function handedOnComment(input: {
+  readonly handedOn: string;
+  readonly merge: AssistantMerge | null;
+  readonly deployment: AssistantDeployment;
+  readonly pullRequest: PullRequest;
+  readonly acceptedState: string;
+}): string {
+  return sections(
+    "**❌ Failed on staging: delivered with the failures handed on** (decided by the team leader)",
+    input.handedOn.trim(),
+    "The tester's report is in the failed run's comment.",
+    ...deliveryFooter({ ...input, delivered: true }),
+  );
+}
+
+/**
  * The most characters T3 puts in one research comment. Linear refuses a comment
  * over 100,000 characters; the margin covers what Linear counts differently.
  */
@@ -518,6 +538,8 @@ export function deliveredDescription(input: {
   readonly e2e: AssistantE2eResult | null;
   readonly deployment: AssistantDeployment;
   readonly acceptedState: string;
+  /** Where the team leader sent the failures of a failed run it delivered anyway. */
+  readonly handedOn?: string | undefined;
 }): string {
   const accept = input.acceptedState.trim() || "a completed state";
   const section = [
@@ -527,6 +549,9 @@ export function deliveredDescription(input: {
       `Delivered to staging and waiting to be accepted. Move this issue to ${accept} to accept it.`,
       input.merge?.summary.trim() ||
         "See the developer assistant's comments below for what changed.",
+      input.handedOn?.trim()
+        ? `**The e2e test failed, and the failures were handed on**\n\n${input.handedOn.trim()}`
+        : null,
       input.e2e?.humanChecks.length
         ? `**Check before accepting**\n\n${input.e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
         : null,

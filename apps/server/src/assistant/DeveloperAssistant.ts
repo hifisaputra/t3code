@@ -98,6 +98,7 @@ import {
   deliveredDescription,
   deployedComment,
   e2eComment,
+  handedOnComment,
   issueFingerprint,
   linearFailureDetail,
   linearFeedback,
@@ -815,6 +816,7 @@ export const make = Effect.gen(function* () {
     t: AssistantTask,
     p: AwaitedProject,
     e2e: AssistantE2eResult | null,
+    handedOn?: string,
   ) {
     const deployment = t.deployment;
     if (!deployment) return t;
@@ -828,6 +830,7 @@ export const make = Effect.gen(function* () {
             e2e,
             deployment,
             acceptedState: p.config.acceptedState,
+            handedOn,
           }),
         }),
       ),
@@ -2725,12 +2728,15 @@ export const make = Effect.gen(function* () {
    * says what shipped, and Linear moves it to the review state for the person.
    * Staging runs reach this from the e2e result, worktree runs from the staging
    * deploy that follows their merge. An issue planned with no e2e test is
-   * delivered with a null result once staging verifies it.
+   * delivered with a null result once staging verifies it. A failed staging
+   * run is delivered with `handedOn`, the team leader's account of where each
+   * failure went; its own card is already on the issue.
    */
   const finishDelivery = Effect.fn("Assistant.finishDelivery")(function* (
     p: AwaitedProject,
     value: AssistantTask,
     e2e: AssistantE2eResult | null,
+    handedOn?: string,
   ) {
     const deployment = value.deployment;
     if (!deployment) return value;
@@ -2738,32 +2744,43 @@ export const make = Effect.gen(function* () {
     const noTestReason = value.e2ePlan?.reason?.trim() || "nothing a user sees changed";
     // The card stays a comment even with a session: a finished session is one
     // collapsed row on the issue page, and the person reads the card there.
-    const card = e2e
-      ? e2eComment({
-          e2e,
+    const card = handedOn
+      ? handedOnComment({
+          handedOn,
           merge: value.merge ?? null,
           deployment,
           pullRequest,
           acceptedState: p.config.acceptedState,
-          criteria: value.criteria ?? null,
-          smoke: assistantTaskE2eDepth(value) === "smoke",
         })
-      : noE2eComment({
-          reason: noTestReason,
-          decidedBy: value.e2ePlan?.depthSetBy,
-          merge: value.merge ?? null,
-          deployment,
-          pullRequest,
-          acceptedState: p.config.acceptedState,
-        });
+      : e2e
+        ? e2eComment({
+            e2e,
+            merge: value.merge ?? null,
+            deployment,
+            pullRequest,
+            acceptedState: p.config.acceptedState,
+            criteria: value.criteria ?? null,
+            smoke: assistantTaskE2eDepth(value) === "smoke",
+          })
+        : noE2eComment({
+            reason: noTestReason,
+            decidedBy: value.e2ePlan?.depthSetBy,
+            merge: value.merge ?? null,
+            deployment,
+            pullRequest,
+            acceptedState: p.config.acceptedState,
+          });
     let updated = yield* postLinear(value, card);
     const cardPosted =
       (updated.linearCommentIds ?? []).length > (value.linearCommentIds ?? []).length;
-    updated = yield* updateDescription(updated, p, e2e);
+    updated = yield* updateDescription(updated, p, e2e, handedOn);
     return yield* handToPerson(p, updated, {
       summary: updated.merge?.summary ?? updated.summary,
       reviewInstructions: e2e
         ? [
+            handedOn
+              ? `The e2e test failed. The team leader delivered it with the failures handed on:\n\n${handedOn}`
+              : null,
             ...e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`),
             e2e.worthALook?.length
               ? `Worth a look:\n${e2e.worthALook.map((note) => `- ${note}`).join("\n")}`
@@ -3507,6 +3524,9 @@ export const make = Effect.gen(function* () {
    * the issue goes on as the run would have taken it without them, delivered
    * with the stored result on staging, or merged in the worktree. What was
    * settled goes on the result, and on the Linear card with the tester's report.
+   * After a failed run on staging the leader can deliver instead of a fix, once
+   * every failure is handed on outside this issue's change; `settled` then
+   * says where each went.
    */
   const deliverChecked = Effect.fn("Assistant.deliverChecked")(
     function* (caller: ThreadId, settled: string) {
@@ -3515,9 +3535,16 @@ export const make = Effect.gen(function* () {
       if (!assistantTaskHoldsProject(t.status))
         return yield* fail("This issue is no longer active.");
       const e2e = t.e2e;
-      if (!e2e || !assistantE2ePendingEngineeringChecks(e2e))
+      const failed = e2e?.verdict === "failed";
+      if (!e2e || (!failed && !assistantE2ePendingEngineeringChecks(e2e)))
         return yield* fail(
-          "No engineering checks are waiting to be settled on this issue. assistant_deliver is only for an e2e run whose tester listed engineeringChecks; T3 moves every other passed run on by itself.",
+          "Nothing is waiting to be delivered on this issue. assistant_deliver is for an e2e run whose tester listed engineeringChecks, or a failed run whose failures you handed on; T3 moves every other passed run on by itself.",
+        );
+      // A failed run in the worktree comes before the merge: there is no
+      // deployed change to hand the person.
+      if (failed && assistantTaskE2eEnvironment(t) === "worktree")
+        return yield* fail(
+          "The run failed in the worktree, before the merge, so there is nothing deployed to deliver. Send the defect to the worker with assistant_message_worker, or ask the person with assistant_ask_decision.",
         );
       if (t.stage !== "lead")
         return yield* fail(
@@ -3526,12 +3553,22 @@ export const make = Effect.gen(function* () {
       const text = settled.trim();
       if (!text)
         return yield* fail(
-          "Say how each engineering check was settled: what was checked and what it showed.",
+          failed
+            ? "Say where each failure went: the issue filed for it, or why it does not block this one."
+            : "Say how each engineering check was settled: what was checked and what it showed.",
         );
       if (yield* taskDecisionsPending(t))
         return yield* fail("Resolve the issue's pending decisions before delivering.");
       if ((yield* taskBusy(t, caller)) || (yield* taskQueued(t, caller)))
         return yield* fail("Wait for the issue's threads to finish before delivering.");
+      if (failed) {
+        if (!t.deployment)
+          return yield* fail(
+            "Staging is not verified for this issue, so there is nothing to deliver.",
+          );
+        // The team is closed when this turn ends, and the loop moves on.
+        return yield* finishDelivery(p, yield* saveTask({ ...t, error: null }), e2e, text);
+      }
       const record: AssistantE2eResult = { ...e2e, engineeringSettled: text };
       if (assistantTaskE2eEnvironment(t) === "worktree") {
         // The merge must be of the commit the run tested.
@@ -4033,7 +4070,7 @@ export const make = Effect.gen(function* () {
     if (t.e2e?.verdict === "failed" && role === "e2e")
       return yield* notifyLead(
         t,
-        `${id} failed its e2e check ${inWorktree ? "in the worktree" : "on staging"}:\n${t.e2e.report.slice(0, 4000)}\nDecide whether this goes to the worker, back to the tester, or to the person.`,
+        `${id} failed its e2e check ${inWorktree ? "in the worktree" : "on staging"}:\n${t.e2e.report.slice(0, 4000)}\nDecide whether this goes to the worker, back to the tester, or to the person.${inWorktree ? "" : " When every failure is a defect outside this issue's change and has its own issue, deliver with assistant_deliver, saying where each went."}`,
       );
     if (t.merge && !t.deployment && role === "implement" && t.e2ePlan)
       return yield* watchAfterMerge(t, t.merge);

@@ -3340,6 +3340,10 @@ it.effect("a failed worktree e2e run goes to the team leader with nothing posted
     yield* service.deliver();
     assert.include(turnsOf(h, lead).at(-1), "failed its e2e check in the worktree");
     assert.isFalse(turnsOf(h, first.threadId).some((text) => text.includes("Merge the PR")));
+    // Nothing is merged or deployed yet, so the failures cannot be handed on.
+    yield* endTurn(h, service, lead);
+    const handOn = yield* service.deliverChecked(lead, "Filed as DEL-2.").pipe(Effect.flip);
+    assert.include(handOn.detail, "before the merge");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -5253,6 +5257,45 @@ it.effect(
     }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
+it.effect("the leader delivers a failed staging run whose failures it handed on", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const tester = assistantTaskThreadId(team, "e2e");
+    const first = yield* takeTask(h, service, team, "Walk it", ["The page loads"], plan);
+    yield* reachMerge(h, service, first);
+    yield* service.scan();
+    yield* service.deliver();
+    yield* service.submitE2e(tester, {
+      checks: oneCheck("failed", "Uploaded images answer 404."),
+      report: "- The page loads: failed",
+      humanChecks: [],
+      screenshots: [],
+    });
+    yield* endTurn(h, service, tester);
+    yield* service.deliver();
+    assert.include(turnsOf(h, lead).at(-1), "deliver with assistant_deliver");
+    const failureCard = h.comments.at(-1)!.body;
+    assert.match(failureCard, /^\*\*❌ Failed on staging/);
+
+    const blank = yield* service.deliverChecked(lead, "  ").pipe(Effect.flip);
+    assert.include(blank.detail, "Say where each failure went");
+    const delivered = yield* service.deliverChecked(lead, "- The page loads: filed as SPI-210.");
+    assert.equal(delivered.status, "review");
+    assert.equal(delivered.e2e?.verdict, "failed");
+    assert.include(delivered.reviewInstructions, "filed as SPI-210");
+    assert.deepEqual(h.transitions, ["review"]);
+    const card = h.comments.at(-1)!.body;
+    assert.notEqual(card, failureCard);
+    assert.match(card, /^\*\*❌ Failed on staging: delivered with the failures handed on\*\*/);
+    assert.include(card, "- The page loads: filed as SPI-210.");
+    const again = yield* service.deliverChecked(lead, "Filed.").pipe(Effect.flip);
+    assert.include(again.detail, "no longer active");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 it.effect("engineering checks hold a staging delivery until the leader settles them", () =>
   Effect.gen(function* () {
     const h = harness();
@@ -5267,7 +5310,7 @@ it.effect("engineering checks hold a staging delivery until the leader settles t
     yield* service.deliver();
     // Nothing waits to be settled yet, and only the leader may settle it.
     const early = yield* service.deliverChecked(lead, "Checked.").pipe(Effect.flip);
-    assert.include(early.detail, "No engineering checks are waiting");
+    assert.include(early.detail, "Nothing is waiting to be delivered");
     const notLead = yield* service.deliverChecked(first.threadId, "Checked.").pipe(Effect.flip);
     assert.include(notLead.detail, "Only the issue's team leader");
     const cards = h.comments.length;
@@ -5364,7 +5407,7 @@ it.effect("engineering checks hold the worktree merge until the leader settles t
     assert.equal(merging.stage, "implement");
     assert.equal(merging.e2e?.engineeringSettled, "The reviewer read the job log: no error.");
     const again = yield* service.deliverChecked(lead, "Checked.").pipe(Effect.flip);
-    assert.include(again.detail, "No engineering checks are waiting");
+    assert.include(again.detail, "Nothing is waiting to be delivered");
     yield* endTurn(h, service, lead);
     yield* service.deliver();
     assert.include(turnsOf(h, first.threadId).at(-1), "Merge the PR into develop");
