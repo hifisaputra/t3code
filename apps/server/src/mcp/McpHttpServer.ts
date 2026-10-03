@@ -18,6 +18,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 import { PreviewAutomationError } from "@t3tools/contracts";
 
 import packageJson from "../../package.json" with { type: "json" };
+import * as AssistantEvidence from "../assistant/AssistantEvidence.ts";
 import * as LinearApi from "../linear/LinearApi.ts";
 import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
@@ -663,11 +664,13 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
  * a credential. `ProjectionSnapshotQuery`, `ServerSettingsService` and
  * `McpApprovalBroker` are left as requirements because the routes already run
  * above them in `server.ts` — the broker especially, since the runtime has to
- * see the same instance the write approvals are raised on.
+ * see the same instance the write approvals are raised on. `AssistantEvidence`
+ * only maps a task to its folder, so a second instance here is harmless.
  */
 const LinearToolkitRegistrationLive = McpServer.toolkit(LinearToolkit).pipe(
   Layer.provide(LinearToolkitHandlersLive),
   Layer.provide(LinearApi.layer),
+  Layer.provide(AssistantEvidence.layer),
 );
 
 export const PullRequestsToolkitRegistrationLive = McpServer.toolkit(PullRequestsToolkit).pipe(

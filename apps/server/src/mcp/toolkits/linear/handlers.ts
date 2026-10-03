@@ -4,6 +4,7 @@ import type {
   LinearResourceSaveInput,
 } from "../../../linear/LinearResources.ts";
 import {
+  assistantTeamThread,
   isProviderDriverKind,
   LinearOperationError,
   type IntegrationApprovalChange,
@@ -14,6 +15,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
+import { AssistantEvidence } from "../../../assistant/AssistantEvidence.ts";
 import { imageMimeTypeForFileName } from "../../../imageMime.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -323,13 +325,44 @@ const threadWorkspaceRoot = Effect.fn("LinearToolkit.threadWorkspaceRoot")(funct
 });
 
 /**
+ * The evidence folder of the assistant task the calling thread belongs to, when
+ * the agent named an absolute path inside it. Team threads are told to save
+ * screenshots there instead of in the worktree they share, so it is the one
+ * place outside the workspace an image may come from, and only for that task.
+ */
+const taskEvidenceRoot = Effect.fn("LinearToolkit.taskEvidenceRoot")(function* (
+  operation: string,
+  scope: Scope,
+  requested: string,
+) {
+  const path = yield* Path.Path;
+  const team = assistantTeamThread(scope.threadId);
+  // Task ids are UUIDs; anything else cannot name a folder of its own.
+  if (team === null || !isResourceId(team.taskId) || !path.isAbsolute(requested)) return undefined;
+  const evidence = yield* AssistantEvidence;
+  const directory = yield* evidence.directory(team.taskId).pipe(
+    Effect.mapError(
+      () =>
+        new LinearOperationError({
+          operation,
+          detail: "Could not read this task's evidence folder.",
+        }),
+    ),
+  );
+  const relative = path.relative(directory, requested);
+  return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative)
+    ? directory
+    : undefined;
+});
+
+/**
  * Everything about an image the agent named except its bytes: enough to
  * describe the upload in an approval, and to refuse a bad path before anything
  * is read.
  *
- * The path is confined to the thread's workspace twice: once as written, and
- * again after the filesystem resolves it, because a symlink inside the
- * workspace can still point outside it.
+ * The path is confined to the thread's workspace, or to its task's evidence
+ * folder, twice: once as written, and again after the filesystem resolves it,
+ * because a symlink inside the root can still point outside it.
  */
 const inspectWorkspaceImage = Effect.fn("LinearToolkit.inspectWorkspaceImage")(function* (
   operation: string,
@@ -339,10 +372,14 @@ const inspectWorkspaceImage = Effect.fn("LinearToolkit.inspectWorkspaceImage")(f
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
-  const root = yield* threadWorkspaceRoot(operation, scope);
+  const evidenceRoot = yield* taskEvidenceRoot(operation, scope, requested);
+  const root = evidenceRoot ?? (yield* threadWorkspaceRoot(operation, scope));
   const outside = new LinearOperationError({
     operation,
-    detail: `"${requested}" is outside this thread's workspace. Pass a path inside it, relative to its root.`,
+    detail:
+      assistantTeamThread(scope.threadId) === null
+        ? `"${requested}" is outside this thread's workspace. Pass a path inside it, relative to its root.`
+        : `"${requested}" is outside this thread's workspace and this task's evidence folder. Pass a path relative to the workspace root, or an absolute path inside the evidence folder.`,
   });
   const unreadable = new LinearOperationError({
     operation,
@@ -372,31 +409,35 @@ const inspectWorkspaceImage = Effect.fn("LinearToolkit.inspectWorkspaceImage")(f
   const info = yield* fileSystem.stat(canonicalFile).pipe(Effect.mapError(() => unreadable));
   if (info.type !== "File") return yield* unreadable;
 
+  // A workspace file is named the way the agent's tools name it; an evidence
+  // file has no workspace-relative name, so it keeps its absolute one.
+  const displayPath = evidenceRoot === undefined ? resolved.relativePath : resolved.absolutePath;
   const fileName = path.basename(canonicalFile);
   const contentType = imageMimeTypeForFileName(fileName);
   if (contentType === undefined) {
     return yield* new LinearOperationError({
       operation,
-      detail: `"${resolved.relativePath}" is not an image this server can identify. Pass a PNG, JPEG, GIF, WebP, AVIF, BMP, TIFF, HEIC, ICO, or SVG file.`,
+      detail: `"${displayPath}" is not an image this server can identify. Pass a PNG, JPEG, GIF, WebP, AVIF, BMP, TIFF, HEIC, ICO, or SVG file.`,
     });
   }
   if (info.size === 0n) {
     return yield* new LinearOperationError({
       operation,
-      detail: `"${resolved.relativePath}" is empty.`,
+      detail: `"${displayPath}" is empty.`,
     });
   }
   if (info.size > BigInt(MAX_UPLOAD_BYTES)) {
     return yield* new LinearOperationError({
       operation,
-      detail: `"${resolved.relativePath}" is ${formatBytes(Number(info.size))}, over the ${formatBytes(MAX_UPLOAD_BYTES)} upload limit.`,
+      detail: `"${displayPath}" is ${formatBytes(Number(info.size))}, over the ${formatBytes(MAX_UPLOAD_BYTES)} upload limit.`,
     });
   }
 
   return {
     contentType,
     fileName,
-    relativePath: resolved.relativePath,
+    displayPath,
+    inWorkspace: evidenceRoot === undefined,
     sizeBytes: Number(info.size),
     // The approval can sit for minutes; re-reading after it keeps the file out
     // of memory until it is actually going somewhere.
@@ -844,7 +885,11 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         change: {
           summary: `Upload ${image.fileName} to Linear`,
           fields: [
-            { label: "File", value: image.relativePath, format: "image" },
+            // The review dialog previews `image` fields from the thread's
+            // workspace, so an evidence file is shown by its path alone.
+            image.inWorkspace
+              ? { label: "File", value: image.displayPath, format: "image" }
+              : { label: "File", value: image.displayPath },
             { label: "Type", value: `${image.contentType}, ${formatBytes(image.sizeBytes)}` },
           ],
         },

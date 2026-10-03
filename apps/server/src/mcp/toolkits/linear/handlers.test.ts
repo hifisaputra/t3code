@@ -28,6 +28,8 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { McpSchema, McpServer, Tool } from "effect/unstable/ai";
 
+import * as AssistantEvidence from "../../../assistant/AssistantEvidence.ts";
+import * as ServerConfig from "../../../config.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
@@ -52,10 +54,13 @@ const environmentId = EnvironmentId.make("environment-linear-mcp");
 const threadId = ThreadId.make("thread-linear-mcp");
 const projectId = ProjectId.make("project-linear-mcp");
 
-const invocation = (capabilities: ReadonlyArray<McpInvocationContext.McpCapability>) =>
+const invocation = (
+  capabilities: ReadonlyArray<McpInvocationContext.McpCapability>,
+  caller: ThreadId = threadId,
+) =>
   McpInvocationContext.McpInvocationContext.of({
     environmentId,
-    threadId,
+    threadId: caller,
     providerSessionId: "provider-session-linear-mcp",
     providerInstanceId: ProviderInstanceId.make("codex"),
     capabilities: new Set(capabilities),
@@ -255,6 +260,8 @@ const testLayer = (input: {
   readonly session?: boolean;
   /** Set for the tools that read files the agent named, unset for the rest. */
   readonly workspaceRoot?: string;
+  /** T3's base directory, for the tests that read a team thread's evidence. */
+  readonly evidenceBaseDir?: string;
 }) =>
   // `provideMerge` because the toolkit's own `handle` keeps the tool
   // dependencies in its requirements; the layer has to satisfy both sides.
@@ -272,15 +279,25 @@ const testLayer = (input: {
           linear: { confirmAgentWrites: input.confirmAgentWrites ?? false },
         }),
         WorkspacePaths.layer.pipe(Layer.provide(NodeServices.layer)),
+        input.evidenceBaseDir === undefined
+          ? Layer.mock(AssistantEvidence.AssistantEvidence)({})
+          : evidenceLayer(input.evidenceBaseDir),
       ),
     ),
     Layer.provideMerge(NodeServices.layer),
+  );
+
+const evidenceLayer = (baseDir: string) =>
+  AssistantEvidence.layer.pipe(
+    Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+    Layer.provide(NodeServices.layer),
   );
 
 const callTool = <Name extends keyof typeof LinearToolkit.tools>(
   name: Name,
   params: Tool.Parameters<(typeof LinearToolkit.tools)[Name]>,
   capabilities: ReadonlyArray<McpInvocationContext.McpCapability> = ["linear"],
+  caller: ThreadId = threadId,
 ) =>
   Effect.gen(function* () {
     const built = yield* LinearToolkit;
@@ -293,7 +310,7 @@ const callTool = <Name extends keyof typeof LinearToolkit.tools>(
   }).pipe(
     Effect.provideService(
       McpInvocationContext.McpInvocationContext,
-      invocation(capabilities) as McpInvocationContext.McpInvocationScope,
+      invocation(capabilities, caller) as McpInvocationContext.McpInvocationScope,
     ),
   );
 
@@ -502,6 +519,7 @@ it.effect("advertises the Linear tools on the MCP server itself", () =>
             projectionLayer({ id: issue.id }),
             McpApprovalBroker.layer,
             ServerSettingsService.layerTest({ linear: { confirmAgentWrites: false } }),
+            Layer.mock(AssistantEvidence.AssistantEvidence)({}),
           ),
         ),
         Layer.provideMerge(McpServer.McpServer.layer),
@@ -521,7 +539,7 @@ const answer = (event: ProviderRuntimeEvent, decision: "accept" | "acceptForSess
   Effect.gen(function* () {
     const broker = yield* McpApprovalBroker.McpApprovalBroker;
     return yield* broker.respond({
-      threadId,
+      threadId: event.threadId,
       requestId: ApprovalRequestId.make(String(event.requestId)),
       decision,
     });
@@ -1403,6 +1421,151 @@ it.effect("asks before the bytes leave the machine when confirmation is on", () 
             },
           }),
         ),
+      );
+    }),
+  ),
+);
+
+const taskId = "7252e40a-1f3b-4c5d-8e9f-0a1b2c3d4e5f";
+const otherTaskId = "8363f51b-2a4c-4d6e-9fa0-1b2c3d4e5f60";
+const e2eThreadId = ThreadId.make(`assistant-e2e-${taskId}`);
+
+/**
+ * A workspace plus a T3 base directory whose evidence folders are the real
+ * ones `AssistantEvidence` hands a team thread. `save` writes a screenshot into
+ * a task's folder and returns its absolute path.
+ */
+const withEvidence = <A, E, R>(
+  run: (input: {
+    readonly root: string;
+    readonly baseDir: string;
+    readonly folder: (task: string) => Effect.Effect<string>;
+    readonly save: (task: string, fileName: string) => Effect.Effect<string>;
+  }) => Effect.Effect<A, E, R>,
+) =>
+  withWorkspace(({ root }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-linear-evidence-" });
+      const evidence = yield* AssistantEvidence.AssistantEvidence.pipe(
+        Effect.provide(evidenceLayer(baseDir)),
+      );
+      const folder = (task: string) => evidence.directory(task).pipe(Effect.orDie);
+      return yield* run({
+        root,
+        baseDir,
+        folder,
+        save: (task, fileName) =>
+          Effect.gen(function* () {
+            const file = path.join(yield* folder(task), fileName);
+            yield* fileSystem.writeFile(file, pngBytes).pipe(Effect.orDie);
+            return file;
+          }),
+      });
+    }),
+  );
+
+it.effect("uploads a screenshot from the evidence folder of the caller's own task", () =>
+  withEvidence(({ root, baseDir, save }) =>
+    Effect.gen(function* () {
+      const file = yield* save(taskId, "c3-home.png");
+      const uploaded: Array<string> = [];
+
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const pending = yield* Effect.forkScoped(
+            callTool("upload_image", { path: file }, ["linear"], e2eThreadId),
+          );
+          const opened = yield* nextApprovalEvent;
+          // The dialog previews workspace files only, so evidence is shown by its path.
+          assert.deepStrictEqual(
+            (opened.payload as { readonly change: { readonly fields: unknown } }).change.fields,
+            [
+              { label: "File", value: file },
+              { label: "Type", value: "image/png, 1 KB" },
+            ],
+          );
+          yield* answer(opened, "accept");
+          const result = yield* Fiber.join(pending);
+          assert.deepStrictEqual(uploaded, ["c3-home.png"]);
+          assert.strictEqual(
+            (result as { readonly markdown: string }).markdown,
+            "![c3-home.png](https://uploads.linear.app/acme/c3-home.png)",
+          );
+        }),
+      ).pipe(
+        Effect.provide(
+          testLayer({
+            workspaceRoot: root,
+            evidenceBaseDir: baseDir,
+            confirmAgentWrites: true,
+            linear: {
+              uploadFile: (input) =>
+                Effect.sync(() => {
+                  uploaded.push(input.fileName);
+                  assert.deepStrictEqual(input.bytes, pngBytes);
+                  return { url: "https://uploads.linear.app/acme/c3-home.png" };
+                }),
+            },
+          }),
+        ),
+      );
+    }),
+  ),
+);
+
+it.effect("refuses another task's evidence, by path, by traversal, or through a symlink", () =>
+  withEvidence(({ root, baseDir, folder, save }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const theirs = yield* save(otherTaskId, "theirs.png");
+      const own = yield* folder(taskId);
+      yield* fileSystem.symlink(theirs, path.join(own, "link.png")).pipe(Effect.orDie);
+
+      for (const requested of [
+        theirs,
+        // Written inside the caller's folder, resolved outside it.
+        `${own}/../${otherTaskId}/theirs.png`,
+        path.join(own, "link.png"),
+      ]) {
+        const error = yield* Effect.flip(
+          callTool("upload_image", { path: requested }, ["linear"], e2eThreadId).pipe(
+            Effect.provide(
+              testLayer({
+                workspaceRoot: root,
+                evidenceBaseDir: baseDir,
+                linear: { uploadFile: () => Effect.die("nothing may be uploaded") },
+              }),
+            ),
+          ),
+        );
+        assert.include(operationError(error).detail, "outside this thread's workspace", requested);
+      }
+    }),
+  ),
+);
+
+it.effect("still confines a thread outside the assistant's team to its workspace", () =>
+  withEvidence(({ root, baseDir, save }) =>
+    Effect.gen(function* () {
+      const file = yield* save(taskId, "c3-home.png");
+
+      const error = yield* Effect.flip(
+        callTool("upload_image", { path: file }).pipe(
+          Effect.provide(
+            testLayer({
+              workspaceRoot: root,
+              evidenceBaseDir: baseDir,
+              linear: { uploadFile: () => Effect.die("nothing may be uploaded") },
+            }),
+          ),
+        ),
+      );
+      assert.strictEqual(
+        operationError(error).detail,
+        `"${file}" is outside this thread's workspace. Pass a path inside it, relative to its root.`,
       );
     }),
   ),
