@@ -1994,6 +1994,32 @@ it.effect("bounds external progress checks, blocking the issue and not the proje
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
+it.effect("a longer external wait wakes the leader only once its minutes pass", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const task = yield* activeTask(service);
+    const lead = leadOf(task);
+    assert.equal((yield* service.waitForExternal(lead, "CI is running", 30)).outcome, "waiting");
+    yield* service.deliver();
+    h.finish(lead);
+    const wakes = () =>
+      turnsOf(h, lead).filter((text) => text.includes("Waiting: CI is running")).length;
+    yield* service.scan();
+    yield* TestClock.adjust("29 minutes");
+    yield* service.scan();
+    assert.equal(wakes(), 0);
+    yield* TestClock.adjust("1 minute");
+    yield* service.scan();
+    assert.equal(wakes(), 1);
+    // One wake per call: later scans do not repeat it.
+    h.finish(lead);
+    yield* TestClock.adjust("1 minute");
+    yield* service.scan();
+    assert.equal(wakes(), 1);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 const eventBase = (threadId: ThreadId) => ({
   sequence: 100,
   eventId: EventId.make("test-event"),

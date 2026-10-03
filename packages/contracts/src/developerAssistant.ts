@@ -455,11 +455,13 @@ export const assistantE2ePendingEngineeringChecks = (
 
 /**
  * A team leader's assistant_wait: what it waits for, how many checks so far,
- * and whether T3 has already told it to check again for the latest call.
+ * when T3 tells it to check again (absent: on the next scan), and whether T3
+ * has already done so for the latest call.
  */
 export const AssistantWait = Schema.Struct({
   reason: Schema.String,
   checks: Schema.Int,
+  until: Schema.optionalKey(IsoDateTime),
   notified: Schema.Boolean,
 });
 export type AssistantWait = typeof AssistantWait.Type;

@@ -134,9 +134,9 @@ it.effect("waiting answers the agent with text instead of an internal error", ()
       Layer.provide(AssistantToolkitHandlers),
       Layer.provideMerge(
         Layer.mock(DeveloperAssistant)({
-          waitForExternal: () =>
+          waitForExternal: (_caller, _reason, minutes) =>
             Effect.sync(() => {
-              calls.push("wait");
+              calls.push(`wait ${minutes}`);
               return { outcome: "waiting" as const };
             }),
         }),
@@ -166,7 +166,26 @@ it.effect("waiting answers the agent with text instead of an internal error", ()
         waitText?.type === "text" ? waitText.text : "",
         "T3 checks back in about a minute",
       );
-      assert.deepEqual(calls, ["wait"]);
+      assert.deepEqual(calls, ["wait 1"]);
+      // A longer wait says when T3 checks back; one past an hour, or under a
+      // minute, is refused before it reaches the service.
+      const longer = yield* call({
+        name: "assistant_wait",
+        arguments: { reason: "CI is running", minutes: 30 },
+      });
+      const longerText = longer.content[0];
+      assert.include(
+        longerText?.type === "text" ? longerText.text : "",
+        "T3 checks back in about 30 minutes",
+      );
+      for (const minutes of [0, 61, 1.5]) {
+        const refused = yield* call({
+          name: "assistant_wait",
+          arguments: { reason: "CI is running", minutes },
+        }).pipe(Effect.flip);
+        assert.equal(refused._tag, "InvalidParams");
+      }
+      assert.deepEqual(calls, ["wait 1", "wait 30"]);
     }).pipe(
       Effect.provide(layer),
       Effect.provideService(
