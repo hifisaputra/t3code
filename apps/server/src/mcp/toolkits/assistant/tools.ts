@@ -50,12 +50,12 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_accept_issue", {
     description:
-      'Team leader only: take your issue, with the acceptance criteria and the plan for its e2e test. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own, and T3 verifies staging and starts the tester with your e2e brief at the depth you plan. For an issue that asks for information rather than a change, pass track "research" and no e2e plan: the worker researches the public web and submits a report, the reviewer fact-checks it, and T3 posts it on the issue. End your turn afterward; T3 messages you when the issue needs a decision.',
+      'Team leader only: take your issue, with the acceptance criteria and the plan for its e2e test. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own, and T3 verifies staging and starts the tester with your e2e brief at the depth you plan. For an issue that asks for information rather than a change, pass track "research" and no e2e plan: the worker researches the public web and submits a report, the reviewer fact-checks it, and T3 posts it on the issue. For an issue whose work is testing what is already deployed (a walk-through, an exploratory test, a regression pass) with nothing to change in the repository, pass track "test" with an e2e plan at depth full or smoke: no worker, review or merge; T3 verifies staging and starts the tester. End your turn afterward; T3 messages you when the issue needs a decision.',
     parameters: Schema.Struct({
       track: Schema.optionalKey(
-        Schema.Literals(["code", "research"]).annotate({
+        Schema.Literals(["code", "research", "test"]).annotate({
           description:
-            "code (default): a change that is merged, deployed to staging and tested. research: a report read from the public web, fact-checked by the reviewer and posted on the issue, with no merge, staging or tester. Choose research when the issue asks for information (a comparison, an analysis, a recommendation) and nothing in the repository or its deployments changes.",
+            "code (default): a change that is merged, deployed to staging and tested. research: a report read from the public web, fact-checked by the reviewer and posted on the issue, with no merge, staging or tester. Choose research when the issue asks for information (a comparison, an analysis, a recommendation) and nothing in the repository or its deployments changes. test: an e2e run on what staging runs now, with no worker, code review or merge; T3 verifies that staging runs the head of origin's integration branch and starts the tester with the e2e brief. Choose test when the work is testing what is deployed and nothing in the repository changes.",
         }),
       ),
       brief: text.annotate({
@@ -90,7 +90,8 @@ export const AssistantToolkit = Toolkit.make(
             }),
           ),
         }).annotate({
-          description: "Required for track code. Omit for research; T3 ignores it there.",
+          description:
+            "Required for tracks code and test (test takes depth full or smoke). Omit for research; T3 ignores it there.",
         }),
       ),
     }),
@@ -237,7 +238,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_verify_staging", {
     description:
-      "Team leader, after the implementer reports the merge: check the saved deployment targets or custom check. T3 runs this check itself when the merge is reported on an issue taken with an e2e plan, and messages you when it fails; call it by hand to check again, for example once a failed deployment is fixed. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts the update on the Linear issue; in staging mode T3 then starts the tester with your planned brief (call assistant_start_e2e yourself for an issue taken without an e2e plan), and in worktree mode this is the delivery: T3 then puts the issue in review. While staging is still deploying T3 watches it for you and messages you when it fails (or, for an issue taken without an e2e plan, when it is verified), so end your turn; a deployment that failed comes back here for you to decide.",
+      "Team leader, after the implementer reports the merge (or, on a test issue, once taken): check the saved deployment targets or custom check. T3 runs this check itself when the merge is reported on an issue taken with an e2e plan, and messages you when it fails; call it by hand to check again, for example once a failed deployment is fixed. Every selected deployment must contain the approved commit and belong to origin's integration branch. Supply the targetIds this change affects, or omit to check all. On success T3 posts the update on the Linear issue; in staging mode T3 then starts the tester with your planned brief (call assistant_start_e2e yourself for an issue taken without an e2e plan), and in worktree mode this is the delivery: T3 then puts the issue in review. While staging is still deploying T3 watches it for you and messages you when it fails (or, for an issue taken without an e2e plan, when it is verified), so end your turn; a deployment that failed comes back here for you to decide.",
     parameters: Schema.Struct({
       targetIds: Schema.optionalKey(Schema.Array(text)),
     }),

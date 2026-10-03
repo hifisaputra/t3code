@@ -4,6 +4,7 @@ import {
   assistantParallelIssues,
   assistantTaskE2eDepth,
   assistantTaskE2eEnvironment,
+  assistantTaskTrack,
 } from "@t3tools/contracts";
 import type {
   AssistantInstructionAudience,
@@ -190,6 +191,10 @@ const SUBAGENT_RULES =
 const researchLead = (config: AssistantProjectConfig, access: string) =>
   `Take an issue as research, with track "research", when what it asks for is information, such as a comparison, an analysis or a recommendation, and nothing in the repository or its deployments changes. When an issue asks for both research and a build, take it as research and have the report recommend the build as a follow-up issue, or ask the person. Research that needs a login, a form or a paid source is declined or asked about, never attempted. For research the criteria are the questions the report must answer, each one a check a person can make by reading the report, such as "names the pricing tiers of each of the 5 competitors listed"; the brief gives the scope: which competitors or sources, the time frame, and what the person will decide with the answer. Leave out the e2e plan: a research issue has no merge, staging deploy or tester. A research worker reads the public web and submits the report, the code reviewer fact-checks it against its sources, and once the reviewer approves, T3 posts the report on the issue, moves it to review and closes the team. The worker and fact checker both run on ${config.workerModelSelection.instanceId}. Web access check for their worktree: ${access} When access is unverified, confirm a permitted public-page reader in that worker instance before taking research, or ask the person. Never infer the worker's access from your own tools.`;
 
+/** How the team leader takes an issue that only tests what is deployed. */
+const testLead = (config: AssistantProjectConfig, worktreeE2e: boolean) =>
+  `Take an issue as a test, with track "test", when its work is testing what is already deployed, such as a walk-through, an exploratory test or a regression pass, and nothing in the repository changes. Give the criteria as the checks the tester makes, and the e2e plan at depth full or smoke with its brief; a test issue has no worker, code review or merge. T3 moves the issue to started, verifies that staging runs this worktree's commit from origin/${config.baseBranch} (watching it while it deploys) and starts the tester on staging${worktreeE2e ? ", even though this project tests changes in the worktree" : ""}. On passed or partial T3 puts the issue in review. On failed, file each defect the run found as its own issue and deliver with assistant_deliver, saying where each went. Never make a change, such as a docs-only pull request, only to reach the tester.`;
+
 const issueHeader = (
   task: AssistantTask,
 ) => `Linear issue ${task.issue.identifier}: ${task.issue.title}
@@ -211,6 +216,7 @@ First decide how the team takes the issue. Read AGENTS.md and the repository's d
 ${task.dispatched ? "The person picked this issue, so you do not decline it: when something stands in the way, ask them." : "- Decline with assistant_decline_issue when the issue cannot be worked as it stands, and say what would change that: the missing details, the blocker, or the issue to finish first. T3 posts your reason on the issue and leaves it until someone changes it."}
 Follow the project instructions on which issues need the person first.
 ${researchLead(config, researchAccess)}
+${testLead(config, worktreeE2e)}
 Once you take it, the worker asks the code reviewer for review itself. The two trade rounds until the reviewer approves a commit${worktreeE2e ? `; the worker merges it into ${config.baseBranch} with a merge commit after the e2e check` : ` and the worker merges it into ${config.baseBranch} with a merge commit`}; do not relay messages between them.
 ${
   worktreeE2e
@@ -273,9 +279,11 @@ export const e2eInstructions = (
   const criteria = testedCriteriaList(task);
   return `${issueHeader(task)}
 You are the e2e tester for this issue, on the team its team leader runs. ${
-    worktreeE2e
-      ? "The change is committed in this worktree at the commit code review approved, and is not merged yet. Run the application from this worktree the way the project instructions describe for your team's slot (port, database, sign-in) and test it there the way a person would. Do not edit code, commit, push or merge."
-      : `The reviewed change is merged and T3 verified its deployment on staging${config.stagingUrl ? ` (${config.stagingUrl})` : ""}. Test it there the way a person would. Do not edit code, commit, push or merge, and do not change staging infrastructure, secrets or production.`
+    assistantTaskTrack(task) === "test"
+      ? `This issue is a test of what is already deployed: nothing in the repository changes, and T3 verified that staging${config.stagingUrl ? ` (${config.stagingUrl})` : ""} runs the latest ${config.baseBranch}. Test it there the way a person would. Do not edit code, commit, push or merge, and do not change staging infrastructure, secrets or production.`
+      : worktreeE2e
+        ? "The change is committed in this worktree at the commit code review approved, and is not merged yet. Run the application from this worktree the way the project instructions describe for your team's slot (port, database, sign-in) and test it there the way a person would. Do not edit code, commit, push or merge."
+        : `The reviewed change is merged and T3 verified its deployment on staging${config.stagingUrl ? ` (${config.stagingUrl})` : ""}. Test it there the way a person would. Do not edit code, commit, push or merge, and do not change staging infrastructure, secrets or production.`
   } Clean up test data you create, or list what you left. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team: the handoffs go through the assistant tools, and T3 posts the updates.${teamLine(config, task)}
 Read AGENTS.md and the full issue with Linear tools, and follow the project instructions for ${worktreeE2e ? "running the application from a worktree" : "staging access"}, test accounts and browser tooling. ${smoke ? `This run is a smoke test: check that the pages the change touches load, walk the happy path of each of these acceptance criteria, in this order, and watch the browser console and network for errors. The issue's other criteria are not part of this run. There is no limit on time or screenshots.\n${criteria}` : criteria ? `Check each of these acceptance criteria, in this order, and anything else the brief below asks for.\n${criteria}` : "Check every acceptance criterion in the issue and the brief below."} Save screenshots (PNG, JPEG or WebP) of the states that prove each visible behavior in ${evidenceDir}; they go on the Linear issue for the person, so frame the relevant part of the page. For non-visual changes record the exact request and response instead.
 Screenshots are the default. Record a video only when the proof is behaviour over time: a multi-step flow, validation while typing, drag and drop, an animation, a loading or empty state changing, a redirect, a modal closing and refreshing a list, or a bug that only shows while it happens (flicker, a double submit, a spinner that never stops). A final state such as a layout, copy, a message or a colour is a screenshot. Record with playwright-cli: \`video-start\` with a .webm file in ${evidenceDir}, \`video-show-actions\` so each click and fill is labelled, a \`video-chapter "<step>"\` before each step, and \`video-stop\` once the criterion is shown. Record one clip per criterion, never one recording of the whole run, and keep each under 10 MB, the most Linear takes per file: a shorter clip or a smaller viewport keeps it down. If the project's browser tooling cannot record, take a screenshot of each step instead.
@@ -321,7 +329,7 @@ export const e2eBrief = (task: AssistantTask, brief: string) =>
 ${task.testNotes ? `What the implementer says to test:\n${task.testNotes.planChanged ? "The implementer reported that the work moved away from the team leader's plan.\n" : ""}${task.testNotes.notes}` : ""}
 ${task.merge ? `What changed, per the implementer:\n${task.merge.summary}` : ""}
 ${task.codeReview?.summary ? `Code review notes:\n${task.codeReview.summary}` : ""}
-${task.e2e?.verdict === "failed" ? `Your previous run failed:\n${task.e2e.report}\nA fix has been reviewed${assistantTaskE2eEnvironment(task) === "worktree" ? "" : " and deployed"} since. Check the failure again, then the remaining criteria.` : ""}`.trim();
+${task.e2e?.verdict === "failed" ? `Your previous run failed:\n${task.e2e.report}\n${assistantTaskTrack(task) === "test" ? "" : `A fix has been reviewed${assistantTaskE2eEnvironment(task) === "worktree" ? "" : " and deployed"} since. `}Check the failure again, then the remaining criteria.` : ""}`.trim();
 
 /** The research questions, numbered the way the worker reports a check for each. */
 const questionList = (task: AssistantTask) =>

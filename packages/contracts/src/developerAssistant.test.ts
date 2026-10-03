@@ -296,6 +296,25 @@ describe("assistantTaskPipeline", () => {
     }
   });
 
+  it("skips code, review and merge for a test issue and goes from staging to the tester", () => {
+    const tested = (overrides: Partial<AssistantTask>) =>
+      task({ track: "test", turns: 0, stage: "lead", ...overrides });
+    const deployment = deployed.deployment;
+    expect(states(tested({}))).toBe(
+      "take:done code:skipped review:skipped merge:skipped staging:current e2e:todo",
+    );
+    expect(states(tested({ stage: "e2e", deployment }))).toBe(
+      "take:done code:skipped review:skipped merge:skipped staging:done e2e:current",
+    );
+    const e2e = { verdict: "failed", report: "", humanChecks: [], screenshots: [], at } as const;
+    const failed = assistantTaskPipeline(tested({ deployment, e2e }));
+    expect(failed?.at(-1)).toMatchObject({ state: "failed", note: "Failed on staging" });
+    expect(failed?.find((step) => step.key === "staging")?.note).toBe("aaaaaaa deployed");
+    expect(
+      states(tested({ status: "review", deployment, e2e: { ...e2e, verdict: "passed" } })),
+    ).toBe("take:done code:skipped review:skipped merge:skipped staging:done e2e:done");
+  });
+
   it("has none for work started before issues had review and e2e threads", () => {
     expect(assistantTaskPipeline(task())).toBeNull();
   });

@@ -5296,6 +5296,179 @@ it.effect("the leader delivers a failed staging run whose failures it handed on"
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
+/** A team leader takes its issue as a test of what staging runs. */
+const takeTest = (service: Service, t: AssistantTaskSummary, e2e: E2ePlan = plan) =>
+  Effect.gen(function* () {
+    yield* service.deliver();
+    return yield* service.acceptIssue(
+      leadOf(t),
+      "Walk the customer path on staging.",
+      ["The page loads"],
+      e2e,
+      "test",
+    );
+  });
+
+it.effect("a test issue starts the tester on the verified deployment with no worker", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const tester = assistantTaskThreadId(team, "e2e");
+    yield* service.deliver();
+    // Before it is taken, the steps that need a merge point to the track for a test.
+    for (const refused of [
+      service.verifyStaging(lead).pipe(Effect.flip),
+      service.startE2e(lead, "Open the page.").pipe(Effect.flip),
+    ])
+      assert.include((yield* refused).detail, 'track "test"');
+    const none = yield* takeTest(service, team, {
+      depth: "none",
+      brief: "",
+      reason: "Nothing to see.",
+    }).pipe(Effect.flip);
+    assert.include(none.detail, "full or smoke");
+    const unplanned = yield* service
+      .acceptIssue(lead, "Walk it", ["The page loads"], null, "test")
+      .pipe(Effect.flip);
+    assert.include(unplanned.detail, "Give the e2e plan");
+
+    const taken = yield* takeTest(service, team);
+    assert.equal(taken.track, "test");
+    assert.equal(taken.turns, 0);
+    assert.equal(taken.stage, "e2e");
+    assert.deepEqual(h.started, ["APP-1"]);
+    // Staging was checked for the worktree's commit, and that deployment is the one tested.
+    assert.equal(h.verified.at(-1)?.expectedRevision, h.git.head);
+    assert.deepEqual(h.verified.at(-1)?.targetIds, ["web"]);
+    assert.equal(taken.deployment?.revision, "a".repeat(40));
+    assert.isFalse(h.threads.has(taken.threadId));
+    const again = yield* takeTest(service, team).pipe(Effect.flip);
+    assert.include(again.detail, "already took this issue");
+    const leaderTurns = turnsOf(h, lead).length;
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    const run = turnsOf(h, tester).at(-1)!;
+    assert.include(run, "This issue is a test of what is already deployed");
+    assert.include(run, "New e2e run on the deployment of aaaaaaa");
+    assert.include(run, "Open the report page as the test admin.");
+    assert.include(
+      (yield* service.messageWorker(lead, "Fix it").pipe(Effect.flip)).detail,
+      "no implementation worker",
+    );
+    assert.include(
+      (yield* service.setE2eDepth({ taskId: taken.id, depth: "none" }).pipe(Effect.flip)).detail,
+      "full or smoke",
+    );
+
+    const delivered = yield* service.submitE2e(tester, {
+      checks: oneCheck("passed"),
+      report: "- The page loads: passed",
+      humanChecks: [],
+      screenshots: [],
+    });
+    assert.equal(delivered.status, "review");
+    assert.deepEqual(h.transitions, ["review"]);
+    assert.isFalse(h.threads.has(taken.threadId));
+    // Nothing shipped, so the description is left alone; the card names the deployment.
+    assert.lengthOf(h.descriptions, 0);
+    const card = h.comments.at(-1)!.body;
+    assert.match(card, /^\*\*✅ Verified on staging/);
+    assert.include(card, "Deployed commit: `aaaaaaa`");
+    assert.notInclude(card, "What shipped");
+    yield* endTurn(h, service, tester);
+    assert.lengthOf(turnsOf(h, lead), leaderTurns);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a test issue whose head is still deploying is watched, then the tester starts", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const tester = assistantTaskThreadId(team, "e2e");
+    h.setStaging("pending");
+    const taken = yield* takeTest(service, team);
+    assert.equal(taken.stage, "lead");
+    assert.equal(taken.deployWait?.commit, h.git.head);
+    assert.equal(taken.deployWait?.checks, 1);
+    assert.isNull(taken.deployment);
+    assert.isFalse(h.threads.has(tester));
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    const leaderTurns = turnsOf(h, lead).length;
+    yield* service.scan();
+    assert.equal((yield* taskById(service, taken.id)).deployWait?.checks, 2);
+    h.setStaging("healthy");
+    yield* service.scan();
+    const testing = yield* taskById(service, taken.id);
+    assert.isNull(testing.deployWait ?? null);
+    assert.equal(testing.stage, "e2e");
+    assert.include(turnsOf(h, tester).at(-1), "Open the report page as the test admin.");
+    assert.lengthOf(turnsOf(h, lead), leaderTurns);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a test issue runs on staging in a project that tests changes in the worktree", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setupWith({ e2eEnvironment: "worktree" });
+    const team = yield* activeTask(service);
+    const taken = yield* takeTest(service, team);
+    assert.equal(taken.e2eEnvironment, "staging");
+    assert.equal(taken.stage, "e2e");
+    assert.equal(taken.deployment?.revision, "a".repeat(40));
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a failed test issue reruns its tester or is delivered with the failures handed on", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    const lead = leadOf(team);
+    const tester = assistantTaskThreadId(team, "e2e");
+    h.setStaging("failed");
+    yield* takeTest(service, team);
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    // A deploy that will not verify is the leader's, who verifies again once it is fixed.
+    assert.include(turnsOf(h, lead).at(-1), "web deployed a failed build.");
+    h.setStaging("healthy");
+    const verified = yield* service.verifyStaging(lead);
+    assert.equal(verified.task.stage, "e2e");
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    const fail = () =>
+      service.submitE2e(tester, {
+        checks: oneCheck("failed", "Checkout answers 500."),
+        report: "- The page loads: failed",
+        humanChecks: [],
+        screenshots: [],
+      });
+    yield* fail();
+    yield* endTurn(h, service, tester);
+    yield* service.deliver();
+    assert.include(turnsOf(h, lead).at(-1), "nothing goes to a worker");
+    assert.match(h.comments.at(-1)!.body, /^\*\*❌ Failed on staging: back with the team leader/);
+
+    yield* service.startE2e(lead, "Open checkout again.");
+    yield* endTurn(h, service, lead);
+    yield* service.deliver();
+    const rerun = turnsOf(h, tester).at(-1)!;
+    assert.include(rerun, "Your previous run failed");
+    assert.notInclude(rerun, "A fix has been reviewed");
+    yield* fail();
+    yield* endTurn(h, service, tester);
+    yield* service.deliver();
+    const delivered = yield* service.deliverChecked(lead, "- Checkout 500: filed as SPI-210.");
+    assert.equal(delivered.status, "review");
+    assert.match(h.comments.at(-1)!.body, /delivered with the failures handed on/);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 it.effect("engineering checks hold a staging delivery until the leader settles them", () =>
   Effect.gen(function* () {
     const h = harness();

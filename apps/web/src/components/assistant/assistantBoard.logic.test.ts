@@ -825,6 +825,36 @@ describe("projectNoteSource", () => {
   });
 });
 
+describe("test issue board", () => {
+  const phase = (overrides: Partial<AssistantTask>) =>
+    describeTaskPhase({
+      task: task({ track: "test", turns: 0, stage: "lead", ...overrides }),
+      workerBusy: false,
+      workerNeedsInput: false,
+      step: null,
+      hasOpenDecision: false,
+    });
+  it("reads as taken with no worker, and says what the team leader decides", () => {
+    expect(phase({}).detail).toBe("T3 is verifying the staging deployment before the e2e check.");
+    expect(
+      phase({
+        deployment: {
+          revision: "a".repeat(40),
+          url: "https://staging.example.com",
+          verifiedAt: "",
+        },
+        e2e: {
+          verdict: "failed",
+          report: "",
+          humanChecks: [],
+          screenshots: [],
+          at: "2026-09-13T00:00:00.000Z",
+        },
+      }).detail,
+    ).toBe("It failed on staging. The team leader is deciding where the failures go.");
+  });
+});
+
 describe("research board", () => {
   const phase = (overrides: Partial<AssistantTask>, workerBusy = true) =>
     describeTaskPhase({

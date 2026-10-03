@@ -250,6 +250,8 @@ export function e2eComment(input: {
   readonly criteria?: ReadonlyArray<string> | null;
   /** The run was a smoke test of some criteria rather than the full test. */
   readonly smoke?: boolean;
+  /** The issue is a test of what staging runs, so a failure has no fix coming. */
+  readonly testOnly?: boolean;
 }): string {
   const { e2e } = input;
   const delivered = e2e.verdict !== "failed";
@@ -265,10 +267,12 @@ export function e2eComment(input: {
   const commit = worktree && e2e.commit ? e2e.commit.slice(0, 7) : null;
   const notes = (e2e.worthALook ?? []).map(oneLine).filter(Boolean);
   return sections(
-    // A partial run whose open criteria were all engineering checks leaves the person nothing to check.
-    (input.smoke ? SMOKE_HEADLINES : HEADLINES)[worktree ? "worktree" : "staging"][
-      e2e.verdict === "partial" && !e2e.humanChecks.length ? "passed" : e2e.verdict
-    ],
+    input.testOnly && e2e.verdict === "failed"
+      ? `**❌ ${input.smoke ? "Smoke test failed" : "Failed"} on staging: back with the team leader to hand the failures on**`
+      : // A partial run whose open criteria were all engineering checks leaves the person nothing to check.
+        (input.smoke ? SMOKE_HEADLINES : HEADLINES)[worktree ? "worktree" : "staging"][
+          e2e.verdict === "partial" && !e2e.humanChecks.length ? "passed" : e2e.verdict
+        ],
     e2e.humanChecks.length
       ? `**Check before accepting**\n\n${e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
       : null,

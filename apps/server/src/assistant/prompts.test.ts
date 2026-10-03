@@ -211,6 +211,41 @@ describe("the team leader and the staging deploy", () => {
   });
 });
 
+describe("a test issue", () => {
+  it("has the team leader take a test of what is deployed with track test", () => {
+    for (const issue of [task, { ...task, e2eEnvironment: "worktree" as const }]) {
+      const lead = leadInstructions(config, issue);
+      expect(lead).toContain('Take an issue as a test, with track "test"');
+      expect(lead).toContain("Never make a change, such as a docs-only pull request");
+    }
+    expect(leadInstructions(config, { ...task, e2eEnvironment: "worktree" })).toContain(
+      "even though this project tests changes in the worktree",
+    );
+  });
+
+  it("tells the tester nothing changed, and a rerun no fix came", () => {
+    const tested: AssistantTask = { ...withCriteria, track: "test" };
+    const instructions = e2eInstructions(config, tested, "/evidence", "Walk checkout.");
+    expect(instructions).toContain("This issue is a test of what is already deployed");
+    expect(instructions).not.toContain("The reviewed change is merged");
+    const rerun = e2eBrief(
+      {
+        ...tested,
+        e2e: {
+          verdict: "failed",
+          report: "Checkout fails.",
+          humanChecks: [],
+          screenshots: [],
+          at: timestamp,
+        },
+      },
+      "Walk checkout.",
+    );
+    expect(rerun).toContain("Your previous run failed:\nCheckout fails.\nCheck the failure again");
+    expect(rerun).not.toContain("A fix has been reviewed");
+  });
+});
+
 describe("the e2e plan and the implementer's test notes", () => {
   const worktree: AssistantTask = { ...withCriteria, e2eEnvironment: "worktree" };
   const planned: AssistantTask = {

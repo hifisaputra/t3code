@@ -317,23 +317,28 @@ export function describeTaskPhase(input: {
                 detail: step,
               }
             : { tone: "idle", label: "E2E check is next", detail: null };
-        case "lead":
+        case "lead": {
+          // A test issue briefs no worker, so its track is what says it was taken.
+          const taken = task.turns > 0 || task.track === "test";
           if (workerBusy)
             return {
               tone: "active",
-              label: task.turns === 0 ? "Reading the issue" : "Team leader is deciding",
+              label: taken ? "Team leader is deciding" : "Reading the issue",
               detail: step,
             };
           return {
             tone: "idle",
             label: "With the team leader",
-            detail:
-              task.turns === 0
-                ? "It decides whether the team takes the issue."
-                : task.e2e?.verdict === "failed"
-                  ? inWorktree
+            detail: !taken
+              ? "It decides whether the team takes the issue."
+              : task.e2e?.verdict === "failed"
+                ? task.track === "test"
+                  ? "It failed on staging. The team leader is deciding where the failures go."
+                  : inWorktree
                     ? "It failed in the worktree. The team leader is deciding on a fix."
                     : "It failed on staging. The team leader is deciding on a fix."
+                : task.track === "test" && !task.deployment
+                  ? "T3 is verifying the staging deployment before the e2e check."
                   : task.merge && !task.deployment
                     ? testsInWorktree
                       ? "Merged after the e2e check passed. The team leader is checking the staging deploy."
@@ -342,6 +347,7 @@ export function describeTaskPhase(input: {
                       ? "Code review approved the change. The team leader starts the e2e check in the worktree."
                       : "The team leader is deciding the next step.",
           };
+        }
       }
     }
   }

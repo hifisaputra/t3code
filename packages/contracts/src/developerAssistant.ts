@@ -492,9 +492,11 @@ export type AssistantDeployWait = typeof AssistantDeployWait.Type;
 /**
  * What an issue delivers. code: a change merged, deployed to staging and
  * tested. research: a report read from the public web, fact-checked by the
- * reviewer and posted on the issue; no merge, staging or tester.
+ * reviewer and posted on the issue; no merge, staging or tester. test: an e2e
+ * run on what staging already runs, such as a walk-through or a regression
+ * pass; no worker, code review or merge.
  */
-export const AssistantTaskTrack = Schema.Literals(["code", "research"]);
+export const AssistantTaskTrack = Schema.Literals(["code", "research", "test"]);
 export type AssistantTaskTrack = typeof AssistantTaskTrack.Type;
 
 /** The most characters a research report may have; T3 refuses a longer one. */
@@ -1138,6 +1140,57 @@ function researchPipeline(task: AssistantTaskSummary): ReadonlyArray<PipelineSte
   }));
 }
 
+/**
+ * Where a test issue is: it tests what staging already runs, so code, review
+ * and merge stay in their places, skipped, and staging is verified at take.
+ */
+function testPipeline(task: AssistantTaskSummary): ReadonlyArray<PipelineStep> {
+  const skipped = new Set<PipelineStepKey>(["code", "review", "merge"]);
+  const steps = LED_PIPELINE.filter((step) => !skipped.has(step.key));
+  const e2eFailed = task.e2e?.verdict === "failed";
+  const confirming = assistantTaskEngineeringChecksPending(task) > 0;
+  const at =
+    task.status === "review" || task.status === "accepted"
+      ? steps.length
+      : task.deployment || task.stage === "e2e"
+        ? steps.length - 1
+        : steps.length - 2;
+  const e2eNote = confirming
+    ? "Team is confirming engineering checks"
+    : task.e2e && task.stage !== "e2e"
+      ? e2eFailed
+        ? "Failed on staging"
+        : task.e2e.verdict === "partial"
+          ? "Passed, with checks for you"
+          : "Passed"
+      : null;
+  return LED_PIPELINE.map((step): PipelineStep => {
+    if (skipped.has(step.key))
+      return { ...step, state: "skipped", note: step.key === "code" ? "Test only" : null };
+    const index = steps.findIndex((s) => s.key === step.key);
+    return {
+      ...step,
+      ...(step.key === "e2e" && assistantTaskE2eDepth(task) === "smoke"
+        ? { label: "E2E test (smoke)" }
+        : {}),
+      state:
+        index < at
+          ? "done"
+          : index > at
+            ? "todo"
+            : step.key === "e2e" && e2eFailed && task.stage === "lead"
+              ? "failed"
+              : "current",
+      note:
+        step.key === "staging" && task.deployment && index < at
+          ? `${task.deployment.revision.slice(0, 7)} deployed`
+          : step.key === "e2e"
+            ? e2eNote
+            : null,
+    };
+  });
+}
+
 /** The note on a skipped e2e step; a reason longer than this stays in the task's plan. */
 const SKIPPED_E2E_REASON_MAX = 48;
 
@@ -1152,6 +1205,7 @@ export function assistantTaskPipeline(
 ): ReadonlyArray<PipelineStep> | null {
   if (task.stage === undefined) return null;
   if (assistantTaskTrack(task) === "research") return researchPipeline(task);
+  if (assistantTaskTrack(task) === "test") return testPipeline(task);
   const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
   const depth = assistantTaskE2eDepth(task);
   const skipsE2e = depth === "none";

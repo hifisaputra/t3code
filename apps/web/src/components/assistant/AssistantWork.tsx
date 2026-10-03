@@ -292,7 +292,8 @@ function E2ePlanDetails({
         if (next === "full" || next === "smoke" || next === "none") void choose(next);
       }}
     >
-      {E2E_DEPTHS.map((depth) => (
+      {/* A test issue is its e2e run, so it has no depth none. */}
+      {E2E_DEPTHS.filter((depth) => task.track !== "test" || depth !== "none").map((depth) => (
         <Toggle key={depth} value={depth}>
           {e2eDepthLabel(depth)}
         </Toggle>

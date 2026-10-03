@@ -382,7 +382,9 @@ export function AssistantReviewView({
                 placeholder={
                   task.track === "research"
                     ? "What should the team research or correct?"
-                    : "What should change? A fresh worker starts from the current integration branch."
+                    : task.track === "test"
+                      ? "What should the team test again?"
+                      : "What should change? A fresh worker starts from the current integration branch."
                 }
                 value={feedback}
                 onChange={(event) => setFeedback(event.target.value)}
