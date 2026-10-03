@@ -299,6 +299,99 @@ it.effect("turns a GraphQL error into an operation error that never repeats the 
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("names the field Linear rejected and its explanation", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json(
+        {
+          errors: [
+            {
+              message: "Argument Validation Error",
+              path: ["projectCreate"],
+              extensions: {
+                code: "INVALID_INPUT",
+                type: "invalid input",
+                userError: true,
+                userPresentableMessage: "name must be shorter than or equal to 80 characters",
+                validationErrors: [
+                  {
+                    target: { name: "x".repeat(120), teamIds: ["team-1"] },
+                    value: "x".repeat(120),
+                    property: "name",
+                    children: [],
+                    constraints: {
+                      maxLength: "name must be shorter than or equal to 80 characters",
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+          data: null,
+        },
+        { status: 400 },
+      ),
+  });
+
+  return Effect.gen(function* () {
+    const api = yield* LinearApi.LinearApi;
+
+    const error = yield* Effect.flip(
+      api.saveResource({ kind: "project", name: "x".repeat(120), teamIds: ["team-1"] }),
+    );
+
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(
+      error.message,
+      "Linear operation saveResource failed: Linear rejected the request: Argument Validation Error. name must be shorter than or equal to 80 characters. Rejected field: name",
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads nested rejected fields and keeps a long rejection short", () => {
+  const constraint = (property: string) => ({
+    property,
+    children: [],
+    constraints: {
+      isUuid: `${property} must be a UUID${property === "teamId" ? "" : ` ${"because ".repeat(30)}`}`,
+    },
+  });
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({
+        errors: [
+          {
+            message: "Argument Validation Error",
+            extensions: {
+              code: "INVALID_INPUT",
+              validationErrors: [
+                {
+                  property: "input",
+                  children: ["teamId", "stateId", "projectId", "cycleId"].map(constraint),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+
+    const error = yield* Effect.flip(linear.createIssue({ teamId: "DEL", title: "Broken" }));
+
+    assert.instanceOf(error, LinearOperationError);
+    assert.isTrue(
+      error.detail.startsWith(
+        "Linear rejected the request: Argument Validation Error. Rejected fields: input.teamId (teamId must be a UUID), input.stateId (stateId must be a UUID because",
+      ),
+    );
+    assert.isTrue(error.detail.endsWith("…"));
+    assert.isAtMost(error.detail.length, 400);
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("fails cleanly when Linear's response is larger than the read cap", () => {
   const oversized = `{"data":{"issues":{"nodes":[]}},"padding":"${"x".repeat(5 * 1024 * 1024)}"}`;
   const { layer } = makeLayer({ response: () => new Response(oversized) });

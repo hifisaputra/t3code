@@ -12,6 +12,7 @@ import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
@@ -48,6 +49,9 @@ const MAX_ISSUE_LIMIT = 100;
 const DEFAULT_LIST_STATE_TYPES: ReadonlyArray<LinearWorkflowStateType> = ["unstarted", "started"];
 /** Details reach the UI verbatim, so a long GraphQL message is cut rather than wrapped forever. */
 const MAX_DETAIL_LENGTH = 200;
+/** A rejection with Linear's explanation and the fields it names still fits a line or two. */
+const MAX_REJECTION_LENGTH = 400;
+const MAX_REJECTED_FIELDS = 3;
 /** A hung exchange is cut off so it can be retried instead of holding the caller until it gives up. */
 const ATTEMPT_TIMEOUT = "20 seconds";
 /** Linear's brief 503s and dropped sockets clear within a second or two, so a couple of retries suffice. */
@@ -88,7 +92,17 @@ const LinearApiBaseUrl = Config.String("T3CODE_LINEAR_API_BASE_URL").pipe(
 
 const RawGraphQLError = Schema.Struct({
   message: Schema.optional(Schema.String),
-  extensions: Schema.optional(Schema.Struct({ code: Schema.optional(Schema.String) })),
+  extensions: Schema.optional(
+    Schema.Struct({
+      code: Schema.optional(Schema.String),
+      type: Schema.optional(Schema.String),
+      userPresentableMessage: Schema.optional(Schema.String),
+      // class-validator output for an "Argument Validation Error", read loosely
+      // in `rejectedFields`; some servers nest it under `exception`.
+      validationErrors: Schema.optional(Schema.Unknown),
+      exception: Schema.optional(Schema.Unknown),
+    }),
+  ),
 });
 
 const RawGraphQLEnvelope = Schema.Struct({
@@ -576,10 +590,72 @@ const failureFields = (failure: LinearRequestFailure) => ({
 });
 
 /** Linear's own words, flattened to one line the UI can print without leaking a body dump. */
-function sanitizeDetail(value: string): string {
+function sanitizeDetail(value: string, maxLength = MAX_DETAIL_LENGTH): string {
   const collapsed = value.replace(/\s+/gu, " ").trim();
-  if (collapsed.length <= MAX_DETAIL_LENGTH) return collapsed;
-  return `${collapsed.slice(0, MAX_DETAIL_LENGTH - 1)}…`;
+  if (collapsed.length <= maxLength) return collapsed;
+  return `${collapsed.slice(0, maxLength - 1)}…`;
+}
+
+/**
+ * The fields a validation error names, as dotted paths with the constraint
+ * messages Linear gave for each. Nested inputs report through `children`.
+ */
+function rejectedFields(
+  extensions: NonNullable<typeof RawGraphQLError.Type.extensions>,
+): Array<{ readonly path: string; readonly problems: ReadonlyArray<string> }> {
+  const roots =
+    extensions.validationErrors ??
+    (Predicate.isObject(extensions.exception) ? extensions.exception.validationErrors : undefined);
+  const fields: Array<{ readonly path: string; readonly problems: ReadonlyArray<string> }> = [];
+  const visit = (node: unknown, prefix: string) => {
+    if (!Predicate.isObject(node) || typeof node.property !== "string") return;
+    const path = prefix.length > 0 ? `${prefix}.${node.property}` : node.property;
+    const problems = Predicate.isObject(node.constraints)
+      ? Object.values(node.constraints).filter((value) => typeof value === "string")
+      : [];
+    const children = Array.isArray(node.children) ? node.children : [];
+    if (problems.length > 0 || children.length === 0) fields.push({ path, problems });
+    for (const child of children) visit(child, path);
+  };
+  if (Array.isArray(roots)) for (const root of roots) visit(root, "");
+  return fields;
+}
+
+/**
+ * What the agent reads when Linear refuses a request: Linear's message, its
+ * user-presentable explanation when that says more, and the fields it
+ * rejected, so a failed save can be fixed rather than guessed at.
+ */
+function rejectionDetail(error: typeof RawGraphQLError.Type): string {
+  const message = sanitizeDetail(error.message || error.extensions?.type || "");
+  const presentable = sanitizeDetail(error.extensions?.userPresentableMessage ?? "");
+  const parts = [message, presentable].filter(
+    (part, index, all) => part.length > 0 && all.indexOf(part) === index,
+  );
+  const fields = (error.extensions ? rejectedFields(error.extensions) : []).map(
+    ({ path, problems }) => {
+      // A constraint the explanation already states is not repeated.
+      const unsaid = problems.filter((problem) => !presentable.includes(problem));
+      return unsaid.length > 0
+        ? `${path} (${unsaid.map((problem) => sanitizeDetail(problem)).join("; ")})`
+        : path;
+    },
+  );
+  if (fields.length > 0) {
+    const more =
+      fields.length > MAX_REJECTED_FIELDS ? ` and ${fields.length - MAX_REJECTED_FIELDS} more` : "";
+    parts.push(
+      `Rejected ${fields.length === 1 ? "field" : "fields"}: ${fields.slice(0, MAX_REJECTED_FIELDS).join(", ")}${more}`,
+    );
+  }
+  if (parts.length === 0) return "Linear rejected the request.";
+  const sentences = parts.map((part, index) =>
+    index < parts.length - 1 && !/[.!?:]$/u.test(part) ? `${part}.` : part,
+  );
+  return sanitizeDetail(
+    `Linear rejected the request: ${sentences.join(" ")}`,
+    MAX_REJECTION_LENGTH,
+  );
 }
 
 function isEntityNotFound(failure: LinearRequestFailure): boolean {
@@ -1019,15 +1095,11 @@ const make = Effect.gen(function* () {
         });
       }
       if (graphQLError !== undefined) {
-        const detail = sanitizeDetail(graphQLError.message ?? "");
         return yield* new LinearRequestFailure({
           operation,
           code,
           transient,
-          detail:
-            detail.length > 0
-              ? `Linear rejected the request: ${detail}`
-              : "Linear rejected the request.",
+          detail: rejectionDetail(graphQLError),
         });
       }
       if (response.status < 200 || response.status >= 300) {
