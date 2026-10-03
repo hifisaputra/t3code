@@ -597,6 +597,16 @@ const inspectWorkspaceImage = Effect.fn("LinearToolkit.inspectWorkspaceImage")(f
   };
 });
 
+/** An attachment is a link someone opens from Linear, so only web addresses qualify. */
+const isWebUrl = (value: string): boolean => {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
 const isResourceId = (value: string | undefined) =>
   value !== undefined &&
   /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value.trim());
@@ -635,6 +645,21 @@ const issueProject = Effect.fn("LinearToolkit.issueProject")(function* (
       detail: "This issue has no project. Pass a project explicitly.",
     });
   return issue.project.id;
+});
+
+/** The linked issue's project, named and linked, for writes that default to it. */
+const linkedIssueProject = Effect.fn("LinearToolkit.linkedIssueProject")(function* (
+  operation: string,
+  scope: Scope,
+) {
+  const issue = yield* resolveIssue(operation, scope, undefined);
+  if (issue.project === null) {
+    return yield* new LinearOperationError({
+      operation,
+      detail: `${issue.identifier} has no project. Pass a project explicitly.`,
+    });
+  }
+  return issue.project;
 });
 
 function validDate(value: string): boolean {
@@ -993,6 +1018,157 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
   save_milestone: (input) => saveResource("milestone", input),
   update_cycle: (input) => saveResource("cycle", input),
   save_issue_label: (input) => saveResource("label", input),
+
+  list_documents: (input) =>
+    Effect.gen(function* () {
+      yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const project = named(input.project);
+      return yield* linear.listDocuments({
+        query: input.query,
+        cursor: input.cursor,
+        limit: input.limit,
+        ...(project ? { projectId: (yield* resolveResource("project", project)).id } : {}),
+      });
+    }),
+
+  get_document: (input) =>
+    Effect.gen(function* () {
+      yield* McpInvocationContext.requireMcpCapability("linear");
+      return yield* (yield* LinearApi.LinearApi).getDocument(input.id);
+    }),
+
+  save_document: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const title = named(input.title);
+      if (input.title !== undefined && title === undefined) {
+        return yield* new LinearOperationError({
+          operation: "save_document",
+          detail: "A document title must not be blank.",
+        });
+      }
+      // Reading the document first turns a slug or link into its UUID, and
+      // gives the approval the title and link of what is being changed.
+      const current = input.id === undefined ? undefined : yield* linear.getDocument(input.id);
+      if (current === undefined && title === undefined) {
+        return yield* new LinearOperationError({
+          operation: "save_document",
+          detail: "A new document needs a title.",
+        });
+      }
+      const requestedProject = named(input.project);
+      const project =
+        requestedProject !== undefined
+          ? yield* resolveResource("project", requestedProject)
+          : current === undefined
+            ? yield* linkedIssueProject("save_document", scope)
+            : undefined;
+      if (
+        current !== undefined &&
+        title === undefined &&
+        input.content === undefined &&
+        project === undefined
+      ) {
+        return yield* new LinearOperationError({
+          operation: "save_document",
+          detail: "Pass at least one field to update.",
+        });
+      }
+      const patch = {
+        ...(title !== undefined ? { title } : {}),
+        ...(input.content !== undefined ? { content: input.content } : {}),
+        ...(project !== undefined ? { projectId: project.id } : {}),
+      };
+      return yield* confirmedWrite(
+        "save_document",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary:
+              current === undefined ? "Create document" : `Update document: ${current.title}`,
+            ...(current === undefined
+              ? {}
+              : { record: { label: current.title, url: current.url } }),
+            fields: [
+              ...(title === undefined ? [] : [{ label: "Title", value: title }]),
+              ...(project === undefined
+                ? []
+                : [{ label: "Project", value: project.name ?? project.id }]),
+              // Content replaces the whole document, so it is reviewed whole.
+              ...(input.content === undefined
+                ? []
+                : [{ label: "Content", value: input.content, format: "markdown" as const }]),
+            ],
+          },
+          args: { ...patch, ...(current === undefined ? {} : { id: current.id }) },
+        },
+        linear.saveDocument({ ...patch, ...(current === undefined ? {} : { id: current.id }) }),
+      );
+    }),
+
+  delete_document: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const document = yield* linear.getDocument(input.id);
+      yield* confirmedWrite(
+        "delete_document",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Delete document: ${document.title}`,
+            record: { label: document.title, url: document.url },
+            fields: [
+              { label: "Title", value: document.title },
+              ...(document.project === null
+                ? []
+                : [{ label: "Project", value: document.project.name ?? document.project.id }]),
+            ],
+          },
+          args: { id: document.id },
+        },
+        linear.deleteDocument(document.id),
+      );
+      return { id: document.id, title: document.title };
+    }),
+
+  restore_document: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const document = yield* linear.getDocument(input.id);
+      // Nothing to bring back, so nothing to ask the user about.
+      if (!document.trashed) {
+        return yield* new LinearOperationError({
+          operation: "restore_document",
+          detail: `"${document.title}" is not in Linear's trash.`,
+        });
+      }
+      return yield* confirmedWrite(
+        "restore_document",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Restore document: ${document.title}`,
+            record: { label: document.title, url: document.url },
+            fields: [
+              { label: "Title", value: document.title },
+              ...(document.project === null
+                ? []
+                : [{ label: "Project", value: document.project.name ?? document.project.id }]),
+            ],
+          },
+          args: { id: document.id },
+        },
+        linear.restoreDocument(document.id),
+      );
+    }),
+
   get_issue: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
@@ -1039,8 +1215,19 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
       const id = named(input.id);
+      const parentId = named(input.parentId);
+      if (id !== undefined && parentId !== undefined) {
+        return yield* new LinearOperationError({
+          operation: "save_comment",
+          detail:
+            "Pass parentId only when creating a reply; an edited comment stays in its thread.",
+        });
+      }
       const comment = id === undefined ? undefined : yield* linear.getComment(id);
-      if (comment !== undefined && comment.issue === null) {
+      const parent = parentId === undefined ? undefined : yield* linear.getComment(parentId);
+      // The comment being edited, or the one being replied to, decides the issue.
+      const anchor = comment ?? parent;
+      if (anchor !== undefined && anchor.issue === null) {
         return yield* new LinearOperationError({
           operation: "save_comment",
           detail: "This comment does not belong to an issue.",
@@ -1049,39 +1236,88 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const issue = yield* resolveIssue(
         "save_comment",
         scope,
-        named(input.issueId) ?? comment?.issue?.id,
+        named(input.issueId) ?? anchor?.issue?.id,
       );
-      if (comment !== undefined && comment.issue?.id !== issue.id) {
+      if (anchor !== undefined && anchor.issue?.id !== issue.id) {
         return yield* new LinearOperationError({
           operation: "save_comment",
           detail: "The comment does not belong to the specified issue.",
         });
       }
       const body = input.body.trim();
-      if (body.length === 0 || (input.id !== undefined && id === undefined)) {
+      if (
+        body.length === 0 ||
+        (input.id !== undefined && id === undefined) ||
+        (input.parentId !== undefined && parentId === undefined)
+      ) {
         return yield* new LinearOperationError({
           operation: "save_comment",
-          detail: "Comment body and supplied comment id must not be blank.",
+          detail: "Comment body and supplied comment ids must not be blank.",
         });
       }
+      // Linear threads are one level deep, so a reply to a reply is posted
+      // under the comment that starts the thread.
+      const threadRoot = parent === undefined ? undefined : (parent.parentId ?? parent.id);
       return yield* confirmedWrite(
         "save_comment",
         scope,
         {
           appName: "Linear",
           change: {
-            summary: `${comment === undefined ? "Comment on" : "Edit comment on"} ${issue.identifier}`,
-            record: { label: issue.identifier, url: comment?.url ?? issue.url },
+            summary: `${comment !== undefined ? "Edit comment on" : parent !== undefined ? "Reply on" : "Comment on"} ${issue.identifier}`,
+            record: { label: issue.identifier, url: comment?.url ?? parent?.url ?? issue.url },
             // The comment lands as the agent wrote it, so it is reviewed the
             // same way: as the markdown Linear will render.
             fields: [{ label: "Comment", value: body, format: "markdown" }],
           },
-          args: { ...input, issueId: issue.id },
+          args: {
+            ...input,
+            issueId: issue.id,
+            ...(threadRoot === undefined ? {} : { parentId: threadRoot }),
+          },
         },
-        comment === undefined
-          ? linear.createComment({ issueId: issue.id, body })
-          : linear.updateComment({ id: comment.id, body }),
+        comment !== undefined
+          ? linear.updateComment({ id: comment.id, body })
+          : linear.createComment({
+              issueId: issue.id,
+              body,
+              ...(threadRoot === undefined ? {} : { parentId: threadRoot }),
+            }),
       );
+    }),
+
+  delete_comment: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const comment = yield* linear.getComment(input.id.trim());
+      if (comment.issue === null) {
+        return yield* new LinearOperationError({
+          operation: "delete_comment",
+          detail: "This comment does not belong to an issue.",
+        });
+      }
+      const issue = yield* resolveIssue("delete_comment", scope, comment.issue.id);
+      // Whether the caller wrote the comment is Linear's call: it refuses
+      // anyone else, and the refusal reaches the agent as it is.
+      yield* confirmedWrite(
+        "delete_comment",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Delete comment on ${issue.identifier}`,
+            record: { label: issue.identifier, url: comment.url },
+            fields: [{ label: "Comment", value: comment.body, format: "markdown" }],
+          },
+          args: { id: comment.id, issueId: issue.id },
+        },
+        linear.deleteComment(comment.id),
+      );
+      return {
+        id: comment.id,
+        issue: { id: issue.id, identifier: issue.identifier, url: issue.url },
+      };
     }),
 
   upload_image: (input) =>
@@ -1119,6 +1355,79 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         ),
       );
       return { url, name: image.fileName, markdown: `![${alt}](${url})` };
+    }),
+
+  create_attachment: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const url = input.url.trim();
+      if (!isWebUrl(url)) {
+        return yield* new LinearOperationError({
+          operation: "create_attachment",
+          detail: `"${url}" is not a link Linear can open. Pass a full http or https URL.`,
+        });
+      }
+      const title = named(input.title);
+      if (title === undefined) {
+        return yield* new LinearOperationError({
+          operation: "create_attachment",
+          detail: "Pass a non-empty title for the link.",
+        });
+      }
+      const subtitle = named(input.subtitle);
+      const issue = yield* resolveIssue("create_attachment", scope, named(input.issueId));
+      // Linear keys an attachment by issue and URL, so this one replaces its
+      // match rather than adding a second; the approval says which happens.
+      const replaces = issue.attachments?.some((attachment) => attachment.url === url) ?? false;
+      return yield* confirmedWrite(
+        "create_attachment",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `${replaces ? "Update link on" : "Attach link to"} ${issue.identifier}`,
+            record: { label: issue.identifier, url: issue.url },
+            fields: [
+              { label: "Title", value: title },
+              { label: "URL", value: url },
+              ...(subtitle === undefined ? [] : [{ label: "Subtitle", value: subtitle }]),
+            ],
+          },
+          args: { ...input, issueId: issue.id },
+        },
+        linear.createAttachment({
+          issueId: issue.id,
+          url,
+          title,
+          ...(subtitle === undefined ? {} : { subtitle }),
+        }),
+      );
+    }),
+
+  delete_attachment: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("linear");
+      const linear = yield* LinearApi.LinearApi;
+      const attachment = yield* linear.getAttachment(input.id.trim());
+      yield* confirmedWrite(
+        "delete_attachment",
+        scope,
+        {
+          appName: "Linear",
+          change: {
+            summary: `Remove link from ${attachment.issue.identifier}`,
+            record: { label: attachment.issue.identifier, url: attachment.issue.url },
+            fields: [
+              { label: "Title", value: attachment.title },
+              { label: "URL", value: attachment.url },
+            ],
+          },
+          args: { id: attachment.id, issueId: attachment.issue.id },
+        },
+        linear.deleteAttachment(attachment.id),
+      );
+      return { id: attachment.id, issue: attachment.issue };
     }),
 
   save_issue: (input) =>

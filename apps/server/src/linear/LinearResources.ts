@@ -94,3 +94,31 @@ export type LinearResourceSaveInput = {
   targetDate?: string | null;
   color?: string | undefined;
 };
+
+/**
+ * Documents have a title and markdown content where the resources above have
+ * a name and a description, so they keep their own shapes and queries.
+ * A page of them leaves the content out; `get_document` reads it.
+ */
+export const LinearDocumentSummary = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+  url: Schema.String,
+  project: Schema.NullOr(Ref),
+  /** ISO 8601. */
+  updatedAt: Schema.String,
+});
+export type LinearDocumentSummary = typeof LinearDocumentSummary.Type;
+export const LinearDocument = Schema.Struct({
+  ...LinearDocumentSummary.fields,
+  /** Markdown, as Linear stores it. */
+  content: Schema.NullOr(Schema.String),
+  /** In Linear's trash after `delete_document`, until `restore_document` brings it back. */
+  trashed: Schema.Boolean,
+});
+export type LinearDocument = typeof LinearDocument.Type;
+export const LinearDocumentPage = Schema.Struct({
+  nodes: Schema.Array(LinearDocumentSummary),
+  pageInfo: LinearResourcePage.fields.pageInfo,
+});
+export type LinearDocumentPage = typeof LinearDocumentPage.Type;

@@ -1,5 +1,11 @@
-import { LinearResource, LinearResourcePage } from "../../../linear/LinearResources.ts";
 import {
+  LinearDocument,
+  LinearDocumentPage,
+  LinearResource,
+  LinearResourcePage,
+} from "../../../linear/LinearResources.ts";
+import {
+  LinearIssueAttachment,
   LinearIssueComment,
   LinearIssueDetail,
   LinearIssueNotFoundError,
@@ -75,6 +81,10 @@ const linearTool = <T extends Tool.Any>(tool: T): T =>
 const readonlyLinearTool = <T extends Tool.Any>(tool: T): T =>
   linearTool(tool).annotate(Tool.Readonly, true).annotate(Tool.Idempotent, true) as T;
 
+/** A Linear write that removes something, which clients may treat with extra care. */
+const destructiveLinearTool = <T extends Tool.Any>(tool: T): T =>
+  linearTool(tool).annotate(Tool.Destructive, true) as T;
+
 /**
  * Parameter text. `TrimmedNonEmptyString` is a decoding transformation, and a
  * description annotated onto one never reaches the JSON Schema the agent
@@ -112,7 +122,7 @@ const IssueRef = Schema.Struct({
 const GetIssueTool = readonlyLinearTool(
   Tool.make("get_issue", {
     description:
-      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, relations to other issues, and its comments. Up to 250 comments, sub-issues, and relations each are read; when an issue has more, truncated names the lists that were cut short. An archived issue still reads, with archivedAt set. Each relation reads from this issue's side: blocks, blockedBy, related, duplicateOf, or duplicatedBy. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
+      "Read one Linear issue in full: description, workflow state, team, labels, parent, sub-issues, relations to other issues, attachments (the links in its sidebar, such as pull requests), and its comments. Up to 250 comments, sub-issues, and relations each are read; when an issue has more, truncated names the lists that were cut short. An archived issue still reads, with archivedAt set. Each relation reads from this issue's side: blocks, blockedBy, related, duplicateOf, or duplicatedBy. Pass id as an identifier such as DEL-123 or a Linear UUID; omit id and the issue this thread is linked to is used.",
     parameters: Schema.Struct({ id: IssueIdParameter }),
     success: LinearIssueDetail,
     failure: LinearToolError,
@@ -123,7 +133,7 @@ const GetIssueTool = readonlyLinearTool(
 const ListCommentsTool = readonlyLinearTool(
   Tool.make("list_comments", {
     description:
-      "List the comments on a Linear issue, with each comment's author and URL. Up to 250 are read; truncated is true when the issue has more. Pass issueId as an identifier such as DEL-123 or a Linear UUID; omit it and the issue this thread is linked to is used.",
+      "List the comments on a Linear issue, with each comment's author and URL. A reply carries parentId, the comment that starts its thread, so a thread can be followed and answered with save_comment. Up to 250 are read; truncated is true when the issue has more. Pass issueId as an identifier such as DEL-123 or a Linear UUID; omit it and the issue this thread is linked to is used.",
     parameters: Schema.Struct({ issueId: IssueIdParameter }),
     success: Schema.Struct({
       issue: IssueRef,
@@ -187,10 +197,15 @@ const ListMyIssuesTool = readonlyLinearTool(
 const SaveCommentTool = linearTool(
   Tool.make("save_comment", {
     description:
-      "Create or edit a Linear comment. On a developer assistant team thread it is posted as the Linear app while the app is connected; otherwise as the connected Linear account. Pass id from list_comments to replace an existing comment body; omit id to create a comment. For creation, issueId defaults to the issue this thread is linked to. For editing, the comment identifies its issue; an optional issueId must match. Linear only lets a comment's author edit it.",
+      "Create or edit a Linear comment. On a developer assistant team thread it is posted as the Linear app while the app is connected; otherwise as the connected Linear account. Pass id from list_comments to replace an existing comment body; omit id to create a comment, and pass parentId to post it as a reply in that comment's thread. For creation, issueId defaults to the issue this thread is linked to, or to the parent comment's issue when replying. For editing, the comment identifies its issue; an optional issueId must match. Linear only lets a comment's author edit it.",
     parameters: Schema.Struct({
       id: Schema.optional(
         describedText("Existing comment UUID to edit. Omit to create a new comment."),
+      ),
+      parentId: Schema.optional(
+        describedText(
+          "Comment UUID from list_comments to reply to. The reply joins that comment's thread; a reply to a reply joins the same thread. Only for new comments.",
+        ),
       ),
       body: describedText(
         'The comment body, in markdown, written for whoever reads the issue next. Post it unsigned: no closing "Written by ..." line, and no mention of the agent, the model, or T3 Code.',
@@ -207,6 +222,25 @@ const SaveCommentTool = linearTool(
     .annotate(Tool.Title, "Comment on Linear issue")
     .annotate(Tool.Readonly, false)
     .annotate(Tool.Idempotent, false),
+);
+
+const DeleteCommentTool = destructiveLinearTool(
+  Tool.make("delete_comment", {
+    description:
+      "Delete a Linear comment by its id from list_comments. Linear only lets a comment's author delete it, so on a developer assistant team thread this reaches the comments the Linear app posted, and elsewhere the connected account's own. The deletion cannot be undone from here.",
+    parameters: Schema.Struct({
+      id: describedText("Comment UUID to delete, from list_comments."),
+    }),
+    success: Schema.Struct({
+      id: TrimmedNonEmptyString,
+      issue: IssueRef,
+    }),
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Delete Linear comment")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
 );
 
 const UploadImageTool = linearTool(
@@ -239,6 +273,45 @@ const UploadImageTool = linearTool(
 );
 
 const IssuePriority = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 4 }));
+const CreateAttachmentTool = linearTool(
+  Tool.make("create_attachment", {
+    description:
+      "Attach a link to a Linear issue, such as a pull request, a staging page, or a dashboard. Linear shows it in the issue's sidebar with its title and subtitle. Attaching a URL the issue already has updates that attachment instead of adding a second one. Pass issueId as an identifier such as DEL-123 or a Linear UUID; omit it and the issue this thread is linked to is used.",
+    parameters: Schema.Struct({
+      issueId: IssueIdParameter,
+      url: describedText("The http or https URL to attach."),
+      title: describedText("The title Linear shows for the link, such as Staging preview."),
+      subtitle: Schema.optional(
+        describedText("A second line under the title, such as the environment or build."),
+      ),
+    }),
+    success: LinearIssueAttachment,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Attach link to Linear issue")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
+);
+
+const DeleteAttachmentTool = destructiveLinearTool(
+  Tool.make("delete_attachment", {
+    description:
+      "Remove an attachment from a Linear issue by the id get_issue lists for it. Only the link leaves the issue; the page it points at is untouched.",
+    parameters: Schema.Struct({
+      id: describedText("Attachment UUID to remove, from get_issue."),
+    }),
+    success: Schema.Struct({
+      id: TrimmedNonEmptyString,
+      issue: IssueRef,
+    }),
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Remove Linear attachment")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
+);
 
 const IssuePlanningFields = {
   assignee: Schema.optional(
@@ -658,13 +731,103 @@ const GetTeamTool = readonlyLinearTool(
   }),
 );
 
+const DocumentId = describedText(
+  "Document UUID, the slug id at the end of its URL, or the Linear document URL itself. Use list_documents to find it.",
+);
+const ListDocumentsTool = readonlyLinearTool(
+  Tool.make("list_documents", {
+    description:
+      "Find Linear documents, such as project specs and notes, most recently updated first. Filter by text in the title or content and by project. Returns IDs, titles, and URLs without the content; read one with get_document. Supports pagination.",
+    parameters: Schema.Struct({
+      ...ResourceListFields,
+      query: Schema.optional(
+        describedText("Text to find in document titles or content. Omit to list every document."),
+      ),
+      project: Schema.optional(
+        describedText("Only documents in this project, by ID or exact name. Omit for all."),
+      ),
+    }),
+    success: LinearDocumentPage,
+    failure: LinearToolError,
+    dependencies,
+  }).annotate(Tool.Title, "List Linear documents"),
+);
+const GetDocumentTool = readonlyLinearTool(
+  Tool.make("get_document", {
+    description:
+      "Read one Linear document in full: its title, markdown content, project, URL, when it was last updated, and whether it is in Linear's trash.",
+    parameters: Schema.Struct({ id: DocumentId }),
+    success: LinearDocument,
+    failure: LinearToolError,
+    dependencies,
+  }).annotate(Tool.Title, "Get Linear document"),
+);
+const SaveDocumentTool = linearTool(
+  Tool.make("save_document", {
+    description:
+      "Create or update a Linear document. Omit id to create one, which needs a title and lands in the project given, or the project of the issue this thread is linked to. Pass id to update only the fields provided.",
+    parameters: Schema.Struct({
+      id: Schema.optional(DocumentId),
+      title: Schema.optional(
+        describedText("Document title. Required when creating; omit to keep it when updating."),
+      ),
+      content: Schema.optional(
+        Schema.String.annotate({
+          description:
+            "Document body, in markdown. Replaces the whole content, so send the full text. Omit to leave it alone.",
+        }),
+      ),
+      project: Schema.optional(
+        describedText(
+          "Project ID or exact name the document belongs to. On create, defaults to the linked issue's project; on update, omit to keep it.",
+        ),
+      ),
+    }),
+    success: LinearDocument,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Save Linear document")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, false),
+);
+const DeleteDocumentTool = destructiveLinearTool(
+  Tool.make("delete_document", {
+    description:
+      "Delete a Linear document. Linear moves it to its trash rather than erasing it, and restore_document brings it back.",
+    parameters: Schema.Struct({ id: DocumentId }),
+    success: Schema.Struct({ id: Schema.String, title: Schema.String }),
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Delete Linear document")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
+);
+const RestoreDocumentTool = linearTool(
+  Tool.make("restore_document", {
+    description:
+      "Restore a Linear document from Linear's trash, such as one removed with delete_document. get_document reports trashed: true for a document that can be restored.",
+    parameters: Schema.Struct({ id: DocumentId }),
+    success: LinearDocument,
+    failure: LinearToolError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Restore Linear document")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Idempotent, true),
+);
+
 export const LinearToolkit = Toolkit.make(
   GetIssueTool,
   ListCommentsTool,
   ListIssueStatusesTool,
   ListMyIssuesTool,
   SaveCommentTool,
+  DeleteCommentTool,
   UploadImageTool,
+  CreateAttachmentTool,
+  DeleteAttachmentTool,
   SaveIssueTool,
   ArchiveIssueTool,
   CreateIssueTool,
@@ -683,4 +846,9 @@ export const LinearToolkit = Toolkit.make(
   GetUserTool,
   ListTeamsTool,
   GetTeamTool,
+  ListDocumentsTool,
+  GetDocumentTool,
+  SaveDocumentTool,
+  DeleteDocumentTool,
+  RestoreDocumentTool,
 );

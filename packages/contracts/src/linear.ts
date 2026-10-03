@@ -147,12 +147,24 @@ export const LinearIssueComment = Schema.Struct({
   author: Schema.NullOr(LinearUser),
   /** Written by an app user, such as T3 Code's own agent session replies. */
   authorIsApp: Schema.optionalKey(Schema.Boolean),
+  /** On a reply, the comment that starts its thread. Absent on a top-level comment. */
+  parentId: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type LinearIssueComment = typeof LinearIssueComment.Type;
 
 /** The lists on an issue detail that can be longer than one read returns. */
 export const LinearIssueDetailList = Schema.Literals(["comments", "children", "relations"]);
 export type LinearIssueDetailList = typeof LinearIssueDetailList.Type;
+/** A link in the issue's sidebar: a pull request, a staging page, a dashboard. */
+export const LinearIssueAttachment = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  title: Schema.String,
+  subtitle: Schema.NullOr(Schema.String),
+  url: Schema.String,
+  /** The integration that made it, such as `github`; null for a plain link. */
+  sourceType: Schema.NullOr(Schema.String),
+});
+export type LinearIssueAttachment = typeof LinearIssueAttachment.Type;
 
 export const LinearIssueDetail = Schema.Struct({
   ...LinearIssueSummaryFields,
@@ -171,6 +183,8 @@ export const LinearIssueDetail = Schema.Struct({
    * hundred of each; absent when every list is complete.
    */
   truncated: Schema.optionalKey(Schema.Array(LinearIssueDetailList)),
+  /** Optional so a client can still read an issue from a server that predates attachments. */
+  attachments: Schema.optional(Schema.Array(LinearIssueAttachment)),
 });
 export type LinearIssueDetail = typeof LinearIssueDetail.Type;
 

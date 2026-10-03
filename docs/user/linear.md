@@ -150,10 +150,11 @@ you started from. Pass one, such as `DEL-123`, to reach a different issue.
 
 The tools are:
 
-- `get_issue` reads an issue, including its assignee, project, milestone, cycle, estimate, and labels.
+- `get_issue` reads an issue, including its assignee, project, milestone, cycle, estimate, labels, and attachments.
 - `list_issues` searches across assignees by words in the title or description, issue identifier, team, project, milestone, cycle, labels, priority, assignee, or workflow state, with pagination. `list_my_issues` lists your open issues.
-- `list_comments` reads the comment thread; `save_comment` posts or edits a comment.
+- `list_comments` reads the comments, and each reply names the comment that starts its thread. `save_comment` posts a comment, replies in a thread, or edits a comment; `delete_comment` deletes one. Linear only lets a comment's author edit or delete it.
 - `upload_image` puts a screenshot on the issue. See [Screenshots on issues](#screenshots-on-issues).
+- `create_attachment` attaches a link, such as a staging page or a dashboard, to the issue's sidebar; `delete_attachment` removes one.
 - `list_issue_statuses` lists a team's workflow states.
 - `save_issue` updates an issue's title, description, state, labels, assignee, project, milestone, cycle, estimate, priority, or due date. `create_issue` accepts these fields when filing a new issue.
 - `archive_issue` archives an issue, or restores an archived one. An archived issue leaves boards and lists but can still be read.
@@ -162,6 +163,7 @@ The tools are:
 - `list_cycles` finds a team's cycles; `update_cycle` edits an existing cycle's name, description, or dates. Linear schedules new cycles automatically.
 - `list_issue_labels` and `save_issue_label` find, create, or edit issue labels.
 - `list_users`, `get_user`, `list_teams`, and `get_team` find people and teams.
+- `list_documents`, `get_document`, and `save_document` find, read, create, or edit Linear documents such as project specs; `delete_document` moves one to Linear's trash and `restore_document` brings it back. A new document goes in the linked issue's project unless the agent names another.
 
 Use exact names or IDs for projects and milestones, and names, emails, or IDs for assignees.
 Cycles accept an ID, name, number, or `current`, `next`, or `previous`. Ambiguous names need
@@ -173,7 +175,8 @@ the complete label set. Changing the project clears its old milestone unless a n
 supplied. Estimates use the team's numeric scale and dates use `YYYY-MM-DD`.
 
 These tools cover issue planning and common resource management; they do not provide every
-operation from Linear's official MCP server. Deletion and agent delegation are not exposed.
+operation from Linear's official MCP server. Agent delegation is not exposed, and comments,
+attachments, and documents are the only things an agent can delete.
 
 ### Screenshots on issues
 

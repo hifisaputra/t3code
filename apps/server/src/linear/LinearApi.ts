@@ -1,4 +1,6 @@
 import {
+  LinearDocument,
+  LinearDocumentPage,
   LinearResource,
   LinearResourcePage,
   resourceDefinitions,
@@ -17,6 +19,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 import {
+  LinearIssueAttachment,
   LinearIssueNotFoundError,
   LinearOperationError,
   LinearUnavailableError,
@@ -209,6 +212,8 @@ const RawIssueCommentNode = Schema.Struct({
   url: Schema.String,
   createdAt: Schema.String,
   user: Schema.NullOr(Schema.Struct({ ...RawUser.fields, app: Schema.optional(Schema.Boolean) })),
+  /** The comment that starts this reply's thread; null on a top-level comment. */
+  parentId: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
 type IssueListPage<A> = {
@@ -243,6 +248,7 @@ const RawIssueDetail = Schema.Struct({
     ),
   }),
   comments: RawIssueConnection(RawIssueCommentNode),
+  attachments: Schema.Struct({ nodes: Schema.Array(LinearIssueAttachment) }),
 });
 
 /** A later page of one list on an issue, under the alias the page queries use. */
@@ -331,8 +337,14 @@ const CommentResult = Schema.Struct({
       body: Schema.String,
       url: Schema.String,
       issue: Schema.NullOr(Schema.Struct({ id: TrimmedNonEmptyString })),
+      /** Set on a reply: the comment it was posted under. */
+      parentId: Schema.optional(Schema.NullOr(Schema.String)),
     }),
   ),
+});
+
+const CommentDeleteResult = Schema.Struct({
+  commentDelete: Schema.Struct({ success: Schema.Boolean }),
 });
 
 const IssueCreateResult = Schema.Struct({
@@ -401,7 +413,7 @@ const ISSUE_LIST_FIELDS = {
   children: "id identifier title url state { name }",
   relations: "id type relatedIssue { id identifier title url state { name } }",
   inverseRelations: "id type issue { id identifier title url state { name } }",
-  comments: "id body url createdAt user { id name displayName app }",
+  comments: "id body url createdAt user { id name displayName app } parentId",
 } as const;
 type IssueListName = keyof typeof ISSUE_LIST_FIELDS;
 
@@ -412,6 +424,7 @@ const MAX_ISSUE_LIST_NODES = 250;
 
 const issueListSelection = (name: IssueListName, first: number, after = "") =>
   `${name}(first: ${first}${after}) { nodes { ${ISSUE_LIST_FIELDS[name]} } pageInfo { hasNextPage endCursor } }`;
+const ATTACHMENT_FIELDS = "id title subtitle url sourceType";
 
 const ISSUE_DETAIL_FIELDS = `
   ${ISSUE_SUMMARY_FIELDS}
@@ -423,6 +436,7 @@ const ISSUE_DETAIL_FIELDS = `
   ${issueListSelection("inverseRelations", ISSUE_LIST_FIRST_PAGE)}
   labels { nodes { id name color } }
   ${issueListSelection("comments", ISSUE_LIST_FIRST_PAGE)}
+  attachments(first: 50) { nodes { ${ATTACHMENT_FIELDS} } }
 `;
 
 /** The page after `$after` of one list on an issue, aliased so one decoder shape reads any of them. */
@@ -567,7 +581,12 @@ const LABELS_QUERY = `
 
 const GET_COMMENT_QUERY = `
   query T3CodeGetComment($id: String!) {
-    comment(id: $id) { id body url issue { id } }
+    comment(id: $id) { id body url issue { id } parentId }
+  }
+`;
+const DELETE_COMMENT_MUTATION = `
+  mutation T3CodeDeleteComment($id: String!) {
+    commentDelete(id: $id) { success }
   }
 `;
 
@@ -597,9 +616,10 @@ const UPDATE_COMMENT_MUTATION = `
   }
 `;
 
+/** An unsent `$id` or `$parentId` is left out of the input; `$parentId` makes a reply. */
 const CREATE_COMMENT_MUTATION = `
-  mutation T3CodeCreateComment($issueId: String!, $body: String!, $id: String) {
-    commentCreate(input: { issueId: $issueId, body: $body, id: $id }) {
+  mutation T3CodeCreateComment($issueId: String!, $body: String!, $id: String, $parentId: String) {
+    commentCreate(input: { issueId: $issueId, body: $body, id: $id, parentId: $parentId }) {
       success
       comment { id url }
     }
@@ -638,6 +658,148 @@ const FileUploadResult = Schema.Struct({
   }),
 });
 const decodeFileUploadResult = Schema.decodeUnknownEffect(FileUploadResult);
+
+/**
+ * `attachmentCreate` rather than `attachmentLinkURL`: it takes any URL with a
+ * subtitle, and the same URL on the same issue updates the attachment that is
+ * already there instead of adding a second one.
+ */
+const CREATE_ATTACHMENT_MUTATION = `
+  mutation T3CodeCreateAttachment($input: AttachmentCreateInput!) {
+    attachmentCreate(input: $input) { success attachment { ${ATTACHMENT_FIELDS} } }
+  }
+`;
+
+const GET_ATTACHMENT_QUERY = `
+  query T3CodeAttachment($id: String!) {
+    attachment(id: $id) { ${ATTACHMENT_FIELDS} issue { id identifier url } }
+  }
+`;
+
+const DELETE_ATTACHMENT_MUTATION = `
+  mutation T3CodeDeleteAttachment($id: String!) {
+    attachmentDelete(id: $id) { success }
+  }
+`;
+
+const decodeAttachmentCreateResult = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    attachmentCreate: Schema.Struct({
+      success: Schema.Boolean,
+      attachment: Schema.NullOr(LinearIssueAttachment),
+    }),
+  }),
+);
+const AttachmentWithIssue = Schema.Struct({
+  ...LinearIssueAttachment.fields,
+  issue: Schema.Struct({
+    id: TrimmedNonEmptyString,
+    identifier: TrimmedNonEmptyString,
+    url: Schema.String,
+  }),
+});
+const decodeAttachmentResult = Schema.decodeUnknownEffect(
+  Schema.Struct({ attachment: Schema.NullOr(AttachmentWithIssue) }),
+);
+const decodeAttachmentDeleteResult = Schema.decodeUnknownEffect(
+  Schema.Struct({ attachmentDelete: Schema.Struct({ success: Schema.Boolean }) }),
+);
+
+const DOCUMENT_SUMMARY_FIELDS = "id title url updatedAt project { id name }";
+const DOCUMENT_FIELDS = `${DOCUMENT_SUMMARY_FIELDS} content trashed`;
+
+const LIST_DOCUMENTS_QUERY = `
+  query T3CodeDocuments($filter: DocumentFilter!, $first: Int!, $after: String) {
+    documents(filter: $filter, first: $first, after: $after, orderBy: updatedAt) {
+      nodes { ${DOCUMENT_SUMMARY_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+/** Linear's `document(id:)` takes a document's UUID or the slug id that ends its URL. */
+const GET_DOCUMENT_QUERY = `
+  query T3CodeDocument($id: String!) {
+    document(id: $id) { ${DOCUMENT_FIELDS} }
+  }
+`;
+
+const CREATE_DOCUMENT_MUTATION = `
+  mutation T3CodeCreateDocument($input: DocumentCreateInput!) {
+    result: documentCreate(input: $input) { success document { ${DOCUMENT_FIELDS} } }
+  }
+`;
+
+const UPDATE_DOCUMENT_MUTATION = `
+  mutation T3CodeUpdateDocument($id: String!, $input: DocumentUpdateInput!) {
+    result: documentUpdate(id: $id, input: $input) { success document { ${DOCUMENT_FIELDS} } }
+  }
+`;
+
+/** Linear trashes the document rather than erasing it; `documentUnarchive` restores it. */
+const DELETE_DOCUMENT_MUTATION = `
+  mutation T3CodeDeleteDocument($id: String!) {
+    documentDelete(id: $id) { success }
+  }
+`;
+
+const RESTORE_DOCUMENT_MUTATION = `
+  mutation T3CodeRestoreDocument($id: String!) {
+    documentUnarchive(id: $id) { success entity { ${DOCUMENT_FIELDS} } }
+  }
+`;
+
+/** Linear's `trashed` is null rather than false on a document that is not in the trash. */
+const RawDocument = Schema.Struct({
+  ...LinearDocument.fields,
+  trashed: Schema.NullOr(Schema.Boolean),
+});
+const toDocument = (raw: typeof RawDocument.Type): LinearDocument => ({
+  ...raw,
+  trashed: raw.trashed === true,
+});
+
+const decodeDocumentPage = Schema.decodeUnknownEffect(
+  Schema.Struct({ documents: LinearDocumentPage }),
+);
+const decodeDocumentResult = Schema.decodeUnknownEffect(
+  Schema.Struct({ document: Schema.NullOr(RawDocument) }),
+);
+const decodeDocumentMutation = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    result: Schema.Struct({ success: Schema.Boolean, document: Schema.NullOr(RawDocument) }),
+  }),
+);
+const decodeDocumentDeleteResult = Schema.decodeUnknownEffect(
+  Schema.Struct({ documentDelete: Schema.Struct({ success: Schema.Boolean }) }),
+);
+const decodeDocumentRestoreResult = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    documentUnarchive: Schema.Struct({
+      success: Schema.Boolean,
+      entity: Schema.NullOr(RawDocument),
+    }),
+  }),
+);
+
+/**
+ * A pasted document link names the document by the slug id that ends its last
+ * path segment (`/document/launch-plan-0f1e2d3c4b5a`); anything else is passed
+ * on as typed, like `issueReferenceFromText`.
+ */
+export function documentReferenceFromText(text: string): string {
+  const trimmed = text.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed;
+  try {
+    const segments = new URL(trimmed).pathname.split("/").filter((segment) => segment.length > 0);
+    const documentAt = segments.indexOf("document");
+    const slugId = documentAt >= 0 ? segments[documentAt + 1]?.split("-").at(-1) : undefined;
+    if (slugId) return slugId;
+  } catch {
+    // Not a URL after all: let Linear decide what it is.
+  }
+  return trimmed;
+}
 
 /**
  * A failure that reached Linear, kept internal so an operation can tell a missing
@@ -875,6 +1037,7 @@ function toIssueDetail(
     relations,
     inverseRelations,
     labels,
+    attachments,
     ...summary
   } = raw;
   return {
@@ -891,6 +1054,7 @@ function toIssueDetail(
         displayName: comment.user.displayName,
       },
       ...(comment.user?.app ? { authorIsApp: true } : {}),
+      ...(comment.parentId ? { parentId: comment.parentId } : {}),
     })),
     parent: parent === null ? null : toIssueRelative(parent),
     children: children.nodes.map(toIssueRelative),
@@ -904,6 +1068,7 @@ function toIssueDetail(
     ],
     labels: labels.nodes,
     ...(truncated.length > 0 ? { truncated } : {}),
+    attachments: attachments.nodes,
   };
 }
 
@@ -1026,6 +1191,8 @@ export class LinearApi extends Context.Service<
       readonly id?: string;
       readonly issueId: string;
       readonly body: string;
+      /** The comment to reply under; the new comment joins its thread. */
+      readonly parentId?: string;
     }) => Effect.Effect<
       { readonly id: string; readonly url: string },
       LinearUnavailableError | LinearOperationError
@@ -1040,6 +1207,52 @@ export class LinearApi extends Context.Service<
       readonly contentType: string;
       readonly bytes: Uint8Array;
     }) => Effect.Effect<{ readonly url: string }, LinearUnavailableError | LinearOperationError>;
+    /** Delete a comment. Linear lets only its author do this. */
+    readonly deleteComment: (
+      id: string,
+    ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    /** Attach a link to an issue, or retitle the one already there for the same URL. */
+    readonly createAttachment: (input: {
+      readonly issueId: string;
+      readonly url: string;
+      readonly title: string;
+      readonly subtitle?: string;
+    }) => Effect.Effect<LinearIssueAttachment, LinearUnavailableError | LinearOperationError>;
+    readonly getAttachment: (
+      id: string,
+    ) => Effect.Effect<
+      typeof AttachmentWithIssue.Type,
+      LinearUnavailableError | LinearOperationError
+    >;
+    readonly deleteAttachment: (
+      id: string,
+    ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    /** Documents by newest update, matched on title or content, without their content. */
+    readonly listDocuments: (input: {
+      readonly query?: string | undefined;
+      readonly projectId?: string | undefined;
+      readonly cursor?: string | undefined;
+      readonly limit?: number | undefined;
+    }) => Effect.Effect<LinearDocumentPage, LinearUnavailableError | LinearOperationError>;
+    /** A document by UUID, slug id, or pasted link, content included. */
+    readonly getDocument: (
+      reference: string,
+    ) => Effect.Effect<LinearDocument, LinearUnavailableError | LinearOperationError>;
+    /** Create a document without `id`; with it, patch only the fields present. */
+    readonly saveDocument: (input: {
+      readonly id?: string | undefined;
+      readonly title?: string | undefined;
+      readonly content?: string | undefined;
+      readonly projectId?: string | undefined;
+    }) => Effect.Effect<LinearDocument, LinearUnavailableError | LinearOperationError>;
+    /** Move a document to Linear's trash. */
+    readonly deleteDocument: (
+      id: string,
+    ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    /** Bring a trashed document back, as it now reads. */
+    readonly restoreDocument: (
+      id: string,
+    ) => Effect.Effect<LinearDocument, LinearUnavailableError | LinearOperationError>;
   }
 >()("t3/linear/LinearApi") {}
 
@@ -1843,12 +2056,18 @@ const make = Effect.gen(function* () {
     readonly id?: string;
     readonly issueId: string;
     readonly body: string;
+    readonly parentId?: string;
   }) {
     const id = input.id ?? newId();
     const result = yield* request({
       operation: "createComment",
       query: CREATE_COMMENT_MUTATION,
-      variables: { issueId: input.issueId, body: input.body, id },
+      variables: {
+        issueId: input.issueId,
+        body: input.body,
+        id,
+        ...(input.parentId ? { parentId: input.parentId } : {}),
+      },
       decode: decodeCommentCreateResult,
       repeatable: true,
     }).pipe(
@@ -1965,6 +2184,246 @@ const make = Effect.gen(function* () {
     return { url: upload.assetUrl };
   });
 
+  const deleteComment = Effect.fn("LinearApi.deleteComment")(function* (id: string) {
+    const notAuthor = "Linear lets only a comment's author delete it.";
+    const result = yield* request({
+      operation: "deleteComment",
+      query: DELETE_COMMENT_MUTATION,
+      variables: { id },
+      decode: Schema.decodeUnknownEffect(CommentDeleteResult),
+      repeatable: true,
+    }).pipe(
+      Effect.catchTag("LinearRequestFailure", (failure) =>
+        // A retried delete finding nothing means an earlier attempt removed it.
+        failure.retried && isEntityNotFound(failure)
+          ? Effect.succeed({ commentDelete: { success: true } })
+          : isEntityNotFound(failure)
+            ? Effect.fail(
+                new LinearOperationError({
+                  operation: failure.operation,
+                  detail: "Comment not found or inaccessible.",
+                }),
+              )
+            : failure.code === "FORBIDDEN"
+              ? Effect.fail(
+                  new LinearOperationError({
+                    operation: failure.operation,
+                    detail: `${failure.detail} ${notAuthor}`,
+                  }),
+                )
+              : failOperation(failure),
+      ),
+    );
+    if (!result.commentDelete.success) {
+      return yield* new LinearOperationError({
+        operation: "deleteComment",
+        detail: `Linear refused to delete the comment. ${notAuthor}`,
+      });
+    }
+  });
+
+  const createAttachment = Effect.fn("LinearApi.createAttachment")(function* (input: {
+    readonly issueId: string;
+    readonly url: string;
+    readonly title: string;
+    readonly subtitle?: string;
+  }) {
+    const result = yield* request({
+      operation: "createAttachment",
+      query: CREATE_ATTACHMENT_MUTATION,
+      variables: {
+        input: {
+          issueId: input.issueId,
+          url: input.url,
+          title: input.title,
+          ...(input.subtitle !== undefined ? { subtitle: input.subtitle } : {}),
+        },
+      },
+      decode: decodeAttachmentCreateResult,
+      // Linear updates the issue's attachment for a URL it already has, so a
+      // second copy cannot add a duplicate link.
+      repeatable: true,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.attachmentCreate.success || result.attachmentCreate.attachment === null) {
+      return yield* new LinearOperationError({
+        operation: "createAttachment",
+        detail: "Linear refused to attach the link.",
+      });
+    }
+    return result.attachmentCreate.attachment;
+  });
+
+  const getAttachment = Effect.fn("LinearApi.getAttachment")(function* (id: string) {
+    const notFound = new LinearOperationError({
+      operation: "getAttachment",
+      detail: "Attachment not found or inaccessible.",
+    });
+    const result = yield* request({
+      operation: "getAttachment",
+      query: GET_ATTACHMENT_QUERY,
+      variables: { id },
+      decode: decodeAttachmentResult,
+    }).pipe(
+      Effect.catchTag("LinearRequestFailure", (failure) =>
+        isEntityNotFound(failure) ? Effect.fail(notFound) : failOperation(failure),
+      ),
+    );
+    if (result.attachment === null) return yield* notFound;
+    return result.attachment;
+  });
+
+  const deleteAttachment = Effect.fn("LinearApi.deleteAttachment")(function* (id: string) {
+    const result = yield* request({
+      operation: "deleteAttachment",
+      query: DELETE_ATTACHMENT_MUTATION,
+      variables: { id },
+      decode: decodeAttachmentDeleteResult,
+      repeatable: true,
+    }).pipe(
+      Effect.catchTag("LinearRequestFailure", (failure) =>
+        // A retried delete finding nothing means an earlier attempt removed it.
+        failure.retried && isEntityNotFound(failure)
+          ? Effect.succeed({ attachmentDelete: { success: true } })
+          : failOperation(failure),
+      ),
+    );
+    if (!result.attachmentDelete.success) {
+      return yield* new LinearOperationError({
+        operation: "deleteAttachment",
+        detail: "Linear refused to remove the attachment.",
+      });
+    }
+  });
+
+  const listDocuments = Effect.fn("LinearApi.listDocuments")(function* (input: {
+    readonly query?: string | undefined;
+    readonly projectId?: string | undefined;
+    readonly cursor?: string | undefined;
+    readonly limit?: number | undefined;
+  }) {
+    const query = input.query?.trim();
+    const filters = [
+      ...(query
+        ? [
+            {
+              or: [
+                { title: { containsIgnoreCase: query } },
+                { searchableContent: { contains: query } },
+              ],
+            },
+          ]
+        : []),
+      ...(input.projectId ? [{ project: { id: { eq: input.projectId } } }] : []),
+    ];
+    const result = yield* request({
+      operation: "listDocuments",
+      query: LIST_DOCUMENTS_QUERY,
+      variables: {
+        filter: filters.length ? { and: filters } : {},
+        first: Math.max(1, Math.min(input.limit ?? 50, 100)),
+        after: input.cursor ?? null,
+      },
+      decode: decodeDocumentPage,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    return result.documents;
+  });
+
+  const getDocument = Effect.fn("LinearApi.getDocument")(function* (reference: string) {
+    const notFound = new LinearOperationError({
+      operation: "getDocument",
+      detail: "Document not found or inaccessible.",
+    });
+    const result = yield* request({
+      operation: "getDocument",
+      query: GET_DOCUMENT_QUERY,
+      variables: { id: documentReferenceFromText(reference) },
+      decode: decodeDocumentResult,
+    }).pipe(
+      Effect.catchTag("LinearRequestFailure", (failure) =>
+        isEntityNotFound(failure) ? Effect.fail(notFound) : failOperation(failure),
+      ),
+    );
+    if (result.document === null) return yield* notFound;
+    return toDocument(result.document);
+  });
+
+  const saveDocument = Effect.fn("LinearApi.saveDocument")(function* (input: {
+    readonly id?: string | undefined;
+    readonly title?: string | undefined;
+    readonly content?: string | undefined;
+    readonly projectId?: string | undefined;
+  }) {
+    const fields = {
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.content !== undefined ? { content: input.content } : {}),
+      ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+    };
+    // A create sends an id chosen here, so a retry cannot file a second document.
+    const createdId = input.id ? undefined : newId();
+    const result = yield* request({
+      operation: "saveDocument",
+      query: input.id ? UPDATE_DOCUMENT_MUTATION : CREATE_DOCUMENT_MUTATION,
+      variables: input.id
+        ? { id: input.id, input: fields }
+        : { input: { ...fields, id: createdId } },
+      decode: decodeDocumentMutation,
+      repeatable: true,
+    }).pipe(
+      Effect.catchTag(
+        "LinearRequestFailure",
+        createdId
+          ? readBackCreate(() =>
+              getDocument(createdId).pipe(
+                Effect.map((document) => ({ result: { success: true, document } })),
+              ),
+            )
+          : failOperation,
+      ),
+    );
+    if (!result.result.success || result.result.document === null) {
+      return yield* new LinearOperationError({
+        operation: "saveDocument",
+        detail: "Linear refused to save the document.",
+      });
+    }
+    return toDocument(result.result.document);
+  });
+
+  const deleteDocument = Effect.fn("LinearApi.deleteDocument")(function* (id: string) {
+    const result = yield* request({
+      operation: "deleteDocument",
+      query: DELETE_DOCUMENT_MUTATION,
+      variables: { id },
+      decode: decodeDocumentDeleteResult,
+      // A second copy finds the document already in the trash.
+      repeatable: true,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.documentDelete.success) {
+      return yield* new LinearOperationError({
+        operation: "deleteDocument",
+        detail: "Linear refused to delete the document.",
+      });
+    }
+  });
+
+  const restoreDocument = Effect.fn("LinearApi.restoreDocument")(function* (id: string) {
+    const result = yield* request({
+      operation: "restoreDocument",
+      query: RESTORE_DOCUMENT_MUTATION,
+      variables: { id },
+      decode: decodeDocumentRestoreResult,
+      // A second copy restores a document that is already back.
+      repeatable: true,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.documentUnarchive.success || result.documentUnarchive.entity === null) {
+      return yield* new LinearOperationError({
+        operation: "restoreDocument",
+        detail: "Linear refused to restore the document.",
+      });
+    }
+    return toDocument(result.documentUnarchive.entity);
+  });
+
   return LinearApi.of({
     getComment,
     updateComment,
@@ -1986,6 +2445,15 @@ const make = Effect.gen(function* () {
     labels,
     createComment,
     uploadFile,
+    deleteComment,
+    createAttachment,
+    getAttachment,
+    deleteAttachment,
+    listDocuments,
+    getDocument,
+    saveDocument,
+    deleteDocument,
+    restoreDocument,
   });
 });
 

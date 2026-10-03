@@ -137,6 +137,7 @@ const issueDetail = {
         url: "https://linear.app/acme/issue/DEL-123#comment-1",
         createdAt: "2026-09-01T09:00:00.000Z",
         user: { id: "user-1", name: "Ada Lovelace", displayName: "ada" },
+        parentId: null,
       },
       {
         id: "comment-2",
@@ -144,6 +145,18 @@ const issueDetail = {
         url: "https://linear.app/acme/issue/DEL-123#comment-2",
         createdAt: "2026-09-01T09:30:00.000Z",
         user: null,
+        parentId: "comment-1",
+      },
+    ],
+  },
+  attachments: {
+    nodes: [
+      {
+        id: "attachment-1",
+        title: "Staging preview",
+        subtitle: null,
+        url: "https://staging.example.com/del-123",
+        sourceType: null,
       },
     ],
   },
@@ -438,6 +451,13 @@ it.effect("decodes an issue with a null assignee and its nested connections", ()
       issue.comments.map((comment) => comment.author?.displayName ?? null),
       ["ada", null],
     );
+    // A reply names the comment it answers; a top-level comment has no key at all.
+    assert.deepStrictEqual(
+      issue.comments.map((comment) => comment.parentId),
+      [undefined, "comment-1"],
+    );
+    assert.isFalse("parentId" in issue.comments[0]!);
+    assert.deepStrictEqual(issue.attachments, issueDetail.attachments.nodes);
     assert.strictEqual(issue.project?.name, "Linear");
     assert.strictEqual(issue.truncated, undefined);
     // An issue whose lists fit their first page is one request.
@@ -1621,5 +1641,357 @@ it.effect("does not repeat an upload Linear may already have signed", () => {
       "Linear returned HTTP 503. Linear may have applied it, so it was not sent again.",
     );
     assert.strictEqual(execute.mock.calls.length, 1);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("posts a reply under the comment it names", () => {
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({
+        data: {
+          commentCreate: { success: true, comment: { id: "reply-1", url: "https://linear.app/r" } },
+        },
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    yield* linear.createComment({ issueId: "issue-uuid", body: "Agreed.", parentId: "comment-1" });
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "parentId: $parentId");
+    const { id, ...variables } = request.variables;
+    assert.match(String(id), UUID);
+    assert.deepStrictEqual(variables, {
+      issueId: "issue-uuid",
+      body: "Agreed.",
+      parentId: "comment-1",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("counts a retried comment delete that finds nothing as done", () => {
+  const { execute, layer } = makeLayer({
+    response: () =>
+      execute.mock.calls.length === 1
+        ? new Response("upstream unavailable", { status: 503 })
+        : Response.json({
+            errors: [{ message: "Entity not found", extensions: { code: "ENTITY_NOT_FOUND" } }],
+          }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    yield* withTestClock(linear.deleteComment("comment-3"));
+    assert.strictEqual(execute.mock.calls.length, 2);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("deletes a comment by id", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { commentDelete: { success: true } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    yield* linear.deleteComment("comment-3");
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "commentDelete");
+    assert.deepStrictEqual(request.variables, { id: "comment-3" });
+  }).pipe(Effect.provide(layer));
+});
+
+for (const [payload, expected] of [
+  [
+    {
+      errors: [
+        { message: "You can only delete your own comments", extensions: { code: "FORBIDDEN" } },
+      ],
+    },
+    "Linear lets only a comment's author delete it.",
+  ],
+  [
+    { data: { commentDelete: { success: false } } },
+    "Linear lets only a comment's author delete it.",
+  ],
+  [
+    { errors: [{ message: "Entity not found", extensions: { code: "ENTITY_NOT_FOUND" } }] },
+    "Comment not found or inaccessible.",
+  ],
+] as const) {
+  it.effect(`tells the agent why Linear refused a deletion: ${expected}`, () => {
+    const { layer } = makeLayer({ response: () => Response.json(payload) });
+    return Effect.gen(function* () {
+      const linear = yield* LinearApi.LinearApi;
+      const error = yield* Effect.flip(linear.deleteComment("comment-3"));
+      assert.instanceOf(error, LinearOperationError);
+      assert.strictEqual(error.operation, "deleteComment");
+      assert.include(error.detail, expected);
+    }).pipe(Effect.provide(layer));
+  });
+}
+
+it.effect("attaches a link with its title and subtitle", () => {
+  const attachment = {
+    id: "attachment-2",
+    title: "Dashboard",
+    subtitle: "Production",
+    url: "https://grafana.example.com/d/1",
+    sourceType: null,
+  };
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { attachmentCreate: { success: true, attachment } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(
+      yield* linear.createAttachment({
+        issueId: "issue-uuid",
+        url: attachment.url,
+        title: "Dashboard",
+        subtitle: "Production",
+      }),
+      attachment,
+    );
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "attachmentCreate");
+    assert.deepStrictEqual(request.variables, {
+      input: {
+        issueId: "issue-uuid",
+        url: attachment.url,
+        title: "Dashboard",
+        subtitle: "Production",
+      },
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads an attachment with the issue it hangs on", () => {
+  const attachment = {
+    id: "attachment-1",
+    title: "Staging preview",
+    subtitle: null,
+    url: "https://staging.example.com/del-123",
+    sourceType: null,
+    issue: {
+      id: "issue-uuid",
+      identifier: "DEL-123",
+      url: "https://linear.app/acme/issue/DEL-123",
+    },
+  };
+  const { layer } = makeLayer({ response: () => Response.json({ data: { attachment } }) });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(yield* linear.getAttachment("attachment-1"), attachment);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reports a missing attachment in plain words", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({
+        errors: [{ message: "Entity not found", extensions: { code: "ENTITY_NOT_FOUND" } }],
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.getAttachment("attachment-9"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.detail, "Attachment not found or inaccessible.");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("removes an attachment by id and fails when Linear refuses", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { attachmentDelete: { success: false } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.deleteAttachment("attachment-1"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "deleteAttachment");
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "attachmentDelete");
+    assert.deepStrictEqual(request.variables, { id: "attachment-1" });
+  }).pipe(Effect.provide(layer));
+});
+
+const launchPlan = {
+  id: "document-uuid",
+  title: "Launch plan",
+  url: "https://linear.app/acme/document/launch-plan-0f1e2d3c4b5a",
+  updatedAt: "2026-09-02T10:00:00.000Z",
+  project: { id: "project-1", name: "Linear" },
+  content: "# Launch\n\nShip it.",
+  // Linear sends null, not false, for a document outside the trash.
+  trashed: null,
+};
+/** `launchPlan` as the API hands it back. */
+const launchPlanRead = { ...launchPlan, trashed: false };
+
+it.effect("finds documents by title or content in a project, newest first, without content", () => {
+  const { content: _content, trashed: _trashed, ...summary } = launchPlan;
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({
+        data: {
+          documents: {
+            nodes: [summary],
+            pageInfo: { hasNextPage: true, endCursor: "cursor-2" },
+          },
+        },
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const page = yield* linear.listDocuments({
+      query: " launch ",
+      projectId: "project-1",
+      cursor: "cursor-1",
+      limit: 500,
+    });
+    assert.deepStrictEqual(page, {
+      nodes: [summary],
+      pageInfo: { hasNextPage: true, endCursor: "cursor-2" },
+    });
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "orderBy: updatedAt");
+    assert.notInclude(request.query, "content");
+    assert.deepStrictEqual(request.variables, {
+      filter: {
+        and: [
+          {
+            or: [
+              { title: { containsIgnoreCase: "launch" } },
+              { searchableContent: { contains: "launch" } },
+            ],
+          },
+          { project: { id: { eq: "project-1" } } },
+        ],
+      },
+      first: 100,
+      after: "cursor-1",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads a document by the slug id at the end of a pasted link", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { document: launchPlan } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(yield* linear.getDocument(launchPlan.url), launchPlanRead);
+    assert.deepStrictEqual(sentGraphQL(execute.mock.calls[0]![0]).variables, {
+      id: "0f1e2d3c4b5a",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it("reduces document links to slug ids and leaves other references alone", () => {
+  assert.strictEqual(
+    LinearApi.documentReferenceFromText(
+      "https://linear.app/acme/document/launch-plan-0f1e2d3c4b5a",
+    ),
+    "0f1e2d3c4b5a",
+  );
+  assert.strictEqual(LinearApi.documentReferenceFromText(" document-uuid "), "document-uuid");
+  assert.strictEqual(
+    LinearApi.documentReferenceFromText("https://example.com/notes"),
+    "https://example.com/notes",
+  );
+});
+
+it.effect("reports a missing document in plain words", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({
+        errors: [{ message: "Entity not found", extensions: { code: "ENTITY_NOT_FOUND" } }],
+      }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.getDocument("missing"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.detail, "Document not found or inaccessible.");
+  }).pipe(Effect.provide(layer));
+});
+
+for (const id of [undefined, "document-uuid"]) {
+  it.effect(`${id ? "updates" : "creates"} a document with only the fields given`, () => {
+    const { execute, layer } = makeLayer({
+      response: () => Response.json({ data: { result: { success: true, document: launchPlan } } }),
+    });
+    return Effect.gen(function* () {
+      const linear = yield* LinearApi.LinearApi;
+      const saved = yield* linear.saveDocument({
+        ...(id ? { id } : { title: "Launch plan", projectId: "project-1" }),
+        content: launchPlan.content,
+      });
+      assert.deepStrictEqual(saved, launchPlanRead);
+      const request = sentGraphQL(execute.mock.calls[0]![0]);
+      assert.include(request.query, id ? "documentUpdate" : "documentCreate");
+      if (id) {
+        assert.deepStrictEqual(request.variables, { id, input: { content: launchPlan.content } });
+      } else {
+        // A create sends the id it would reuse on a retry.
+        const { id: createdId, ...input } = request.variables.input as Record<string, unknown>;
+        assert.match(String(createdId), UUID);
+        assert.deepStrictEqual(input, {
+          title: "Launch plan",
+          content: launchPlan.content,
+          projectId: "project-1",
+        });
+      }
+    }).pipe(Effect.provide(layer));
+  });
+}
+
+it.effect("trashes a document by id and fails when Linear refuses", () => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { documentDelete: { success: false } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.deleteDocument("document-uuid"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "deleteDocument");
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "documentDelete");
+    assert.deepStrictEqual(request.variables, { id: "document-uuid" });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reads a trashed document as trashed", () => {
+  const { layer } = makeLayer({
+    response: () => Response.json({ data: { document: { ...launchPlan, trashed: true } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const document = yield* linear.getDocument("document-uuid");
+    assert.isTrue(document.trashed);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("restores a trashed document and returns it as it now reads", () => {
+  const { execute, layer } = makeLayer({
+    response: () =>
+      Response.json({ data: { documentUnarchive: { success: true, entity: launchPlan } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    assert.deepStrictEqual(yield* linear.restoreDocument("document-uuid"), launchPlanRead);
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, "documentUnarchive");
+    assert.deepStrictEqual(request.variables, { id: "document-uuid" });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("fails a restore Linear refuses", () => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({ data: { documentUnarchive: { success: false, entity: null } } }),
+  });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.restoreDocument("document-uuid"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "restoreDocument");
   }).pipe(Effect.provide(layer));
 });

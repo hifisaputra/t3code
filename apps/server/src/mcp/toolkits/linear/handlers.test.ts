@@ -161,6 +161,15 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       getComment: () => Effect.die("unused"),
       updateComment: () => Effect.die("unused"),
       uploadFile: () => Effect.die("unused"),
+      deleteComment: () => Effect.die("unused"),
+      createAttachment: () => Effect.die("unused"),
+      getAttachment: () => Effect.die("unused"),
+      deleteAttachment: () => Effect.die("unused"),
+      listDocuments: () => Effect.die("unused"),
+      getDocument: () => Effect.die("unused"),
+      saveDocument: () => Effect.die("unused"),
+      deleteDocument: () => Effect.die("unused"),
+      restoreDocument: () => Effect.die("unused"),
       ...overrides,
     }),
   );
@@ -558,6 +567,11 @@ const nextApprovalEvent = Effect.gen(function* () {
   const [event] = yield* Stream.runCollect(Stream.take(broker.streamEvents, 1));
   return event as ProviderRuntimeEvent;
 });
+
+/** The parts of an approval a test reads: its one-line summary, the change, and the call it guards. */
+const decodeApprovalReview = Schema.decodeUnknownEffect(
+  Schema.Struct({ detail: Schema.String, change: Schema.Unknown, args: Schema.Unknown }),
+);
 
 const answer = (event: ProviderRuntimeEvent, decision: "accept" | "acceptForSession" | "decline") =>
   Effect.gen(function* () {
@@ -984,6 +998,135 @@ it.effect("rejects a comment from a different issue before approval or mutation"
     ),
   ),
 );
+
+it.effect("replies at the root of the thread the agent named, on that comment's issue", () => {
+  const created: Array<unknown> = [];
+  const read: Array<string> = [];
+  return callTool("save_comment", { parentId: "reply-1", body: "Agreed." }).pipe(
+    Effect.map(() => {
+      // The parent's issue wins over the thread's link, and a reply to a reply
+      // joins the thread its parent belongs to.
+      assert.deepStrictEqual(read, [issue.id]);
+      assert.deepStrictEqual(created, [
+        { issueId: issue.id, body: "Agreed.", parentId: "comment-1" },
+      ]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getComment: (id) =>
+            Effect.succeed({
+              id,
+              body: "Should we ship?",
+              url: `${issue.url}#${id}`,
+              issue: { id: issue.id },
+              parentId: "comment-1",
+            }),
+          getIssue: ({ reference }) => {
+            read.push(reference);
+            return Effect.succeed(issue);
+          },
+          createComment: (input) =>
+            Effect.sync(() => {
+              created.push(input);
+              return { id: "reply-2", url: `${issue.url}#reply-2` };
+            }),
+        },
+        linkedIssue: { id: "linked-elsewhere" },
+      }),
+    ),
+  );
+});
+
+it.effect("replies under a top-level comment directly", () => {
+  const created: Array<unknown> = [];
+  return callTool("save_comment", { parentId: "comment-1", body: "Agreed." }).pipe(
+    Effect.map(() => {
+      assert.deepStrictEqual(created, [
+        { issueId: issue.id, body: "Agreed.", parentId: "comment-1" },
+      ]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getComment: (id) =>
+            Effect.succeed({
+              id,
+              body: "Started on this.",
+              url: `${issue.url}#${id}`,
+              issue: { id: issue.id },
+              parentId: null,
+            }),
+          getIssue: () => Effect.succeed(issue),
+          createComment: (input) =>
+            Effect.sync(() => {
+              created.push(input);
+              return { id: "reply-2", url: `${issue.url}#reply-2` };
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("refuses to move an edited comment into another thread", () =>
+  Effect.gen(function* () {
+    const error = operationError(
+      yield* Effect.flip(
+        callTool("save_comment", { id: "comment-1", parentId: "comment-2", body: "Moved." }),
+      ),
+    );
+    assert.include(error.detail, "only when creating a reply");
+  }).pipe(Effect.provide(testLayer({ linear: {} }))),
+);
+
+for (const decision of ["accept", "decline"] as const) {
+  it.effect(`deletes a comment only after approval: ${decision}`, () => {
+    const deleted: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          Effect.result(callTool("delete_comment", { id: "old-comment" })),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        // The person sees what disappears before it does.
+        assert.strictEqual(review.detail, "Delete comment on DEL-123\n\nWrong finding.");
+        assert.deepStrictEqual(review.args, { id: "old-comment", issueId: issue.id });
+        assert.deepStrictEqual(deleted, []);
+        yield* answer(opened, decision);
+        const result = yield* Fiber.join(pending);
+        assert.deepStrictEqual(deleted, decision === "accept" ? ["old-comment"] : []);
+        if (decision === "accept") {
+          assert.deepStrictEqual(result._tag === "Success" ? result.success : undefined, {
+            id: "old-comment",
+            issue: { id: issue.id, identifier: issue.identifier, url: issue.url },
+          });
+        }
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getComment: () =>
+              Effect.succeed({
+                id: "old-comment",
+                body: "Wrong finding.",
+                url: issue.url + "#old-comment",
+                issue: { id: issue.id },
+              }),
+            getIssue: () => Effect.succeed(issue),
+            deleteComment: (id) =>
+              Effect.sync(() => {
+                deleted.push(id);
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
 
 for (const assignee of ["Ada", null]) {
   it.effect(`updates assignment with ${assignee}`, () => {
@@ -2113,5 +2256,335 @@ it.effect("still confines a thread outside the assistant's team to its workspace
         `"${file}" is outside this thread's workspace. Pass a path inside it, relative to its root.`,
       );
     }),
+  ),
+);
+
+const stagingLink = {
+  id: "attachment-1",
+  title: "Staging preview",
+  subtitle: null,
+  url: "https://staging.example.com/del-123",
+  sourceType: null,
+};
+
+for (const [current, summary] of [
+  [[], "Attach link to DEL-123"],
+  // Linear updates the attachment it already has for this URL.
+  [[stagingLink], "Update link on DEL-123"],
+] as const) {
+  it.effect(`attaches a link only after approval: ${summary}`, () => {
+    const created: Array<unknown> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          callTool("create_attachment", {
+            url: ` ${stagingLink.url} `,
+            title: "Staging preview",
+            subtitle: "Build 42",
+          }),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        assert.deepStrictEqual(review.change, {
+          summary,
+          record: { label: "DEL-123", url: issue.url },
+          fields: [
+            { label: "Title", value: "Staging preview" },
+            { label: "URL", value: stagingLink.url },
+            { label: "Subtitle", value: "Build 42" },
+          ],
+        });
+        assert.deepStrictEqual(created, []);
+        yield* answer(opened, "accept");
+        yield* Fiber.join(pending);
+        assert.deepStrictEqual(created, [
+          {
+            issueId: issue.id,
+            url: stagingLink.url,
+            title: "Staging preview",
+            subtitle: "Build 42",
+          },
+        ]);
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getIssue: () => Effect.succeed({ ...issue, attachments: current }),
+            createAttachment: (input) =>
+              Effect.sync(() => {
+                created.push(input);
+                return { ...stagingLink, subtitle: input.subtitle ?? null };
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
+
+it.effect("refuses to attach something that is not a web link, before asking", () =>
+  Effect.gen(function* () {
+    const error = operationError(
+      yield* Effect.flip(
+        callTool("create_attachment", { url: "file:///etc/passwd", title: "Secrets" }),
+      ),
+    );
+    assert.include(error.detail, "http or https");
+  }).pipe(Effect.provide(testLayer({ linear: {}, confirmAgentWrites: true }))),
+);
+
+for (const decision of ["accept", "decline"] as const) {
+  it.effect(`removes an attachment only after approval: ${decision}`, () => {
+    const deleted: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          Effect.result(callTool("delete_attachment", { id: "attachment-1" })),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        assert.strictEqual(
+          review.detail,
+          `Remove link from DEL-123\nTitle: Staging preview\nURL: ${stagingLink.url}`,
+        );
+        assert.deepStrictEqual(review.args, { id: "attachment-1", issueId: issue.id });
+        assert.deepStrictEqual(deleted, []);
+        yield* answer(opened, decision);
+        const result = yield* Fiber.join(pending);
+        assert.deepStrictEqual(deleted, decision === "accept" ? ["attachment-1"] : []);
+        assert.strictEqual(result._tag, decision === "accept" ? "Success" : "Failure");
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getAttachment: () =>
+              Effect.succeed({
+                ...stagingLink,
+                issue: { id: issue.id, identifier: issue.identifier, url: issue.url },
+              }),
+            deleteAttachment: (id) =>
+              Effect.sync(() => {
+                deleted.push(id);
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
+
+const launchPlan = {
+  id: "document-uuid",
+  title: "Launch plan",
+  url: "https://linear.app/acme/document/launch-plan-0f1e2d3c4b5a",
+  updatedAt: "2026-09-02T10:00:00.000Z",
+  project: { id: "project-1", name: "Launch" },
+  content: "# Launch",
+  trashed: false,
+};
+const launchProject = {
+  id: "project-1",
+  name: "Launch",
+  url: "https://linear.app/acme/project/launch",
+};
+
+it.effect("lists documents in a project the agent named", () => {
+  const listed: Array<unknown> = [];
+  return callTool("list_documents", { project: "Launch", query: "plan" }).pipe(
+    Effect.map(() => {
+      assert.deepStrictEqual(listed, [
+        { query: "plan", cursor: undefined, limit: undefined, projectId: "project-1" },
+      ]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          listResources: () =>
+            Effect.succeed({
+              nodes: [{ id: "project-1", name: "Launch" }],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            }),
+          listDocuments: (input) =>
+            Effect.sync(() => {
+              listed.push(input);
+              return { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("creates a document in the linked issue's project once approved", () => {
+  const saved: Array<unknown> = [];
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const pending = yield* Effect.forkScoped(
+        callTool("save_document", { title: " Launch plan ", content: "# Launch" }),
+      );
+      const opened = yield* nextApprovalEvent;
+      const review = yield* decodeApprovalReview(opened.payload);
+      assert.deepStrictEqual(review.change, {
+        summary: "Create document",
+        fields: [
+          { label: "Title", value: "Launch plan" },
+          { label: "Project", value: "Launch" },
+          { label: "Content", value: "# Launch", format: "markdown" },
+        ],
+      });
+      assert.deepStrictEqual(saved, []);
+      yield* answer(opened, "accept");
+      assert.deepStrictEqual(yield* Fiber.join(pending), launchPlan);
+      assert.deepStrictEqual(saved, [
+        { title: "Launch plan", content: "# Launch", projectId: "project-1" },
+      ]);
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed({ ...issue, project: launchProject }),
+          saveDocument: (input) =>
+            Effect.sync(() => {
+              saved.push(input);
+              return launchPlan;
+            }),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
+
+it.effect("updates only the fields given, addressing the document by its UUID", () => {
+  const saved: Array<unknown> = [];
+  return callTool("save_document", { id: launchPlan.url, content: "# Launch v2" }).pipe(
+    Effect.map(() => {
+      assert.deepStrictEqual(saved, [{ id: "document-uuid", content: "# Launch v2" }]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          getDocument: () => Effect.succeed(launchPlan),
+          saveDocument: (input) =>
+            Effect.sync(() => {
+              saved.push(input);
+              return launchPlan;
+            }),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("refuses a new document without a title before reading anything", () =>
+  Effect.gen(function* () {
+    const error = operationError(
+      yield* Effect.flip(callTool("save_document", { content: "# Untitled" })),
+    );
+    assert.include(error.detail, "needs a title");
+  }).pipe(Effect.provide(testLayer({ linear: {} }))),
+);
+
+for (const decision of ["accept", "decline"] as const) {
+  it.effect(`deletes a document only after approval: ${decision}`, () => {
+    const deleted: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          Effect.result(callTool("delete_document", { id: "0f1e2d3c4b5a" })),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        assert.strictEqual(
+          review.detail,
+          "Delete document: Launch plan\nTitle: Launch plan\nProject: Launch",
+        );
+        assert.deepStrictEqual(review.args, { id: "document-uuid" });
+        assert.deepStrictEqual(deleted, []);
+        yield* answer(opened, decision);
+        const result = yield* Fiber.join(pending);
+        assert.deepStrictEqual(deleted, decision === "accept" ? ["document-uuid"] : []);
+        assert.strictEqual(result._tag, decision === "accept" ? "Success" : "Failure");
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getDocument: () => Effect.succeed(launchPlan),
+            deleteDocument: (id) =>
+              Effect.sync(() => {
+                deleted.push(id);
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
+
+for (const decision of ["accept", "decline"] as const) {
+  it.effect(`restores a trashed document only after approval: ${decision}`, () => {
+    const restored: Array<string> = [];
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const pending = yield* Effect.forkScoped(
+          Effect.result(callTool("restore_document", { id: launchPlan.url })),
+        );
+        const opened = yield* nextApprovalEvent;
+        const review = yield* decodeApprovalReview(opened.payload);
+        assert.strictEqual(
+          review.detail,
+          "Restore document: Launch plan\nTitle: Launch plan\nProject: Launch",
+        );
+        assert.deepStrictEqual(review.args, { id: "document-uuid" });
+        assert.deepStrictEqual(restored, []);
+        yield* answer(opened, decision);
+        const result = yield* Fiber.join(pending);
+        assert.deepStrictEqual(restored, decision === "accept" ? ["document-uuid"] : []);
+        assert.deepStrictEqual(
+          result._tag === "Success" ? result.success : undefined,
+          decision === "accept" ? launchPlan : undefined,
+        );
+      }),
+    ).pipe(
+      Effect.provide(
+        testLayer({
+          linear: {
+            getDocument: () => Effect.succeed({ ...launchPlan, trashed: true }),
+            restoreDocument: (id) =>
+              Effect.sync(() => {
+                restored.push(id);
+                return launchPlan;
+              }),
+          },
+          confirmAgentWrites: true,
+        }),
+      ),
+    );
+  });
+}
+
+it.effect("refuses to restore a document that is not in the trash, without asking", () =>
+  Effect.gen(function* () {
+    const error = operationError(
+      yield* Effect.flip(callTool("restore_document", { id: "document-uuid" })),
+    );
+    assert.include(error.detail, "not in Linear's trash");
+  }).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getDocument: () => Effect.succeed(launchPlan),
+          restoreDocument: () => Effect.die("Linear must not be called"),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
   ),
 );
