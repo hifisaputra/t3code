@@ -7,6 +7,8 @@ import {
   isProviderDriverKind,
   LinearOperationError,
   type IntegrationApprovalChange,
+  type LinearIssueDetail,
+  type LinearIssueRelationType,
   type LinearTeamRef,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -163,6 +165,83 @@ const resolveLabels = Effect.fn("LinearToolkit.resolveLabels")(function* (
   }
   return resolved;
 });
+
+type RelationInput = { readonly type: LinearIssueRelationType; readonly issue: string };
+
+const relationPhrases: Record<LinearIssueRelationType, string> = {
+  blocks: "Blocks",
+  blockedBy: "Blocked by",
+  related: "Related to",
+  duplicateOf: "Duplicate of",
+  duplicatedBy: "Duplicated by",
+};
+
+/** "Blocked by DEL-120, Related to DEL-98": relations as the approval lists them. */
+const describeRelations = (
+  relations: ReadonlyArray<{
+    readonly type: LinearIssueRelationType;
+    readonly issue: { readonly identifier: string };
+  }>,
+): string =>
+  relations
+    .map((relation) => `${relationPhrases[relation.type]} ${relation.issue.identifier}`)
+    .join(", ");
+
+/** Whether an agent's `DEL-123`, UUID, or issue link names this issue. */
+const namesIssue = (
+  reference: string,
+  issue: { readonly id: string; readonly identifier: string },
+): boolean => {
+  const needle = LinearApi.issueReferenceFromText(reference).toUpperCase();
+  return issue.id.toUpperCase() === needle || issue.identifier.toUpperCase() === needle;
+};
+
+/**
+ * Looks up the other issue of each relation to add, skipping any `issue`
+ * already has: adding a relation that exists is a no-op, not a duplicate. With
+ * no `issue`, the relations are for one that does not exist yet.
+ */
+const resolveRelationsToAdd = Effect.fn("LinearToolkit.resolveRelationsToAdd")(function* (
+  operation: string,
+  relations: ReadonlyArray<RelationInput>,
+  issue?: LinearIssueDetail,
+) {
+  const linear = yield* LinearApi.LinearApi;
+  const existing = issue?.relations ?? [];
+  const resolved: Array<{ type: LinearIssueRelationType; issue: LinearIssueDetail }> = [];
+  for (const relation of relations) {
+    const has = (otherReference: string) =>
+      existing.some(
+        (current) => current.type === relation.type && namesIssue(otherReference, current.issue),
+      );
+    if (has(relation.issue)) continue;
+    const other = yield* linear.getIssue({ reference: relation.issue.trim() });
+    if (issue !== undefined && other.id === issue.id) {
+      return yield* new LinearOperationError({
+        operation,
+        detail: `${issue.identifier} cannot be related to itself.`,
+      });
+    }
+    if (has(other.id)) continue;
+    if (resolved.some((added) => added.type === relation.type && added.issue.id === other.id)) {
+      continue;
+    }
+    resolved.push({ type: relation.type, issue: other });
+  }
+  return resolved;
+});
+
+/**
+ * The relations to delete, matched against what `issue` has. Removing one it
+ * does not have is a no-op, like adding one it already has: the re-read the
+ * agent gets back shows where the issue ended up either way.
+ */
+const relationsToRemove = (issue: LinearIssueDetail, relations: ReadonlyArray<RelationInput>) =>
+  (issue.relations ?? []).filter((current) =>
+    relations.some(
+      (relation) => relation.type === current.type && namesIssue(relation.issue, current.issue),
+    ),
+  );
 
 /**
  * The approval row is one line above the composer, so its `detail` is a
@@ -875,7 +954,9 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         input.cycle === undefined &&
         input.estimate === undefined &&
         input.priority === undefined &&
-        input.dueDate === undefined
+        input.dueDate === undefined &&
+        !input.addRelations?.length &&
+        !input.removeRelations?.length
       ) {
         return yield* new LinearOperationError({
           operation: "save_issue",
@@ -883,6 +964,12 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         });
       }
       const issue = yield* resolveIssue("save_issue", scope, named(input.id));
+      const addedRelations = yield* resolveRelationsToAdd(
+        "save_issue",
+        input.addRelations ?? [],
+        issue,
+      );
+      const removedRelations = relationsToRemove(issue, input.removeRelations ?? []);
       const resolvedState =
         state === undefined ? undefined : yield* resolveState("save_issue", issue.team.id, state);
       const resolvedLabels =
@@ -900,6 +987,23 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const planning = yield* resolveIssuePlanning(input, issue.team.id, issue.project?.id ?? null);
       const stateId = resolvedState?.id;
       const labelIds = resolvedLabels?.map((label) => label.id);
+      const patch = {
+        ...planning.patch,
+        ...(assigneeId !== undefined ? { assigneeId } : {}),
+        ...(title !== undefined ? { title } : {}),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(stateId !== undefined ? { stateId } : {}),
+        ...(labelIds !== undefined ? { labelIds } : {}),
+      };
+      // Relations the issue already has (or already lacks) are the only thing
+      // that can make a save land nowhere; there is nothing to ask about then.
+      if (
+        Object.keys(patch).length === 0 &&
+        addedRelations.length === 0 &&
+        removedRelations.length === 0
+      ) {
+        return issue;
+      }
       yield* confirmWrite("save_issue", scope, {
         appName: "Linear",
         change: {
@@ -928,6 +1032,12 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
                     value: resolvedLabels.map((label) => label.name).join(", "),
                   },
                 ]),
+            ...(addedRelations.length === 0
+              ? []
+              : [{ label: "Add relations", value: describeRelations(addedRelations) }]),
+            ...(removedRelations.length === 0
+              ? []
+              : [{ label: "Remove relations", value: describeRelations(removedRelations) }]),
             // The description replaces what the issue says now, so it is shown
             // whole. A character count is not something anyone can approve.
             ...(input.description === undefined
@@ -950,15 +1060,19 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
           ...(labelIds ? { labelIds } : {}),
         },
       });
-      yield* linear.updateIssue({
-        issueId: issue.id,
-        ...planning.patch,
-        ...(assigneeId !== undefined ? { assigneeId } : {}),
-        ...(title !== undefined ? { title } : {}),
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        ...(stateId !== undefined ? { stateId } : {}),
-        ...(labelIds !== undefined ? { labelIds } : {}),
-      });
+      if (Object.keys(patch).length > 0) {
+        yield* linear.updateIssue({ issueId: issue.id, ...patch });
+      }
+      yield* Effect.forEach(removedRelations, (relation) =>
+        linear.removeIssueRelation(relation.id),
+      );
+      yield* Effect.forEach(addedRelations, (relation) =>
+        linear.addIssueRelation({
+          issueId: issue.id,
+          type: relation.type,
+          otherIssueId: relation.issue.id,
+        }),
+      );
       // Re-read so the agent sees what Linear actually stored, including the
       // state and label names it just resolved by name.
       return yield* linear.getIssue({ reference: issue.id });
@@ -992,6 +1106,7 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
           ? undefined
           : yield* resolveLabels("create_issue", team.id, input.labels);
       const planning = yield* resolveIssuePlanning(input, team.id, null);
+      const relations = yield* resolveRelationsToAdd("create_issue", input.relations ?? []);
       const assignee =
         input.assignee == null ? input.assignee : yield* linear.resolveAssignee(input.assignee);
       const assigneeId = assignee == null ? assignee : assignee.id;
@@ -1027,6 +1142,9 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
                     value: resolvedLabels.map((label) => label.name).join(", "),
                   },
                 ]),
+            ...(relations.length === 0
+              ? []
+              : [{ label: "Relations", value: describeRelations(relations) }]),
             ...(input.description === undefined
               ? []
               : [
@@ -1048,7 +1166,7 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
           ...(labelIds ? { labelIds } : {}),
         },
       });
-      return yield* linear.createIssue({
+      const created = yield* linear.createIssue({
         teamId: team.id,
         ...planning.patch,
         ...(assigneeId !== undefined ? { assigneeId } : {}),
@@ -1058,5 +1176,24 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         ...(stateId !== undefined ? { stateId } : {}),
         ...(labelIds !== undefined ? { labelIds } : {}),
       });
+      // Linear has no way to relate issues inside `issueCreate`, so they are
+      // linked afterwards. By then the issue exists, and the agent must hear
+      // that before it retries and files a second one.
+      yield* Effect.forEach(relations, (relation) =>
+        linear.addIssueRelation({
+          issueId: created.id,
+          type: relation.type,
+          otherIssueId: relation.issue.id,
+        }),
+      ).pipe(
+        Effect.mapError(
+          (error) =>
+            new LinearOperationError({
+              operation: "create_issue",
+              detail: `Created ${created.identifier}, but its relations were not all saved: ${error.message} Add them with save_issue instead of creating the issue again.`,
+            }),
+        ),
+      );
+      return created;
     }),
 });

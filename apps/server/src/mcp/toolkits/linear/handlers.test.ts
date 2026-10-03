@@ -146,6 +146,8 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
       getResource: () => Effect.die("unused"),
       saveResource: () => Effect.die("unused"),
       createIssue: () => Effect.die("unused"),
+      addIssueRelation: () => Effect.die("unused"),
+      removeIssueRelation: () => Effect.die("unused"),
       labels: () => Effect.die("unused"),
       createComment: () => Effect.die("unused"),
       getComment: () => Effect.die("unused"),
@@ -1407,3 +1409,228 @@ it.effect("asks before the bytes leave the machine when confirmation is on", () 
     }),
   ),
 );
+
+const blocker: LinearIssueDetail = {
+  ...issue,
+  id: "issue-110",
+  identifier: "DEL-110",
+  title: "Store the key",
+  url: "https://linear.app/acme/issue/DEL-110",
+};
+
+const sibling: LinearIssueDetail = {
+  ...issue,
+  id: "issue-98",
+  identifier: "DEL-98",
+  title: "Integrations page",
+  url: "https://linear.app/acme/issue/DEL-98",
+};
+
+const relativeOf = (other: LinearIssueDetail) => ({
+  id: other.id,
+  identifier: other.identifier,
+  title: other.title,
+  url: other.url,
+  stateName: other.state.name,
+});
+
+/** DEL-123 as Linear has it once DEL-110 blocks it. */
+const blockedIssue: LinearIssueDetail = {
+  ...issue,
+  relations: [{ id: "relation-1", type: "blockedBy", issue: relativeOf(blocker) }],
+};
+
+const issuesByReference = (...known: ReadonlyArray<LinearIssueDetail>) => ({
+  getIssue: ({ reference }: { readonly reference: string }) => {
+    const found = known.find(
+      (candidate) => candidate.id === reference || candidate.identifier === reference,
+    );
+    return found === undefined
+      ? Effect.die(`unexpected lookup of ${reference}`)
+      : Effect.succeed(found);
+  },
+});
+
+it.effect("creates an issue, then links it to the issues the agent named", () => {
+  const writes: Array<unknown> = [];
+
+  return callTool("create_issue", {
+    title: "Follow up",
+    parentId: null,
+    relations: [
+      { type: "blockedBy", issue: "DEL-110" },
+      { type: "related", issue: "DEL-98" },
+      // Named twice, linked once.
+      { type: "blockedBy", issue: "issue-110" },
+    ],
+  }).pipe(
+    Effect.map((result) => {
+      assert.strictEqual((result as LinearIssueSummary).identifier, "DEL-124");
+      assert.deepStrictEqual(writes, [
+        { createIssue: "Follow up" },
+        { issueId: createdIssue.id, type: "blockedBy", otherIssueId: blocker.id },
+        { issueId: createdIssue.id, type: "related", otherIssueId: sibling.id },
+      ]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          ...issuesByReference(issue, blocker, sibling),
+          createIssue: (input) =>
+            Effect.sync(() => {
+              writes.push({ createIssue: input.title });
+              return createdIssue;
+            }),
+          addIssueRelation: (input) => Effect.sync(() => void writes.push(input)),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("tells the agent the issue exists when its relations fail to save", () =>
+  Effect.flip(
+    callTool("create_issue", {
+      title: "Follow up",
+      parentId: null,
+      relations: [{ type: "blockedBy", issue: "DEL-110" }],
+    }),
+  ).pipe(
+    Effect.map((error) => {
+      const { detail } = operationError(error);
+      assert.include(detail, "Created DEL-124");
+      assert.include(detail, "instead of creating the issue again");
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          ...issuesByReference(issue, blocker),
+          createIssue: () => Effect.succeed(createdIssue),
+          addIssueRelation: () =>
+            Effect.fail(
+              new LinearOperationError({
+                operation: "addIssueRelation",
+                detail: "Linear refused to relate the issues.",
+              }),
+            ),
+        },
+      }),
+    ),
+  ),
+);
+
+it.effect("adds and removes relations, skipping the ones already in place", () => {
+  const writes: Array<unknown> = [];
+  const linked: LinearIssueDetail = {
+    ...blockedIssue,
+    relations: [
+      ...blockedIssue.relations!,
+      { id: "relation-2", type: "blocks", issue: relativeOf(sibling) },
+    ],
+  };
+
+  return callTool("save_issue", {
+    addRelations: [
+      // Already there: neither looked up nor duplicated.
+      { type: "blockedBy", issue: "del-110" },
+      { type: "related", issue: "DEL-98" },
+    ],
+    removeRelations: [
+      { type: "blocks", issue: "DEL-98" },
+      // Not there: nothing to remove.
+      { type: "duplicateOf", issue: "DEL-98" },
+    ],
+  }).pipe(
+    Effect.map(() => {
+      // Only relations changed, so the issue itself is not patched.
+      assert.deepStrictEqual(writes, [
+        { remove: "relation-2" },
+        { issueId: issue.id, type: "related", otherIssueId: sibling.id },
+      ]);
+    }),
+    Effect.provide(
+      testLayer({
+        linear: {
+          ...issuesByReference(linked, sibling),
+          updateIssue: () => Effect.die("no issue field changed"),
+          removeIssueRelation: (id) => Effect.sync(() => void writes.push({ remove: id })),
+          addIssueRelation: (input) => Effect.sync(() => void writes.push(input)),
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("returns the issue without asking when its relations are already as requested", () =>
+  callTool("save_issue", {
+    addRelations: [{ type: "blockedBy", issue: "DEL-110" }],
+    removeRelations: [{ type: "related", issue: "DEL-98" }],
+  }).pipe(
+    Effect.map((result) => {
+      assert.deepStrictEqual(result, blockedIssue);
+    }),
+    Effect.provide(
+      testLayer({
+        // An approval would park this call forever, so finishing proves none was raised.
+        confirmAgentWrites: true,
+        linear: {
+          ...issuesByReference(blockedIssue),
+          removeIssueRelation: () => Effect.die("nothing to remove"),
+          addIssueRelation: () => Effect.die("nothing to add"),
+        },
+      }),
+    ),
+  ),
+);
+
+it.effect("refuses to relate an issue to itself", () =>
+  Effect.flip(
+    callTool("save_issue", { addRelations: [{ type: "related", issue: "DEL-123" }] }),
+  ).pipe(
+    Effect.map((error) => {
+      assert.include(operationError(error).detail, "cannot be related to itself");
+    }),
+    Effect.provide(testLayer({ linear: issuesByReference(issue) })),
+  ),
+);
+
+it.effect("lists relation changes for review and writes none of them on decline", () => {
+  const writes: Array<unknown> = [];
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const pending = yield* Effect.forkScoped(
+        Effect.flip(
+          callTool("save_issue", {
+            title: "Renamed",
+            addRelations: [{ type: "related", issue: "DEL-98" }],
+            removeRelations: [{ type: "blockedBy", issue: "DEL-110" }],
+          }),
+        ),
+      );
+      const opened = yield* nextApprovalEvent;
+      assert.deepStrictEqual(
+        (opened.payload as { readonly change: { readonly fields: unknown } }).change.fields,
+        [
+          { label: "Title", value: "Renamed" },
+          { label: "Add relations", value: "Related to DEL-98" },
+          { label: "Remove relations", value: "Blocked by DEL-110" },
+        ],
+      );
+      yield* answer(opened, "decline");
+      yield* Fiber.join(pending);
+      assert.deepStrictEqual(writes, []);
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        confirmAgentWrites: true,
+        linear: {
+          ...issuesByReference(blockedIssue, sibling),
+          updateIssue: (input) => Effect.sync(() => void writes.push(input)),
+          removeIssueRelation: (id) => Effect.sync(() => void writes.push(id)),
+          addIssueRelation: (input) => Effect.sync(() => void writes.push(input)),
+        },
+      }),
+    ),
+  );
+});

@@ -24,6 +24,8 @@ import {
   type LinearGetIssueInput,
   type LinearIssueDetail,
   type LinearIssueLabel,
+  type LinearIssueRelation,
+  type LinearIssueRelationType,
   type LinearIssueRelative,
   type LinearIssueSummary,
   type LinearListIssuesInput,
@@ -162,6 +164,23 @@ const RawIssueDetail = Schema.Struct({
   description: Schema.NullOr(Schema.String),
   parent: Schema.NullOr(RawIssueRelative),
   children: Schema.Struct({ nodes: Schema.Array(RawIssueRelative) }),
+  // Relation types are read as plain strings: `similar` (Linear's own
+  // suggestion) and any type this build does not know are dropped in
+  // `toIssueRelation` rather than failing the whole read.
+  relations: Schema.Struct({
+    nodes: Schema.Array(
+      Schema.Struct({
+        id: TrimmedNonEmptyString,
+        type: Schema.String,
+        relatedIssue: RawIssueRelative,
+      }),
+    ),
+  }),
+  inverseRelations: Schema.Struct({
+    nodes: Schema.Array(
+      Schema.Struct({ id: TrimmedNonEmptyString, type: Schema.String, issue: RawIssueRelative }),
+    ),
+  }),
   labels: Schema.Struct({
     nodes: Schema.Array(
       Schema.Struct({
@@ -277,6 +296,14 @@ const IssueCreateResult = Schema.Struct({
   }),
 });
 
+const IssueRelationCreateResult = Schema.Struct({
+  issueRelationCreate: Schema.Struct({ success: Schema.Boolean }),
+});
+
+const IssueRelationDeleteResult = Schema.Struct({
+  issueRelationDelete: Schema.Struct({ success: Schema.Boolean }),
+});
+
 const RawIssueLabel = Schema.Struct({
   id: TrimmedNonEmptyString,
   name: TrimmedNonEmptyString,
@@ -296,6 +323,8 @@ const decodeIssueUpdateResult = Schema.decodeUnknownEffect(IssueUpdateResult);
 const decodeCommentCreateResult = Schema.decodeUnknownEffect(CommentCreateResult);
 const decodeIssueCreateResult = Schema.decodeUnknownEffect(IssueCreateResult);
 const decodeLabelsResult = Schema.decodeUnknownEffect(LabelsResult);
+const decodeIssueRelationCreateResult = Schema.decodeUnknownEffect(IssueRelationCreateResult);
+const decodeIssueRelationDeleteResult = Schema.decodeUnknownEffect(IssueRelationDeleteResult);
 
 const ISSUE_SUMMARY_FIELDS = `
   id
@@ -319,6 +348,8 @@ const ISSUE_DETAIL_FIELDS = `
   description
   parent { id identifier title url state { name } }
   children { nodes { id identifier title url state { name } } }
+  relations(first: 50) { nodes { id type relatedIssue { id identifier title url state { name } } } }
+  inverseRelations(first: 50) { nodes { id type issue { id identifier title url state { name } } } }
   labels { nodes { id name color } }
   comments(first: 50) { nodes { id body url createdAt user { id name displayName app } } }
 `;
@@ -377,6 +408,22 @@ const UPDATE_ISSUE_STATE_MUTATION = `
 const UPDATE_ISSUE_MUTATION = `
   mutation T3CodeUpdateIssue($id: String!, $input: IssueUpdateInput!) {
     issueUpdate(id: $id, input: $input) { success }
+  }
+`;
+
+/**
+ * A relation points from `issueId` to `relatedIssueId`: "A blocks B" and "A is
+ * a duplicate of B" are both stored on A. See `storedRelations`.
+ */
+const CREATE_ISSUE_RELATION_MUTATION = `
+  mutation T3CodeCreateIssueRelation($input: IssueRelationCreateInput!) {
+    issueRelationCreate(input: $input) { success }
+  }
+`;
+
+const DELETE_ISSUE_RELATION_MUTATION = `
+  mutation T3CodeDeleteIssueRelation($id: String!) {
+    issueRelationDelete(id: $id) { success }
   }
 `;
 
@@ -512,8 +559,50 @@ function toIssueRelative(raw: typeof RawIssueRelative.Type): LinearIssueRelative
   };
 }
 
+/**
+ * Linear stores a relation on one issue, pointing at another. Each stored type
+ * reads differently from the issue that holds it (`outward`) and from the issue
+ * it points at (`inward`); `related` is symmetric, so it reads the same from both.
+ */
+const relationReadings = {
+  blocks: { outward: "blocks", inward: "blockedBy" },
+  duplicate: { outward: "duplicateOf", inward: "duplicatedBy" },
+  related: { outward: "related", inward: "related" },
+} as const;
+
+/** The inverse of `relationReadings`: what to store for a type read from the issue's side. */
+const storedRelations = {
+  blocks: { type: "blocks", outward: true },
+  blockedBy: { type: "blocks", outward: false },
+  related: { type: "related", outward: true },
+  duplicateOf: { type: "duplicate", outward: true },
+  duplicatedBy: { type: "duplicate", outward: false },
+} as const satisfies Record<
+  LinearIssueRelationType,
+  { readonly type: keyof typeof relationReadings; readonly outward: boolean }
+>;
+
+function toIssueRelation(
+  relation: { readonly id: string; readonly type: string },
+  direction: "outward" | "inward",
+  other: typeof RawIssueRelative.Type,
+): LinearIssueRelation[] {
+  if (!Object.hasOwn(relationReadings, relation.type)) return [];
+  const readings = relationReadings[relation.type as keyof typeof relationReadings];
+  return [{ id: relation.id, type: readings[direction], issue: toIssueRelative(other) }];
+}
+
 function toIssueDetail(raw: typeof RawIssueDetail.Type): LinearIssueDetail {
-  const { description, comments, parent, children, labels, ...summary } = raw;
+  const {
+    description,
+    comments,
+    parent,
+    children,
+    relations,
+    inverseRelations,
+    labels,
+    ...summary
+  } = raw;
   return {
     ...summary,
     description,
@@ -531,6 +620,14 @@ function toIssueDetail(raw: typeof RawIssueDetail.Type): LinearIssueDetail {
     })),
     parent: parent === null ? null : toIssueRelative(parent),
     children: children.nodes.map(toIssueRelative),
+    relations: [
+      ...relations.nodes.flatMap((relation) =>
+        toIssueRelation(relation, "outward", relation.relatedIssue),
+      ),
+      ...inverseRelations.nodes.flatMap((relation) =>
+        toIssueRelation(relation, "inward", relation.issue),
+      ),
+    ],
     labels: labels.nodes,
   };
 }
@@ -610,6 +707,20 @@ export class LinearApi extends Context.Service<
       readonly priority?: number;
       readonly dueDate?: string | null;
     }) => Effect.Effect<LinearIssueSummary, LinearUnavailableError | LinearOperationError>;
+    /**
+     * Link two issues, with `type` read from `issueId`'s side: `blockedBy`
+     * stores a `blocks` relation from `otherIssueId` to `issueId`. Both ids
+     * are UUIDs.
+     */
+    readonly addIssueRelation: (input: {
+      readonly issueId: string;
+      readonly type: LinearIssueRelationType;
+      readonly otherIssueId: string;
+    }) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
+    /** Delete a relation by the id `getIssue` reports for it. */
+    readonly removeIssueRelation: (
+      relationId: string,
+    ) => Effect.Effect<void, LinearUnavailableError | LinearOperationError>;
     /** Labels an issue on this team may carry, team-owned plus workspace-wide, sorted by name. */
     readonly labels: (
       teamId: string,
@@ -1176,6 +1287,49 @@ const make = Effect.gen(function* () {
     return result.issueCreate.issue satisfies LinearIssueSummary;
   });
 
+  const addIssueRelation = Effect.fn("LinearApi.addIssueRelation")(function* (input: {
+    readonly issueId: string;
+    readonly type: LinearIssueRelationType;
+    readonly otherIssueId: string;
+  }) {
+    const stored = storedRelations[input.type];
+    const result = yield* request({
+      operation: "addIssueRelation",
+      query: CREATE_ISSUE_RELATION_MUTATION,
+      variables: {
+        input: {
+          type: stored.type,
+          issueId: stored.outward ? input.issueId : input.otherIssueId,
+          relatedIssueId: stored.outward ? input.otherIssueId : input.issueId,
+        },
+      },
+      decode: decodeIssueRelationCreateResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.issueRelationCreate.success) {
+      return yield* new LinearOperationError({
+        operation: "addIssueRelation",
+        detail: "Linear refused to relate the issues.",
+      });
+    }
+  });
+
+  const removeIssueRelation = Effect.fn("LinearApi.removeIssueRelation")(function* (
+    relationId: string,
+  ) {
+    const result = yield* request({
+      operation: "removeIssueRelation",
+      query: DELETE_ISSUE_RELATION_MUTATION,
+      variables: { id: relationId },
+      decode: decodeIssueRelationDeleteResult,
+    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    if (!result.issueRelationDelete.success) {
+      return yield* new LinearOperationError({
+        operation: "removeIssueRelation",
+        detail: "Linear refused to remove the relation.",
+      });
+    }
+  });
+
   const labels = Effect.fn("LinearApi.labels")(function* (teamId: string) {
     const result = yield* request({
       operation: "labels",
@@ -1319,6 +1473,8 @@ const make = Effect.gen(function* () {
     getResource,
     saveResource,
     createIssue,
+    addIssueRelation,
+    removeIssueRelation,
     labels,
     createComment,
     uploadFile,
