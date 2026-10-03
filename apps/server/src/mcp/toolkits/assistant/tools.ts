@@ -361,8 +361,15 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_wait", {
     description:
-      "Team leader: wait for external progress, such as CI or a staging deployment, without polling in the agent. Supply a concrete reason and end your turn. T3 wakes you in about a minute. Use assistant_ask_decision instead for a lasting blocker requiring a person.",
-    parameters: Schema.Struct({ reason: text }),
+      "Team leader: wait for external progress, such as CI or a staging deployment, without polling in the agent. Supply a concrete reason and end your turn. T3 wakes you in about a minute, or after minutes when you give it: for something slow, such as a 40-minute CI run, give about how long it has left so you do not spend a turn every minute. After 15 waits on one issue T3 blocks it for the person. Use assistant_ask_decision instead for a lasting blocker requiring a person.",
+    parameters: Schema.Struct({
+      reason: text,
+      minutes: Schema.optionalKey(
+        Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 60 })).annotate({
+          description: "How long T3 waits before waking you, 1 to 60 minutes. Defaults to 1.",
+        }),
+      ),
+    }),
     success: Schema.String,
     failure,
     dependencies,
@@ -541,9 +548,10 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_wait: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      const result = yield* service.waitForExternal(caller, input.reason.trim());
+      const minutes = input.minutes ?? 1;
+      const result = yield* service.waitForExternal(caller, input.reason.trim(), minutes);
       if (result.outcome === "limit")
         return "T3 has checked back 15 times without this completing, so the issue is now blocked for the person to look at. End your turn.";
-      return "T3 checks back in about a minute. End your turn now.";
+      return `T3 checks back in about ${minutes === 1 ? "a minute" : `${minutes} minutes`}. End your turn now.`;
     }),
 });

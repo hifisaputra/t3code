@@ -253,12 +253,16 @@ export function describeTaskPhase(input: {
           detail: `The ${holder} asked something in its thread.`,
         };
       // A team leader waiting on something outside T3 records it on its issue.
-      // T3 tells it to check again once a minute until it moves or gives up.
+      // T3 tells it to check again after the delay it asked for (a minute by
+      // default) until it moves or gives up.
       const wait = task.wait ?? null;
       if (wait && !workerBusy) {
         const detail = [
           wait.reason.trim() || null,
           wait.checks > 0 ? `check ${wait.checks} of ${WAIT_CHECKS_LIMIT}` : null,
+          wait.until && !wait.notified
+            ? `next at ${new Date(wait.until).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+            : null,
         ]
           .filter(Boolean)
           .join(" · ");

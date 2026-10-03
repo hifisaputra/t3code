@@ -3835,11 +3835,13 @@ export const make = Effect.gen(function* () {
   /**
    * A team leader waits for progress outside T3. The wait is counted on its
    * issue, so the issue waits for the person while the loop and the project's
-   * other teams carry on.
+   * other teams carry on. T3 tells it to check again on the next scan, or once
+   * `minutes` have passed when that is more than one.
    */
   const waitForExternal = Effect.fn("Assistant.waitForExternal")(function* (
     caller: ThreadId,
     reason: string,
+    minutes = 1,
   ) {
     const { p, t } = yield* authorizeLead(caller);
     if (p.status === "stopped") return yield* fail("The assistant is stopped.");
@@ -3854,9 +3856,20 @@ export const make = Effect.gen(function* () {
       });
       return { outcome: "limit" } satisfies AssistantWaitResult;
     }
+    const until =
+      minutes > 1
+        ? DateTime.formatIso(
+            DateTime.makeUnsafe((yield* Clock.currentTimeMillis) + minutes * 60_000),
+          )
+        : undefined;
     const waiting = yield* saveTask({
       ...t,
-      wait: { reason: reason.slice(0, 1000), checks: (t.wait?.checks ?? 0) + 1, notified: false },
+      wait: {
+        reason: reason.slice(0, 1000),
+        checks: (t.wait?.checks ?? 0) + 1,
+        ...(until ? { until } : {}),
+        notified: false,
+      },
     });
     yield* sessionUpdate(waiting, `wait:${waiting.wait?.checks}`, {
       type: "thought",
@@ -4403,8 +4416,9 @@ export const make = Effect.gen(function* () {
         yield* Effect.gen(function* () {
           for (const held of yield* heldTasks(row.project_id)) {
             const wait = held.wait;
-            // One assistant_wait call produces one check-again message.
+            // One assistant_wait call produces one check-again message, once its delay passes.
             if (!wait || wait.notified) continue;
+            if (wait.until && Date.parse(wait.until) > (yield* Clock.currentTimeMillis)) continue;
             yield* notifyLead(held, `Waiting: ${wait.reason}\nCheck again.`);
             yield* saveTask({ ...held, wait: { ...wait, notified: true } });
           }
