@@ -202,8 +202,9 @@ export function declinedComment(reason: string): string {
 const FINGERPRINT_COMMENTS = 20;
 
 /**
- * What the issue says, as a person would change it. T3's own comments are left
- * out, so posting one never makes a declined issue look edited.
+ * What the issue says, as a person would change it. T3's own comments, and the
+ * app's replies on its agent sessions, are left out, so posting one never makes a
+ * declined issue look edited.
  *
  * Linear returns the newest comments first and T3 reads a window of 50, so on a
  * long thread its own comment pushes an older one out of the window. Only the
@@ -226,7 +227,7 @@ export function issueFingerprint(
     parent: issue.parent?.id ?? null,
     children: issue.children.map((child) => `${child.id}:${child.stateName}`).toSorted(),
     comments: issue.comments
-      .filter((c) => !posted.has(c.id))
+      .filter((c) => !posted.has(c.id) && !c.authorIsApp)
       .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt))
       .slice(-FINGERPRINT_COMMENTS)
       .map((c) => `${c.id}:${c.body}`),

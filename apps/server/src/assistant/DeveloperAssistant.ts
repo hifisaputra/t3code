@@ -1556,13 +1556,16 @@ export const make = Effect.gen(function* () {
   /**
    * The person gives an issue to the next team from the board. It goes ahead
    * of the loop's own picks and runs while the loop is paused. Its team leader
-   * takes it or asks; it does not decline it.
+   * takes it or asks; it does not decline it. A note for an issue a team already
+   * has goes to that team, and a note on a delivered issue sends it back.
+   * `passed` is what became of such a note.
    */
   const dispatchIssue = Effect.fn("Assistant.dispatchIssue")(function* (
     p: AwaitedProject,
     reference: string,
     note: string,
     linearSession?: AssistantTask["linearSession"],
+    deliveryId: string = newId(),
   ) {
     const issue = yield* linear.getIssue({ reference });
     if (issue.project?.id !== p.config.linearProjectId)
@@ -1571,19 +1574,32 @@ export const make = Effect.gen(function* () {
       return yield* fail("This issue is closed in Linear.");
     const rows =
       yield* sql<TaskRow>`SELECT * FROM assistant_tasks WHERE project_id = ${p.project_id} AND issue_id = ${issue.id} ORDER BY rowid DESC LIMIT 1`;
-    const previous = rows[0] ? yield* decodeTask(rows[0].data) : undefined;
+    let previous = rows[0] ? yield* decodeTask(rows[0].data) : undefined;
     if (previous && (previous.status === "queued" || assistantTaskHoldsProject(previous.status)))
-      return previous;
-    if (previous?.status === "review")
-      return yield* fail(
-        "This issue is waiting for the person's review. Moving it back in Linear gives it to a new team with their feedback.",
-      );
+      return {
+        task: previous,
+        passed: note ? yield* passNote(previous, note, deliveryId) : null,
+      };
     if ((yield* humanClaims()).has(issue.id))
       return yield* fail("A thread outside the assistant is already working on this issue.");
+    const sendsBack = previous?.status === "review";
+    if (previous && sendsBack) {
+      if (!note)
+        return yield* fail(
+          "This issue is waiting for the person's review. Say what should change to give it to a new team, or move it back in Linear.",
+        );
+      // As the board's request for changes, with replies kept from the session.
+      previous = yield* saveTask({
+        ...previous,
+        status: "changes-requested",
+        feedback: [note, sessionNotes(previous.feedback)].filter(Boolean).join("\n\n"),
+      });
+    }
     const value = yield* newTask(p, issue, {
       status: "queued",
       dispatched: true,
-      brief: note,
+      // A note that sent the issue back is its feedback, not a second brief.
+      brief: sendsBack ? "" : note,
       feedback: previous?.status === "changes-requested" ? previous.feedback : "",
       // Carried from the start, so a team started below speaks in it and opens none.
       ...(linearSession ? { linearSession } : {}),
@@ -1598,7 +1614,7 @@ export const make = Effect.gen(function* () {
         }),
       ),
     );
-    return yield* task(value.id);
+    return { task: yield* task(value.id), passed: null };
   });
   /**
    * A person delegated an issue to the T3 Code app in Linear. The assistant whose
@@ -1620,15 +1636,27 @@ export const make = Effect.gen(function* () {
       const p = matches.find((match) => match.status !== "stopped") ?? matches[0];
       if (!p) return null;
       const session = { id: input.sessionId, origin: "delegated" as const };
-      let t = yield* dispatchIssue(p, issue.id, input.note, session);
+      // A redelivered webhook finds its note already passed on, so it is not passed twice.
+      const handled =
+        yield* sql`SELECT delivery_id FROM assistant_linear_replies WHERE delivery_id = ${input.deliveryId}`;
+      const dispatched = yield* dispatchIssue(
+        p,
+        issue.id,
+        handled.length ? "" : input.note,
+        session,
+        input.deliveryId,
+      );
+      let t = dispatched.task;
+      yield* sql`INSERT OR IGNORE INTO assistant_linear_replies (delivery_id, task_id, handled_at) VALUES (${input.deliveryId}, ${t.id}, ${yield* now})`;
       const say = (key: string, content: OutboxContent) =>
         outbox.enqueue(`${t.id}:${key}:${input.deliveryId}`, input.sessionId, content);
       if (t.linearSession && t.linearSession.id !== input.sessionId) {
         // The team speaks in its own session; this one only points there.
         yield* say("elsewhere", {
           type: "response",
-          body:
-            t.status === "queued"
+          body: dispatched.passed
+            ? `${dispatched.passed} Follow the team's session on this issue.`
+            : t.status === "queued"
               ? "This issue is already queued in T3 Code. Follow its session on this issue."
               : "A team is already working on this issue in T3 Code. Follow its session on this issue.",
         });
@@ -1639,7 +1667,10 @@ export const make = Effect.gen(function* () {
         t = yield* saveTask({ ...t, linearSession: session });
         if (assistantTaskHoldsProject(t.status)) yield* openSession(t);
       }
-      if (t.status !== "queued") return { taskId: t.id, queuedBehind: 0, attached: true };
+      if (t.status !== "queued") {
+        if (dispatched.passed) yield* say("passed", { type: "thought", body: dispatched.passed });
+        return { taskId: t.id, queuedBehind: 0, attached: true };
+      }
       // What starts before it, the way advance picks: earlier dispatched issues
       // first, and every team when the project is at its limit.
       const current = yield* project(p.project_id);
@@ -2207,6 +2238,45 @@ export const make = Effect.gen(function* () {
   );
 
   /**
+   * What a person wrote in Linear for the team that has the issue. It answers the
+   * team's oldest open question, or reaches the team leader as a note; a queued
+   * issue keeps it in the brief its leader starts with. Returns what to tell them.
+   */
+  const passNote = Effect.fn("Assistant.passNote")(function* (
+    t: AssistantTask,
+    body: string,
+    deliveryId: string,
+  ) {
+    if (t.status === "queued") {
+      yield* saveTask({ ...t, brief: [t.brief.trim(), body].filter(Boolean).join("\n\n") });
+      return "Queued. The team leader gets this note when the team starts.";
+    }
+    const ids = taskThreadIds(t);
+    const open = yield* sql<{
+      data: string;
+    }>`SELECT data FROM assistant_decisions WHERE resolved = 0 AND thread_id IN (${ids[0]}, ${ids[1]}, ${ids[2]}, ${ids[3]}) ORDER BY rowid`;
+    const decisions = yield* Effect.forEach(open, (row) => decodeDecision(row.data));
+    const roleOf = (threadId: ThreadId) =>
+      threadTask(threadId).pipe(Effect.map((owner) => (owner ? LINEAR_ROLES[owner.role] : "team")));
+    const questions = decisions.filter((d) => d.kind === "decision");
+    if (questions[0]) {
+      yield* resolveDecision(questions[0], body);
+      const next = questions[1];
+      return `Answer sent to the ${yield* roleOf(questions[0].threadId)}.${next ? `\n\nStill open: ${firstLine(next.question)}` : ""}`;
+    }
+    if (decisions[0])
+      return `A ${yield* roleOf(decisions[0].threadId)} thread is waiting on a permission or input request, which can only be answered in T3 Code.`;
+    yield* queueMessage(
+      t.projectId,
+      assistantTaskThreadId(t, "lead"),
+      `${t.id}:lead:linear:${deliveryId}`,
+      `The person wrote on the Linear issue:\n${body}\nTake it into account; ask with assistant_ask_decision if it changes the agreed scope.`,
+    );
+    yield* changed;
+    return "Passed to the team leader.";
+  });
+
+  /**
    * A person's reply on a team's Linear session, or its stop button. A reply
    * answers the team's oldest open question, or reaches the team leader as a
    * note, or is kept for a send-back once the work is delivered. Each webhook
@@ -2257,50 +2327,16 @@ export const make = Effect.gen(function* () {
       yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* record;
-          if (!stop && assistantTaskHoldsProject(t.status)) {
-            const ids = taskThreadIds(t);
-            const open = yield* sql<{
-              data: string;
-            }>`SELECT data FROM assistant_decisions WHERE resolved = 0 AND thread_id IN (${ids[0]}, ${ids[1]}, ${ids[2]}, ${ids[3]}) ORDER BY rowid`;
-            const decisions = yield* Effect.forEach(open, (row) => decodeDecision(row.data));
-            const roleOf = (threadId: ThreadId) =>
-              threadTask(threadId).pipe(
-                Effect.map((owner) => (owner ? LINEAR_ROLES[owner.role] : "team")),
-              );
-            const questions = decisions.filter((d) => d.kind === "decision");
-            if (questions[0]) {
-              yield* resolveDecision(questions[0], body);
-              const next = questions[1];
-              return yield* reply(
-                `Answer sent to the ${yield* roleOf(questions[0].threadId)}.${next ? `\n\nStill open: ${firstLine(next.question)}` : ""}`,
-              );
-            }
-            if (decisions[0])
-              return yield* reply(
-                `A ${yield* roleOf(decisions[0].threadId)} thread is waiting on a permission or input request, which can only be answered in T3 Code.`,
-              );
-            yield* queueMessage(
-              t.projectId,
-              assistantTaskThreadId(t, "lead"),
-              `${t.id}:lead:linear:${input.deliveryId}`,
-              `The person wrote on the Linear issue:\n${body}\nTake it into account; ask with assistant_ask_decision if it changes the agreed scope.`,
+          if (!stop && (t.status === "queued" || assistantTaskHoldsProject(t.status)))
+            return yield* reply(yield* passNote(t, body, input.deliveryId));
+          if (stop && t.status === "queued") {
+            // Like the board's skip; no thread exists yet to interrupt.
+            yield* saveTask({ ...t, status: "skipped" });
+            return yield* outbox.enqueue(
+              `${t.id}:linear-reply:${input.deliveryId}`,
+              input.sessionId,
+              { type: "response", body: "Removed from the queue." },
             );
-            yield* changed;
-            return yield* reply("Passed to the team leader.");
-          }
-          if (t.status === "queued") {
-            if (stop) {
-              // Like the board's skip; no thread exists yet to interrupt.
-              yield* saveTask({ ...t, status: "skipped" });
-              return yield* outbox.enqueue(
-                `${t.id}:linear-reply:${input.deliveryId}`,
-                input.sessionId,
-                { type: "response", body: "Removed from the queue." },
-              );
-            }
-            // The brief is the dispatch note the team leader starts with.
-            yield* saveTask({ ...t, brief: [t.brief.trim(), body].filter(Boolean).join("\n\n") });
-            return yield* reply("Queued. The team leader gets this note when the team starts.");
           }
           if (!stop && t.status === "review") {
             const p = yield* project(t.projectId);

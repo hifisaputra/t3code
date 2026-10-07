@@ -144,6 +144,12 @@ if you like. A dispatched issue goes next, ahead of the loop's own picks, and it
 or asks you rather than declining it. Assignment does not matter: you chose it. Dispatched issues
 wait under **Up next** while every team is busy, and you can take them out again.
 
+Mentioning or delegating to the T3 Code app on an issue in the assistant's Linear project dispatches
+it the same way, with your comment as the note (see [Delegate work from Linear](./linear.md#delegate-work-from-linear)).
+A note for an issue a team already has goes to that team: it answers the team's open question, or
+reaches its team leader. A note on a delivered issue sends it back to a new team, with the note as
+the change request.
+
 Product questions appear under **Needs you** and remain linked to the asking thread. You
 can answer in the inbox, or tell the assistant in its conversation and it passes your answer to
 the thread that asked. When a thread has one pending product question, a reply in that original
