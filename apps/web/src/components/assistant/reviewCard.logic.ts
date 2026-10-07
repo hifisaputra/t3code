@@ -1,12 +1,13 @@
 import {
   assistantE2eEvidenceCounts,
   assistantResearchCounts,
+  assistantTaskReports,
   type AssistantE2eSummary,
   type AssistantE2eVerdict,
   type AssistantTaskSummary,
 } from "@t3tools/contracts";
 
-import { engineeringChecksLine } from "./assistantBoard.logic";
+import { engineeringChecksLine, reportWords } from "./assistantBoard.logic";
 
 export type ReviewVerdictTone = AssistantE2eVerdict | "verified";
 
@@ -46,7 +47,8 @@ function verdictLabel(task: AssistantTaskSummary, e2e: AssistantE2eSummary | nul
 
 /** What an issue waiting for acceptance amounts to, for its inbox card. */
 export function reviewSummary(task: AssistantTaskSummary): ReviewSummary {
-  if (task.track === "research") {
+  if (assistantTaskReports(task)) {
+    const words = reportWords(task.track);
     const research = task.research;
     const total = Math.max(task.criteria?.length ?? 0, research?.checks.length ?? 0);
     const answered = research?.checks.filter((check) => check.result === "answered").length ?? 0;
@@ -55,11 +57,21 @@ export function reviewSummary(task: AssistantTaskSummary): ReviewSummary {
     return {
       kind: "Check and accept",
       verdict: {
-        label: approved ? "Fact-check approved" : "Awaiting fact-check approval",
+        label: approved ? words.checked : words.awaitingCheck,
         tone: approved ? "verified" : "partial",
       },
-      criteria: { passed: answered, total, label: `${answered} of ${total} questions answered` },
-      sources: research ? assistantResearchCounts(research).sources : 0,
+      criteria: {
+        passed: answered,
+        total,
+        label:
+          task.track === "ops"
+            ? `${answered} of ${total} done`
+            : `${answered} of ${total} questions answered`,
+      },
+      // An ops change's links are not sources; its line reads like a delivery's.
+      ...(task.track === "ops"
+        ? {}
+        : { sources: research ? assistantResearchCounts(research).sources : 0 }),
       screenshots: research ? assistantResearchCounts(research).screenshots : 0,
       videos: 0,
       humanChecks: 0,

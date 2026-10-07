@@ -1,4 +1,5 @@
 import {
+  assistantTaskReports,
   type AssistantBoard,
   type AssistantTaskSummary,
   type EnvironmentId,
@@ -33,6 +34,7 @@ import {
   ScreenshotGrid,
   useEvidenceViewer,
 } from "./AssistantReviewEvidence";
+import { reportWords } from "./assistantBoard.logic";
 import { TeamThreads } from "./AssistantTeam";
 import {
   CommitChip,
@@ -43,7 +45,7 @@ import {
   type StatusTone,
 } from "./assistantUi";
 import { reviewOutcomeLine, reviewSummary, type ReviewVerdictTone } from "./reviewCard.logic";
-import { ResearchBadge } from "./threadKinds";
+import { TrackBadge } from "./threadKinds";
 import { useAssistantTaskDetail } from "./useAssistantTaskDetail";
 
 const VERDICT_TONE: Record<ReviewVerdictTone, { dot: StatusTone; text: string }> = {
@@ -217,7 +219,7 @@ export function AssistantReviewView({
             <span className="shrink-0 font-mono text-muted-foreground">
               {task.issue.identifier}
             </span>
-            <ResearchBadge track={task.track} />
+            <TrackBadge track={task.track} />
             {projectLabel ? (
               <span className="min-w-0 truncate text-muted-foreground">{projectLabel}</span>
             ) : null}
@@ -252,11 +254,11 @@ export function AssistantReviewView({
                 <span className="text-muted-foreground">{summary.engineering.label}</span>
               )
             ) : null}
-            {task.track !== "research" && task.deployment ? (
+            {!assistantTaskReports(task) && task.deployment ? (
               <CommitChip revision={task.deployment.revision} />
             ) : null}
             <span className="ml-auto flex items-center gap-3">
-              {task.track !== "research" && task.deployment ? (
+              {!assistantTaskReports(task) && task.deployment ? (
                 <Button
                   size="xs"
                   variant="outline"
@@ -278,7 +280,7 @@ export function AssistantReviewView({
                 Could not load the rest of this issue: {detail.error}
               </p>
             ) : null}
-            {task.track === "research" ? (
+            {assistantTaskReports(task) ? (
               <ResearchEvidence task={opened} environmentId={environmentId} viewer={viewer} />
             ) : (
               <>
@@ -380,8 +382,8 @@ export function AssistantReviewView({
                 autoFocus
                 aria-label={`Changes you want in ${task.issue.identifier}`}
                 placeholder={
-                  task.track === "research"
-                    ? "What should the team research or correct?"
+                  assistantTaskReports(task)
+                    ? reportWords(task.track).sendBack
                     : task.track === "test"
                       ? "What should the team test again?"
                       : "What should change? A fresh worker starts from the current integration branch."

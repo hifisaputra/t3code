@@ -68,6 +68,17 @@ export function ThreadKindIcon({
 
 export function threadKind(kind: AssistantThreadKind, track?: AssistantTaskTrack) {
   const base = THREAD_KIND[kind];
+  if (track === "ops") {
+    if (kind === "implement")
+      return { ...base, does: "Makes the change outside the repository and reports it." };
+    if (kind === "review") return { ...base, label: "Verify", does: "Reads each change back." };
+    if (kind === "lead")
+      return {
+        ...base,
+        does: "Scopes the change, briefs the worker, and coordinates the verification.",
+      };
+    return base;
+  }
   if (track !== "research") return base;
   if (kind === "implement") return { ...base, does: "Researches on the public web." };
   if (kind === "review") return { ...base, label: "Fact check", does: "Fact-checks the report." };
@@ -79,10 +90,11 @@ export function threadKind(kind: AssistantThreadKind, track?: AssistantTaskTrack
   return base;
 }
 
-export function ResearchBadge({ track }: { track?: AssistantTaskTrack | undefined }) {
-  return track === "research" ? (
+/** Marks an issue that delivers a report rather than a merged change. */
+export function TrackBadge({ track }: { track?: AssistantTaskTrack | undefined }) {
+  return track === "research" || track === "ops" ? (
     <span className="shrink-0 rounded border border-info/25 bg-info/5 px-1.5 py-0.5 text-3xs font-medium text-info-foreground">
-      Research
+      {track === "ops" ? "Ops" : "Research"}
     </span>
   ) : null;
 }

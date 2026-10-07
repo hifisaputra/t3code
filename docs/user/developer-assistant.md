@@ -183,6 +183,19 @@ State and queued messages survive a server restart. If a provider was interrupte
 issue may be blocked; Start tells its team leader to pick the work back up, without creating a second
 team for the same issue.
 
+## Issues that change nothing in the repository
+
+The team leader also takes issues whose result is not a merged change. A research issue gets a
+report read from the public web, and a test issue gets an e2e run against what staging already runs.
+An ops issue is a change made outside the repository, such as a DNS record, a hosting or domain
+setting, a search console, or Linear issues updated to record a decision. Its worker makes the
+change, the code reviewer reads each change back, and T3 posts the report on the issue for you to
+accept like any other delivery.
+
+An ops worker only has the access the server machine has: the CLIs logged in there and the
+Linear tools. Say in setup what it may change alone. It asks before anything it cannot undo or
+that touches production data, billing, credentials or someone else's access.
+
 ## Release to production
 
 Production releases happen only when you ask the assistant in its conversation. It lists what would

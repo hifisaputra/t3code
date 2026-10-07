@@ -5,6 +5,7 @@ import {
   assistantTaskE2eEnvironment,
   assistantTaskEngineeringChecksPending,
   assistantTaskHoldsProject,
+  assistantTaskReports,
   type AssistantBoard,
   type AssistantDecision,
   type AssistantE2eDepth,
@@ -17,6 +18,41 @@ import {
   type AssistantThreadRole,
   type ProjectId,
 } from "@t3tools/contracts";
+
+/** How the board words a research or ops issue's report and its review. */
+export function reportWords(track: AssistantTaskSummary["track"]) {
+  return track === "ops"
+    ? {
+        criteria: "Done when",
+        sources: "Links",
+        check: "Verification",
+        checker: "verifier",
+        checked: "Verified",
+        awaitingCheck: "Awaiting verification",
+        checking: "Verifying",
+        checkNext: "Verification is next",
+        working: "Making the change",
+        workerNext: "Worker is next",
+        met: "done",
+        noReport: "No report submitted yet.",
+        sendBack: "What should change?",
+      }
+    : {
+        criteria: "Research questions",
+        sources: "Sources",
+        check: "Fact check",
+        checker: "fact checker",
+        checked: "Fact-check approved",
+        awaitingCheck: "Awaiting fact-check approval",
+        checking: "Fact-checking",
+        checkNext: "Fact check is next",
+        working: "Researching",
+        workerNext: "Research worker is next",
+        met: "answered",
+        noReport: "No research report submitted yet.",
+        sendBack: "What should the team research or correct?",
+      };
+}
 
 /**
  * The server keeps one free-text slot per project and uses it for two things:
@@ -216,7 +252,7 @@ export function describeTaskPhase(input: {
   const { task, workerBusy, workerNeedsInput, step, hasOpenDecision, waitingOn } = input;
   const stageThread: Record<string, string> = {
     ...STAGE_THREAD,
-    ...(task.track === "research" ? { review: "fact checker" } : {}),
+    ...(assistantTaskReports(task) ? { review: reportWords(task.track).checker } : {}),
   };
   const holder = stageThread[task.stage ?? "implement"] ?? "worker";
   // A question outranks whatever state the issue was left in while it waits.
@@ -237,14 +273,16 @@ export function describeTaskPhase(input: {
       };
     default: {
       if (
-        task.track === "research" &&
+        assistantTaskReports(task) &&
         task.research?.review?.verdict === "approved" &&
         task.research.review.revision === task.research.revision
       )
         return {
           tone: task.error ? "waiting" : "active",
           label: "Delivering report",
-          detail: task.error ?? "The fact check passed. T3 is posting the report to Linear.",
+          detail:
+            task.error ??
+            `The ${reportWords(task.track).check.toLowerCase()} passed. T3 is posting the report to Linear.`,
         };
       if (workerNeedsInput)
         return {
@@ -281,10 +319,12 @@ export function describeTaskPhase(input: {
       const e2ePassed = Boolean(task.e2e) && task.e2e?.verdict !== "failed";
       switch (task.stage ?? "implement") {
         case "implement":
-          if (task.track === "research")
+          if (assistantTaskReports(task))
             return {
               tone: workerBusy ? "active" : "idle",
-              label: workerBusy ? "Researching" : "Research worker is next",
+              label: workerBusy
+                ? reportWords(task.track).working
+                : reportWords(task.track).workerNext,
               detail: workerBusy ? step : null,
             };
           if (workerBusy)
@@ -300,10 +340,12 @@ export function describeTaskPhase(input: {
               : { tone: "active", label: "Coding", detail: step };
           return { tone: "idle", label: "Worker is next", detail: null };
         case "review":
-          if (task.track === "research")
+          if (assistantTaskReports(task))
             return {
               tone: workerBusy ? "active" : "idle",
-              label: workerBusy ? "Fact-checking" : "Fact check is next",
+              label: workerBusy
+                ? reportWords(task.track).checking
+                : reportWords(task.track).checkNext,
               detail: workerBusy ? step : "The reviewer starts when the worker's turn ends.",
             };
           return workerBusy

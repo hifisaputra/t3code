@@ -170,6 +170,26 @@ const research = (
   ...overrides,
 });
 
+describe("ops review", () => {
+  it("reads as a change verified, with what is done and no sources", () => {
+    const summary = reviewSummary(
+      task({
+        track: "ops",
+        criteria: ["The domain opens staging", "The issue names the domain"],
+        research: research({
+          sources: [],
+          checks: [
+            { criterion: 1, result: "answered", evidence: "curl" },
+            { criterion: 2, result: "partly", evidence: "One issue left" },
+          ],
+        }),
+      }),
+    );
+    expect(summary.verdict.label).toBe("Verified");
+    expect(reviewOutcomeLine(summary)).toBe("Verified · 1 of 2 done · 1 screenshot");
+  });
+});
+
 describe("research review", () => {
   it("opens the report for acceptance and reports questions, sources and screenshots", () => {
     const summary = reviewSummary(

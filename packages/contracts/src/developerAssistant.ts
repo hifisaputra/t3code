@@ -494,11 +494,13 @@ export type AssistantDeployWait = typeof AssistantDeployWait.Type;
 /**
  * What an issue delivers. code: a change merged, deployed to staging and
  * tested. research: a report read from the public web, fact-checked by the
- * reviewer and posted on the issue; no merge, staging or tester. test: an e2e
- * run on what staging already runs, such as a walk-through or a regression
- * pass; no worker, code review or merge.
+ * reviewer and posted on the issue; no merge, staging or tester. ops: a change
+ * made outside the repository, such as DNS, a hosting setting or Linear issues,
+ * reported the way research is and verified by the reviewer reading it back.
+ * test: an e2e run on what staging already runs, such as a walk-through or a
+ * regression pass; no worker, code review or merge.
  */
-export const AssistantTaskTrack = Schema.Literals(["code", "research", "test"]);
+export const AssistantTaskTrack = Schema.Literals(["code", "research", "ops", "test"]);
 export type AssistantTaskTrack = typeof AssistantTaskTrack.Type;
 
 /** The most characters a research report may have; T3 refuses a longer one. */
@@ -884,6 +886,15 @@ export function assistantTaskSummary(task: AssistantTask): AssistantTaskSummary 
 export const assistantTaskTrack = (task: Pick<AssistantTask, "track">): AssistantTaskTrack =>
   task.track ?? "code";
 
+/**
+ * Whether the issue delivers a report rather than a merged change: research and
+ * ops issues, whose worker submits a report the reviewer checks before T3 posts it.
+ */
+export const assistantTaskReports = (task: Pick<AssistantTask, "track">): boolean => {
+  const track = assistantTaskTrack(task);
+  return track === "research" || track === "ops";
+};
+
 /** Where a managed issue's e2e check runs; see AssistantTask.e2eEnvironment. */
 export const assistantTaskE2eEnvironment = (
   task: Pick<AssistantTask, "e2eEnvironment">,
@@ -1117,12 +1128,23 @@ const RESEARCH_PIPELINE: ReadonlyArray<PipelineStepDef> = [
   { key: "research", label: "Research", kind: "implement" },
   { key: "fact-check", label: "Fact check", kind: "review" },
 ];
+// An ops issue runs the same steps: the change is made and reported, then read back.
+const OPS_PIPELINE: ReadonlyArray<PipelineStepDef> = [
+  TAKE_ON,
+  { key: "research", label: "Make the change", kind: "implement" },
+  { key: "fact-check", label: "Verify", kind: "review" },
+];
 
-/** Where a research issue is: taken, researching, fact-checked, then with the person. */
+/**
+ * Where a research or ops issue is: taken, worked, checked by the reviewer,
+ * then with the person.
+ */
 function researchPipeline(task: AssistantTaskSummary): ReadonlyArray<PipelineStep> {
+  const ops = assistantTaskTrack(task) === "ops";
+  const pipeline = ops ? OPS_PIPELINE : RESEARCH_PIPELINE;
   const approved = task.research?.review?.verdict === "approved";
   const at = (() => {
-    if (task.status === "review" || task.status === "accepted") return RESEARCH_PIPELINE.length;
+    if (task.status === "review" || task.status === "accepted") return pipeline.length;
     switch (task.stage) {
       case "implement":
         return 1;
@@ -1130,16 +1152,18 @@ function researchPipeline(task: AssistantTaskSummary): ReadonlyArray<PipelineSte
         return 2;
       default:
         if (task.turns === 0) return 0;
-        return approved ? RESEARCH_PIPELINE.length : task.research ? 2 : 1;
+        return approved ? pipeline.length : task.research ? 2 : 1;
     }
   })();
   const revising = task.research?.review?.verdict === "changes-requested" && at === 1;
-  return RESEARCH_PIPELINE.map((step, index): PipelineStep => ({
+  return pipeline.map((step, index): PipelineStep => ({
     ...step,
     state: index < at ? "done" : index > at ? "todo" : "current",
     note: revising
       ? step.key === "research"
-        ? "Addressing fact-check findings"
+        ? ops
+          ? "Addressing the reviewer's findings"
+          : "Addressing fact-check findings"
         : step.key === "fact-check"
           ? "Changes requested"
           : null
@@ -1211,7 +1235,7 @@ export function assistantTaskPipeline(
   task: AssistantTaskSummary,
 ): ReadonlyArray<PipelineStep> | null {
   if (task.stage === undefined) return null;
-  if (assistantTaskTrack(task) === "research") return researchPipeline(task);
+  if (assistantTaskReports(task)) return researchPipeline(task);
   if (assistantTaskTrack(task) === "test") return testPipeline(task);
   const inWorktree = assistantTaskE2eEnvironment(task) === "worktree";
   const depth = assistantTaskE2eDepth(task);

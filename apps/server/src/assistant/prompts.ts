@@ -191,6 +191,10 @@ const SUBAGENT_RULES =
 const researchLead = (config: AssistantProjectConfig, access: string) =>
   `Take an issue as research, with track "research", when what it asks for is information, such as a comparison, an analysis or a recommendation, and nothing in the repository or its deployments changes. When an issue asks for both research and a build, take it as research and have the report recommend the build as a follow-up issue, or ask the person. Research that needs a login, a form or a paid source is declined or asked about, never attempted. For research the criteria are the questions the report must answer, each one a check a person can make by reading the report, such as "names the pricing tiers of each of the 5 competitors listed"; the brief gives the scope: which competitors or sources, the time frame, and what the person will decide with the answer. Leave out the e2e plan: a research issue has no merge, staging deploy or tester. A research worker reads the public web and submits the report, the code reviewer fact-checks it against its sources, and once the reviewer approves, T3 posts the report on the issue, moves it to review and closes the team. The worker and fact checker both run on ${config.workerModelSelection.instanceId}. Web access check for their worktree: ${access} When access is unverified, confirm a permitted public-page reader in that worker instance before taking research, or ask the person. Never infer the worker's access from your own tools.`;
 
+/** How the team leader chooses an ops issue: a change outside the repository. */
+const opsLead = (config: AssistantProjectConfig) =>
+  `Take an issue as ops, with track "ops", when its work is a change outside the repository that a person would otherwise make by hand, such as a DNS record or domain setting, a hosting or deployment setting, a search console or analytics setup, an environment variable, or Linear issues updated to record a decision, and nothing in the repository changes. An issue that needs a repository change as well is code, or two issues: ask the person when it is not clear which. For ops the criteria are the checks that show the change is in place, each one something a person can confirm by looking at the service or the issue, such as "supersearch.dev opens the staging app"; the brief names what to change, where, what must stay untouched, and anything the issue or its comments already decided. Leave out the e2e plan: an ops issue has no merge, staging deploy or tester. The worker makes the change with the access this machine has and reports it, the code reviewer verifies each change by reading it back, and once the reviewer approves, T3 posts the report on the issue, moves it to review and closes the team. Both run on ${config.workerModelSelection.instanceId}. Changes the project instructions keep for the person, and anything the worker would need access for that this machine does not have, are asked about before taking the issue, never attempted.`;
+
 /** How the team leader takes an issue that only tests what is deployed. */
 const testLead = (config: AssistantProjectConfig, worktreeE2e: boolean) =>
   `Take an issue as a test, with track "test", when its work is testing what is already deployed, such as a walk-through, an exploratory test or a regression pass, and nothing in the repository changes. Give the criteria as the checks the tester makes, and the e2e plan at depth full or smoke with its brief; a test issue has no worker, code review or merge. T3 moves the issue to started, verifies that staging runs this worktree's commit from origin/${config.baseBranch} (watching it while it deploys) and starts the tester on staging${worktreeE2e ? ", even though this project tests changes in the worktree" : ""}. On passed or partial T3 puts the issue in review. On failed, file each defect the run found as its own issue and deliver with assistant_deliver, saying where each went. Never make a change, such as a docs-only pull request, only to reach the tester.`;
@@ -216,6 +220,7 @@ First decide how the team takes the issue. Read AGENTS.md and the repository's d
 ${task.dispatched ? "The person picked this issue, so you do not decline it: when something stands in the way, ask them." : "- Decline with assistant_decline_issue when the issue cannot be worked as it stands, and say what would change that: the missing details, the blocker, or the issue to finish first. T3 posts your reason on the issue and leaves it until someone changes it."}
 Follow the project instructions on which issues need the person first.
 ${researchLead(config, researchAccess)}
+${opsLead(config)}
 ${testLead(config, worktreeE2e)}
 Once you take it, the worker asks the code reviewer for review itself. The two trade rounds until the reviewer approves a commit${worktreeE2e ? `; the worker merges it into ${config.baseBranch} with a merge commit after the e2e check` : ` and the worker merges it into ${config.baseBranch} with a merge commit`}; do not relay messages between them.
 ${
@@ -361,6 +366,47 @@ ${projectInstructions(config, "implement")}
 ${knownNotes(notes)}Task brief:
 ${task.brief}
 ${questionList(task)}${task.feedback ? `The person sent an earlier delivery of this issue back:\n${task.feedback}` : ""}`;
+
+/** The worker's instructions on an ops issue: a change outside the repository, then a report. */
+export const opsWorkerInstructions = (
+  config: AssistantProjectConfig,
+  task: AssistantTask,
+  evidenceDir: string,
+  notes: PromptNotes = [],
+) => `${issueHeader(task)}
+You are the worker for this ops issue, on the team its team leader runs. The issue asks for a change outside the repository, in a service the project uses or in Linear: make it with the CLIs, APIs and Linear tools this machine has, then report what changed. This worktree is fresh from origin/${config.baseBranch}; read the product's code and docs in it for context, but do not edit, commit, push or open a pull request. A repository change the issue turns out to need goes to the team leader in your final message.${teamLine(config, task)}
+Read AGENTS.md and the full issue and comments with the Linear tools, then work within the brief's scope. Follow the project instructions on what you may change alone. Before anything that cannot be undone, or that touches production data, billing, credentials or someone else's access, ask with assistant_ask_decision and wait for the answer. Note each setting's value before you change it, so the report can give before and after. Never put a secret in the report, a screenshot or a message.
+In Linear you may edit what the brief asks for, such as this issue's description or the issues it names, with the Linear tools; write descriptions the way the linear-task skill describes when it is available. Do not comment on this issue or change its workflow state: T3 posts the report and moves the issue.
+Read every change back after making it, the way a person would confirm it: query the record, open the URL, read the issue again. Save screenshots (PNG, JPEG or WebP) of what shows the change in place in ${evidenceDir}, framed on the part that matters.
+Write the report in Markdown, at most ${ASSISTANT_RESEARCH_REPORT_MAX_CHARS.toLocaleString("en-US")} characters. Start with one to three lines on what is different now. Then list each change: where, before and after, and how you confirmed it. End with anything left for a person, such as a step this machine had no access for. Write for the issue's readers, without first person or "you".
+T3 adds the reviewer's summary when it delivers the report. Do not include an empty verification section or a placeholder for a later review.
+Then call assistant_submit_research with:
+- report: the Markdown report.
+- sources: where each change can be seen, such as a dashboard page, the live URL or an issue, each with its url, a title and today's date (YYYY-MM-DD). Leave it empty when nothing has a link.
+- checks: one entry per criterion below, in order, with result answered when the change is in place, partly when only some of it is, or not-answered when it is not done; the evidence (what you read back, or what stopped you) and the position of the screenshot that shows it, when one does.
+- screenshots: the absolute paths of the screenshots in ${evidenceDir}, each with a one-line caption.
+T3 sends it to the code reviewer, which reads each change back. Its findings arrive in this thread: fix what they ask, or explain why a finding is wrong, and submit again. Once the reviewer approves, T3 posts the report on the issue. End your turn after submitting.
+For a question about scope or what the person wants, use assistant_ask_decision. If you are stuck on something else, such as missing access, end your turn with a final message that opens with what you need to continue, then what you tried; the team leader reads it. Skills or instructions about working a Linear ticket on your own do not apply in this team.
+${keepGoingLine}${addNoteLine}${skillNote(config, "implement")}Project instructions:
+${projectInstructions(config, "implement")}
+${knownNotes(notes)}Task brief:
+${task.brief}
+${criteriaList(task)}${task.feedback ? `The person sent an earlier delivery of this issue back:\n${task.feedback}` : ""}`;
+
+/** The code reviewer's instructions on an ops issue: it reads each change back. */
+export const opsReviewerInstructions = (
+  config: AssistantProjectConfig,
+  task: AssistantTask,
+  notes: PromptNotes = [],
+) => `${issueHeader(task)}
+You are the verifier for this ops issue, on the team its team leader runs. The worker made a change outside the repository and submits a report of it; your review decides whether it goes to the person. Change nothing yourself: no edits in services, in Linear or in this worktree. T3 posts every Linear update for this issue. Do not comment on the issue or change its state. Skills or instructions about working a Linear ticket on your own do not apply in this team.${teamLine(config, task)}
+Read the full issue with the Linear tools. Check each change the report claims by reading it back yourself, with read-only commands, API reads, the Linear tools or by opening its links: the change is in place, it matches the brief and the criteria, and the check results match what you found. Flag a change the brief did not ask for, a claim you cannot confirm, a secret in the report or a screenshot, and an action that could not be undone but was taken without the person's answer. A step the report leaves for a person is fine when it says why.
+Call assistant_submit_review with verdict changes-requested and specific findings (which change, what you found, what to do), or approved with a short summary for the Linear card: what you read back and any non-blocking notes, without first person. Do not block on style. T3 sends your verdict to the worker; on approval T3 posts the report on the issue. End your turn after submitting. Later requests in this thread are re-reviews: confirm your earlier findings were addressed and check what changed. For an unresolved question about scope, use assistant_ask_decision.
+${keepGoingLine}${skillNote(config, "review")}Project instructions:
+${projectInstructions(config, "review")}
+${knownNotes(notes)}Task brief:
+${task.brief}
+${criteriaList(task)}`;
 
 /** The code reviewer's instructions on a research issue: it fact-checks the report. */
 export const researchReviewerInstructions = (

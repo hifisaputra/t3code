@@ -31,7 +31,7 @@ import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { formatRelativeTimeLabel, formatShortTimestamp } from "../../timestampFormat";
 import { useUiStateStore } from "../../uiStateStore";
 import { useAssistantThreadAsksYou } from "../assistant/AssistantThreadTag";
-import { threadKind, ThreadKindIcon, ResearchBadge } from "../assistant/threadKinds";
+import { threadKind, ThreadKindIcon, TrackBadge } from "../assistant/threadKinds";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
 import {
   animateSidebarLayoutChanges,
@@ -497,7 +497,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
                     {props.projectDisplayName}
                   </span>
                 ) : null}
-                <ResearchBadge track={track} />
+                <TrackBadge track={track} />
                 <span className="flex-1" />
                 {/* Expanded, every member states its own status one row down;
                     repeating the worst of them here just says "Working" three
