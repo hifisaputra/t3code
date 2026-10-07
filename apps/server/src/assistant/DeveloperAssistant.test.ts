@@ -4758,7 +4758,7 @@ it.effect("delegating an issue a team works without a session gives the team tha
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-it.effect("delegating an issue waiting for the person's review fails with the reason", () =>
+it.effect("delegating an issue waiting for the person's review without a note says how", () =>
   Effect.gen(function* () {
     const h = harness();
     h.app.connected = true;
@@ -4770,9 +4770,69 @@ it.effect("delegating an issue waiting for the person's review fails with the re
     assert.instanceOf(error, LinearOperationError);
     assert.equal(
       Schema.is(LinearOperationError)(error) ? error.detail : "",
-      "This issue is waiting for the person's review. Moving it back in Linear gives it to a new team with their feedback.",
+      "This issue is waiting for the person's review. Say what should change to give it to a new team, or move it back in Linear.",
     );
     assert.lengthOf(updatesOn(h, "delegated"), 0);
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("delegating a delivered issue with a note sends it back to a new team", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const delivered = yield* deliverIssue(h, service, first);
+    yield* linearReply(h, delivered, "d1", "The button should be blue.");
+    const result = yield* delegate(h, first.issue.id, "delegated", "Make it bigger, too.");
+    const old = yield* taskById(service, first.id);
+    assert.equal(old.status, "changes-requested");
+    const next = yield* taskById(service, result!.taskId);
+    assert.notEqual(next.id, first.id);
+    assert.isTrue(next.dispatched);
+    // The note is the feedback the new team works from, with the earlier session reply.
+    assert.equal(next.brief, "");
+    assert.equal(next.feedback, "Make it bigger, too.\n\nThe button should be blue.");
+    assert.deepEqual(next.linearSession, { id: "delegated", origin: "delegated" });
+    // A retried delivery does not send it back twice.
+    yield* delegate(h, first.issue.id, "delegated", "Make it bigger, too.");
+    assert.lengthOf(
+      (yield* service.board(null)).tasks.filter((t) => t.issue.id === first.issue.id),
+      2,
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("mentioning the app on an issue a team works passes the note to its leader", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    yield* service.deliver();
+    h.finish(leadOf(team));
+    const result = yield* delegate(h, team.issue.id, "delegated", "Use supersearch.dev.");
+    assert.deepEqual(result, { taskId: team.id, queuedBehind: 0, attached: false });
+    assert.deepEqual(
+      updatesOn(h, "delegated").map((item) => item.content),
+      [
+        {
+          type: "response",
+          body: "Passed to the team leader. Follow the team's session on this issue.",
+        },
+      ],
+    );
+    yield* service.deliver();
+    assert.include(
+      turnsOf(h, leadOf(team)).at(-1),
+      "The person wrote on the Linear issue:\nUse supersearch.dev.",
+    );
+    // A redelivered webhook does not pass it on again.
+    const turns = turnsOf(h, leadOf(team)).length;
+    h.finish(leadOf(team));
+    yield* delegate(h, team.issue.id, "delegated", "Use supersearch.dev.");
+    yield* service.deliver();
+    assert.lengthOf(turnsOf(h, leadOf(team)), turns);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 

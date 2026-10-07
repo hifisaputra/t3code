@@ -575,6 +575,12 @@ describe("issueFingerprint", () => {
     expect(issueFingerprint(withOwnComment, ["t3"])).toBe(before);
   });
 
+  it("ignores the app's replies on its agent sessions", () => {
+    // A decline's "Not taken" session reply lands after the fingerprint is taken.
+    const reply = { ...comment("app", "Not taken: out of scope"), authorIsApp: true };
+    expect(issueFingerprint({ ...issue, comments: [reply] }, [])).toBe(issueFingerprint(issue, []));
+  });
+
   it("ignores an old comment leaving the window Linear returns", () => {
     // Linear hands back the newest comments first, so a decline comment of T3's own
     // pushes the oldest one out of the 50 it reads. Nobody changed the issue.
