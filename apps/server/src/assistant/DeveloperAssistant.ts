@@ -200,6 +200,8 @@ const STOPPED_FROM_LINEAR =
 const firstLine = (text: string) => text.trim().split("\n")[0]!.slice(0, 300);
 /** A team leader that declines this many issues in a row pauses the loop for the person. */
 const DECLINE_STREAK_LIMIT = 3;
+/** The longest question a thread may ask; a long one buries the decision. */
+const QUESTION_MAX_CHARS = 3000;
 /** A provider error this soon after T3 retried the last one blocks the issue instead. */
 const ERROR_RETRY_WINDOW_MS = 30 * 60_000;
 /** How long T3 watches a staging deploy before handing it back to the team leader. */
@@ -2197,6 +2199,10 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           "This issue is no longer active. Explain what is left in your final message; the person schedules follow-up work from the board.",
         );
+      if (question.length > QUESTION_MAX_CHARS)
+        return yield* fail(
+          `The question is ${question.length.toLocaleString("en-US")} characters; ask in at most ${QUESTION_MAX_CHARS.toLocaleString("en-US")}. Start with the decisions and your recommendation for each, and keep only the context needed to decide.`,
+        );
       const value: AssistantDecision = {
         id: newId(),
         projectId: p.config.projectId,
@@ -2213,7 +2219,7 @@ export const make = Effect.gen(function* () {
       const role = LINEAR_ROLES[owner.role];
       yield* sessionUpdate(t, `decision:${value.id}`, {
         type: "elicitation",
-        body: `${role[0]!.toUpperCase()}${role.slice(1)} asks:\n\n${question.slice(0, 11_000)}\n\nReply here to answer.`,
+        body: `${role[0]!.toUpperCase()}${role.slice(1)} asks:\n\n${question}\n\nReply here to answer. For several questions, answer each by its number.`,
       });
       // The inbox shows the question; the answer goes straight to the thread that asked.
       yield* saveTask({ ...t, status: "waiting" });

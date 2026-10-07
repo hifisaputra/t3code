@@ -147,8 +147,13 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_ask_decision", {
     description:
-      "Ask the person a product question in the decision inbox, preserving the issue/thread link. Include context and a recommendation. Available to every thread of an active managed issue. After asking, end your turn and wait; the answer arrives in the thread that asked.",
-    parameters: Schema.Struct({ question: text }),
+      "Ask the person a product question in the decision inbox, preserving the issue/thread link. T3 also posts it on the Linear issue. Available to every thread of an active managed issue. After asking, end your turn and wait; the answer arrives in the thread that asked.",
+    parameters: Schema.Struct({
+      question: text.annotate({
+        description:
+          'Markdown, at most 3,000 characters, for a person who may not be an engineer. Start with the decisions, numbered, each with the option you recommend, so a short reply such as "1. yes 2. go ahead" settles them. Then only the context needed to decide, in plain words, without recounting the work so far. Leave out file paths, commands, environment variables, hostnames and IDs unless the answer depends on them.',
+      }),
+    }),
     success: AssistantDecision,
     failure,
     dependencies,
@@ -306,7 +311,7 @@ export const AssistantToolkit = Toolkit.make(
       worthALook: Schema.optionalKey(
         Schema.Array(Schema.String).annotate({
           description:
-            "Things the person should look at that are not failures, one short line each (at most 15, 400 characters each): leftover wording, inconsistencies, suspicious behavior outside the criteria. A failure belongs in checks, and coverage, gaps and test data in report. Omit when there is nothing.",
+            "Things the person accepting the work should look at that are not failures, one short line each in their words (at most 15, 400 characters each): leftover wording, inconsistencies, suspicious behavior outside the criteria. A failure belongs in checks, and coverage, gaps, test data, IDs and database rows in report. Omit when there is nothing.",
         }),
       ),
       screenshots: Schema.Array(

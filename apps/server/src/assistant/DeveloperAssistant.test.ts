@@ -4413,6 +4413,19 @@ const queuedBody = (h: Harness, id: string) => {
   return content && "body" in content ? content.body : undefined;
 };
 
+it.effect("a question too long to answer at a glance is refused with how to shorten it", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* takeIssue(h, service);
+    const refused = yield* service
+      .askDecision(first.threadId, `1. Keep access?\n\n${"Context. ".repeat(400)}`)
+      .pipe(Effect.flip);
+    assert.include(refused.detail, "Start with the decisions");
+    assert.equal((yield* taskById(service, first.id)).status, "working");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 it.effect("a question asked in T3 is answered by a reply on the Linear session, once", () =>
   Effect.gen(function* () {
     const h = harness();
@@ -4427,7 +4440,7 @@ it.effect("a question asked in T3 is answered by a reply on the Linear session, 
     );
     assert.equal(
       queuedBody(h, `${first.id}:decision:${decision.id}`),
-      "Implementer asks:\n\nShould existing users keep access?\n\nReply here to answer.",
+      "Implementer asks:\n\nShould existing users keep access?\n\nReply here to answer. For several questions, answer each by its number.",
     );
     assert.equal(
       h.app.queued.find((item) => item.id.includes(":decision:"))?.content.type,
@@ -5078,7 +5091,8 @@ it.effect("a smoke test covers only its criteria, and T3 records the rest as ski
     ]);
     const card = h.comments.at(-1)!.body;
     assert.match(card, /^\*\*✅ Smoke test passed on staging: ready to accept\*\*/);
-    assert.include(card, "| The page loads | ➖ not in the smoke test |");
+    assert.include(card, "+++ Not in this smoke test (1)\n\n- The page loads\n\n+++");
+    assert.notInclude(card, "| The page loads |");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 

@@ -189,6 +189,39 @@ const evidenceList = (
     })
     .join("\n");
 
+/** How many screenshots a card shows open when no check points at one; the rest sit collapsed. */
+const OPEN_SCREENSHOTS = 3;
+
+/**
+ * The run's screenshots as the card shows them: the ones a check points at open,
+ * or the first few when none is pointed at, and the rest collapsed. Each keeps
+ * its number, so a check's "(screenshot 3)" still finds it.
+ */
+const screenshotSections = (
+  e2e: AssistantE2eResult,
+  checks: ReadonlyArray<E2eCheck>,
+): { readonly open: string | null; readonly more: string | null } => {
+  const shots = e2e.screenshots.map(
+    (shot, i) => `*Screenshot ${i + 1}: ${shot.caption}*\n\n![${shot.caption}](${shot.url})`,
+  );
+  if (!shots.length) return { open: null, more: null };
+  const cited = new Set(
+    checks.flatMap((check) => (check.screenshot ? [check.screenshot - 1] : [])),
+  );
+  const open = (i: number) => (cited.size ? cited.has(i) : i < OPEN_SCREENSHOTS);
+  const shown = shots.filter((_, i) => open(i));
+  const more = shots.filter((_, i) => !open(i));
+  return {
+    open: shown.length ? ["**Screenshots**", ...shown].join("\n\n") : null,
+    more: more.length
+      ? collapsed(
+          `${shown.length ? "More screenshots" : "Screenshots"} (${more.length})`,
+          more.join("\n\n"),
+        )
+      : null,
+  };
+};
+
 /** Why the issue's team leader did not take it, and what brings it back. */
 export function declinedComment(reason: string): string {
   return sections(
@@ -259,6 +292,10 @@ export function e2eComment(input: {
   const worktree = e2e.environment === "worktree";
   const criteria = input.criteria ?? [];
   const checks = e2e.checks?.length && criteria.length ? e2e.checks : null;
+  // A smoke test leaves criteria out; the table and evidence cover what it checked.
+  const tested = checks?.filter((check) => check.result !== "skipped") ?? [];
+  const untested = checks?.filter((check) => check.result === "skipped") ?? [];
+  const shots = screenshotSections(e2e, tested);
   // The engineering checks and how the team settled them are for the record,
   // so they sit with the tester's report rather than in the person's checks.
   const engineering = e2e.engineeringChecks?.length
@@ -277,17 +314,15 @@ export function e2eComment(input: {
     e2e.humanChecks.length
       ? `**Check before accepting**\n\n${e2e.humanChecks.map((check, i) => `${i + 1}. ${check}`).join("\n")}`
       : null,
-    checks ? checksTable(checks, criteria, e2e) : null,
-    notes.length ? `**Worth a look**\n\n${bullets(notes)}` : null,
-    e2e.screenshots.length
-      ? [
-          "**Screenshots**",
-          ...e2e.screenshots.map(
-            (shot, i) =>
-              `*Screenshot ${i + 1}: ${shot.caption}*\n\n![${shot.caption}](${shot.url})`,
-          ),
-        ].join("\n\n")
+    tested.length ? checksTable(tested, criteria, e2e) : null,
+    untested.length
+      ? collapsed(
+          `Not in this smoke test (${untested.length})`,
+          bullets(untested.map((check) => oneLine(criterionName(check, criteria)))),
+        )
       : null,
+    notes.length ? `**Worth a look**\n\n${bullets(notes)}` : null,
+    shots.open,
     // Linear plays a video embedded with image markdown inline.
     e2e.videos?.length
       ? [
@@ -297,7 +332,8 @@ export function e2eComment(input: {
           ),
         ].join("\n\n")
       : null,
-    checks ? collapsed("Evidence per criterion", evidenceList(checks, criteria, e2e)) : null,
+    shots.more,
+    tested.length ? collapsed("Evidence per criterion", evidenceList(tested, criteria, e2e)) : null,
     // Without criteria the report is the only record of what was checked, so it stays open.
     report && checks
       ? collapsed(`Tester's full report${commit ? ` (tested commit ${commit})` : ""}`, report)

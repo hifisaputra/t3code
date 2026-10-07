@@ -107,6 +107,17 @@ describe("project instructions by audience", () => {
   });
 });
 
+describe("writing for Linear", () => {
+  it("tells every thread to write what T3 posts in plain words, decisions first", () => {
+    for (const [audience, text] of Object.entries(prompts(config))) {
+      expect(text, audience).toContain("following the unslop skill when it is available");
+      expect(text, audience).toContain("put the decisions first");
+      // Posting to Linear stays T3's; the writing guidance does not depend on those skills.
+      expect(text, audience).not.toContain("Skills or instructions about working a Linear ticket");
+    }
+  });
+});
+
 describe("acceptance criteria", () => {
   it("numbers them for the worker, the reviewer and the tester", () => {
     const written = prompts(config, withCriteria);
@@ -118,7 +129,7 @@ describe("acceptance criteria", () => {
     expect(written.e2e).toContain("one entry per criterion");
     // Notes that are not failures have their own list; failures stay in checks.
     expect(written.e2e).toContain(
-      "- worthALook: what the person should look at that is not a failure",
+      "- worthALook: what the person accepting the work should look at that is not a failure",
     );
     expect(written.e2e).toContain("A failure goes in checks, not here.");
   });

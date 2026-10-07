@@ -73,7 +73,7 @@ describe("e2eComment", () => {
     criteria: ["A blog post shows its body", "The author gets a reminder email"],
   };
 
-  it("puts checks, results, notes and screenshots up top and collapses the evidence and report", () => {
+  it("puts checks, results, notes and the cited screenshots up top and collapses the rest", () => {
     expect(e2eComment(withCriteria)).toBe(
       [
         "**👀 Verified on staging, with checks for a person**",
@@ -85,12 +85,18 @@ describe("e2eComment", () => {
           "| The author gets a reminder email | 👀 not checked |",
         ].join("\n"),
         "**Worth a look**\n\n- The footer still says | Read more.",
+        // Only the screenshot a check points at is open; the rest keep their numbers.
+        "**Screenshots**\n\n*Screenshot 1: State 1*\n\n![State 1](https://uploads.linear.app/shot-1.png)",
         [
-          "**Screenshots**",
-          ...screenshots.map(
-            (shot, i) =>
-              `*Screenshot ${i + 1}: ${shot.caption}*\n\n![${shot.caption}](${shot.url})`,
-          ),
+          "+++ More screenshots (11)",
+          screenshots
+            .slice(1)
+            .map(
+              (shot, i) =>
+                `*Screenshot ${i + 2}: ${shot.caption}*\n\n![${shot.caption}](${shot.url})`,
+            )
+            .join("\n\n"),
+          "+++",
         ].join("\n\n"),
         [
           "+++ Evidence per criterion",
@@ -141,7 +147,7 @@ describe("e2eComment", () => {
     const recordings =
       "**Recordings**\n\n*Video 1: Signing up, step by step*\n\n![Signing up, step by step](https://uploads.linear.app/signup.webm)";
     expect(body).toContain(
-      `![State 2](https://uploads.linear.app/shot-2.png)\n\n${recordings}\n\n+++ Evidence`,
+      `![State 2](https://uploads.linear.app/shot-2.png)\n\n${recordings}\n\n+++ More screenshots (1)`,
     );
   });
 
@@ -185,6 +191,8 @@ describe("e2eComment", () => {
       },
     });
     expect(body.split("\n").filter((line) => line.trim().startsWith("+++"))).toEqual([
+      "+++ More screenshots (11)",
+      "+++",
       "+++ Evidence per criterion",
       "+++",
       "+++ Tester's full report",
@@ -305,9 +313,13 @@ describe("e2eComment", () => {
       },
     });
     expect(body.startsWith("**✅ Smoke test passed on staging: ready to accept**")).toBe(true);
-    expect(body).toContain("| The author gets a reminder email | ➖ not in the smoke test |");
+    // The table and evidence cover what ran; the criteria left out sit collapsed by name.
+    expect(body).not.toContain("➖");
     expect(body).toContain(
-      "2. **The author gets a reminder email** ➖ not in the smoke test: Not in the smoke test",
+      "+++ Not in this smoke test (1)\n\n- The author gets a reminder email\n\n+++",
+    );
+    expect(body.split("+++ Evidence per criterion")[1]!.split("+++")[0]).not.toContain(
+      "reminder email",
     );
     expect(body.endsWith(footer)).toBe(true);
   });
