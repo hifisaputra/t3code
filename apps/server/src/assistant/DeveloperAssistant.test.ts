@@ -1970,8 +1970,13 @@ it.effect("bounds external progress checks, blocking the issue and not the proje
     assert.isTrue(
       yield* service.waitForExternal(task.threadId, "Deploy is pending").pipe(Effect.isFailure),
     );
-    for (let i = 0; i < 15; i++)
-      assert.equal((yield* service.waitForExternal(lead, "Deploy is pending")).outcome, "waiting");
+    const minutes: number[] = [];
+    for (let i = 0; i < 15; i++) {
+      const result = yield* service.waitForExternal(lead, "Deploy is pending");
+      if (result.outcome === "waiting") minutes.push(result.minutes);
+    }
+    // Repeated checks back off, so the 15 cover about two hours.
+    assert.deepEqual(minutes, [1, 1, 2, 2, 4, 4, 8, 8, 15, 15, 15, 15, 15, 15, 15]);
     assert.equal((yield* service.waitForExternal(lead, "Deploy is pending")).outcome, "limit");
     // Only the issue that waited is held; the loop and the person's other work run on.
     const board = yield* service.board(null);
@@ -1991,6 +1996,33 @@ it.effect("bounds external progress checks, blocking the issue and not the proje
     }
     yield* service.scan();
     assert.include(turnsOf(h, lead).at(-1), "Waiting: One more check");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a team that frees its place starts the next issue without waiting for the scan", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const first = yield* activeTask(service);
+    const lead = leadOf(first);
+    // The first scan ends by delivering the leader's start turn. The next team's
+    // leader is created by a later scan, and the clock never moves.
+    const scanned = yield* Deferred.make<void>();
+    const started = yield* Deferred.make<ThreadId>();
+    h.onDispatch((command) =>
+      command.type === "thread.turn.start" && command.threadId === lead
+        ? Deferred.succeed(scanned, undefined).pipe(Effect.asVoid)
+        : command.type === "thread.create" && command.threadId !== lead
+          ? Deferred.succeed(started, command.threadId).pipe(Effect.asVoid)
+          : Effect.void,
+    );
+    const live = yield* h.makeWithWorkers;
+    yield* Deferred.await(scanned);
+    yield* live.declineIssue(lead, "Waiting on the API team.");
+    const next = yield* Deferred.await(started);
+    const team = (yield* live.board(null)).tasks.find((t) => leadOf(t) === next);
+    assert.isDefined(team);
+    assert.notEqual(team?.issue.id, first.issue.id);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -3839,20 +3871,40 @@ it.effect("starting the assistant lifts a usage-limit hold and sends what waited
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-it.effect("a worker failing for any other reason still blocks its issue", () =>
+it.effect("a provider error gets the thread one more turn before it blocks the issue", () =>
   Effect.gen(function* () {
     const h = harness();
     const { service } = yield* h.setup;
     const first = yield* takeIssue(h, service);
     yield* service.deliver();
-    h.finish(first.threadId);
-    yield* service.observe(
+    const failed = service.observe(
       sessionError(first.threadId, "Claude gave up after repeated API errors."),
     );
+    const retries = () =>
+      turnsOf(h, first.threadId).filter((text) => text.includes("Continue where you left off."))
+        .length;
+    h.finish(first.threadId);
+    yield* failed;
+    // The worker continues by itself; the issue does not wait for the person.
+    assert.equal((yield* taskById(service, first.id)).status, "working");
+    yield* service.deliver();
+    assert.equal(retries(), 1);
+    assert.include(turnsOf(h, first.threadId).at(-1), "Claude gave up after repeated API errors.");
+    // A failure long after the last retry gets another go.
+    h.finish(first.threadId);
+    yield* TestClock.adjust(Duration.minutes(31));
+    yield* failed;
+    yield* service.deliver();
+    assert.equal(retries(), 2);
+    // One soon after a retry blocks the issue.
+    h.finish(first.threadId);
+    yield* failed;
     const blocked = yield* taskById(service, first.id);
     assert.equal(blocked.status, "blocked");
     assert.equal(blocked.error, "Claude gave up after repeated API errors.");
     assert.isNull((yield* service.board(null)).projects[0]?.limitedUntil);
+    yield* service.deliver();
+    assert.equal(retries(), 2);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -4289,9 +4341,11 @@ it.effect("an issue blocked for the person is an error in its session, once", ()
     const first = yield* takeIssue(h, service);
     yield* service.deliver();
     h.finish(first.threadId);
-    yield* service.observe(
-      sessionError(first.threadId, "Claude gave up after repeated API errors."),
-    );
+    // The first error is retried; the second, soon after, blocks the issue.
+    for (const _ of [1, 2])
+      yield* service.observe(
+        sessionError(first.threadId, "Claude gave up after repeated API errors."),
+      );
     assert.equal((yield* taskById(service, first.id)).status, "blocked");
     // Interrupting an issue that is already blocked adds nothing.
     yield* service.control({ projectId: config.projectId, action: "interrupt" });

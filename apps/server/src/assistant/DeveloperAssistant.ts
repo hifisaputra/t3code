@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -196,6 +197,8 @@ const STOPPED_FROM_LINEAR =
 const firstLine = (text: string) => text.trim().split("\n")[0]!.slice(0, 300);
 /** A team leader that declines this many issues in a row pauses the loop for the person. */
 const DECLINE_STREAK_LIMIT = 3;
+/** A provider error this soon after T3 retried the last one blocks the issue instead. */
+const ERROR_RETRY_WINDOW_MS = 30 * 60_000;
 /** How long T3 watches a staging deploy before handing it back to the team leader. */
 const DEPLOY_WATCH_MS = 45 * 60_000;
 /** How much of a passing check run the reviewer is shown. */
@@ -433,9 +436,17 @@ const deliveredState = (
       ? null
       : config.reviewState.trim() || null;
 /** What assistant_wait told the caller to do next. */
-export type AssistantWaitResult = {
-  readonly outcome: "waiting" | "limit";
-};
+export type AssistantWaitResult =
+  | { readonly outcome: "waiting"; readonly minutes: number }
+  | { readonly outcome: "limit" };
+
+/**
+ * How many minutes T3 waits before a team leader's next check: what it asked
+ * for, but at least 1, 1, 2, 2, 4, 4, 8, 8, then 15 minutes as the checks on one
+ * wait add up, so its 15 checks cover about two hours rather than fifteen minutes.
+ */
+export const waitMinutes = (asked: number, checksSoFar: number) =>
+  Math.max(asked, Math.min(15, 2 ** Math.floor(checksSoFar / 2)));
 
 export const DeveloperAssistantWorkers = Context.Reference<boolean>("t3/assistant/workers", {
   defaultValue: () => true,
@@ -473,6 +484,8 @@ export const make = Effect.gen(function* () {
   // Issues declined in a row since the last one a team took, per project. In
   // memory: a restart only allows a few more declines before the pause.
   const declineStreak = new Map<string, ReadonlyArray<string>>();
+  /** Asks for a scan before the minute is up, such as when a team frees its place. */
+  const rescan = yield* Queue.sliding<void>(1);
   // Threads whose session the assistant released, and when: their stop is no
   // failure, and one that never reports back is asked again after a while.
   const releasedAt = new Map<string, number>();
@@ -524,10 +537,17 @@ export const make = Effect.gen(function* () {
   });
   const saveTask = Effect.fn("Assistant.saveTask")(function* (value: AssistantTask) {
     const updated = { ...value, updatedAt: yield* now };
-    const before = updated.linearSession
-      ? yield* sql<{ status: string }>`SELECT status FROM assistant_tasks WHERE id = ${updated.id}`
-      : [];
+    const before = yield* sql<{
+      status: AssistantTask["status"];
+    }>`SELECT status FROM assistant_tasks WHERE id = ${updated.id}`;
     yield* sql`UPDATE assistant_tasks SET status = ${updated.status}, data = ${encodeTask(updated)} WHERE id = ${updated.id}`;
+    // The next issue starts at once rather than on the minute's scan.
+    if (
+      before[0] &&
+      assistantTaskHoldsProject(before[0].status) &&
+      !assistantTaskHoldsProject(updated.status)
+    )
+      yield* Queue.offer(rescan, undefined);
     if (updated.linearSession) {
       // Every way an issue gets blocked for the person passes here.
       if (updated.status === "blocked" && before[0]?.status !== "blocked") {
@@ -3926,7 +3946,7 @@ export const make = Effect.gen(function* () {
    * A team leader waits for progress outside T3. The wait is counted on its
    * issue, so the issue waits for the person while the loop and the project's
    * other teams carry on. T3 tells it to check again on the next scan, or once
-   * `minutes` have passed when that is more than one.
+   * the {@link waitMinutes} have passed when that is more than one.
    */
   const waitForExternal = Effect.fn("Assistant.waitForExternal")(function* (
     caller: ThreadId,
@@ -3946,11 +3966,10 @@ export const make = Effect.gen(function* () {
       });
       return { outcome: "limit" } satisfies AssistantWaitResult;
     }
+    const delay = waitMinutes(minutes, t.wait?.checks ?? 0);
     const until =
-      minutes > 1
-        ? DateTime.formatIso(
-            DateTime.makeUnsafe((yield* Clock.currentTimeMillis) + minutes * 60_000),
-          )
+      delay > 1
+        ? DateTime.formatIso(DateTime.makeUnsafe((yield* Clock.currentTimeMillis) + delay * 60_000))
         : undefined;
     const waiting = yield* saveTask({
       ...t,
@@ -3965,7 +3984,7 @@ export const make = Effect.gen(function* () {
       type: "thought",
       body: `Waiting: ${reason.slice(0, 1000)}`,
     });
-    return { outcome: "waiting" } satisfies AssistantWaitResult;
+    return { outcome: "waiting", minutes: delay } satisfies AssistantWaitResult;
   }, Effect.mapError(wrap));
 
   const deliver = Effect.fn("Assistant.deliver")(
@@ -4322,6 +4341,23 @@ export const make = Effect.gen(function* () {
         )
           return;
         yield* turnEnded(t, owner.role);
+      } else if (
+        status === "error" &&
+        t.status !== "blocked" &&
+        assistantTaskHoldsProject(t.status) &&
+        (!t.errorRetriedAt ||
+          Date.parse(t.errorRetriedAt) < (yield* Clock.currentTimeMillis) - ERROR_RETRY_WINDOW_MS)
+      ) {
+        // A provider error is often passing, so the thread gets one more turn by
+        // itself before the issue waits for the person.
+        yield* ingestion.drain;
+        const retried = yield* saveTask({ ...t, errorRetriedAt: yield* now });
+        yield* queueMessage(
+          projectId,
+          threadId,
+          `${t.id}:error-retry:${threadId}:${retried.errorRetriedAt}`,
+          `Your last turn stopped with a provider error: ${event.payload.session.lastError ?? "no detail"}\nContinue where you left off.`,
+        );
       } else if (failed && assistantTaskHoldsProject(t.status)) {
         yield* ingestion.drain;
         yield* saveTask({
@@ -4720,14 +4756,16 @@ export const make = Effect.gen(function* () {
     ),
     forkParked,
   );
-  // Linear is re-fetched once per minute; persisted messages also retry here.
+  // Linear is re-fetched once per minute, or sooner on a rescan; persisted
+  // messages also retry here.
   yield* Deferred.await(recovered).pipe(
     Effect.andThen(
       scan().pipe(
         Effect.catch((error) =>
           Effect.logWarning("Developer assistant issue scan will retry", { error }),
         ),
-        Effect.repeat(Schedule.spaced("60 seconds")),
+        Effect.andThen(Effect.raceFirst(Effect.sleep("60 seconds"), Queue.take(rescan))),
+        Effect.forever,
       ),
     ),
     forkParked,
