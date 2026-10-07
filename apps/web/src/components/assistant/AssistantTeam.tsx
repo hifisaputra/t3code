@@ -273,7 +273,12 @@ export function TeamThreads({
       ) : null}
       <TrackBadge track={task.track} />
       {teamRoleOrder
-        .filter((role) => !assistantTaskReports(task) || role !== "e2e")
+        // No tester on a report, and no reviewer on an issue taken without one.
+        .filter(
+          (role) =>
+            (!assistantTaskReports(task) || role !== "e2e") &&
+            (!task.skipReview || role !== "review"),
+        )
         .map((role) => {
           const threadId = assistantTaskThreadId(task, role);
           const shell = shells[role];

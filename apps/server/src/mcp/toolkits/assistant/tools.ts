@@ -94,6 +94,12 @@ export const AssistantToolkit = Toolkit.make(
             "Required for tracks code and test (test takes depth full or smoke). Omit for research and ops; T3 ignores it there.",
         }),
       ),
+      skipReview: Schema.optionalKey(
+        text.annotate({
+          description:
+            "Only for tracks code and ops, and only when a separate review adds nothing: why. Code: a change so small and contained that reading the diff adds nothing, such as copy, a config value or a one-line fix whose cause the issue names; never a migration, authentication or permissions, data handling, a dependency or a shared package. No reviewer thread starts; the worker merges once the project's check command passes. Ops: every change is an edit to Linear issues; T3 posts the worker's report without a read-back. When in doubt, omit it.",
+        }),
+      ),
     }),
     success: AssistantTask,
     failure,
@@ -428,6 +434,7 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
             }
           : null,
         input.track ?? "code",
+        input.skipReview?.trim() || undefined,
       );
     }),
   assistant_decline_issue: (input) =>

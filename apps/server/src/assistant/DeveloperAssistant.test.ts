@@ -22,6 +22,7 @@ import {
   TurnId,
   assistantE2eEvidenceCounts,
   assistantTaskHoldsProject,
+  assistantTaskPipeline,
   assistantTaskThreadId,
   type AssistantE2eCheck,
   type AssistantResearchCheck,
@@ -6047,6 +6048,87 @@ it.effect("an ops change is made, read back by the reviewer and reported on the 
       delivered.reviewInstructions ?? "",
       "Criteria the change does not fully meet:\n- The issue names supersearch.dev: partly done.",
     );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("a small change taken without a code review merges once its checks pass", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    yield* service.deliver();
+    // A research report is always fact-checked.
+    assert.include(
+      (yield* service
+        .acceptIssue(leadOf(team), "Compare.", ["What does it cost?"], null, "research", "Small.")
+        .pipe(Effect.flip)).detail,
+      "always fact-checked",
+    );
+    yield* service.acceptIssue(
+      leadOf(team),
+      "Fix the typo in the footer.",
+      ["The footer reads Copyright"],
+      { depth: "none", brief: "", reason: "Copy only." },
+      "code",
+      "A one-word copy fix.",
+    );
+    yield* endTurn(h, service, leadOf(team));
+    const taken = yield* taskById(service, team.id);
+    assert.equal(taken.skipReview, "A one-word copy fix.");
+    yield* service.deliver();
+    assert.include(turnsOf(h, taken.threadId)[0], "without a separate code review");
+    const approved = yield* service.requestReview(taken.threadId, "Ready: PR #1", testNotes);
+    assert.equal(approved.stage, "implement");
+    assert.equal(approved.codeReview?.verdict, "approved");
+    assert.equal(approved.codeReview?.summary, "No code review: A one-word copy fix.");
+    yield* endTurn(h, service, taken.threadId);
+    yield* service.deliver();
+    // No reviewer thread starts; the worker is told to merge.
+    assert.lengthOf(turnsOf(h, assistantTaskThreadId(taken, "review")), 0);
+    assert.include(turnsOf(h, taken.threadId).at(-1), "goes ahead without a code review");
+    assert.include(turnsOf(h, taken.threadId).at(-1), "Merge the PR");
+    const review = assistantTaskPipeline(yield* taskById(service, taken.id))?.find(
+      (step) => step.key === "review",
+    );
+    assert.equal(review?.state, "skipped");
+    assert.equal(review?.note, "No code review");
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
+it.effect("an ops change of Linear issues only is delivered without a read-back", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    yield* service.deliver();
+    yield* service.acceptIssue(
+      leadOf(team),
+      "Record supersearch.dev as the domain in the description.",
+      ["The description names supersearch.dev"],
+      null,
+      "ops",
+      "Only this issue's description changes.",
+    );
+    yield* endTurn(h, service, leadOf(team));
+    const taken = yield* taskById(service, team.id);
+    yield* service.deliver();
+    assert.include(turnsOf(h, taken.threadId)[0], "without a read-back");
+    const delivered = yield* service.submitResearch(taken.threadId, {
+      report: "The description names supersearch.dev.",
+      sources: [],
+      checks: [{ criterion: 1, result: "answered", evidence: "Read the issue again." }],
+      screenshots: [],
+    });
+    assert.equal(delivered.status, "review");
+    assert.lengthOf(turnsOf(h, assistantTaskThreadId(taken, "review")), 0);
+    assert.include(
+      h.comments[0]!.body,
+      "**Verification:** Not read back separately: Only this issue's description changes.",
+    );
+    const verify = assistantTaskPipeline(yield* taskById(service, taken.id))?.find(
+      (step) => step.key === "fact-check",
+    );
+    assert.equal(verify?.state, "skipped");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
