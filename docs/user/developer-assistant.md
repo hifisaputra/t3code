@@ -172,8 +172,12 @@ so does each fix the team leader sends. When review still asks for changes at th
 run fails, the issue goes back to its team leader. A team leader that twice ends its turn without a
 next step blocks the issue for you. **Allow more rounds** grants more worker turns; **Skip issue** cancels queued work and
 releases the repository while preserving the thread and branch for inspection. Skipping does not
-revert a merge, deployment, database migration, or Linear state. After 15 external progress checks
-without completion, the assistant stops so you can inspect the blocker and Start again.
+revert a merge, deployment, database migration, or Linear state. A team leader waiting on something
+outside T3, such as CI, checks back less often the longer it waits; after 15 checks, about two hours,
+the issue is blocked so you can inspect what it waits for and retry it from the board.
+
+When a provider fails with an error, the thread that failed is told to continue once by itself. A
+second failure within half an hour blocks the issue for you.
 
 State and queued messages survive a server restart. If a provider was interrupted or failed, the
 issue may be blocked; Start tells its team leader to pick the work back up, without creating a second

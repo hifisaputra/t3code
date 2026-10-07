@@ -137,7 +137,7 @@ it.effect("waiting answers the agent with text instead of an internal error", ()
           waitForExternal: (_caller, _reason, minutes) =>
             Effect.sync(() => {
               calls.push(`wait ${minutes}`);
-              return { outcome: "waiting" as const };
+              return { outcome: "waiting" as const, minutes: minutes ?? 1 };
             }),
         }),
       ),

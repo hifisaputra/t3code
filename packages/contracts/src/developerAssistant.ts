@@ -615,6 +615,11 @@ export const AssistantTask = Schema.Struct({
   /** The team leader's wait on something outside T3 (a deploy, CI), while it lasts. */
   wait: Schema.optionalKey(Schema.NullOr(AssistantWait)),
   /**
+   * When T3 last gave a thread whose provider failed another turn by itself. A
+   * second failure soon after blocks the issue for the person instead.
+   */
+  errorRetriedAt: Schema.optionalKey(IsoDateTime),
+  /**
    * Where this issue's e2e check runs, fixed when its team starts so a setup
    * change mid-issue does not move the goalposts. Absent means staging.
    */

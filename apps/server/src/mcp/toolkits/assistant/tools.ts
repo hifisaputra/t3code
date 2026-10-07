@@ -362,7 +362,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_wait", {
     description:
-      "Team leader: wait for external progress, such as CI or a staging deployment, without polling in the agent. Supply a concrete reason and end your turn. T3 wakes you in about a minute, or after minutes when you give it: for something slow, such as a 40-minute CI run, give about how long it has left so you do not spend a turn every minute. After 15 waits on one issue T3 blocks it for the person. Use assistant_ask_decision instead for a lasting blocker requiring a person.",
+      "Team leader: wait for external progress, such as CI or a staging deployment, without polling in the agent. Supply a concrete reason and end your turn. T3 wakes you in about a minute, or after minutes when you give it: for something slow, such as a 40-minute CI run, give about how long it has left so you do not spend a turn every minute. T3 spaces repeated waits further apart, up to 15 minutes, and after 15 waits on one issue, about two hours, it blocks the issue for the person. Use assistant_ask_decision instead for a lasting blocker requiring a person.",
     parameters: Schema.Struct({
       reason: text,
       minutes: Schema.optionalKey(
@@ -549,10 +549,13 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
   assistant_wait: (input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
-      const minutes = input.minutes ?? 1;
-      const result = yield* service.waitForExternal(caller, input.reason.trim(), minutes);
+      const result = yield* service.waitForExternal(
+        caller,
+        input.reason.trim(),
+        input.minutes ?? 1,
+      );
       if (result.outcome === "limit")
         return "T3 has checked back 15 times without this completing, so the issue is now blocked for the person to look at. End your turn.";
-      return `T3 checks back in about ${minutes === 1 ? "a minute" : `${minutes} minutes`}. End your turn now.`;
+      return `T3 checks back in about ${result.minutes === 1 ? "a minute" : `${result.minutes} minutes`}. End your turn now.`;
     }),
 });
