@@ -42,7 +42,7 @@ import {
   type StatusTone,
 } from "./assistantUi";
 import { reviewOutcomeLine, reviewSummary, type ReviewVerdictTone } from "./reviewCard.logic";
-import { THREAD_KIND, ResearchBadge } from "./threadKinds";
+import { THREAD_KIND, TrackBadge } from "./threadKinds";
 
 type Accent = "question" | "review" | "blocked" | "paused" | "setup";
 
@@ -466,7 +466,7 @@ function ReviewRow({
           <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
             <span aria-hidden>·</span>
             <span className="shrink-0 font-mono">{task.issue.identifier}</span>
-            <ResearchBadge track={task.track} />
+            <TrackBadge track={task.track} />
             {context.projectLabel(task.projectId) ? (
               <span className="min-w-0 truncate">{context.projectLabel(task.projectId)}</span>
             ) : null}

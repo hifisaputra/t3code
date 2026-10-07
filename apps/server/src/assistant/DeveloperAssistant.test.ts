@@ -5980,6 +5980,76 @@ it.effect("the fact check trades rounds with the research worker, then delivers 
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
+it.effect("an ops change is made, read back by the reviewer and reported on the issue", () =>
+  Effect.gen(function* () {
+    const h = harness();
+    h.app.connected = true;
+    const { service } = yield* h.setup;
+    const team = yield* activeTask(service);
+    yield* service.deliver();
+    const criteria = ["supersearch.dev opens the staging app", "The issue names supersearch.dev"];
+    yield* service.acceptIssue(
+      leadOf(team),
+      "Point supersearch.dev at staging and record the domain on the issue.",
+      criteria,
+      null,
+      "ops",
+    );
+    yield* endTurn(h, service, leadOf(team));
+    const taken = yield* taskById(service, team.id);
+    assert.equal(taken.track, "ops");
+    assert.isNull(taken.e2ePlan);
+    yield* service.deliver();
+    const first = turnsOf(h, taken.threadId)[0]!;
+    assert.include(first, "You are the worker for this ops issue");
+    assert.include(first, "1. supersearch.dev opens the staging app");
+    const plan = yield* h.app.resolver!(taken.id);
+    assert.deepEqual(
+      plan?.plan.map((step) => `${step.content}=${step.status}`),
+      ["Take on=completed", "Make the change=inProgress", "Verify=pending", "Your check=pending"],
+    );
+    // Nothing of the code path applies to it.
+    assert.include(
+      (yield* service.verifyStaging(leadOf(taken)).pipe(Effect.flip)).detail,
+      "This is an ops issue",
+    );
+    // A change may have nothing to link to.
+    yield* service.submitResearch(taken.threadId, {
+      report: "supersearch.dev now opens the staging app.\n\n## Changes\n\n- DNS: CNAME added.",
+      sources: [],
+      checks: [
+        { criterion: 1, result: "answered", evidence: "curl returns the staging app." },
+        { criterion: 2, result: "partly", evidence: "The description is updated; DEL-272 is not." },
+      ],
+      screenshots: [],
+    });
+    yield* endTurn(h, service, taken.threadId);
+    yield* service.deliver();
+    const reviewer = assistantTaskThreadId(taken, "review");
+    const request = turnsOf(h, reviewer)[0]!;
+    assert.include(request, "You are the verifier for this ops issue");
+    assert.include(request, "Verification request from the worker");
+    assert.notInclude(request, "Sources:");
+    const delivered = yield* service.submitReview(
+      reviewer,
+      "approved",
+      "",
+      "Read the DNS record back.",
+    );
+    assert.equal(delivered.status, "review");
+    const card = h.comments[0]!.body;
+    assert.match(card, /^\*\*Change ready for review\*\*/);
+    assert.include(card, "| supersearch.dev opens the staging app | ✅ done |");
+    assert.include(card, "| The issue names supersearch.dev | 🟡 partly done |");
+    assert.include(card, "**Verification:** Read the DNS record back.");
+    assert.notInclude(card, "**Links**");
+    assert.include(
+      delivered.reviewInstructions ?? "",
+      "Criteria the change does not fully meet:\n- The issue names supersearch.dev: partly done.",
+    );
+  }).pipe(Effect.provide(database()), Effect.scoped),
+);
+
 it.effect("a fact check that still wants changes after the last round blocks the issue", () =>
   Effect.gen(function* () {
     const h = harness();

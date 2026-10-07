@@ -50,21 +50,21 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_accept_issue", {
     description:
-      'Team leader only: take your issue, with the acceptance criteria and the plan for its e2e test. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own, and T3 verifies staging and starts the tester with your e2e brief at the depth you plan. For an issue that asks for information rather than a change, pass track "research" and no e2e plan: the worker researches the public web and submits a report, the reviewer fact-checks it, and T3 posts it on the issue. For an issue whose work is testing what is already deployed (a walk-through, an exploratory test, a regression pass) with nothing to change in the repository, pass track "test" with an e2e plan at depth full or smoke: no worker, review or merge; T3 verifies staging and starts the tester. End your turn afterward; T3 messages you when the issue needs a decision.',
+      'Team leader only: take your issue, with the acceptance criteria and the plan for its e2e test. T3 moves it to started in Linear and starts the implementation worker in this worktree with your brief. The worker and the code reviewer then work together on their own, and T3 verifies staging and starts the tester with your e2e brief at the depth you plan. For an issue that asks for information rather than a change, pass track "research" and no e2e plan: the worker researches the public web and submits a report, the reviewer fact-checks it, and T3 posts it on the issue. For a change made outside the repository (DNS, a hosting or domain setting, a search console, Linear issues), pass track "ops" and no e2e plan: the worker makes the change and reports it, the reviewer reads it back, and T3 posts the report on the issue. For an issue whose work is testing what is already deployed (a walk-through, an exploratory test, a regression pass) with nothing to change in the repository, pass track "test" with an e2e plan at depth full or smoke: no worker, review or merge; T3 verifies staging and starts the tester. End your turn afterward; T3 messages you when the issue needs a decision.',
     parameters: Schema.Struct({
       track: Schema.optionalKey(
-        Schema.Literals(["code", "research", "test"]).annotate({
+        Schema.Literals(["code", "research", "ops", "test"]).annotate({
           description:
-            "code (default): a change that is merged, deployed to staging and tested. research: a report read from the public web, fact-checked by the reviewer and posted on the issue, with no merge, staging or tester. Choose research when the issue asks for information (a comparison, an analysis, a recommendation) and nothing in the repository or its deployments changes. test: an e2e run on what staging runs now, with no worker, code review or merge; T3 verifies that staging runs the head of origin's integration branch and starts the tester with the e2e brief. Choose test when the work is testing what is deployed and nothing in the repository changes.",
+            "code (default): a change that is merged, deployed to staging and tested. research: a report read from the public web, fact-checked by the reviewer and posted on the issue, with no merge, staging or tester. Choose research when the issue asks for information (a comparison, an analysis, a recommendation) and nothing in the repository or its deployments changes. ops: a change made outside the repository with the CLIs, APIs and Linear tools this machine has, reported and read back by the reviewer, then posted on the issue; no merge, staging or tester. Choose ops when the work is a setting, record or issue a person would otherwise change by hand and nothing in the repository changes. test: an e2e run on what staging runs now, with no worker, code review or merge; T3 verifies that staging runs the head of origin's integration branch and starts the tester with the e2e brief. Choose test when the work is testing what is deployed and nothing in the repository changes.",
         }),
       ),
       brief: text.annotate({
         description:
-          "For the worker: the scope, the acceptance criteria, and what the issue leaves implicit. For research: which competitors or sources, the time frame, and what the person will decide with the answer.",
+          "For the worker: the scope, the acceptance criteria, and what the issue leaves implicit. For research: which competitors or sources, the time frame, and what the person will decide with the answer. For ops: what to change, where, what must stay untouched, and what the issue already decided.",
       }),
       criteria: AssistantCriteria.annotate({
         description:
-          "Each criterion is one check a person could perform on the product, not a diff. T3 gives them, numbered, to the worker, the reviewer and the tester. For research: the questions the report must answer, each one a check a person can make by reading the report.",
+          "Each criterion is one check a person could perform on the product, not a diff. T3 gives them, numbered, to the worker, the reviewer and the tester. For research: the questions the report must answer, each one a check a person can make by reading the report. For ops: what shows the change is in place, each one something a person can confirm by looking at the service or the issue.",
       }),
       e2e: Schema.optionalKey(
         Schema.Struct({
@@ -91,7 +91,7 @@ export const AssistantToolkit = Toolkit.make(
           ),
         }).annotate({
           description:
-            "Required for tracks code and test (test takes depth full or smoke). Omit for research; T3 ignores it there.",
+            "Required for tracks code and test (test takes depth full or smoke). Omit for research and ops; T3 ignores it there.",
         }),
       ),
     }),
@@ -171,7 +171,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_submit_research", {
     description:
-      "Implementation thread of a research issue only: submit the report and ask the code reviewer to fact-check it. T3 checks the screenshots, records the report as a new revision and sends it to the reviewer. Its findings come back to this thread; submit again after fixing them. Once the reviewer approves, T3 uploads the screenshots, posts the report on the Linear issue and moves it to review. End your turn after submitting.",
+      "Implementation thread of a research or ops issue only: submit the report and ask the code reviewer to fact-check it, or on an ops issue to read each change back. T3 checks the screenshots, records the report as a new revision and sends it to the reviewer. Its findings come back to this thread; submit again after fixing them. Once the reviewer approves, T3 uploads the screenshots, posts the report on the Linear issue and moves it to review. End your turn after submitting.",
     parameters: Schema.Struct({
       report: Schema.String.check(Schema.isNonEmpty()).annotate({
         description:
@@ -179,11 +179,11 @@ export const AssistantToolkit = Toolkit.make(
       }),
       sources: Schema.Array(AssistantResearchSource).annotate({
         description:
-          "Every page the report cites, numbered by position as the report references them: url, title and seen, the date the page was read (YYYY-MM-DD). At least one, at most 60.",
+          "Every page the report cites, numbered by position as the report references them: url, title and seen, the date the page was read (YYYY-MM-DD). At least one, at most 60. On an ops issue: where each change can be seen, such as a dashboard page, the live URL or an issue; may be empty.",
       }),
       checks: Schema.Array(AssistantResearchCheck).annotate({
         description:
-          "One entry per question (the criteria the brief lists numbered), in order: result answered, partly or not-answered; evidence, where the report answers it or what could not be found and where it was looked for; screenshot, the 1-based position in screenshots of the one that shows it, when one does.",
+          "One entry per question (the criteria the brief lists numbered), in order: result answered, partly or not-answered; evidence, where the report answers it or what could not be found and where it was looked for; screenshot, the 1-based position in screenshots of the one that shows it, when one does. On an ops issue one entry per criterion: answered when the change is in place, partly or not-answered otherwise, with what was read back as the evidence.",
       }),
       screenshots: Schema.Array(
         Schema.Struct({
@@ -201,7 +201,7 @@ export const AssistantToolkit = Toolkit.make(
   }),
   Tool.make("assistant_submit_review", {
     description:
-      "Code review thread only: record your verdict on the worktree's current commit, or, on a research issue, on the report's latest revision. changes-requested sends your findings to the implementer as its next round. approved tells the implementer to merge exactly that commit; any later commit needs another review. On a research issue approved delivers the report: T3 posts it on the issue. End your turn after submitting.",
+      "Code review thread only: record your verdict on the worktree's current commit, or, on a research or ops issue, on the report's latest revision. changes-requested sends your findings to the implementer as its next round. approved tells the implementer to merge exactly that commit; any later commit needs another review. On a research or ops issue approved delivers the report: T3 posts it on the issue. End your turn after submitting.",
     parameters: Schema.Struct({
       verdict: Schema.Literals(["approved", "changes-requested"]),
       findings: text.annotate({

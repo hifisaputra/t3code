@@ -1,4 +1,5 @@
 import {
+  assistantTaskReports,
   assistantTaskThreadId,
   type AssistantBoard,
   type AssistantTaskSummary,
@@ -19,7 +20,7 @@ import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { taskIsFinished, teamRoleOrder, threadHasOpenQuestion } from "./assistantBoard.logic";
 import { StatusDot, threadIsBusy, useAssistantAction } from "./assistantUi";
-import { ThreadKindIcon, threadKind, ResearchBadge } from "./threadKinds";
+import { ThreadKindIcon, threadKind, TrackBadge } from "./threadKinds";
 
 /** One issue's four conversations, keyed by the role each plays. */
 export type TeamShells = Readonly<Record<AssistantThreadRole, EnvironmentThreadShell | null>>;
@@ -270,9 +271,9 @@ export function TeamThreads({
           {label}
         </span>
       ) : null}
-      <ResearchBadge track={task.track} />
+      <TrackBadge track={task.track} />
       {teamRoleOrder
-        .filter((role) => task.track !== "research" || role !== "e2e")
+        .filter((role) => !assistantTaskReports(task) || role !== "e2e")
         .map((role) => {
           const threadId = assistantTaskThreadId(task, role);
           const shell = shells[role];

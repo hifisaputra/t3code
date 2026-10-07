@@ -1,8 +1,9 @@
-import type {
-  AssistantE2eCheckResult,
-  AssistantResearchCheckResult,
-  AssistantTaskSummary,
-  EnvironmentId,
+import {
+  assistantTaskReports,
+  type AssistantE2eCheckResult,
+  type AssistantResearchCheckResult,
+  type AssistantTaskSummary,
+  type EnvironmentId,
 } from "@t3tools/contracts";
 import { CheckIcon, CircleIcon, FilmIcon, ImageIcon, MinusIcon, XIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -14,6 +15,7 @@ import { ExpandedImageDialog } from "../chat/ExpandedImageDialog";
 import type { ExpandedImagePreview } from "../chat/ExpandedImagePreview";
 import { MediaVideoPlayer } from "../media/MediaVideoPlayer";
 import { Checkbox } from "../ui/checkbox";
+import { reportWords } from "./assistantBoard.logic";
 import { ExpandableMarkdown } from "./assistantUi";
 import { useAssistantEvidenceUrls } from "./assistantScreenshots";
 
@@ -28,6 +30,14 @@ const CHECK_RESULT: Record<
   failed: { icon: XIcon, label: "Failed", className: "text-destructive-foreground" },
   "not-checked": { icon: CircleIcon, label: "Not checked", className: "text-warning-foreground" },
   skipped: { icon: MinusIcon, label: "Not in smoke test", className: "text-muted-foreground" },
+};
+/** An ops issue's results say whether each change is in place rather than answered. */
+const OPS_RESULT_LABEL: Partial<
+  Record<AssistantE2eCheckResult | AssistantResearchCheckResult, string>
+> = {
+  answered: "Done",
+  partly: "Partly done",
+  "not-answered": "Not done",
 };
 
 /** A small uppercase heading over one part of the evidence, with an optional count. */
@@ -53,9 +63,10 @@ const EMPTY_FILES: ReadonlyArray<never> = [];
  */
 export function useEvidenceViewer(environmentId: EnvironmentId, task: AssistantTaskSummary | null) {
   const shots =
-    (task?.track === "research" ? task.research?.screenshots : task?.e2e?.screenshots) ??
+    (task && assistantTaskReports(task) ? task.research?.screenshots : task?.e2e?.screenshots) ??
     EMPTY_FILES;
-  const videos = (task?.track === "research" ? undefined : task?.e2e?.videos) ?? EMPTY_FILES;
+  const videos =
+    (task && assistantTaskReports(task) ? undefined : task?.e2e?.videos) ?? EMPTY_FILES;
   const threadId = task?.threadId ?? null;
   const urls = useAssistantEvidenceUrls(environmentId, threadId, shots);
   const videoUrls = useAssistantEvidenceUrls(environmentId, threadId, videos);
@@ -172,14 +183,16 @@ export function CriteriaResults({
   viewer: EvidenceViewer;
 }) {
   const criteria = task.criteria ?? [];
-  const checks = (task.track === "research" ? task.research?.checks : task.e2e?.checks) ?? [];
+  const checks = (assistantTaskReports(task) ? task.research?.checks : task.e2e?.checks) ?? [];
   const count = Math.max(criteria.length, ...checks.map((check) => check.criterion));
   if (count <= 0) return null;
   return (
     <ul className="flex flex-col gap-1.5 text-sm">
       {Array.from({ length: count }, (_, index) => {
         const check = checks.find((entry) => entry.criterion === index + 1) ?? null;
-        const result = check ? CHECK_RESULT[check.result] : null;
+        const found = check ? CHECK_RESULT[check.result] : null;
+        const opsLabel = check && task.track === "ops" ? OPS_RESULT_LABEL[check.result] : undefined;
+        const result = found && opsLabel ? { ...found, label: opsLabel } : found;
         const shot = check?.screenshot ? check.screenshot - 1 : null;
         const video = check && "video" in check && check.video ? check.video - 1 : null;
         return (
@@ -199,7 +212,7 @@ export function CriteriaResults({
               <p className={cn(check?.result === "skipped" && "text-muted-foreground")}>
                 {criteria[index] ?? `Criterion ${index + 1}`}
               </p>
-              {task.track === "research" && result ? (
+              {assistantTaskReports(task) && result ? (
                 <p className={cn("text-xs", result.className)}>{result.label}</p>
               ) : null}
               {check?.evidence?.trim() ? <Evidence text={check.evidence.trim()} /> : null}
@@ -418,7 +431,7 @@ export function ResearchEvidence({
   const research = task.research;
   const [reportOpen, setReportOpen] = useState(false);
   if (!research)
-    return <p className="text-muted-foreground text-sm">No research report submitted yet.</p>;
+    return <p className="text-muted-foreground text-sm">{reportWords(task.track).noReport}</p>;
   // Absent while the report is still being fetched; see useAssistantTaskDetail.
   const report = research.report ?? "";
   const sources = research.sources ?? [];
@@ -454,29 +467,33 @@ export function ResearchEvidence({
         </section>
       ) : null}
       <section>
-        <EvidenceHeading>Research questions</EvidenceHeading>
+        <EvidenceHeading>{reportWords(task.track).criteria}</EvidenceHeading>
         <CriteriaResults task={task} viewer={viewer} />
       </section>
-      <section>
-        <EvidenceHeading count={sources.length}>Sources</EvidenceHeading>
-        <ol className="flex list-decimal flex-col gap-1 pl-5 text-sm">
-          {sources.map((source, index) => (
-            // Sources are numbered by position in the report, including repeated URLs.
-            // oxlint-disable-next-line react/no-array-index-key
-            <li key={`${index}:${source.url}`}>
-              <a
-                href={source.url}
-                target="_blank"
-                rel="noreferrer"
-                className="break-words underline underline-offset-2"
-              >
-                {source.title}
-              </a>
-              <span className="text-muted-foreground text-xs"> · Seen {source.seen}</span>
-            </li>
-          ))}
-        </ol>
-      </section>
+      {sources.length || task.track !== "ops" ? (
+        <section>
+          <EvidenceHeading count={sources.length}>
+            {reportWords(task.track).sources}
+          </EvidenceHeading>
+          <ol className="flex list-decimal flex-col gap-1 pl-5 text-sm">
+            {sources.map((source, index) => (
+              // Sources are numbered by position in the report, including repeated URLs.
+              // oxlint-disable-next-line react/no-array-index-key
+              <li key={`${index}:${source.url}`}>
+                <a
+                  href={source.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="break-words underline underline-offset-2"
+                >
+                  {source.title}
+                </a>
+                <span className="text-muted-foreground text-xs"> · Seen {source.seen}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
       {viewer.shots.length ? (
         <section>
           <EvidenceHeading count={viewer.shots.length}>Screenshots</EvidenceHeading>
@@ -486,7 +503,8 @@ export function ResearchEvidence({
       {research.review && research.review.revision === research.revision ? (
         <section>
           <EvidenceHeading>
-            Fact check · {research.review.verdict === "approved" ? "Approved" : "Changes requested"}
+            {reportWords(task.track).check} ·{" "}
+            {research.review.verdict === "approved" ? "Approved" : "Changes requested"}
           </EvidenceHeading>
           {research.review.summary ? (
             <ExpandableMarkdown text={research.review.summary} environmentId={environmentId} />

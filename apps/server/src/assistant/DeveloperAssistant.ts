@@ -41,6 +41,7 @@ import {
   assistantTaskHoldsProject,
   assistantTaskSummary,
   assistantTaskThreadId,
+  assistantTaskReports,
   assistantTaskTrack,
   assistantThreadKind,
   type AssistantAddProjectNoteInput,
@@ -115,6 +116,8 @@ import {
   e2eBrief,
   e2eInstructions,
   leadInstructions,
+  opsReviewerInstructions,
+  opsWorkerInstructions,
   researchReviewerInstructions,
   researchWorkerInstructions,
   reviewerInstructions,
@@ -290,9 +293,9 @@ const criterionChecksError = (
 };
 /** How many sources a research report may cite. The full review message is checked separately. */
 const RESEARCH_SOURCES_MAX = 60;
-/** What a tool meant for a code issue answers on a research issue. */
-const RESEARCH_HAS_NO_DEPLOY =
-  "This is a research issue: it has no merge, staging deploy or e2e test. The reviewer's approval of the report delivers it.";
+/** What a tool meant for a code issue answers on a research or ops issue. */
+const reportHasNoDeploy = (t: AssistantTask) =>
+  `This is ${assistantTaskTrack(t) === "ops" ? "an ops" : "a research"} issue: it has no merge, staging deploy or e2e test. The reviewer's approval of the report delivers it.`;
 /**
  * What a refusal to reach the tester adds for a leader that may only want a
  * test of what is deployed: the track for it, never a change made to unlock it.
@@ -307,32 +310,38 @@ const testTrackHint = (t: AssistantTask) =>
 const TEST_HAS_NO_WORKER =
   "This is a test issue: it has no implementation worker, code review or merge. File each defect the tester finds as its own issue and deliver with assistant_deliver, saying where each went, or ask the person with assistant_ask_decision.";
 /**
- * What the person is asked to check on a delivered research issue: the
- * report's short answer, then the questions it does not fully answer.
+ * What the person is asked to check on a delivered research or ops issue: the
+ * report's short answer, then the questions it does not fully answer, or the
+ * criteria an ops change does not fully meet.
  */
 const researchReviewInstructions = (
   research: AssistantResearch,
   criteria: ReadonlyArray<string>,
+  ops: boolean,
 ) => {
   const open = research.checks.flatMap((check) =>
     check.result === "answered"
       ? []
       : [
-          `- ${criteria[check.criterion - 1] ?? `Question ${check.criterion}`}: ${check.result === "partly" ? "partly answered" : "not answered"}. ${check.evidence.replace(/\s+/g, " ").trim()}`.trim(),
+          `- ${criteria[check.criterion - 1] ?? `${ops ? "Criterion" : "Question"} ${check.criterion}`}: ${check.result === "partly" ? (ops ? "partly done" : "partly answered") : ops ? "not done" : "not answered"}. ${check.evidence.replace(/\s+/g, " ").trim()}`.trim(),
         ],
   );
   return [
     researchShortAnswer(research.report),
-    open.length ? `Questions the report does not fully answer:\n${open.join("\n")}` : null,
+    open.length
+      ? `${ops ? "Criteria the change does not fully meet" : "Questions the report does not fully answer"}:\n${open.join("\n")}`
+      : null,
   ]
     .filter(Boolean)
     .join("\n\n");
 };
-/** A research submission as the reviewer reads it: the report, its sources, checks and screenshots. */
+/** A research or ops submission as the reviewer reads it: the report, its sources, checks and screenshots. */
 const researchForReview = (research: AssistantResearch, criteria: ReadonlyArray<string>) =>
   [
     `Report, revision ${research.revision}:\n${research.report}`,
-    `Sources:\n${research.sources.map((source, i) => `${i + 1}. ${source.title}: ${source.url} (seen ${source.seen})`).join("\n")}`,
+    research.sources.length
+      ? `Sources:\n${research.sources.map((source, i) => `${i + 1}. ${source.title}: ${source.url} (seen ${source.seen})`).join("\n")}`
+      : null,
     `The worker's checks:\n${research.checks
       .map(
         (check) =>
@@ -1187,7 +1196,7 @@ export const make = Effect.gen(function* () {
     Effect.mapError(wrap),
   );
 
-  /** What a new review thread is told: a code review, or a research issue's fact check. */
+  /** What a new review thread is told: a code review, a research fact check or an ops read-back. */
   const reviewInstructionsFor = (
     p: AwaitedProject,
     t: AssistantTask,
@@ -1195,7 +1204,9 @@ export const make = Effect.gen(function* () {
   ) =>
     assistantTaskTrack(t) === "research"
       ? researchReviewerInstructions(p.config, t, notes)
-      : reviewerInstructions(p.config, t, notes);
+      : assistantTaskTrack(t) === "ops"
+        ? opsReviewerInstructions(p.config, t, notes)
+        : reviewerInstructions(p.config, t, notes);
 
   /**
    * Prepare a turn for one of the issue's threads, creating the review or e2e
@@ -1758,14 +1769,17 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           track === "research"
             ? "List 1 to 12 questions the report must answer, each one a check a person can make by reading the report. T3 gives them to the worker and the reviewer."
-            : "List 1 to 12 acceptance criteria, each one a check a person could perform on the product. T3 gives them to the worker, the reviewer and the tester.",
+            : track === "ops"
+              ? "List 1 to 12 criteria that show the change is in place, each one something a person can confirm by looking at the service or the issue. T3 gives them to the worker and the reviewer."
+              : "List 1 to 12 acceptance criteria, each one a check a person could perform on the product. T3 gives them to the worker, the reviewer and the tester.",
         );
-      if (track === "research") return yield* acceptResearch(p, t, brief, listed);
+      if (track === "research" || track === "ops")
+        return yield* acceptResearch(p, t, brief, listed, track);
       if (!e2eInput)
         return yield* fail(
           track === "test"
             ? "Give the e2e plan: depth full or smoke and a brief for the tester. A test issue is its e2e run."
-            : 'Give the e2e plan with its depth and a brief for the tester. For an issue that asks for information rather than a change, pass track "research" instead.',
+            : 'Give the e2e plan with its depth and a brief for the tester. For an issue that asks for information rather than a change, pass track "research" instead, and for a change made outside the repository, track "ops".',
         );
       const e2e = e2eInput;
       if (track === "test" && e2e.depth === "none")
@@ -1858,14 +1872,16 @@ export const make = Effect.gen(function* () {
   );
 
   /**
-   * The start of a research issue: like taking a code issue, with no e2e plan,
-   * and a worker told to research and report. Callers hold the assistant lock.
+   * The start of a research or ops issue: like taking a code issue, with no e2e
+   * plan, and a worker told to research, or make the change, and report.
+   * Callers hold the assistant lock.
    */
   const acceptResearch = Effect.fn("Assistant.acceptResearch")(function* (
     p: AwaitedProject,
     t: AssistantTask,
     brief: string,
     questions: ReadonlyArray<string>,
+    track: "research" | "ops",
   ) {
     if (yield* taskDecisionsPending(t))
       return yield* fail("Wait for the answer to your open question before taking the issue.");
@@ -1898,7 +1914,7 @@ export const make = Effect.gen(function* () {
       ...t,
       brief,
       criteria: questions,
-      track: "research",
+      track,
       e2ePlan: null,
       research: null,
       turns: 1,
@@ -1917,14 +1933,16 @@ export const make = Effect.gen(function* () {
           withRoleSkill(
             p.config,
             "implement",
-            researchWorkerInstructions(p.config, taken, directory, notes),
+            track === "ops"
+              ? opsWorkerInstructions(p.config, taken, directory, notes)
+              : researchWorkerInstructions(p.config, taken, directory, notes),
           ),
         );
       }),
     );
     yield* sessionUpdate(taken, "taken", {
       type: "thought",
-      body: `Taking this issue as research. Questions the report answers:\n\n${questions.map((question, i) => `${i + 1}. ${question}`).join("\n")}`,
+      body: `${track === "ops" ? "Taking this issue as a change outside the repository. Done when:" : "Taking this issue as research. Questions the report answers:"}\n\n${questions.map((question, i) => `${i + 1}. ${question}`).join("\n")}`,
     });
     return yield* task(t.id);
   });
@@ -2064,7 +2082,7 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           "Only the active issue's threads can receive follow-up work. An issue sent back from review goes to a new team.",
         );
-      if (assistantTaskTrack(t) === "research" && t.research?.review?.verdict === "approved")
+      if (assistantTaskReports(t) && t.research?.review?.verdict === "approved")
         return yield* fail(
           "The report is approved. T3 is delivering it to Linear and retries automatically; no further worker or reviewer turn is needed.",
         );
@@ -2079,8 +2097,10 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           "This issue reached its worker turn limit. Ask the person to review it or explicitly retry from the assistant board.",
         );
-      if (role === "e2e" && assistantTaskTrack(t) === "research")
-        return yield* fail("A research issue has no e2e tester.");
+      if (role === "e2e" && assistantTaskReports(t))
+        return yield* fail(
+          `${assistantTaskTrack(t) === "ops" ? "An ops" : "A research"} issue has no e2e tester.`,
+        );
       // In the worktree the tester runs on the approved commit, before any deployment.
       const testerReady =
         assistantTaskE2eEnvironment(t) === "worktree"
@@ -2422,9 +2442,9 @@ export const make = Effect.gen(function* () {
     } = {},
   ) {
     const { p, t } = yield* authorizeRole(caller, "implement");
-    if (assistantTaskTrack(t) === "research")
+    if (assistantTaskReports(t))
       return yield* fail(
-        "This is a research issue: submit the report with assistant_submit_research, and T3 sends it to the reviewer.",
+        `This is ${assistantTaskTrack(t) === "ops" ? "an ops" : "a research"} issue: submit the report with assistant_submit_research, and T3 sends it to the reviewer.`,
       );
     const notes = input.testNotes?.trim() ?? "";
     // The tester is started with these notes and no leader in between, so a
@@ -2508,14 +2528,15 @@ export const make = Effect.gen(function* () {
       },
     ) {
       const { p, t } = yield* authorizeRole(caller, "implement");
-      if (assistantTaskTrack(t) !== "research")
+      if (!assistantTaskReports(t))
         return yield* fail(
-          "Only a research issue has a report. Commit, push and call assistant_request_review.",
+          "Only a research or ops issue has a report. Commit, push and call assistant_request_review.",
         );
+      const ops = assistantTaskTrack(t) === "ops";
       if (t.stage !== "implement")
         return yield* fail(
           t.stage === "review"
-            ? "The reviewer is fact-checking your last report. End your turn; its verdict arrives here."
+            ? `The reviewer is ${ops ? "verifying" : "fact-checking"} your last report. End your turn; its verdict arrives here.`
             : "The issue is not with you right now. End your turn; the team leader messages you when it is.",
         );
       const report = input.report.trim();
@@ -2524,7 +2545,8 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           `The report is ${report.length.toLocaleString("en-US")} characters, and the most T3 posts is ${ASSISTANT_RESEARCH_REPORT_MAX_CHARS.toLocaleString("en-US")}. Shorten the detail, keep the short answer, the figures and their references, and submit again.`,
         );
-      if (!input.sources.length)
+      // An ops change may have nothing to link to; research rests on its sources.
+      if (!ops && !input.sources.length)
         return yield* fail(
           "List the sources the report cites, at least one, each with its url, title and the date you read it.",
         );
@@ -2536,7 +2558,9 @@ export const make = Effect.gen(function* () {
       const checksError = criterionChecksError(
         criteria,
         input.checks,
-        `This issue has ${criteria.length} ${criteria.length === 1 ? "question" : "questions"}; list one check for each, in order.`,
+        ops
+          ? `This issue has ${criteria.length} ${criteria.length === 1 ? "criterion" : "criteria"}; list one check for each, in order.`
+          : `This issue has ${criteria.length} ${criteria.length === 1 ? "question" : "questions"}; list one check for each, in order.`,
       );
       if (checksError) return yield* fail(checksError);
       const stray = input.checks.find(
@@ -2544,7 +2568,7 @@ export const make = Effect.gen(function* () {
       );
       if (stray)
         return yield* fail(
-          `Question ${stray.criterion} points at screenshot ${stray.screenshot}, and you attached ${input.screenshots.length}. Number each screenshot by its position in screenshots.`,
+          `${ops ? "Criterion" : "Question"} ${stray.criterion} points at screenshot ${stray.screenshot}, and you attached ${input.screenshots.length}. Number each screenshot by its position in screenshots.`,
         );
       // Every file is read now, so a bad path is refused while the worker can
       // still fix it; delivery uploads them once the reviewer approves.
@@ -2572,8 +2596,8 @@ export const make = Effect.gen(function* () {
         p,
         next,
         "review",
-        `Fact-check request from the research worker.\n\n${researchForReview(research, criteria)}`,
-        (notes) => researchReviewerInstructions(p.config, next, notes),
+        `${ops ? "Verification request from the worker: read each change back." : "Fact-check request from the research worker."}\n\n${researchForReview(research, criteria)}`,
+        (notes) => reviewInstructionsFor(p, next, notes),
       );
       if (prepared.text.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS)
         return yield* fail(
@@ -2649,7 +2673,7 @@ export const make = Effect.gen(function* () {
         research: reviewed,
         stage: "lead",
         status: "blocked",
-        error: `The fact check still requests changes after ${t.turns} worker rounds.`,
+        error: `The ${assistantTaskTrack(t) === "ops" ? "verification" : "fact check"} still requests changes after ${t.turns} worker rounds.`,
       });
     return yield* sql.withTransaction(
       Effect.gen(function* () {
@@ -2663,7 +2687,7 @@ export const make = Effect.gen(function* () {
           p.project_id,
           t.threadId,
           `${t.id}:turn:${t.turns + 1}`,
-          `The fact check requested changes on revision ${research.revision} of the report:\n${findings}\nFix them (or explain why a finding is wrong) and call assistant_submit_research again.`,
+          `The ${assistantTaskTrack(t) === "ops" ? "verification" : "fact check"} requested changes on revision ${research.revision} of the report:\n${findings}\nFix them (or explain why a finding is wrong) and call assistant_submit_research again.`,
         );
         return updated;
       }),
@@ -2679,7 +2703,7 @@ export const make = Effect.gen(function* () {
       needsE2e?: boolean,
     ) {
       const { p, t: current } = yield* authorizeRole(caller, "review");
-      if (assistantTaskTrack(current) === "research")
+      if (assistantTaskReports(current))
         return yield* reviewResearch(p, current, verdict, findings, summary);
       // A reviewer who sees user-facing changes the planned depth would not
       // test raises it to full, with either verdict.
@@ -2776,7 +2800,7 @@ export const make = Effect.gen(function* () {
   const reportMerged = Effect.fn("Assistant.reportMerged")(
     function* (caller: ThreadId, summary: string) {
       const { p, t } = yield* authorizeRole(caller, "implement");
-      if (assistantTaskTrack(t) === "research") return yield* fail(RESEARCH_HAS_NO_DEPLOY);
+      if (assistantTaskReports(t)) return yield* fail(reportHasNoDeploy(t));
       const review = t.codeReview;
       if (review?.verdict !== "approved")
         return yield* fail("Request a code review and wait for its approval before merging.");
@@ -2975,6 +2999,7 @@ export const make = Effect.gen(function* () {
     value: AssistantTask,
     research: AssistantResearch,
   ) {
+    const ops = assistantTaskTrack(value) === "ops";
     let updated = yield* saveTask({
       ...value,
       research,
@@ -3005,6 +3030,7 @@ export const make = Effect.gen(function* () {
         research: delivered,
         criteria: value.criteria ?? [],
         acceptedState: p.config.acceptedState,
+        ops,
       });
       delivered = {
         ...delivered,
@@ -3025,6 +3051,7 @@ export const make = Effect.gen(function* () {
       research: delivered,
       criteria: value.criteria ?? [],
       acceptedState: delivery.acceptedState,
+      ops,
     });
     for (const [index, body] of cards.entries()) {
       const id = delivery.commentIds[index]!;
@@ -3045,7 +3072,7 @@ export const make = Effect.gen(function* () {
       if (posted._tag === "Failure")
         return yield* saveTask({
           ...updated,
-          error: `Could not post the research report on Linear: ${linearFailureDetail(posted.failure)} T3 will retry delivery automatically.`,
+          error: `Could not post the ${ops ? "ops" : "research"} report on Linear: ${linearFailureDetail(posted.failure)} T3 will retry delivery automatically.`,
         });
       updated = yield* saveTask({
         ...updated,
@@ -3054,7 +3081,7 @@ export const make = Effect.gen(function* () {
     }
     return yield* handToPerson(p, updated, {
       summary: researchShortAnswer(delivered.report),
-      reviewInstructions: researchReviewInstructions(delivered, value.criteria ?? []),
+      reviewInstructions: researchReviewInstructions(delivered, value.criteria ?? [], ops),
       problems: delivery.problems,
       response: `${cards[0]!.split("\n")[0]}\n\n${
         cards.length > 1
@@ -3072,7 +3099,7 @@ export const make = Effect.gen(function* () {
     for (const t of yield* heldTasks(projectId)) {
       const research = t.research;
       if (
-        assistantTaskTrack(t) !== "research" ||
+        !assistantTaskReports(t) ||
         research?.review?.verdict !== "approved" ||
         research.review.revision !== research.revision
       )
@@ -3230,7 +3257,7 @@ export const make = Effect.gen(function* () {
       if (p.status === "stopped") return yield* fail("The assistant is stopped.");
       if (!assistantTaskHoldsProject(t.status))
         return yield* fail("This issue is no longer active.");
-      if (assistantTaskTrack(t) === "research") return yield* fail(RESEARCH_HAS_NO_DEPLOY);
+      if (assistantTaskReports(t)) return yield* fail(reportHasNoDeploy(t));
       if (t.deployment) return { task: t, outcome: "verified" as const };
       if (
         assistantTaskTrack(t) !== "test" &&
@@ -3320,7 +3347,7 @@ export const make = Effect.gen(function* () {
       if (p.status === "stopped") return yield* fail("The assistant is stopped.");
       if (!assistantTaskHoldsProject(t.status))
         return yield* fail("Only the active issue can be tested.");
-      if (assistantTaskTrack(t) === "research") return yield* fail(RESEARCH_HAS_NO_DEPLOY);
+      if (assistantTaskReports(t)) return yield* fail(reportHasNoDeploy(t));
       if (assistantTaskE2eEnvironment(t) === "worktree") {
         if (t.codeReview?.verdict !== "approved")
           return yield* fail(`Start e2e after code review approves a commit.${testTrackHint(t)}`);
@@ -3744,7 +3771,7 @@ export const make = Effect.gen(function* () {
       const t = yield* task(input.taskId);
       const p = yield* project(t.projectId);
       const plan = t.e2ePlan;
-      if (assistantTaskTrack(t) === "research") return yield* fail(RESEARCH_HAS_NO_DEPLOY);
+      if (assistantTaskReports(t)) return yield* fail(reportHasNoDeploy(t));
       if (!plan) return yield* fail("The team leader plans the test when it takes the issue.");
       if (assistantTaskTrack(t) === "test" && input.depth === "none")
         return yield* fail("A test issue is its e2e run, so its depth is full or smoke.");
@@ -4141,8 +4168,8 @@ export const make = Effect.gen(function* () {
       `${t.id}:lead:nudge:${newId()}`,
       assistantTaskEngineeringChecksPending(t)
         ? `You ended your turn with the e2e run's engineering checks unsettled and nothing handed on. Send them to the code reviewer with assistant_message_worker and thread "review", send a defect to the worker, call assistant_deliver once they are settled, or ask the person with assistant_ask_decision.`
-        : assistantTaskTrack(t) === "research"
-          ? `You ended your turn with the issue still yours and nothing handed on. Take the next step (message the research worker or the reviewer), or ask the person with assistant_ask_decision.`
+        : assistantTaskReports(t)
+          ? `You ended your turn with the issue still yours and nothing handed on. Take the next step (message the worker or the reviewer), or ask the person with assistant_ask_decision.`
           : `You ended your turn with the issue still yours and nothing handed on. Take the next step (${t.dispatched ? "take" : "take or decline"} the issue, verify staging, start e2e, or message a thread), ask the person with assistant_ask_decision, or use assistant_wait while staging deploys.`,
     );
     yield* changed;
@@ -4197,7 +4224,7 @@ export const make = Effect.gen(function* () {
       return yield* closeTeam(t);
     }
     // A durable approval is a server-owned handoff; the scan resumes delivery.
-    if (assistantTaskTrack(t) === "research" && t.research?.review?.verdict === "approved") return;
+    if (assistantTaskReports(t) && t.research?.review?.verdict === "approved") return;
     // A queued handoff carries the issue on; an open question waits for the person.
     if (
       !assistantTaskHoldsProject(t.status) ||

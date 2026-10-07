@@ -385,6 +385,12 @@ const RESEARCH_RESULTS: Record<AssistantResearchCheck["result"], string> = {
   partly: "🟡 partly answered",
   "not-answered": "👀 not answered",
 };
+/** The same results read for an ops change: whether each criterion is in place. */
+const OPS_RESULTS: Record<AssistantResearchCheck["result"], string> = {
+  answered: "✅ done",
+  partly: "🟡 partly done",
+  "not-answered": "👀 not done",
+};
 
 /** A link label with its brackets escaped, so a title cannot end the link early. */
 const label = (text: string) => oneLine(text).replace(/[[\]]/g, "\\$&");
@@ -450,26 +456,31 @@ const pieces = (text: string, limit: number): ReadonlyArray<string> => {
 /**
  * The research card a person decides from: whether each question is
  * answered, the report open because it is the deliverable, its numbered
- * sources, the pages as they were seen, and the reviewer's fact check. A card
- * longer than one comment is split into numbered comments, the card first.
+ * sources, the pages as they were seen, and the reviewer's fact check. An ops
+ * card reads the same way for a change: each criterion done or not, the links
+ * where it shows, and the reviewer's verification. A card longer than one
+ * comment is split into numbered comments, the card first.
  */
 export function researchComments(input: {
   readonly research: AssistantResearch;
-  /** The issue's criteria: the questions the report answers. */
+  /** The issue's criteria: the questions the report answers, or what shows an ops change is in place. */
   readonly criteria: ReadonlyArray<string>;
   readonly acceptedState: string;
+  readonly ops?: boolean;
   readonly maxChars?: number;
 }): ReadonlyArray<string> {
-  const { research } = input;
+  const { research, ops = false } = input;
   const accept = input.acceptedState.trim() || "a completed state";
-  const headline = "**Research ready for review**";
+  const headline = ops ? "**Change ready for review**" : "**Research ready for review**";
+  const item = ops ? "Criterion" : "Question";
+  const results = ops ? OPS_RESULTS : RESEARCH_RESULTS;
   const table = research.checks.length
     ? [
-        "| Question | Result |",
+        `| ${item} | Result |`,
         "| --- | --- |",
         ...research.checks.map(
           (check) =>
-            `| ${cell(input.criteria[check.criterion - 1] ?? `Question ${check.criterion}`)} | ${RESEARCH_RESULTS[check.result]}${researchScreenshotRef(check, research)} |`,
+            `| ${cell(input.criteria[check.criterion - 1] ?? `${item} ${check.criterion}`)} | ${results[check.result]}${researchScreenshotRef(check, research)} |`,
         ),
       ].join("\n")
     : null;
@@ -482,7 +493,7 @@ export function researchComments(input: {
       : `*Screenshot ${i + 1}: ${oneLine(shot.caption)}* (could not be uploaded)`,
   );
   const factCheck = research.review?.summary.trim()
-    ? `**Fact check:** ${research.review.summary.trim()}`
+    ? `**${ops ? "Verification" : "Fact check"}:** ${research.review.summary.trim()}`
     : null;
   const footer = sections(
     "---",
@@ -492,7 +503,7 @@ export function researchComments(input: {
     headline,
     table,
     research.report.trim(),
-    sources.length ? `**Sources**\n\n${sources.join("\n")}` : null,
+    sources.length ? `**${ops ? "Links" : "Sources"}**\n\n${sources.join("\n")}` : null,
     screenshots.length ? ["**Screenshots**", ...screenshots].join("\n\n") : null,
     factCheck,
     footer,
@@ -519,7 +530,7 @@ export function researchComments(input: {
     sections(
       i === 0
         ? part.replace(headline, `${headline} (part 1 of ${parts.length})`)
-        : `**Research, part ${i + 1} of ${parts.length}**\n\n${part}`,
+        : `**${ops ? "Change" : "Research"}, part ${i + 1} of ${parts.length}**\n\n${part}`,
       i < parts.length - 1 ? "*Continued in the next comment.*" : null,
     ),
   );
