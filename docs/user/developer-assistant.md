@@ -15,6 +15,12 @@ own worktree, fresh from the integration branch:
 - **E2E** tests the change with a browser and takes screenshots, either in the team's worktree
   before the merge or on staging after it. You choose which during setup.
 
+For a change too small for a review to add anything, such as copy or a config value, the team leader
+can take the issue without the code reviewer: the worker merges once the project's check command
+passes, and the merge comment on the issue says why there was no review. An ops issue that only
+edits Linear issues can skip its read-back the same way. To require a review for every change, say
+so in the project instructions during setup.
+
 A delivered issue closes its team and frees its place for the next issue immediately. Your review
 can happen later, from Linear or T3. Different repositories can run at the same time.
 

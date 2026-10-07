@@ -656,6 +656,12 @@ export const AssistantTask = Schema.Struct({
   ),
   /** Set by the team leader on taking the issue; absent means code. */
   track: Schema.optionalKey(AssistantTaskTrack),
+  /**
+   * Why the team leader took the issue without a separate review: a small code
+   * change the worker merges once the check command passes, or an ops change of
+   * Linear issues only, delivered without a read-back. Absent means reviewed.
+   */
+  skipReview: Schema.optionalKey(Schema.String),
   /** The research report, on a research issue once its worker submitted one. */
   research: Schema.optionalKey(Schema.NullOr(AssistantResearch)),
 });
@@ -1158,7 +1164,14 @@ function researchPipeline(task: AssistantTaskSummary): ReadonlyArray<PipelineSte
   const revising = task.research?.review?.verdict === "changes-requested" && at === 1;
   return pipeline.map((step, index): PipelineStep => ({
     ...step,
-    state: index < at ? "done" : index > at ? "todo" : "current",
+    state:
+      step.key === "fact-check" && task.skipReview
+        ? "skipped"
+        : index < at
+          ? "done"
+          : index > at
+            ? "todo"
+            : "current",
     note: revising
       ? step.key === "research"
         ? ops
@@ -1341,6 +1354,8 @@ export function assistantTaskPipeline(
   return allSteps.map((step): PipelineStep => {
     const note = notes[step.key] ?? null;
     if (step.key === "e2e" && skipsE2e) return { ...step, state: "skipped", note };
+    if (step.key === "review" && task.skipReview)
+      return { ...step, state: "skipped", note: "No code review" };
     const index = stepAt(step.key);
     return {
       ...step,

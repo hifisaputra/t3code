@@ -1757,8 +1757,15 @@ export const make = Effect.gen(function* () {
         readonly targetIds?: ReadonlyArray<string> | undefined;
       } | null,
       track: AssistantTaskTrack = "code",
+      skipReview?: string,
     ) {
       const { p, t } = yield* authorizeRole(caller, "lead");
+      if (skipReview && track !== "code" && track !== "ops")
+        return yield* fail(
+          track === "research"
+            ? "A research report is always fact-checked. Take it without skipReview."
+            : "A test issue has no code review to skip. Take it without skipReview.",
+        );
       // A test issue never briefs a worker, so its track is what says it was taken.
       if (t.turns > 0 || assistantTaskTrack(t) === "test")
         return yield* fail(
@@ -1774,7 +1781,7 @@ export const make = Effect.gen(function* () {
               : "List 1 to 12 acceptance criteria, each one a check a person could perform on the product. T3 gives them to the worker, the reviewer and the tester.",
         );
       if (track === "research" || track === "ops")
-        return yield* acceptResearch(p, t, brief, listed, track);
+        return yield* acceptResearch(p, t, brief, listed, track, skipReview);
       if (!e2eInput)
         return yield* fail(
           track === "test"
@@ -1843,6 +1850,7 @@ export const make = Effect.gen(function* () {
         brief,
         criteria: listed,
         e2ePlan,
+        ...(skipReview ? { skipReview } : {}),
         turns: 1,
         stage: "implement",
         status: "working",
@@ -1882,6 +1890,7 @@ export const make = Effect.gen(function* () {
     brief: string,
     questions: ReadonlyArray<string>,
     track: "research" | "ops",
+    skipReview?: string,
   ) {
     if (yield* taskDecisionsPending(t))
       return yield* fail("Wait for the answer to your open question before taking the issue.");
@@ -1915,6 +1924,7 @@ export const make = Effect.gen(function* () {
       brief,
       criteria: questions,
       track,
+      ...(skipReview ? { skipReview } : {}),
       e2ePlan: null,
       research: null,
       turns: 1,
@@ -2492,6 +2502,26 @@ export const make = Effect.gen(function* () {
         // A run still waiting on its engineering checks tested the old code.
         ...(assistantE2ePendingEngineeringChecks(recorded.e2e) ? { e2e: null } : {}),
       });
+      if (updated.skipReview) {
+        // The leader took it without a review: the passing checks stand in for one.
+        yield* sessionUpdate(updated, `review:skipped:${head}:${updated.turns}`, {
+          type: "action",
+          action: "Code review skipped",
+          parameter: shortSha(head),
+        });
+        return yield* approveCommit(
+          p,
+          updated,
+          {
+            verdict: "approved",
+            findings: "",
+            summary: `No code review: ${updated.skipReview}`,
+            commit: head,
+            at: yield* now,
+          },
+          caller,
+        );
+      }
       yield* queueRoleTurn(
         p,
         updated,
@@ -2592,6 +2622,24 @@ export const make = Effect.gen(function* () {
         status: "working",
         error: null,
       };
+      if (t.skipReview) {
+        // Taken without a read-back: the report is delivered as the worker wrote it.
+        yield* sessionUpdate(next, `research-submitted:${research.revision}`, {
+          type: "action",
+          action: "Report submitted without a separate review",
+          parameter: `revision ${research.revision}`,
+        });
+        return yield* finishResearch(p, next, {
+          ...research,
+          review: {
+            verdict: "approved",
+            findings: "",
+            summary: `Not read back separately: ${t.skipReview}`,
+            revision: research.revision,
+            at: research.at,
+          },
+        });
+      }
       const prepared = yield* prepareRoleTurn(
         p,
         next,
@@ -2694,6 +2742,48 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  /**
+   * An approved commit moves on: in the worktree to the e2e check, which T3
+   * starts itself when one is planned, otherwise to the worker to merge. A
+   * commit on an issue taken without a review is approved by its passing
+   * checks. `caller` is the thread whose turn is still running, so it does not
+   * count as the team being busy. Callers hold the assistant lock.
+   */
+  const approveCommit = Effect.fn("Assistant.approveCommit")(function* (
+    p: AwaitedProject,
+    t: AssistantTask,
+    codeReview: AssistantCodeReview,
+    caller: ThreadId,
+  ) {
+    const head = codeReview.commit;
+    const approval = (commit: string) =>
+      t.skipReview
+        ? `Commit ${commit} passed the project's checks and goes ahead without a code review (the team leader's call: ${t.skipReview})`
+        : `Code review approved commit ${commit}`;
+    // In the worktree the e2e check comes before the merge, so the issue
+    // goes back to its team leader to start it rather than to the worker.
+    if (assistantTaskE2eEnvironment(t) === "worktree") {
+      const tested = yield* saveTask({ ...t, codeReview, stage: "lead" });
+      if (tested.e2ePlan) {
+        yield* autoStartE2e(p, tested, caller);
+        return yield* task(t.id);
+      }
+      yield* notifyLead(
+        tested,
+        `${approval(shortSha(head))} for ${t.issue.identifier}. Start the e2e check in the worktree with assistant_start_e2e: ${briefAsk(t)}. T3 tells the worker to merge once it passes.`,
+      );
+      return tested;
+    }
+    const updated = yield* saveTask({ ...t, codeReview, stage: "implement" });
+    yield* queueMessage(
+      p.project_id,
+      t.threadId,
+      `${t.id}:approved:${newId()}`,
+      `${approval(head)}.\n${codeReview.findings ? `${codeReview.findings}\n` : ""}Merge the PR into ${p.config.baseBranch} with a merge commit once its required checks pass, then call assistant_report_merged. If anything changes before the merge, push and request review again.`,
+    );
+    return updated;
+  });
+
   const submitReview = Effect.fn("Assistant.submitReview")(
     function* (
       caller: ThreadId,
@@ -2748,32 +2838,7 @@ export const make = Effect.gen(function* () {
           ? { result: `${findingsListed} finding${findingsListed === 1 ? "" : "s"}` }
           : {}),
       });
-      if (verdict === "approved") {
-        // In the worktree the e2e check comes before the merge, so the issue
-        // goes back to its team leader to start it rather than to the worker.
-        if (assistantTaskE2eEnvironment(t) === "worktree") {
-          const tested = yield* saveTask({ ...t, codeReview, stage: "lead" });
-          // With a planned test T3 starts the tester itself; this reviewer's
-          // turn is still running, so it does not count as the team being busy.
-          if (tested.e2ePlan) {
-            yield* autoStartE2e(p, tested, caller);
-            return yield* task(t.id);
-          }
-          yield* notifyLead(
-            tested,
-            `Code review approved commit ${shortSha(head)} for ${t.issue.identifier}. Start the e2e check in the worktree with assistant_start_e2e: ${briefAsk(t)}. T3 tells the worker to merge once it passes.`,
-          );
-          return tested;
-        }
-        const updated = yield* saveTask({ ...t, codeReview, stage: "implement" });
-        yield* queueMessage(
-          p.project_id,
-          t.threadId,
-          `${t.id}:approved:${newId()}`,
-          `Code review approved commit ${head}.\n${findings}\nMerge the PR into ${p.config.baseBranch} with a merge commit once its required checks pass, then call assistant_report_merged. If anything changes before the merge, push and request review again.`,
-        );
-        return updated;
-      }
+      if (verdict === "approved") return yield* approveCommit(p, t, codeReview, caller);
       if (t.turns >= t.turnLimit) {
         // The pair has spent its rounds; the team leader hears when this turn ends.
         return yield* saveTask({
