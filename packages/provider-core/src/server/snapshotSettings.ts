@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Stream from "effect/Stream";
 
-import type { ProviderHostShape } from "./ProviderHost.ts";
+import * as ProviderHost from "./ProviderHost.ts";
 
 export interface ProviderSnapshotSettings<Settings> {
   readonly provider: Settings;
@@ -27,17 +27,20 @@ export function haveProviderSnapshotSettingsChanged<Settings>(
   return !Equal.equals(previous, next);
 }
 
-export function makeProviderSnapshotSettingsSource<Settings>(
-  provider: Settings,
-  settings: ProviderHostShape["settings"],
-): {
-  readonly getSettings: Effect.Effect<ProviderSnapshotSettings<Settings>, ServerSettingsError>;
-  readonly streamSettings: Stream.Stream<ProviderSnapshotSettings<Settings>>;
-} {
-  const mapSettings = (settings: ServerSettings) =>
-    makeProviderSnapshotSettings(provider, settings);
+export const makeProviderSnapshotSettingsSource = Effect.fn(
+  "snapshotSettings.makeProviderSnapshotSettingsSource",
+)(function* <Settings>(provider: Settings): Effect.fn.Return<
+  {
+    readonly getSettings: Effect.Effect<ProviderSnapshotSettings<Settings>, ServerSettingsError>;
+    readonly streamSettings: Stream.Stream<ProviderSnapshotSettings<Settings>>;
+  },
+  never,
+  ProviderHost.ProviderHost
+> {
+  const { settings } = yield* ProviderHost.ProviderHost;
+  const mapSettings = (current: ServerSettings) => makeProviderSnapshotSettings(provider, current);
   return {
     getSettings: settings.get.pipe(Effect.map(mapSettings)),
     streamSettings: settings.changes.pipe(Stream.map(mapSettings)),
   };
-}
+});

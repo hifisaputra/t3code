@@ -5,9 +5,10 @@ credentials for reaching environments, and managed tunnel allocations. After
 bootstrap, clients send application traffic through the environment's tunnel
 hostname; the relay Worker does not proxy their HTTP or WebSocket sessions.
 The one exception is automation webhooks: the relay forwards
-`/v1/hooks/:environmentId/:hookId/:token` to the environment's tunnel so
-senders get a stable URL. It keeps bodies and tokens out of its traces and
-leaves token and signature verification to the environment
+`/v1/hooks/:endpointKey/:hookId/:token` to the environment's tunnel so
+senders get a stable URL. `endpointKey` is the 16-hex hash suffix of the
+managed tunnel's name, not the environment id. It keeps bodies and tokens out
+of its traces and leaves token and signature verification to the environment
 ([forwarder](../../infra/relay/src/hooks/HookForwarder.ts)).
 
 By default the forwarder stores nothing. An environment can opt in to having
@@ -136,10 +137,11 @@ The host runs `cloudflared` pinned by `CLOUDFLARED_VERSION` in
 [`relayClient.ts`](../../packages/shared/src/relayClient.ts), and bumping it there
 (version, URLs, and checksums) is the whole release step. A linked host that
 starts a server with a new pin keeps its connector up on the newest older managed
-release, installs the pinned one in the background, then restarts only the
-connector child on it. If that restart fails to spawn, the host requests recovery
-as it would for an exited connector. A host with no relay client installs one
-first. A `cloudflared` on `PATH` or an explicit `T3CODE_CLOUDFLARED_PATH` is the
+release, installs the pinned one in the background, then starts a second
+connector on it for the same tunnel. The old connector stops only after the new
+one registers, so the swap never takes the host off the relay. If the new one
+fails to spawn, the old one keeps serving and the install retries later. A host
+with no relay client installs one first. A `cloudflared` on `PATH` or an explicit `T3CODE_CLOUDFLARED_PATH` is the
 user's choice and is never replaced, since linking asks before downloading.
 
 Once the pinned release registers a connection, managed releases older than the
