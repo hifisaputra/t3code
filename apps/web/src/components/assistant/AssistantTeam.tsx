@@ -164,7 +164,7 @@ function TeamChipButton({
             }
             onClick={() => onClick?.()}
             className={cn(
-              "inline-flex min-w-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              "inline-flex min-w-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
               CHIP_SIZE[size],
               onClick === null ? "cursor-default" : "hover:bg-accent",
               current

@@ -1,6 +1,5 @@
 import {
   memo,
-  useCallback,
   useEffect,
   useRef,
   useState,
@@ -8,8 +7,10 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { ChevronLeftIcon, ChevronRightIcon, ImageIcon, TextIcon, XIcon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
+import { Image as ImageGlyph, Text as TextGlyph } from "lucide";
 import { Button } from "../ui/button";
+import { MorphIcon } from "~/components/MorphIcon";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
 import type { ExpandedImageItem, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { resolveExternalWebLinkHost } from "./externalLinkContextMenu";
@@ -26,6 +27,10 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ZoomableImage, type ZoomableImageHandle } from "./ZoomableImage";
 import { composerFloatingLayerProps } from "./composerEventScope";
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { expandedImageKey } from "./ExpandedImagePreview";
 
 /** Ignore incidental drags; only a deliberate horizontal swipe pages the lightbox. */
 const SWIPE_THRESHOLD_PX = 48;
@@ -85,7 +90,6 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     document.activeElement instanceof HTMLElement ? document.activeElement : null,
   );
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  // The offset accumulates without bound, so wrap it into range in both directions:
   // JavaScript `%` keeps the sign of the dividend, and a negative index blanks the dialog.
   const imageCount = preview.images.length;
   const index =
@@ -107,9 +111,9 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
       }
     : source;
 
-  const navigateImage = useCallback((direction: -1 | 1) => {
+  const navigateImage = (direction: -1 | 1) => {
     setImageOffset((current) => current + direction);
-  }, []);
+  };
 
   // The element that opened the preview gets focus back on close. Without
   // this a close button click leaves focus on the unmounted dialog, and the
@@ -131,44 +135,35 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   // A swipe that ends on the backdrop still fires a click, which would close the
   // dialog mid-gesture; this suppresses that one click.
   const swipeHandledRef = useRef(false);
-  const onSwipeStart = useCallback(
-    (event: ReactPointerEvent<HTMLElement>) => {
-      swipeStartXRef.current = event.pointerType === "mouse" || zoomed ? null : event.clientX;
-      swipeHandledRef.current = false;
-    },
-    [zoomed],
-  );
-  const onSwipeEnd = useCallback(
-    (event: ReactPointerEvent<HTMLElement>) => {
-      const startX = swipeStartXRef.current;
-      swipeStartXRef.current = null;
-      if (startX === null || preview.images.length <= 1) return;
-      const deltaX = event.clientX - startX;
-      if (Math.abs(deltaX) < SWIPE_THRESHOLD_PX) return;
-      swipeHandledRef.current = true;
-      navigateImage(deltaX < 0 ? 1 : -1);
-    },
-    [navigateImage, preview.images.length],
-  );
-  const onBackdropClick = useCallback(() => {
+  const onSwipeStart = (event: ReactPointerEvent<HTMLElement>) => {
+    swipeStartXRef.current = event.pointerType === "mouse" || zoomed ? null : event.clientX;
+    swipeHandledRef.current = false;
+  };
+  const onSwipeEnd = (event: ReactPointerEvent<HTMLElement>) => {
+    const startX = swipeStartXRef.current;
+    swipeStartXRef.current = null;
+    if (startX === null || preview.images.length <= 1) return;
+    const deltaX = event.clientX - startX;
+    if (Math.abs(deltaX) < SWIPE_THRESHOLD_PX) return;
+    swipeHandledRef.current = true;
+    navigateImage(deltaX < 0 ? 1 : -1);
+  };
+  const onBackdropClick = () => {
     if (swipeHandledRef.current) {
       swipeHandledRef.current = false;
       return;
     }
     onClose();
-  }, [onClose]);
+  };
   // A swipe ends in a click on whatever it lifted over, so the tap zones share
   // the backdrop's guard — without it a swipe would page twice.
-  const onTapZoneClick = useCallback(
-    (direction: -1 | 1) => () => {
-      if (swipeHandledRef.current) {
-        swipeHandledRef.current = false;
-        return;
-      }
-      navigateImage(direction);
-    },
-    [navigateImage],
-  );
+  const onTapZoneClick = (direction: -1 | 1) => () => {
+    if (swipeHandledRef.current) {
+      swipeHandledRef.current = false;
+      return;
+    }
+    navigateImage(direction);
+  };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.defaultPrevented || isContextMenuOpen() || event.target instanceof HTMLVideoElement)
@@ -216,7 +211,6 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     : accessibilityDetails?.format === "json"
       ? "Show accessibility JSON"
       : "Show extracted text";
-  const ContentsIcon = showingAccessibilityDetails ? ImageIcon : TextIcon;
   const showTapZones =
     preview.images.length > 1 && item.type !== "video" && !showingAccessibilityDetails && !zoomed;
 
@@ -232,7 +226,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         variant="media"
         showCloseButton={false}
         bottomStickOnMobile={false}
-        className="row-start-1 max-h-[92vh] w-[92vw] max-w-[92vw] items-center overflow-visible [--media-width:92vw] [--media-height:min(86vh,calc(100vh-160px))] sm:[--media-width:calc(92vw-96px)]"
+        className="row-start-1 h-full max-h-[92vh] w-[92vw] max-w-[92vw] items-center justify-center overflow-visible [--media-width:92vw] [--media-height:min(calc((100vh-var(--native-titlebar-height,0px))*0.86),calc(100vh-var(--native-titlebar-height,0px)-160px))] sm:[--media-width:calc(92vw-96px)]"
         onKeyDown={onKeyDown}
         initialFocus={closeButtonRef}
         finalFocus={() => returnFocusTarget}
@@ -246,12 +240,23 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         }}
       >
         <DialogTitle className="sr-only">Expanded {mediaLabel} preview</DialogTitle>
+        <Button
+          type="button"
+          ref={closeButtonRef}
+          size="icon-sm"
+          variant="media-close"
+          className="absolute right-0 top-0 z-20"
+          onClick={onClose}
+          aria-label={`Close ${mediaLabel} preview`}
+        >
+          <XIcon />
+        </Button>
         {preview.images.length > 1 && (
           <Button
             type="button"
             size="icon"
             variant="media-navigation"
-            className="left-0 top-auto -bottom-12 translate-y-0 sm:top-1/2 sm:bottom-auto sm:-translate-y-1/2"
+            className="left-0 top-auto bottom-0 translate-y-0 sm:top-1/2 sm:bottom-auto sm:-translate-y-1/2"
             aria-label="Previous media"
             onClick={() => navigateImage(-1)}
           >
@@ -259,24 +264,13 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
           </Button>
         )}
         <MediaActions source={actionsSource}>
-          <div className="relative isolate z-10 max-h-[92vh] max-w-[var(--media-width)]">
-            <Button
-              type="button"
-              ref={closeButtonRef}
-              size="icon-xs"
-              variant="media-close"
-              className="absolute right-0 -top-10 z-20"
-              onClick={onClose}
-              aria-label={`Close ${mediaLabel} preview`}
-            >
-              <XIcon />
-            </Button>
+          <div className="relative isolate z-10 flex max-h-full max-w-[var(--media-width)] flex-col items-center">
             {showTapZones && (
               <>
                 {/*
                   The arrows are too small to hit on a phone, so on a touch screen a
                   third of each edge of the image pages as well; the middle third keeps
-                  tap-to-zoom. Above the image, below the close button.
+                  tap-to-zoom.
                 */}
                 <button
                   type="button"
@@ -316,11 +310,12 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
                 key={`${index}:${item.src}`}
                 src={item.src}
                 name={item.name}
+                mimeType={item.mimeType}
                 onError={() => setFailedImageSrc(item.src)}
                 onZoomChange={(zoom) => setZoomed(zoom > 1)}
               />
             )}
-            <div className="mt-2 flex max-w-[var(--media-width)] items-center justify-center gap-1.5 text-xs text-white/80">
+            <div className="mt-2 flex max-w-[var(--media-width)] items-center justify-center gap-1.5 text-xs text-white/80 max-sm:px-10">
               <span className="truncate" aria-live="polite" aria-atomic="true">
                 {item.name}
                 {preview.images.length > 1 ? ` (${index + 1}/${preview.images.length})` : ""}
@@ -340,7 +335,11 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
                       />
                     }
                   >
-                    <ContentsIcon className="size-3" aria-hidden="true" />
+                    <MorphIcon
+                      className="size-3"
+                      aria-hidden="true"
+                      icon={showingAccessibilityDetails ? ImageGlyph : TextGlyph}
+                    />
                   </TooltipTrigger>
                   <TooltipPopup side="top">{contentsLabel}</TooltipPopup>
                 </Tooltip>
@@ -355,7 +354,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
             type="button"
             size="icon"
             variant="media-navigation"
-            className="right-0 top-auto -bottom-12 translate-y-0 sm:top-1/2 sm:bottom-auto sm:-translate-y-1/2"
+            className="right-0 top-auto bottom-0 translate-y-0 sm:top-1/2 sm:bottom-auto sm:-translate-y-1/2"
             aria-label="Next media"
             onClick={() => navigateImage(1)}
           >
@@ -366,3 +365,47 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     </Dialog>
   );
 });
+
+/**
+ * The chat view's open media preview. It lives outside ChatView so opening or
+ * closing it renders only the dialog host, not the whole chat chrome.
+ */
+const expandedImagePreviewAtom = Atom.make<{
+  readonly threadKey: string;
+  readonly preview: ExpandedImagePreview;
+} | null>(null).pipe(Atom.keepAlive, Atom.withLabel("chat:expanded-image-preview"));
+
+export function openExpandedImagePreview(threadKey: string, preview: ExpandedImagePreview): void {
+  appAtomRegistry.set(expandedImagePreviewAtom, { threadKey, preview });
+}
+
+function closeExpandedImagePreview(): void {
+  appAtomRegistry.set(expandedImagePreviewAtom, null);
+}
+
+function closeExpandedImagePreviewFor(threadKey: string): void {
+  if (appAtomRegistry.get(expandedImagePreviewAtom)?.threadKey === threadKey) {
+    closeExpandedImagePreview();
+  }
+}
+
+export function ExpandedImageDialogHost({ threadKey }: { readonly threadKey: string }) {
+  const state = useAtomValue(expandedImagePreviewAtom);
+  const preview = state?.threadKey === threadKey ? state.preview : null;
+  const item = preview?.images[preview.index];
+  const ownedSrc = item?.ownsSrc === true ? item.src : null;
+  useEffect(() => {
+    if (ownedSrc === null) return;
+    return () => URL.revokeObjectURL(ownedSrc);
+  }, [ownedSrc]);
+  // Leaving the thread (or the chat view) drops its preview.
+  useEffect(() => () => closeExpandedImagePreviewFor(threadKey), [threadKey]);
+  if (preview === null) return null;
+  return (
+    <ExpandedImageDialog
+      key={expandedImageKey(preview)}
+      preview={preview}
+      onClose={closeExpandedImagePreview}
+    />
+  );
+}

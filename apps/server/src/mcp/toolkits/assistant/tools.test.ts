@@ -1,7 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { McpSchema, McpServer } from "effect/unstable/ai";
+import { McpSchema, McpServer } from "effect/ai";
 import {
   EnvironmentId,
   ProjectId,
@@ -12,7 +12,14 @@ import {
 } from "@t3tools/contracts";
 import { DeveloperAssistant } from "../../../assistant/DeveloperAssistant.ts";
 import { McpInvocationContext } from "../../McpInvocationContext.ts";
-import { AssistantToolkit, AssistantToolkitHandlers } from "./tools.ts";
+import * as McpHttpServer from "../../McpHttpServer.ts";
+import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
+import { AssistantToolkit, layer as AssistantHandlers } from "./tools.ts";
+
+/** The toolkit registered as /mcp serves it, with the calling thread live. */
+const registered = McpHttpServer.toolkitRegistration(AssistantToolkit, AssistantHandlers).pipe(
+  Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+);
 
 it.effect(
   "serves setup tools through MCP with the authenticated thread and validates proposals",
@@ -36,8 +43,7 @@ it.effect(
         },
       };
       const callers: ThreadId[] = [];
-      const layer = McpServer.toolkit(AssistantToolkit).pipe(
-        Layer.provide(AssistantToolkitHandlers),
+      const layer = registered.pipe(
         Layer.provideMerge(
           Layer.mock(DeveloperAssistant)({
             getSetup: (caller) =>
@@ -130,8 +136,7 @@ it.effect(
 it.effect("waiting answers the agent with text instead of an internal error", () =>
   Effect.gen(function* () {
     const calls: string[] = [];
-    const layer = McpServer.toolkit(AssistantToolkit).pipe(
-      Layer.provide(AssistantToolkitHandlers),
+    const layer = registered.pipe(
       Layer.provideMerge(
         Layer.mock(DeveloperAssistant)({
           waitForExternal: (_caller, _reason, minutes) =>
@@ -247,8 +252,7 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
     const reviewed: Array<unknown> = [];
     const started: Array<unknown> = [];
     const settled: Array<string> = [];
-    const layer = McpServer.toolkit(AssistantToolkit).pipe(
-      Layer.provide(AssistantToolkitHandlers),
+    const layer = registered.pipe(
       Layer.provideMerge(
         Layer.mock(DeveloperAssistant)({
           acceptIssue: (_caller, _brief, criteria, e2e, track) =>
@@ -491,18 +495,21 @@ it.effect("carries acceptance criteria, per-criterion checks and the deploy note
 
 const invocation = {
   environmentId: EnvironmentId.make("environment"),
-  threadId: ThreadId.make("assistant-setup-test"),
-  providerSessionId: "session",
-  providerInstanceId: ProviderInstanceId.make("codex"),
   capabilities: new Set(["linear"] as const),
   issuedAt: 1,
+  requestNamespace: "session",
+  thread: {
+    threadId: ThreadId.make("assistant-setup-test"),
+    providerSessionId: "session",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
+  client: undefined,
 };
 
 it.effect("adding a project note answers whether it was new, and refuses a long one", () =>
   Effect.gen(function* () {
     const notes: string[] = [];
-    const layer = McpServer.toolkit(AssistantToolkit).pipe(
-      Layer.provide(AssistantToolkitHandlers),
+    const layer = registered.pipe(
       Layer.provideMerge(
         Layer.mock(DeveloperAssistant)({
           addProjectNoteFromThread: (_caller, text) =>

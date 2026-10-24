@@ -1,4 +1,4 @@
-import { useCallback, type DragEvent, type MutableRefObject } from "react";
+import { type DragEvent, type MutableRefObject } from "react";
 import { cn } from "~/lib/utils";
 import { clockMinute, validPlanningHours, type PlanningHours } from "./calendarAvailability";
 import { layoutCalendarDay, type CalendarEntry } from "./calendarPlanning";
@@ -18,6 +18,11 @@ const minuteAt = (e: DragEvent<HTMLElement>) =>
     0,
     Math.min(1410, Math.floor((e.clientY - e.currentTarget.getBoundingClientRect().top) / 30) * 30),
   );
+
+/** Callback ref that opens the grid at 8:00; module scope keeps it from re-running per render. */
+function scrollToMorning(node: HTMLDivElement | null) {
+  if (node) node.scrollTop = 480;
+}
 
 /**
  * Seven days at a minute per pixel. It draws what it is given and reports
@@ -66,9 +71,6 @@ export function CalendarWeekGrid({
   onWork: (identifier: string) => void;
   hasThread: (identifier: string) => boolean;
 }) {
-  const scrollToMorning = useCallback((node: HTMLDivElement | null) => {
-    if (node) node.scrollTop = 480;
-  }, []);
   const shading = validPlanningHours(hours)
     ? { start: clockMinute(hours.start), end: clockMinute(hours.end) }
     : null;

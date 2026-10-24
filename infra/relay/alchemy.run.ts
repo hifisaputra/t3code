@@ -11,8 +11,10 @@ import * as Planetscale from "alchemy/Planetscale";
 import { PublishClientConfig, tokenDigest } from "./src/clientConfig.ts";
 import * as RelayDb from "./src/db.ts";
 import { RelayObservability } from "./src/observability.ts";
-import { ManagedEndpointZone, RelayApiZone } from "./src/zone.ts";
-import ApiLive, { Api } from "./src/worker.ts";
+import { isPreviewStage } from "./src/previewStages.ts";
+import { PreviewTunnelSweep, PreviewTunnelSweepProvider } from "./src/previewTunnelSweep.ts";
+import { ManagedEndpointZone, RelayApiZone, RelayDeploymentConfig } from "./src/zone.ts";
+import * as RelayWorker from "./src/worker.ts";
 
 export default Alchemy.Stack(
   "T3CodeRelay",
@@ -22,16 +24,26 @@ export default Alchemy.Stack(
       Cloudflare.providers(),
       Drizzle.providers(),
       Planetscale.providers(),
+      PreviewTunnelSweepProvider(),
     ),
     state: Cloudflare.state(),
   },
   Effect.gen(function* () {
+    const { stage } = yield* Alchemy.Stack;
     const db = yield* RelayDb.PlanetscaleDatabase;
     const hyperdrive = yield* RelayDb.RelayHyperdrive;
     const managedEndpointZone = yield* ManagedEndpointZone.pipe(Effect.orDie);
     const relayApiZone = yield* RelayApiZone.pipe(Effect.orDie);
     const observability = yield* RelayObservability;
-    const api = yield* Api;
+    const api = yield* RelayWorker.Api;
+    if (isPreviewStage(stage)) {
+      const { managedEndpointZoneName } = yield* RelayDeploymentConfig;
+      yield* PreviewTunnelSweep("PreviewTunnelSweep", {
+        stage,
+        tunnelZoneName: managedEndpointZoneName,
+        workerName: api.workerName,
+      });
+    }
     yield* PublishClientConfig({
       url: api.url,
       mobileTracingUrl: observability.traces.otelTracesEndpoint,
@@ -61,5 +73,5 @@ export default Alchemy.Stack(
       clientTracingDataset: observability.traces.name,
       clientTracingToken: observability.clientIngestToken.token,
     };
-  }).pipe(Effect.provide(ApiLive)),
+  }).pipe(Effect.provide(RelayWorker.layer)),
 );

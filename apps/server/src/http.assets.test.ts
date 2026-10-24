@@ -6,17 +6,18 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import { HttpClient, HttpRouter } from "effect/unstable/http";
+import { HttpClient, HttpRouter } from "effect/http";
 
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
-import * as GitHubCli from "./sourceControl/GitHubCli.ts";
+import * as BuiltInDrivers from "./sourceControl/builtInDrivers.ts";
+import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ServerConfig from "./config.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
-import { assetRouteLayer } from "./http.ts";
+import { layerAssetRoute } from "./http.ts";
 
 const configLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-asset-route-test-",
@@ -30,8 +31,10 @@ const testLayer = Layer.mergeAll(
   ),
   NativeAppIconResolver.layer.pipe(Layer.provide(configLayer)),
   ServerSecretStore.layer.pipe(Layer.provide(configLayer)),
-  // The github-media resource kind needs the CLI; this test never requests one.
-  Layer.mock(GitHubCli.GitHubCli)({}),
+  // Source control media needs the host drivers; this test never requests any.
+  Layer.succeed(BuiltInDrivers.SourceControlDrivers, []),
+  // Only tool-output images read the orchestrator; this test serves workspace files.
+  Layer.mock(Orchestrator.OrchestratorV2)({}),
 ).pipe(Layer.provideMerge(NodeServices.layer), Layer.provideMerge(NodeHttpServer.layerTest));
 
 /** Serve a workspace image and hand back its URL plus a client bound to the test server. */
@@ -42,7 +45,7 @@ const serveImage = Effect.fnUntraced(function* () {
   const imagePath = path.join(root, "shot.png");
   yield* fileSystem.writeFile(imagePath, new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
 
-  yield* HttpRouter.serve(assetRouteLayer, {
+  yield* HttpRouter.serve(layerAssetRoute, {
     disableListenLog: true,
     disableLogger: true,
   }).pipe(Layer.build);

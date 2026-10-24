@@ -112,13 +112,15 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "$matrix"
 
-  # The Windows installer bundles a Linux node-pty for the WSL backend. Without
-  # it the app still runs; only the WSL backend cannot start.
-  wsl_node_pty:
-    name: Build WSL node-pty (linux-x64)
+  # The Windows installer embeds the Linux CLI archive as the WSL runtime: the
+  # WSL backend runs it inside the distro. Without it the app still runs; only
+  # the WSL backend cannot start.
+  wsl_runtime:
+    name: Build WSL runtime (Linux x64 CLI archive)
+    needs: prepare
     if: ${{ inputs.windows }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -133,32 +135,57 @@ jobs:
         with:
           node-version-file: package.json
           cache: true
-          run-install: |
-            args:
-              - --filter=t3...
+          run-install: false
 
-      - name: Build node-pty linux-x64 prebuild
+      - name: Install CLI dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
+
+      - name: Align package versions and public configuration
         shell: bash
         run: |
           set -euo pipefail
-          pty_pkg="$(node -e "console.log(require.resolve('node-pty/package.json', { paths: ['$GITHUB_WORKSPACE/apps/server'] }))")"
-          pty_dir="$(dirname "$pty_pkg")"
-          ( cd "$pty_dir" && npx --yes node-gyp rebuild )
-          mkdir -p wsl-prebuild
-          cp "$pty_dir/build/Release/pty.node" wsl-prebuild/pty.node
-          file wsl-prebuild/pty.node
+          node scripts/update-release-package-versions.ts "${{ needs.prepare.outputs.version }}"
+          cp .env.example .env
 
-      - name: Upload node-pty linux-x64 prebuild
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build resource monitor
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+
+      - name: Build server bundle
+        run: vp run --filter t3 build
+
+      - name: Build CLI single-executable
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build CLI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          monitor_dir="$RUNNER_TEMP/cli-resource-monitor"
+          mkdir -p "$monitor_dir/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$monitor_dir/linux-x64/"
+          node scripts/build-cli-archive.ts \
+            --platform linux \
+            --arch x64 \
+            --version "${{ needs.prepare.outputs.version }}" \
+            --resource-monitor-dir "$monitor_dir" \
+            --output-dir release-cli
+
+      - name: Upload WSL runtime
         uses: actions/upload-artifact@v7
         with:
-          name: wsl-node-pty-x64
-          path: wsl-prebuild/pty.node
+          name: wsl-runtime-x64
+          path: release-cli/*
           if-no-files-found: error
 
   build:
     name: Build ${{ matrix.label }}
-    needs: [prepare, wsl_node_pty]
-    # wsl_node_pty is skipped when Windows is off and may fail on its own; only
+    needs: [prepare, wsl_runtime]
+    # wsl_runtime is skipped when Windows is off and may fail on its own; only
     # the Windows leg needs its artifact, and that download fails the leg alone.
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ${{ matrix.runner }}
@@ -207,12 +234,12 @@ jobs:
           # the same published values the upstream preview builds use.
           cp .env.example .env
 
-      - name: Download WSL node-pty prebuild
+      - name: Download WSL runtime
         if: matrix.platform == 'win'
         uses: actions/download-artifact@v8
         with:
-          name: wsl-node-pty-x64
-          path: wsl-prebuild
+          name: wsl-runtime-x64
+          path: wsl-runtime
 
       - name: Install Spectre-mitigated MSVC libs
         if: matrix.platform == 'win'
@@ -260,7 +287,7 @@ jobs:
             --verbose
           )
           if [[ "${{ matrix.platform }}" == "win" ]]; then
-            args+=(--wsl-prebuild "$GITHUB_WORKSPACE/wsl-prebuild/pty.node")
+            args+=(--wsl-runtime "$GITHUB_WORKSPACE"/wsl-runtime/t3-*-linux-x64.tar.gz)
           fi
           if [[ -n "$DISTRIBUTION" ]]; then
             args+=(--distribution "$DISTRIBUTION")
@@ -370,10 +397,10 @@ jobs:
               echo "Distribution \`$DISTRIBUTION\`: installs next to the official T3 Code as its own app, with its own data directory \`~/.t3-$DISTRIBUTION\` and \`t3code-$DISTRIBUTION://\` scheme. It does not read or change the official app's data."
               echo
             fi
-            app_name="T3 Code (Alpha)"
+            app_name="T3 Code (Beta)"
             if [[ -n "$DISTRIBUTION" ]]; then
               label="$(printf '%s' "$DISTRIBUTION" | sed -E 's/(^|-)([a-z0-9])/ \U\2/g')"
-              app_name="T3 Code${label} (Alpha)"
+              app_name="T3 Code${label} (Beta)"
             fi
             echo "macOS: the DMG is not notarized. After copying the app, run \`xattr -dr com.apple.quarantine \"/Applications/$app_name.app\"\` once, or right-click the app and choose Open."
             echo

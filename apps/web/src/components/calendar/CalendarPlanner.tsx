@@ -8,7 +8,7 @@ import {
   GripVerticalIcon,
   SettingsIcon,
 } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ensureLocalApi } from "~/localApi";
 import { cn, randomUUID } from "~/lib/utils";
 import { googleCalendarEnvironment as calendar } from "~/state/googleCalendar";
@@ -89,18 +89,15 @@ export function CalendarPlanner({
   const start = calendarDayRange(days[0] ?? "")?.start ?? "";
   const end = calendarDayRange(days[6] ?? "")?.end ?? "";
   const [snapshots, setSnapshots] = useState<Record<string, Snapshot>>({});
-  const report = useCallback(
-    (key: string, snapshot: Snapshot) =>
-      setSnapshots((current) =>
-        Object.fromEntries([
-          ...Object.entries(current)
-            .filter(([entryKey]) => entryKey !== key)
-            .slice(-139),
-          [key, snapshot],
-        ]),
-      ),
-    [],
-  );
+  const report = (key: string, snapshot: Snapshot) =>
+    setSnapshots((current) =>
+      Object.fromEntries([
+        ...Object.entries(current)
+          .filter(([entryKey]) => entryKey !== key)
+          .slice(-139),
+        [key, snapshot],
+      ]),
+    );
   const [refreshKey, setRefreshKey] = useState(0);
   const snapshotOf = (calendarId: string) => snapshots[JSON.stringify([calendarId, start, end])];
   const entries = displayed.flatMap((c) =>
@@ -148,17 +145,13 @@ export function CalendarPlanner({
     });
   };
   // A fresh block lands at the start of the working day, where suggestions begin.
-  const selectIssue = (
-    reference: string,
-    date = day,
-    time = validPlanningHours(preferences.planningHours)
-      ? preferences.planningHours.start
-      : "09:00",
-  ) => {
+  const selectIssue = (reference: string, date = day, time?: string) => {
     setDraft({
       reference,
       day: date,
-      time,
+      time:
+        time ??
+        (validPlanningHours(preferences.planningHours) ? preferences.planningHours.start : "09:00"),
       minutes: preferences.minutes,
       requestId: newRequestId(),
     });
@@ -242,7 +235,7 @@ export function CalendarPlanner({
   const save = async () => {
     if (!draft || !range || busy) return;
     setBusy(true);
-    try {
+    const persist = async () => {
       const result = draft.event
         ? await update({
             environmentId,
@@ -271,9 +264,8 @@ export function CalendarPlanner({
           title: draft.event ? "Block moved" : "Block saved to Google Calendar",
         });
       }
-    } finally {
-      setBusy(false);
-    }
+    };
+    await persist().finally(() => setBusy(false));
   };
   const openBlock = (event: CalendarEntry) => {
     if (writable(event)) edit(event);
@@ -592,7 +584,7 @@ export function CalendarPlanner({
                         }}
                         onDragEnd={endDrag}
                         onClick={() => selectIssue(issue.identifier)}
-                        className="flex w-full cursor-grab items-start gap-2 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-accent/60 focus-visible:ring-1 focus-visible:ring-ring active:cursor-grabbing disabled:opacity-50"
+                        className="flex w-full cursor-grab items-start gap-2 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-accent/60 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring active:cursor-grabbing disabled:opacity-50"
                       >
                         <GripVerticalIcon
                           aria-hidden

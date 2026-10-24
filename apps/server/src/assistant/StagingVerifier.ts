@@ -3,7 +3,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   AssistantDeployment,
   DeveloperAssistantError,
@@ -94,7 +94,7 @@ export const layer = Layer.effect(
   StagingVerifier,
   Effect.gen(function* () {
     const runner = yield* ProcessRunner;
-    const platform = yield* HostProcessPlatform;
+    const platform = yield* HostProcess.Platform;
     const gitRun = (
       cwd: string,
       args: ReadonlyArray<string>,

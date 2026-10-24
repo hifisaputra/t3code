@@ -1,6 +1,6 @@
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { GoogleCalendar } from "./GoogleCalendar.ts";
 
 // The browser may be on another device. Google returns to the configured public

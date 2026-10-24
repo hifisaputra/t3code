@@ -5,8 +5,10 @@ import {
   EnvironmentId,
   LinearOperationError,
   OrchestrationProjectShell,
-  OrchestrationThreadShell,
+  type OrchestrationV2ProviderSession,
+  type OrchestrationV2ThreadShell,
   McpCapabilityUnavailableError,
+  ProviderSessionId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -16,7 +18,6 @@ import {
   type LinearWorkflowState,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
-import { createModelSelection } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -26,19 +27,23 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
-import { McpSchema, McpServer, Tool } from "effect/unstable/ai";
+import { McpSchema, McpServer, Tool } from "effect/ai";
 
 import * as AssistantEvidence from "../../../assistant/AssistantEvidence.ts";
 import * as ServerConfig from "../../../config.ts";
 import { LinearAgentOutbox } from "../../../linear/LinearAgentOutbox.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
 import { LinearOAuth } from "../../../linear/LinearOAuth.ts";
-import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectService from "../../../project/ProjectService.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
 import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
 import * as McpApprovalBroker from "../../McpApprovalBroker.ts";
+import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
-import { LinearToolkitHandlersLive } from "./handlers.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
+import * as LinearHandlers from "./handlers.ts";
 import { LinearToolkit } from "./tools.ts";
 
 /** `assert.instanceOf` narrows `unknown`, not the tool's failure union. */
@@ -62,9 +67,13 @@ const invocation = (
 ) =>
   McpInvocationContext.McpInvocationContext.of({
     environmentId,
-    threadId: caller,
-    providerSessionId: "provider-session-linear-mcp",
-    providerInstanceId: ProviderInstanceId.make("codex"),
+    thread: {
+      threadId: caller,
+      providerSessionId: "provider-session-linear-mcp",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    client: undefined,
+    requestNamespace: "provider:linear-mcp",
     capabilities: new Set(capabilities),
     issuedAt: 1,
   });
@@ -174,46 +183,26 @@ const linearApiLayer = (overrides: Partial<LinearApiService>) =>
     }),
   );
 
-const decodeThreadShell = Schema.decodeUnknownSync(OrchestrationThreadShell);
+const threadShell = (
+  linkedIssue: { readonly id: string } | null,
+  caller: ThreadId = threadId,
+): OrchestrationV2ThreadShell => ({
+  ...liveThreadShell(caller),
+  projectId,
+  title: "Linear MCP test",
+  linkedIssue:
+    linkedIssue === null
+      ? null
+      : {
+          provider: "linear",
+          id: linkedIssue.id,
+          identifier: "DEL-123",
+          url: "https://linear.app/acme/issue/DEL-123",
+        },
+});
 
-const threadShell = (linkedIssue: { readonly id: string } | null, session: boolean = false) =>
-  decodeThreadShell({
-    id: threadId,
-    projectId,
-    title: "Linear MCP test",
-    modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4"),
-    runtimeMode: "full-access",
-    branch: null,
-    worktreePath: null,
-    latestTurn: null,
-    createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-01T00:00:00.000Z",
-    session: session
-      ? {
-          threadId,
-          status: "running",
-          providerName: "codex",
-          providerInstanceId: "codex",
-          runtimeMode: "full-access",
-          activeTurnId: "turn-1",
-          lastError: null,
-          updatedAt: "2026-01-01T00:00:00.000Z",
-        }
-      : null,
-    latestUserMessageAt: null,
-    hasPendingApprovals: false,
-    hasPendingUserInput: false,
-    hasActionableProposedPlan: false,
-    linkedIssue:
-      linkedIssue === null
-        ? null
-        : {
-            provider: "linear",
-            id: linkedIssue.id,
-            identifier: "DEL-123",
-            url: "https://linear.app/acme/issue/DEL-123",
-          },
-  });
+/** The provider session an approval card is addressed through. */
+const providerSession = ProviderSessionId.make("provider-session-linear-mcp");
 
 const decodeProjectShell = Schema.decodeUnknownSync(OrchestrationProjectShell);
 
@@ -233,35 +222,31 @@ const projectionLayer = (
   session: boolean = false,
   workspaceRoot?: string,
 ) =>
-  Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
-    getTurnStartMessage: () => Effect.die("unused"),
-    getImportedAgentSessionSources: () => Effect.die("unused"),
-    listActivitiesByKind: () => Effect.die("unused"),
-    getDeletedWorktreeThreads: () => Effect.die("unused"),
-    getProjectShells: () => Effect.die("unused"),
-    getUserInputActivity: () => Effect.die("unused"),
-    getCommandReadModel: () => Effect.die("unused"),
-    getSnapshot: () => Effect.die("unused"),
-    getShellSnapshot: () => Effect.die("unused"),
-    getArchivedShellSnapshot: () => Effect.die("unused"),
-    getSnapshotSequence: () => Effect.die("unused"),
-    getCounts: () => Effect.die("unused"),
-    getEventReplayStats: () => Effect.die("unused"),
-    getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
-    getProjectShellById: () =>
-      workspaceRoot === undefined
-        ? Effect.die("unused")
-        : Effect.succeed(Option.some(projectShell(workspaceRoot))),
-    getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
-    getThreadCheckpointContext: () => Effect.die("unused"),
-    getFullThreadDiffContext: () => Effect.die("unused"),
-    getThreadRuntimeContext: () => Effect.die("unused"),
-    getThreadShellById: () => Effect.succeed(Option.some(threadShell(linkedIssue, session))),
-    getThreadDetailById: () => Effect.die("unused"),
-    getThreadDetailSnapshot: () => Effect.die("unused"),
-    searchThreads: () => Effect.die("unused"),
-    listThreadsWithPullRequests: () => Effect.die("unused"),
-  });
+  Layer.mergeAll(
+    Layer.mock(ThreadManagement.ThreadManagementService)({
+      getThreadShell: (caller) => Effect.succeed(threadShell(linkedIssue, caller)),
+      getThreadRecords: (caller) =>
+        Effect.succeed({
+          thread: { ...threadShell(linkedIssue, caller), deletedAt: null },
+          providerSessions: session
+            ? [
+                {
+                  id: providerSession,
+                  driver: "codex",
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                  status: "running",
+                } as unknown as OrchestrationV2ProviderSession,
+              ]
+            : [],
+        } as never),
+    }),
+    Layer.mock(ProjectService.ProjectService)({
+      getShell: () =>
+        workspaceRoot === undefined
+          ? Effect.die("unused")
+          : Effect.succeed(Option.some(projectShell(workspaceRoot))),
+    }),
+  );
 
 /**
  * Most tests are about resolution, not confirmation, so writes are unconfirmed
@@ -281,7 +266,7 @@ const testLayer = (input: {
 }) =>
   // `provideMerge` because the toolkit's own `handle` keeps the tool
   // dependencies in its requirements; the layer has to satisfy both sides.
-  LinearToolkitHandlersLive.pipe(
+  McpToolAccess.HandlersLayer.layer(LinearHandlers.layer).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         linearApiLayer(input.linear),
@@ -544,17 +529,8 @@ it.effect("advertises the Linear tools on the MCP server itself", () =>
     );
   }).pipe(
     Effect.provide(
-      McpServer.toolkit(LinearToolkit).pipe(
-        Layer.provide(LinearToolkitHandlersLive),
-        Layer.provideMerge(
-          Layer.mergeAll(
-            linearApiLayer({ getIssue: () => Effect.succeed(issue) }),
-            projectionLayer({ id: issue.id }),
-            McpApprovalBroker.layer,
-            ServerSettingsService.layerTest({ linear: { confirmAgentWrites: false } }),
-            Layer.mock(AssistantEvidence.AssistantEvidence)({}),
-          ),
-        ),
+      McpHttpServer.toolkitRegistration(LinearToolkit, LinearHandlers.layer).pipe(
+        Layer.provideMerge(testLayer({ linear: { getIssue: () => Effect.succeed(issue) } })),
         Layer.provideMerge(McpServer.McpServer.layer),
       ),
     ),
@@ -920,8 +896,9 @@ it.effect("refuses to write when the thread has no session to ask through", () =
   ),
 );
 
-for (const decision of ["accept", "decline"] as const) {
-  it.effect(`edits a comment only after approval: ${decision}`, () => {
+it.effect.each(["accept", "decline"] as const)(
+  "edits a comment only after approval: %s",
+  (decision) => {
     const updated: Array<unknown> = [];
     return Effect.scoped(
       Effect.gen(function* () {
@@ -969,8 +946,8 @@ for (const decision of ["accept", "decline"] as const) {
         }),
       ),
     );
-  });
-}
+  },
+);
 
 it.effect("rejects a comment from a different issue before approval or mutation", () =>
   Effect.gen(function* () {
@@ -1080,8 +1057,9 @@ it.effect("refuses to move an edited comment into another thread", () =>
   }).pipe(Effect.provide(testLayer({ linear: {} }))),
 );
 
-for (const decision of ["accept", "decline"] as const) {
-  it.effect(`deletes a comment only after approval: ${decision}`, () => {
+it.effect.each(["accept", "decline"] as const)(
+  "deletes a comment only after approval: %s",
+  (decision) => {
     const deleted: Array<string> = [];
     return Effect.scoped(
       Effect.gen(function* () {
@@ -1125,11 +1103,12 @@ for (const decision of ["accept", "decline"] as const) {
         }),
       ),
     );
-  });
-}
+  },
+);
 
-for (const assignee of ["Ada", null]) {
-  it.effect(`updates assignment with ${assignee}`, () => {
+it.effect.each([{ assignee: "Ada" }, { assignee: null }])(
+  "updates assignment with $assignee",
+  ({ assignee }) => {
     const patches: unknown[] = [];
     return callTool("save_issue", { assignee }).pipe(
       Effect.map(() =>
@@ -1153,8 +1132,8 @@ for (const assignee of ["Ada", null]) {
         }),
       ),
     );
-  });
-}
+  },
+);
 
 it.effect("shows the assignee for approval and does not reassign after rejection", () => {
   const patches: unknown[] = [];
@@ -2267,62 +2246,60 @@ const stagingLink = {
   sourceType: null,
 };
 
-for (const [current, summary] of [
+it.effect.each([
   [[], "Attach link to DEL-123"],
   // Linear updates the attachment it already has for this URL.
   [[stagingLink], "Update link on DEL-123"],
-] as const) {
-  it.effect(`attaches a link only after approval: ${summary}`, () => {
-    const created: Array<unknown> = [];
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const pending = yield* Effect.forkScoped(
-          callTool("create_attachment", {
-            url: ` ${stagingLink.url} `,
-            title: "Staging preview",
-            subtitle: "Build 42",
-          }),
-        );
-        const opened = yield* nextApprovalEvent;
-        const review = yield* decodeApprovalReview(opened.payload);
-        assert.deepStrictEqual(review.change, {
-          summary,
-          record: { label: "DEL-123", url: issue.url },
-          fields: [
-            { label: "Title", value: "Staging preview" },
-            { label: "URL", value: stagingLink.url },
-            { label: "Subtitle", value: "Build 42" },
-          ],
-        });
-        assert.deepStrictEqual(created, []);
-        yield* answer(opened, "accept");
-        yield* Fiber.join(pending);
-        assert.deepStrictEqual(created, [
-          {
-            issueId: issue.id,
-            url: stagingLink.url,
-            title: "Staging preview",
-            subtitle: "Build 42",
-          },
-        ]);
-      }),
-    ).pipe(
-      Effect.provide(
-        testLayer({
-          linear: {
-            getIssue: () => Effect.succeed({ ...issue, attachments: current }),
-            createAttachment: (input) =>
-              Effect.sync(() => {
-                created.push(input);
-                return { ...stagingLink, subtitle: input.subtitle ?? null };
-              }),
-          },
-          confirmAgentWrites: true,
+] as const)("attaches a link only after approval: $1", ([current, summary]) => {
+  const created: Array<unknown> = [];
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const pending = yield* Effect.forkScoped(
+        callTool("create_attachment", {
+          url: ` ${stagingLink.url} `,
+          title: "Staging preview",
+          subtitle: "Build 42",
         }),
-      ),
-    );
-  });
-}
+      );
+      const opened = yield* nextApprovalEvent;
+      const review = yield* decodeApprovalReview(opened.payload);
+      assert.deepStrictEqual(review.change, {
+        summary,
+        record: { label: "DEL-123", url: issue.url },
+        fields: [
+          { label: "Title", value: "Staging preview" },
+          { label: "URL", value: stagingLink.url },
+          { label: "Subtitle", value: "Build 42" },
+        ],
+      });
+      assert.deepStrictEqual(created, []);
+      yield* answer(opened, "accept");
+      yield* Fiber.join(pending);
+      assert.deepStrictEqual(created, [
+        {
+          issueId: issue.id,
+          url: stagingLink.url,
+          title: "Staging preview",
+          subtitle: "Build 42",
+        },
+      ]);
+    }),
+  ).pipe(
+    Effect.provide(
+      testLayer({
+        linear: {
+          getIssue: () => Effect.succeed({ ...issue, attachments: current }),
+          createAttachment: (input) =>
+            Effect.sync(() => {
+              created.push(input);
+              return { ...stagingLink, subtitle: input.subtitle ?? null };
+            }),
+        },
+        confirmAgentWrites: true,
+      }),
+    ),
+  );
+});
 
 it.effect("refuses to attach something that is not a web link, before asking", () =>
   Effect.gen(function* () {
@@ -2335,8 +2312,9 @@ it.effect("refuses to attach something that is not a web link, before asking", (
   }).pipe(Effect.provide(testLayer({ linear: {}, confirmAgentWrites: true }))),
 );
 
-for (const decision of ["accept", "decline"] as const) {
-  it.effect(`removes an attachment only after approval: ${decision}`, () => {
+it.effect.each(["accept", "decline"] as const)(
+  "removes an attachment only after approval: %s",
+  (decision) => {
     const deleted: Array<string> = [];
     return Effect.scoped(
       Effect.gen(function* () {
@@ -2374,8 +2352,8 @@ for (const decision of ["accept", "decline"] as const) {
         }),
       ),
     );
-  });
-}
+  },
+);
 
 const launchPlan = {
   id: "document-uuid",
@@ -2490,8 +2468,9 @@ it.effect("refuses a new document without a title before reading anything", () =
   }).pipe(Effect.provide(testLayer({ linear: {} }))),
 );
 
-for (const decision of ["accept", "decline"] as const) {
-  it.effect(`deletes a document only after approval: ${decision}`, () => {
+it.effect.each(["accept", "decline"] as const)(
+  "deletes a document only after approval: %s",
+  (decision) => {
     const deleted: Array<string> = [];
     return Effect.scoped(
       Effect.gen(function* () {
@@ -2525,11 +2504,12 @@ for (const decision of ["accept", "decline"] as const) {
         }),
       ),
     );
-  });
-}
+  },
+);
 
-for (const decision of ["accept", "decline"] as const) {
-  it.effect(`restores a trashed document only after approval: ${decision}`, () => {
+it.effect.each(["accept", "decline"] as const)(
+  "restores a trashed document only after approval: %s",
+  (decision) => {
     const restored: Array<string> = [];
     return Effect.scoped(
       Effect.gen(function* () {
@@ -2567,8 +2547,8 @@ for (const decision of ["accept", "decline"] as const) {
         }),
       ),
     );
-  });
-}
+  },
+);
 
 it.effect("refuses to restore a document that is not in the trash, without asking", () =>
   Effect.gen(function* () {

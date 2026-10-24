@@ -10,7 +10,8 @@ import {
   deriveProviderInstanceEntries,
   resolveDefaultProviderModelSelection,
 } from "~/providerInstances";
-import { usePrimaryEnvironment } from "~/state/environments";
+import { useEnvironmentProviders, usePrimaryEnvironment } from "~/state/environments";
+import { EMPTY_SERVER_PROVIDERS } from "~/state/server";
 import { linearEnvironment } from "~/state/linear";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -36,7 +37,10 @@ export function LinearDelegationSettingsSection() {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const providers = environment?.serverConfig?.providers ?? [];
+  const providersByEnvironment = useEnvironmentProviders();
+  const providers =
+    (environmentId ? providersByEnvironment.get(environmentId) : undefined) ??
+    EMPTY_SERVER_PROVIDERS;
   const selection = resolveDefaultProviderModelSelection(providers, saved.modelSelection);
   const entries = deriveProviderInstanceEntries(providers);
   const options = getCustomModelOptionsByInstance(
@@ -79,13 +83,14 @@ export function LinearDelegationSettingsSection() {
                 if (!environmentId) return;
                 setBusy(true);
                 setError(null);
-                try {
+                const attempt = async () => {
                   const result = await authorize({ environmentId, input: {} });
                   if (result._tag === "Success") setUrl(result.value.url);
                   else setError("Could not authorize. Check the saved app settings.");
-                } finally {
+                };
+                await attempt().finally(() => {
                   setBusy(false);
-                }
+                });
               }}
             >
               {status.data?.connected ? "Reconnect" : "Connect"}
@@ -98,15 +103,16 @@ export function LinearDelegationSettingsSection() {
                 onClick={async () => {
                   if (!environmentId) return;
                   setBusy(true);
-                  try {
+                  const attempt = async () => {
                     const result = await disconnect({ environmentId, input: {} });
                     if (result._tag === "Success") {
                       setUrl(null);
                       status.refresh();
                     } else setError("Could not disconnect the app.");
-                  } finally {
+                  };
+                  await attempt().finally(() => {
                     setBusy(false);
-                  }
+                  });
                 }}
               >
                 Disconnect
@@ -174,11 +180,23 @@ export function LinearDelegationSettingsSection() {
       </IntegrationSetup>
       <SettingsRow
         serverScoped
+        {...searchableSetting("linear-post-thread-links")}
+        description="Add a link to the T3 Code thread on delegated Linear issues. Turn off to keep your environment URL out of Linear."
+        control={
+          <Switch
+            checked={saved.postThreadLinks}
+            onCheckedChange={(postThreadLinks) => patch({ postThreadLinks })}
+          />
+        }
+      />
+      <SettingsRow
+        serverScoped
         title="Delegation model"
         description="Choose the provider and model that will run delegated issues."
         control={
           selection ? (
             <ProviderModelPicker
+              environmentId={environmentId ?? null}
               activeInstanceId={selection.instanceId}
               model={selection.model}
               lockedProvider={null}

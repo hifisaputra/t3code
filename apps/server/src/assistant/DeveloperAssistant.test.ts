@@ -5,9 +5,10 @@ import * as Deferred from "effect/Deferred";
 import * as Stream from "effect/Stream";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
@@ -15,11 +16,14 @@ import {
   EventId,
   MessageId,
   LinearOperationError,
-  OrchestrationThreadShell,
+  IsoDateTime,
+  NodeId,
   ProjectId,
   ProviderInstanceId,
+  RunId,
+  RuntimeRequestId,
   ThreadId,
-  TurnId,
+  TurnItemId,
   assistantE2eEvidenceCounts,
   assistantTaskHoldsProject,
   assistantTaskPipeline,
@@ -31,9 +35,12 @@ import {
   type AssistantTaskSummary,
   type LinearIssueDetail,
   type LinearPrepareIssueThreadInput,
-  type OrchestrationCommand,
-  type OrchestrationEvent,
-  type OrchestrationMessage,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
+  type OrchestrationV2ServerCommand,
+  type OrchestrationV2StoredEvent,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import {
   LinearAgentOutbox,
@@ -45,33 +52,37 @@ import {
 import { LinearApi, LinearAppCredential } from "../linear/LinearApi.ts";
 import { LinearOAuth } from "../linear/LinearOAuth.ts";
 import { LinearThreadService } from "../linear/LinearThreadService.ts";
+import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
+import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
 import {
-  OrchestrationCommandInvariantError,
-  OrchestrationCommandPreviouslyRejectedError,
-  OrchestrationThreadSettleBlockedError,
-} from "../orchestration/Errors.ts";
-import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
-import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
-import { ProviderService } from "../provider/Services/ProviderService.ts";
+  OrchestratorCommandPreviouslyRejectedError,
+  OrchestratorCommandRejectedError,
+  OrchestratorDispatchError,
+} from "../orchestration-v2/Orchestrator.ts";
+import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
+import { ProjectService } from "../project/ProjectService.ts";
+import { ProviderInstanceRegistry } from "../provider/ProviderInstanceRegistry.ts";
 import * as Settings from "../serverSettings.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { ServerActivation } from "../serverActivation.ts";
-import Migration from "../persistence/Migrations/052_DeveloperAssistant.ts";
-import SetupMigration from "../persistence/Migrations/053_AssistantSetup.ts";
-import ParallelMigration from "../persistence/Migrations/055_AssistantParallelIssues.ts";
-import UsageLimitMigration from "../persistence/Migrations/056_AssistantUsageLimit.ts";
-import RetireChatMigration from "../persistence/Migrations/057_RetireAssistantCoordinator.ts";
-import LinearRepliesMigration from "../persistence/Migrations/059_AssistantLinearReplies.ts";
-import ProjectNotesMigration from "../persistence/Migrations/060_AssistantProjectNotes.ts";
+import Migration from "../persistence/ForkMigrations/003_DeveloperAssistant.ts";
+import SetupMigration from "../persistence/ForkMigrations/004_AssistantSetup.ts";
+import ParallelMigration from "../persistence/ForkMigrations/006_AssistantParallelIssues.ts";
+import UsageLimitMigration from "../persistence/ForkMigrations/007_AssistantUsageLimit.ts";
+import RetireChatMigration from "../persistence/ForkMigrations/008_RetireAssistantCoordinator.ts";
+import LinearRepliesMigration from "../persistence/ForkMigrations/010_AssistantLinearReplies.ts";
+import ProjectNotesMigration from "../persistence/ForkMigrations/011_AssistantProjectNotes.ts";
 import * as Assistant from "./DeveloperAssistant.ts";
 import { AssistantEvidence } from "./AssistantEvidence.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 
-const decodeThread = Schema.decodeUnknownSync(OrchestrationThreadShell);
+type ThreadShell = OrchestrationV2ThreadShell;
+type ProviderInstance = NonNullable<
+  Effect.Success<ReturnType<ProviderInstanceRegistry["Service"]["getInstance"]>>
+>;
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const timestamp = "2026-09-12T00:00:00.000Z";
+const at = DateTime.makeUnsafe(timestamp);
 const config: AssistantProjectConfig = {
   projectId: ProjectId.make("project"),
   linearProjectId: "linear-project",
@@ -120,18 +131,14 @@ const makeIssue = (number: number): LinearIssueDetail => ({
 });
 
 function harness() {
-  const commands: OrchestrationCommand[] = [];
-  const replayEvents: OrchestrationEvent[] = [];
-  let dispatchObserver = (_command: OrchestrationCommand): Effect.Effect<void> => Effect.void;
+  const commands: OrchestrationV2ServerCommand[] = [];
+  const replayEvents: OrchestrationV2StoredEvent[] = [];
+  let dispatchObserver = (_command: OrchestrationV2ServerCommand): Effect.Effect<void> =>
+    Effect.void;
   const seen = new Set<string>();
   const rejected = new Map<string, string>();
-  const threads = new Map<ThreadId, OrchestrationThreadShell>();
-  const messages = new Map<ThreadId, OrchestrationMessage[]>();
-  // Like the real projection, lookups hide archived threads unless asked.
-  const visibleThread = (id: ThreadId, options?: { readonly includeArchived?: boolean }) =>
-    Option.fromNullishOr(threads.get(id)).pipe(
-      Option.filter((t) => options?.includeArchived === true || t.archivedAt === null),
-    );
+  const threads = new Map<ThreadId, ThreadShell>();
+  const messages = new Map<ThreadId, OrchestrationV2ConversationMessage[]>();
   const issues = [makeIssue(1), makeIssue(2), makeIssue(3)];
   const transitions: string[] = [];
   const started: string[] = [];
@@ -151,7 +158,6 @@ function harness() {
   let onComment: (body: string) => Effect.Effect<void, LinearOperationError> = () => Effect.void;
   let commentsHealthy = true;
   let descriptionsHealthy = true;
-  const pendingStarts = new Set<ThreadId>();
   // What the staging deploy check reports: verified, still deploying, a failed
   // deployment, or a CLI T3 could not run at all.
   let staging: "healthy" | "pending" | "failed" | "broken" = "healthy";
@@ -223,36 +229,19 @@ function harness() {
       threadLink: (threadId, label = "T3 Code thread") =>
         Effect.succeed({ label, url: `https://t3.example.com/env/${threadId}` }),
     }),
-    // Like a provider, a stopped session drops the thread's background work.
-    Layer.mock(ProviderService)({
-      getResearchAccess: (instanceId, cwd) =>
-        Effect.sync(() => {
-          researchAccess.requests.push({ instanceId, cwd });
-          return researchAccess.text;
-        }),
-      stopSession: ({ threadId }) =>
-        Effect.sync(() => {
-          stopped.push(threadId);
-          const thread = threads.get(threadId);
-          if (thread) threads.set(threadId, { ...thread, session: null, backgroundLiveness: null });
-        }),
+    Layer.mock(ProviderInstanceRegistry)({
+      getInstance: () =>
+        Effect.succeed({
+          enabled: true,
+          driverKind: "claudeAgent",
+          researchAccess: (cwd: string) =>
+            Effect.sync(() => {
+              researchAccess.requests.push({ instanceId: "claudeCode", cwd });
+              return researchAccess.text;
+            }),
+        } as unknown as ProviderInstance),
     }),
     Settings.layerTest({ linear: { agentAccess: true, apiKey: "test-key" } }),
-    Layer.mock(ProjectionTurnRepository)({
-      getPendingTurnStartByThreadId: ({ threadId }) =>
-        Effect.succeed(
-          pendingStarts.has(threadId)
-            ? Option.some({
-                threadId,
-                messageId: MessageId.make("pending"),
-                sourceProposedPlanThreadId: null,
-                sourceProposedPlanId: null,
-                requestedAt: timestamp,
-              })
-            : Option.none(),
-        ),
-    }),
-    Layer.mock(ProviderRuntimeIngestionService)({ drain: Effect.void }),
     Layer.mock(TerminalManager)({ close: () => Effect.void }),
     Layer.mock(StagingVerifier)({
       removeWorktree: ({ worktreePath }) =>
@@ -430,22 +419,53 @@ function harness() {
               new LinearOperationError({ operation: "prepareIssueThread", detail: "Setup failed" }),
             ),
     }),
-    Layer.mock(OrchestrationEngineService)({
-      subscribeDomainEvents: Effect.succeed(Stream.empty),
-      readEvents: (after) =>
-        Stream.fromIterable(replayEvents.filter((event) => event.sequence > after)),
+    // The setup conversation mints its thread ids with Crypto.
+    NodeServices.layer,
+    Layer.mock(EventSinkV2)({
+      latestSequence: () =>
+        Effect.sync(() => replayEvents.reduce((max, event) => Math.max(max, event.sequence), 0)),
+      stream: (input) =>
+        Stream.fromIterable(
+          replayEvents.filter((event) => event.sequence > (input?.afterSequence ?? 0)),
+        ),
+    }),
+    Layer.mock(ProjectService)({
+      getShell: () => Effect.succeed(Option.some(project)),
+      listShells: () => Effect.succeed([project]),
+    }),
+    Layer.mock(ThreadManagementService)({
+      getThreadShell: (id) => Effect.sync(() => threads.get(id) ?? null),
+      getShellSnapshot: () =>
+        Effect.sync(() => ({
+          schemaVersion: 1,
+          snapshotSequence: commands.length,
+          threads: [...threads.values()].filter((t) => t.archivedAt === null),
+          archivedThreads: [...threads.values()].filter((t) => t.archivedAt !== null),
+        })),
+      // The assistant only reads a thread's messages.
+      getThreadRecords: ((
+        id: ThreadId,
+        _fields: ReadonlyArray<string>,
+        filter?: { readonly messageRoles?: ReadonlyArray<string> },
+      ) =>
+        Effect.sync(() => ({
+          messages: (messages.get(id) ?? []).filter(
+            (m) => filter?.messageRoles === undefined || filter.messageRoles.includes(m.role),
+          ),
+        }))) as unknown as ThreadManagementService["Service"]["getThreadRecords"],
       dispatch: (command) =>
         Effect.gen(function* () {
-          if (seen.has(command.commandId)) return { sequence: commands.length };
-          // Like the real engine, a rejected command id stays rejected.
+          if (seen.has(command.commandId)) return { sequence: commands.length, storedEvents: [] };
+          // Like the real orchestrator, a rejected command id stays rejected.
           const previous = rejected.get(command.commandId);
           if (previous !== undefined)
-            return yield* new OrchestrationCommandPreviouslyRejectedError({
+            return yield* new OrchestratorCommandPreviouslyRejectedError({
               commandId: command.commandId,
+              commandType: command.type,
               detail: previous,
             });
-          // Mirror the decider's thread invariants so callers cannot rely on
-          // commands the real engine rejects.
+          // Mirror the orchestrator's thread invariants so callers cannot rely on
+          // commands the real one rejects.
           const target = "threadId" in command ? threads.get(command.threadId) : undefined;
           const violation =
             command.type === "thread.create"
@@ -455,113 +475,94 @@ function harness() {
                 : command.type === "thread.archive" || command.type === "thread.settle"
                   ? (!target || target.archivedAt !== null) && "Thread is missing or archived."
                   : "threadId" in command && !target && "Thread does not exist.";
-          // Like the decider, a thread whose session is alive cannot be settled.
-          if (
-            command.type === "thread.settle" &&
-            !violation &&
-            (target?.session?.status === "starting" || target?.session?.status === "running")
-          ) {
+          // A thread whose run is going cannot be settled.
+          if (command.type === "thread.settle" && !violation && target?.activeRunId) {
             rejected.set(command.commandId, "Thread still needs attention.");
-            return yield* new OrchestrationThreadSettleBlockedError({ threadId: command.threadId });
+            return yield* new OrchestratorCommandRejectedError({
+              commandId: command.commandId,
+              commandType: command.type,
+            });
           }
           if (violation) {
             rejected.set(command.commandId, violation);
-            return yield* new OrchestrationCommandInvariantError({
+            return yield* new OrchestratorDispatchError({
+              commandId: command.commandId,
               commandType: command.type,
-              detail: violation,
+              cause: violation,
             });
           }
           seen.add(command.commandId);
           commands.push(command);
           if (command.type === "thread.create")
-            threads.set(
-              command.threadId,
-              decodeThread({
-                ...command,
-                id: command.threadId,
-                updatedAt: timestamp,
-                latestTurn: null,
-                session: null,
-                latestUserMessageAt: null,
-                hasPendingApprovals: false,
-                hasPendingUserInput: false,
-                hasActionableProposedPlan: false,
-              }),
-            );
+            threads.set(command.threadId, {
+              ...liveThreadShell(command.threadId, { activeRunId: null }),
+              status: "idle",
+              projectId: command.projectId,
+              title: command.title,
+              modelSelection: command.modelSelection,
+              providerInstanceId: command.modelSelection.instanceId,
+              runtimeMode: command.runtimeMode,
+              interactionMode: command.interactionMode,
+              branch: command.branch,
+              worktreePath: command.worktreePath,
+              linkedIssue: command.linkedIssue ?? null,
+              createdBy: command.createdBy,
+              creationSource: command.creationSource,
+            });
           const thread = "threadId" in command ? threads.get(command.threadId) : undefined;
-          // Like the projection, a turn's message joins the thread's conversation.
-          if (thread && command.type === "thread.turn.start")
+          // Like the projection, a turn's message joins the thread's conversation
+          // and starts a run.
+          if (thread && command.type === "message.dispatch") {
+            const runId = RunId.make(`run:${command.commandId}`);
             messages.set(thread.id, [
               ...(messages.get(thread.id) ?? []),
               {
-                id: command.message.messageId,
+                id: command.messageId,
+                threadId: thread.id,
+                runId,
+                nodeId: null,
                 role: "user",
-                text: command.message.text,
-                turnId: null,
+                text: command.text,
+                attachments: [],
                 streaming: false,
-                createdAt: timestamp,
-                updatedAt: timestamp,
+                createdAt: at,
+                updatedAt: at,
+                createdBy: command.createdBy,
+                creationSource: command.creationSource,
               },
             ]);
-          if (thread && command.type === "thread.turn.start")
             threads.set(thread.id, {
               ...thread,
-              // The projection stamps the message that started the turn, which
-              // is also how a thread shows it has ever run one.
-              latestUserMessageAt: timestamp,
-              // Like the decider, work on a settled thread un-settles it.
+              latestUserMessageAt: at,
+              // Work on a settled thread un-settles it.
               settledOverride: null,
               settledAt: null,
-              session: {
-                threadId: thread.id,
-                status: "running",
-                providerName: "test",
-                activeTurnId: TurnId.make(command.commandId),
-                runtimeMode: "approval-required",
-                lastError: null,
-                updatedAt: timestamp,
-              },
+              status: "running",
+              activeRunId: runId,
+              latestRunId: runId,
+              latestRunCompletedAt: null,
             });
+          }
           if (thread && command.type === "thread.archive")
-            threads.set(thread.id, { ...thread, archivedAt: timestamp });
+            threads.set(thread.id, { ...thread, archivedAt: at });
           if (thread && command.type === "thread.unarchive")
             threads.set(thread.id, { ...thread, archivedAt: null });
           if (thread && command.type === "thread.settle")
-            threads.set(thread.id, {
-              ...thread,
-              settledOverride: "settled",
-              settledAt: timestamp,
-            });
+            threads.set(thread.id, { ...thread, settledOverride: "settled", settledAt: at });
           if (thread && command.type === "thread.unsettle")
             threads.set(thread.id, { ...thread, settledOverride: null, settledAt: null });
-          if (thread && command.type === "thread.turn.interrupt")
-            threads.set(thread.id, { ...thread, session: null });
-          return { sequence: commands.length };
-        }).pipe(Effect.tap(() => dispatchObserver(command))),
-    }),
-    Layer.mock(ProjectionSnapshotQuery)({
-      getProjectShellById: () => Effect.succeed(Option.some(project)),
-      getShellSnapshot: () =>
-        Effect.succeed({
-          projects: [project],
-          threads: [...threads.values()].filter((t) => t.archivedAt === null),
-          snapshotSequence: commands.length,
-          updatedAt: timestamp,
-        }),
-      getThreadShellById: (id, options) => Effect.succeed(visibleThread(id, options)),
-      getThreadDetailById: (id) =>
-        Effect.succeed(visibleThread(id)).pipe(
-          Effect.map(
-            Option.map((thread) => ({
+          // Stop ends the run and the thread's background work.
+          if (thread && command.type === "thread.stop") {
+            stopped.push(thread.id);
+            threads.set(thread.id, {
               ...thread,
-              deletedAt: null,
-              messages: messages.get(thread.id) ?? [],
-              activities: [],
-              checkpoints: [],
-              proposedPlans: [],
-            })),
-          ),
-        ),
+              activeRunId: null,
+              status: thread.activeRunId ? "interrupted" : thread.status,
+              pendingBackgroundTasks: [],
+            });
+          }
+          return { sequence: commands.length, storedEvents: [] };
+        }).pipe(Effect.tap(() => dispatchObserver(command))),
     }),
   );
   const make = Assistant.make.pipe(
@@ -623,7 +624,6 @@ function harness() {
     setDescriptionsHealthy: (value: boolean) => {
       descriptionsHealthy = value;
     },
-    pendingStarts,
     git,
     verified,
     uploads,
@@ -639,9 +639,15 @@ function harness() {
     setSetupHealthy: (value: boolean) => {
       setupHealthy = value;
     },
+    /** The thread's run ends, as the provider reports it. */
     finish: (id: ThreadId) => {
       const thread = threads.get(id)!;
-      threads.set(id, { ...thread, session: null });
+      threads.set(id, {
+        ...thread,
+        activeRunId: null,
+        status: "completed",
+        latestRunCompletedAt: at,
+      });
     },
   };
 }
@@ -649,34 +655,129 @@ const database = () => NodeSqliteClient.layer({ filename: ":memory:" });
 type Harness = ReturnType<typeof harness>;
 type Service = Effect.Success<typeof Assistant.make>;
 
-const sessionReady = (threadId: ThreadId) =>
-  ({
+let eventCount = 0;
+const eventBase = (threadId: ThreadId) => ({
+  id: EventId.make(`event-${(eventCount += 1)}`),
+  threadId,
+  occurredAt: at,
+});
+
+/** A run of the thread's ends: completed unless told otherwise. */
+const runEnded = (
+  thread: Pick<ThreadShell, "id" | "latestRunId" | "providerInstanceId" | "modelSelection">,
+  status: OrchestrationV2Run["status"] = "completed",
+): OrchestrationV2DomainEvent => ({
+  ...eventBase(thread.id),
+  type: "run.updated",
+  payload: {
+    // Tests end a thread's turn again without sending it one, so each end is its own run.
+    id: RunId.make(`${thread.latestRunId ?? thread.id}:end:${eventCount}`),
+    threadId: thread.id,
+    ordinal: 1,
+    providerInstanceId: thread.providerInstanceId,
+    modelSelection: thread.modelSelection,
+    providerThreadId: null,
+    userMessageId: MessageId.make(`message:${thread.id}`),
+    rootNodeId: null,
+    activeAttemptId: null,
+    status,
+    requestedAt: at,
+    startedAt: at,
+    completedAt: at,
+    checkpointId: null,
+    contextHandoffId: null,
+  },
+});
+
+/** The provider asks the thread's person for an approval or an answer. */
+const requestOpened = (
+  threadId: ThreadId,
+  kind: "approval" | "user-input",
+  requestId: string,
+  title: string,
+): OrchestrationV2DomainEvent => {
+  const base = {
+    id: TurnItemId.make(`item:${requestId}`),
+    threadId,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 0,
+    status: "waiting" as const,
+    title,
+    startedAt: at,
+    completedAt: null,
+    updatedAt: at,
+    requestId: RuntimeRequestId.make(requestId),
+  };
+  return {
     ...eventBase(threadId),
-    type: "thread.session-set",
-    payload: {
-      threadId,
-      session: {
-        threadId,
-        status: "ready",
-        providerName: "test",
-        activeTurnId: null,
-        runtimeMode: "approval-required",
-        lastError: null,
-        updatedAt: timestamp,
-      },
-    },
-  }) satisfies OrchestrationEvent;
+    type: "turn-item.updated",
+    payload:
+      kind === "approval"
+        ? { ...base, type: "approval_request", requestKind: "command" }
+        : { ...base, type: "user_input_request", questions: [] },
+  };
+};
+
+/** The thread's open request is answered, or ends unanswered. */
+const requestClosed = (
+  threadId: ThreadId,
+  requestId: string,
+  status: "resolved" | "expired" | "cancelled" = "resolved",
+): OrchestrationV2DomainEvent => ({
+  ...eventBase(threadId),
+  type: "runtime-request.updated",
+  payload: {
+    id: RuntimeRequestId.make(requestId),
+    nodeId: NodeId.make(`node:${requestId}`),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    kind: "command",
+    status,
+    responseCapability: { type: "message" },
+    createdAt: at,
+    resolvedAt: at,
+  },
+});
+
+/** The person writes in the thread. */
+const personWrites = (
+  threadId: ThreadId,
+  id: string,
+  text: string,
+): OrchestrationV2DomainEvent => ({
+  ...eventBase(threadId),
+  type: "message.updated",
+  payload: {
+    id: MessageId.make(id),
+    threadId,
+    runId: null,
+    nodeId: null,
+    role: "user",
+    text,
+    attachments: [],
+    streaming: false,
+    createdAt: at,
+    updatedAt: at,
+    createdBy: "user",
+    creationSource: "web",
+  },
+});
 
 /** A thread's turn ends the way the provider reports it. */
 const endTurn = (h: Harness, service: Service, threadId: ThreadId) => {
   h.finish(threadId);
-  return service.observe(sessionReady(threadId));
+  return service.observe(runEnded(h.threads.get(threadId)!));
 };
 
 /** What a thread was sent, turn by turn. */
 const turnsOf = (h: Harness, threadId: ThreadId) =>
   h.commands.flatMap((c) =>
-    c.type === "thread.turn.start" && c.threadId === threadId ? [c.message.text] : [],
+    c.type === "message.dispatch" && c.threadId === threadId ? [c.text] : [],
   );
 const leadOf = (t: AssistantTaskSummary) => assistantTaskThreadId(t, "lead");
 /** The tester's result for the single criterion the helpers take an issue with. */
@@ -869,7 +970,7 @@ it.effect("setup is a durable conversation and saving never starts the issue que
     assert.isTrue(yield* service.getSetup(ThreadId.make("unrelated")).pipe(Effect.isFailure));
     assert.equal((yield* service.beginSetup(setupInput)).threadId, draft.threadId);
     assert.lengthOf(
-      h.commands.filter((c) => c.type === "thread.turn.start"),
+      h.commands.filter((c) => c.type === "message.dispatch"),
       1,
     );
     assert.equal(h.threads.get(draft.threadId)?.runtimeMode, "approval-required");
@@ -901,10 +1002,10 @@ it.effect("setup is a durable conversation and saving never starts the issue que
     assert.lengthOf(board.tasks, 0);
     assert.lengthOf(h.transitions, 0);
     assert.lengthOf(
-      h.commands.filter((c) => c.type === "thread.turn.start"),
+      h.commands.filter((c) => c.type === "message.dispatch"),
       1,
     );
-    assert.equal(h.threads.get(draft.threadId)?.archivedAt, timestamp);
+    assert.equal(h.threads.get(draft.threadId)?.archivedAt, at);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -918,8 +1019,6 @@ it.effect("setup runs with its own permissions, separate from issue work", () =>
       setupRuntimeMode: "full-access",
     });
     assert.equal(h.threads.get(draft.threadId)?.runtimeMode, "full-access");
-    const start = h.commands.find((c) => c.type === "thread.turn.start");
-    assert.equal(start?.type === "thread.turn.start" ? start.runtimeMode : null, "full-access");
     const proposed = yield* service.proposeSetup(draft.threadId, setupPlan, "Plan");
     assert.equal(proposed.proposal?.runtimeMode, "approval-required");
     assert.notProperty(proposed.proposal, "setupRuntimeMode");
@@ -945,7 +1044,7 @@ it.effect("requires a fresh proposal after more discussion and rejects stale sav
     h.finish(draft.threadId);
     h.threads.set(draft.threadId, {
       ...h.threads.get(draft.threadId)!,
-      latestUserMessageAt: "2026-09-12T00:01:00.000Z",
+      latestUserMessageAt: DateTime.makeUnsafe("2026-09-12T00:01:00.000Z"),
     });
     assert.isTrue(
       yield* service
@@ -983,8 +1082,8 @@ it.effect("cancelling setup interrupts its turn, retains history and permits a n
     });
     assert.lengthOf(board.setups ?? [], 0);
     assert.lengthOf(board.projects, 0);
-    assert.isNull(h.threads.get(draft.threadId)?.session);
-    assert.equal(h.threads.get(draft.threadId)?.archivedAt, timestamp);
+    assert.isNull(h.threads.get(draft.threadId)?.activeRunId);
+    assert.equal(h.threads.get(draft.threadId)?.archivedAt, at);
     assert.isTrue(
       yield* service.proposeSetup(draft.threadId, setupPlan, "Too late").pipe(Effect.isFailure),
     );
@@ -1098,10 +1197,10 @@ it.effect("the loop gives one issue at a time to a team and moves on after e2e",
     assert.equal(h.threads.get(first.threadId)?.worktreePath, `/worktrees/${team.threadId}`);
     yield* service.deliver();
     const workerStart = h.commands.find(
-      (c) => c.type === "thread.turn.start" && c.threadId === first.threadId,
+      (c) => c.type === "message.dispatch" && c.threadId === first.threadId,
     );
     assert.equal(
-      workerStart?.type === "thread.turn.start" ? workerStart.modelSelection?.model : null,
+      workerStart?.type === "message.dispatch" ? workerStart.modelSelection?.model : null,
       "worker-model",
     );
     // No second team while one holds the project.
@@ -1617,12 +1716,17 @@ it.effect("a leader that ends its turn without a next step is nudged once, then 
       ...(h.messages.get(lead) ?? []),
       {
         id: MessageId.make("person"),
+        threadId: lead,
+        runId: null,
+        nodeId: null,
         role: "user",
         text: "What is left?",
-        turnId: null,
+        attachments: [],
         streaming: false,
-        createdAt: timestamp,
-        updatedAt: timestamp,
+        createdAt: at,
+        updatedAt: at,
+        createdBy: "user",
+        creationSource: "web",
       },
     ]);
     yield* endTurn(h, service, lead);
@@ -1647,7 +1751,7 @@ it.effect("retains ownership and queued turns across service recreation", () =>
     yield* restarted.deliver();
     yield* restarted.deliver();
     const starts = h.commands.filter(
-      (c) => c.type === "thread.turn.start" && c.threadId === first.threadId,
+      (c) => c.type === "message.dispatch" && c.threadId === first.threadId,
     );
     assert.lengthOf(starts, 1);
   }).pipe(Effect.provide(database()), Effect.scoped),
@@ -1671,7 +1775,7 @@ it.effect("answers a decision exactly once in its worker and prevents unattended
     yield* service.answer({ decisionId: decision.id, answer: "Duplicate" });
     yield* service.deliver();
     const replies = h.commands.filter(
-      (c) => c.type === "thread.turn.start" && c.message.text.includes("Keep existing access."),
+      (c) => c.type === "message.dispatch" && c.text.includes("Keep existing access."),
     );
     assert.lengthOf(replies, 1);
     assert.equal((yield* service.board(null)).decisions[0]?.answer, "Keep existing access.");
@@ -1712,29 +1816,15 @@ it.effect(
       yield* service.submitReview(reviewer, "changes-requested", "Missing a test.", "One gap.");
       // The reviewer's turn ends with a watch loop still running in its session.
       yield* endTurn(h, service, reviewer);
-      h.threads.set(reviewer, { ...h.threads.get(reviewer)!, backgroundLiveness: "monitoring" });
+      h.threads.set(reviewer, {
+        ...h.threads.get(reviewer)!,
+        pendingBackgroundTasks: [{ kind: "monitor", taskId: "watch" }],
+      });
       const before = turnsOf(h, t.threadId).length;
       yield* service.deliver();
       // The handoff waits for the reviewer, whose session is released rather than waited on.
       assert.equal(turnsOf(h, t.threadId).length, before);
       assert.deepEqual(h.stopped, [reviewer]);
-      // The provider reports the released session; that is no failure of the team's.
-      yield* service.observe({
-        ...eventBase(reviewer),
-        type: "thread.session-set",
-        payload: {
-          threadId: reviewer,
-          session: {
-            threadId: reviewer,
-            status: "stopped",
-            providerName: "test",
-            activeTurnId: null,
-            runtimeMode: "approval-required",
-            lastError: null,
-            updatedAt: timestamp,
-          },
-        },
-      });
       yield* service.deliver();
       assert.include(turnsOf(h, t.threadId).at(-1), "Code review requested changes");
       const after = yield* taskById(service, t.id);
@@ -1742,68 +1832,29 @@ it.effect(
       assert.equal(after.stage, "implement");
       assert.isNull(after.error);
       // The thread that holds the issue keeps its background work.
-      h.threads.set(t.threadId, { ...h.threads.get(t.threadId)!, backgroundLiveness: "working" });
+      h.threads.set(t.threadId, {
+        ...h.threads.get(t.threadId)!,
+        pendingBackgroundTasks: [{ kind: "subagent", taskId: "helper" }],
+      });
       yield* service.deliver();
       assert.deepEqual(h.stopped, [reviewer]);
     }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-it.effect("a waiting thread's idle session being released does not block its issue", () =>
+it.effect("a waiting thread whose run is stopped mid-turn hands its issue to the leader", () =>
   Effect.gen(function* () {
     const h = harness();
     const { service } = yield* h.setup;
     const first = yield* takeIssue(h, service);
     yield* service.deliver();
     yield* service.askDecision(first.threadId, "Which copy?");
-    yield* endTurn(h, service, first.threadId);
-    const stop = (state: "completed" | "running") =>
-      Effect.gen(function* () {
-        const thread = h.threads.get(first.threadId)!;
-        h.threads.set(first.threadId, {
-          ...thread,
-          latestTurn: {
-            turnId: TurnId.make("turn-1"),
-            state,
-            requestedAt: timestamp,
-            startedAt: timestamp,
-            completedAt: state === "completed" ? timestamp : null,
-            assistantMessageId: null,
-          },
-        });
-        yield* service.observe({
-          ...eventBase(first.threadId),
-          type: "thread.session-set",
-          payload: {
-            threadId: first.threadId,
-            session: {
-              threadId: first.threadId,
-              status: "stopped",
-              providerName: "test",
-              activeTurnId: null,
-              runtimeMode: "approval-required",
-              lastError: null,
-              updatedAt: timestamp,
-            },
-          },
-        });
-        return yield* taskById(service, first.id);
-      });
-
-    const released = yield* stop("completed");
-    assert.equal(released.status, "waiting");
-    assert.isNull(released.error);
-    // Stopped mid-turn is still a failure its team leader hears about.
-    const cut = yield* stop("running");
+    h.finish(first.threadId);
+    yield* service.observe(runEnded(h.threads.get(first.threadId)!, "interrupted"));
+    const cut = yield* taskById(service, first.id);
     assert.equal(cut.status, "blocked");
     assert.equal(cut.stage, "lead");
-    // The projection settles the cut turn once its session stops.
-    const thread = h.threads.get(first.threadId)!;
-    h.threads.set(first.threadId, {
-      ...thread,
-      latestTurn: { ...thread.latestTurn!, state: "interrupted" },
-    });
     yield* service.deliver();
-    assert.include(turnsOf(h, leadOf(first)).at(-1), "The worker for APP-1 is stopped");
+    assert.include(turnsOf(h, leadOf(first)).at(-1), "The worker for APP-1 is interrupted");
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -1815,7 +1866,7 @@ it.effect("interrupting holds every team until the person resumes it", () =>
     yield* service.control({ projectId: config.projectId, action: "interrupt" });
     yield* service.deliver();
     assert.lengthOf(
-      h.commands.filter((c) => c.type === "thread.turn.start"),
+      h.commands.filter((c) => c.type === "message.dispatch"),
       0,
     );
     yield* service.scan();
@@ -1912,12 +1963,14 @@ it.effect("a pending provider start blocks duplicate delivery and staging accept
     const h = harness();
     const { service } = yield* h.setup;
     const first = yield* takeIssue(h, service);
-    h.pendingStarts.add(first.threadId);
+    // A run queued on the thread, not yet started by its provider.
+    const idle = h.threads.get(first.threadId)!;
+    h.threads.set(first.threadId, { ...idle, status: "queued" });
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, first.threadId), 0);
     assert.isTrue(yield* service.messageWorker(leadOf(first), "More work").pipe(Effect.isFailure));
     assert.isTrue(yield* service.verifyStaging(leadOf(first)).pipe(Effect.isFailure));
-    h.pendingStarts.delete(first.threadId);
+    h.threads.set(first.threadId, idle);
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, first.threadId), 1);
   }).pipe(Effect.provide(database()), Effect.scoped),
@@ -2011,7 +2064,7 @@ it.effect("a team that frees its place starts the next issue without waiting for
     const scanned = yield* Deferred.make<void>();
     const started = yield* Deferred.make<ThreadId>();
     h.onDispatch((command) =>
-      command.type === "thread.turn.start" && command.threadId === lead
+      command.type === "message.dispatch" && command.threadId === lead
         ? Deferred.succeed(scanned, undefined).pipe(Effect.asVoid)
         : command.type === "thread.create" && command.threadId !== lead
           ? Deferred.succeed(started, command.threadId).pipe(Effect.asVoid)
@@ -2053,18 +2106,6 @@ it.effect("a longer external wait wakes the leader only once its minutes pass", 
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-const eventBase = (threadId: ThreadId) => ({
-  sequence: 100,
-  eventId: EventId.make("test-event"),
-  aggregateKind: "thread" as const,
-  aggregateId: threadId,
-  occurredAt: timestamp,
-  commandId: null,
-  causationEventId: null,
-  correlationId: null,
-  metadata: {},
-});
-
 it.effect("deleting a setup thread releases the project for another conversation", () =>
   Effect.gen(function* () {
     const h = harness();
@@ -2074,7 +2115,7 @@ it.effect("deleting a setup thread releases the project for another conversation
     yield* service.observe({
       ...eventBase(draft.threadId),
       type: "thread.deleted",
-      payload: { threadId: draft.threadId, deletedAt: timestamp },
+      payload: { ...liveThreadShell(draft.threadId), deletedAt: at } as never,
     });
     assert.lengthOf((yield* service.board(null)).setups ?? [], 0);
     assert.notEqual((yield* service.beginSetup(setupInput)).threadId, draft.threadId);
@@ -2087,7 +2128,7 @@ it.effect("resuming setup restores its archived conversation", () =>
     const service = yield* h.initialize;
     const draft = yield* service.beginSetup(setupInput);
     h.finish(draft.threadId);
-    h.threads.set(draft.threadId, { ...h.threads.get(draft.threadId)!, archivedAt: timestamp });
+    h.threads.set(draft.threadId, { ...h.threads.get(draft.threadId)!, archivedAt: at });
     assert.equal((yield* service.beginSetup(setupInput)).threadId, draft.threadId);
     assert.isNull(h.threads.get(draft.threadId)?.archivedAt);
   }).pipe(Effect.provide(database()), Effect.scoped),
@@ -2099,7 +2140,7 @@ it.effect("verifies staging for a worker the person already archived", () =>
     const { service } = yield* h.setup;
     const first = yield* takeIssue(h, service);
     yield* reachMerge(h, service, first);
-    h.threads.set(first.threadId, { ...h.threads.get(first.threadId)!, archivedAt: timestamp });
+    h.threads.set(first.threadId, { ...h.threads.get(first.threadId)!, archivedAt: at });
     yield* leadToE2e(h, service, first);
     const tester = assistantTaskThreadId(first, "e2e");
     const delivered = yield* service.submitE2e(tester, {
@@ -2136,28 +2177,9 @@ it.effect("a provider request that expired before it was answered closes its dec
     const h = harness();
     const { service } = yield* h.setup;
     const lead = leadOf(yield* activeTask(service));
-    const activity = (kind: string, detail?: string) => ({
-      ...eventBase(lead),
-      type: "thread.activity-appended" as const,
-      payload: {
-        threadId: lead,
-        activity: {
-          id: EventId.make(kind),
-          kind,
-          summary: "Approve the command",
-          tone: "approval" as const,
-          turnId: null,
-          createdAt: timestamp,
-          payload: { requestId: "approval-1", ...(detail ? { detail } : {}) },
-        },
-      },
-    });
-    yield* service.observe(activity("approval.requested"));
-    yield* service.observe(activity("provider.approval.respond.failed", "Provider unavailable"));
+    yield* service.observe(requestOpened(lead, "approval", "approval-1", "Approve the command"));
     assert.isNull((yield* service.board(null)).decisions[0]?.answer);
-    yield* service.observe(
-      activity("provider.approval.respond.failed", "Stale pending approval request: approval-1"),
-    );
+    yield* service.observe(requestClosed(lead, "approval-1", "expired"));
     assert.equal(
       (yield* service.board(null)).decisions[0]?.answer,
       "The request expired before it was answered",
@@ -2173,22 +2195,9 @@ it.effect(
       const { service } = yield* h.setup;
       const first = yield* takeIssue(h, service);
       yield* service.deliver();
-      yield* service.observe({
-        ...eventBase(first.threadId),
-        type: "thread.activity-appended",
-        payload: {
-          threadId: first.threadId,
-          activity: {
-            id: EventId.make("request"),
-            kind: "user-input.requested",
-            summary: "Choose the behavior",
-            tone: "approval",
-            turnId: null,
-            createdAt: timestamp,
-            payload: { requestId: "request-1" },
-          },
-        },
-      });
+      yield* service.observe(
+        requestOpened(first.threadId, "user-input", "request-1", "Choose the behavior"),
+      );
       const question = (yield* service.board(null)).decisions[0]!;
       assert.equal(question.kind, "user-input");
       assert.equal((yield* taskById(service, first.id)).status, "waiting");
@@ -2197,22 +2206,7 @@ it.effect(
           .answer({ decisionId: question.id, answer: "Bypass provider" })
           .pipe(Effect.isFailure),
       );
-      yield* service.observe({
-        ...eventBase(first.threadId),
-        type: "thread.activity-appended",
-        payload: {
-          threadId: first.threadId,
-          activity: {
-            id: EventId.make("resolved"),
-            kind: "user-input.resolved",
-            summary: "Answered",
-            tone: "info",
-            turnId: null,
-            createdAt: timestamp,
-            payload: { requestId: "request-1" },
-          },
-        },
-      });
+      yield* service.observe(requestClosed(first.threadId, "request-1"));
       assert.equal((yield* service.board(null)).decisions[0]?.answer, "Answered in the thread");
       yield* endTurn(h, service, first.threadId);
       yield* service.deliver();
@@ -2228,21 +2222,7 @@ it.effect("accepts a decision reply in the original thread without dispatching i
     const first = yield* takeIssue(h, service);
     yield* service.deliver();
     yield* service.askDecision(first.threadId, "Keep existing access?");
-    yield* service.observe({
-      ...eventBase(first.threadId),
-      type: "thread.message-sent",
-      payload: {
-        threadId: first.threadId,
-        messageId: MessageId.make("human-reply"),
-        role: "user",
-        text: "Yes, keep it.",
-        attachments: [],
-        turnId: null,
-        streaming: false,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      },
-    });
+    yield* service.observe(personWrites(first.threadId, "human-reply", "Yes, keep it."));
     assert.equal((yield* service.board(null)).decisions[0]?.answer, "Yes, keep it.");
     h.finish(first.threadId);
     yield* service.deliver();
@@ -2259,26 +2239,20 @@ it.effect(
       const [first, second] = yield* heldTasks(service);
       const lead = leadOf(first!);
       h.replayEvents.push({
-        ...eventBase(lead),
-        type: "thread.activity-appended",
-        payload: {
-          threadId: lead,
-          activity: {
-            id: EventId.make("recovered-question"),
-            kind: "user-input.requested",
-            summary: "A question retained across restart",
-            tone: "approval",
-            turnId: null,
-            createdAt: timestamp,
-            payload: { requestId: "recovered-request" },
-          },
-        },
+        sequence: 1,
+        commandId: null,
+        event: requestOpened(
+          lead,
+          "user-input",
+          "recovered-request",
+          "A question retained across restart",
+        ),
       });
       const activation = yield* Deferred.make<void>();
       const resumed = yield* Deferred.make<void>();
       // Both leaders' start turns are undelivered: the other team's marks delivery.
       h.onDispatch((command) =>
-        command.type === "thread.turn.start" && command.threadId === leadOf(second!)
+        command.type === "message.dispatch" && command.threadId === leadOf(second!)
           ? Deferred.succeed(resumed, undefined).pipe(Effect.asVoid)
           : Effect.void,
       );
@@ -2286,7 +2260,7 @@ it.effect(
         Effect.provideService(ServerActivation, Deferred.await(activation)),
       );
       assert.lengthOf(
-        h.commands.filter((c) => c.type === "thread.turn.start"),
+        h.commands.filter((c) => c.type === "message.dispatch"),
         0,
       );
       yield* Deferred.succeed(activation, undefined);
@@ -2316,13 +2290,13 @@ it.effect("recovery archives the retired developer assistant chat threads", () =
     // The leader's start turn is delivered once recovery is done.
     const recovered = yield* Deferred.make<void>();
     h.onDispatch((command) =>
-      command.type === "thread.turn.start" && command.threadId === lead
+      command.type === "message.dispatch" && command.threadId === lead
         ? Deferred.succeed(recovered, undefined).pipe(Effect.asVoid)
         : Effect.void,
     );
     yield* h.makeWithWorkers;
     yield* Deferred.await(recovered);
-    assert.equal(h.threads.get(chat)?.archivedAt, timestamp);
+    assert.equal(h.threads.get(chat)?.archivedAt, at);
     assert.lengthOf(
       h.commands.filter((c) => c.type === "thread.archive"),
       1,
@@ -2442,9 +2416,7 @@ it.effect("a pair that runs out of rounds goes back to the team leader", () =>
     assert.include(turnsOf(h, leadOf(first)).at(-1), "is blocked");
     // The implementer received only the rounds it was allowed.
     assert.isFalse(
-      h.commands.some(
-        (c) => c.type === "thread.turn.start" && c.message.text.includes("Still wrong 2"),
-      ),
+      h.commands.some((c) => c.type === "message.dispatch" && c.text.includes("Still wrong 2")),
     );
     // A blocked issue waits for the person; its leader is not nudged.
     const told = turnsOf(h, leadOf(first)).length;
@@ -2745,7 +2717,7 @@ it.effect("a team leader's thread the person archived is brought back for its ne
     const lead = leadOf(task);
     yield* service.deliver();
     // The person archives the leader's thread while its worker is running.
-    h.threads.set(lead, { ...h.threads.get(lead)!, archivedAt: timestamp });
+    h.threads.set(lead, { ...h.threads.get(lead)!, archivedAt: at });
     yield* endTurn(h, service, task.threadId);
     yield* service.deliver();
     assert.isNull(h.threads.get(lead)?.archivedAt);
@@ -2816,7 +2788,7 @@ it.effect("interrupting keeps an update made while its threads were stopped", ()
     // A turn ending writes to the same row between the board read and the save.
     let raced = false;
     h.onDispatch((command) =>
-      command.type === "thread.turn.interrupt" && command.threadId === leadOf(task) && !raced
+      command.type === "thread.stop" && command.threadId === leadOf(task) && !raced
         ? Effect.sync(() => {
             raced = true;
           }).pipe(
@@ -2940,10 +2912,11 @@ it.effect("a delivered team is closed once its threads are all finished, and onl
       screenshots: [],
     });
     // The leader is running again when the tester's turn ends; the team stays open.
-    h.pendingStarts.add(leadOf(task));
+    const lead = h.threads.get(leadOf(task))!;
+    h.threads.set(leadOf(task), { ...lead, status: "queued" });
     yield* endTurn(h, service, tester);
     assert.lengthOf(h.removed, 0);
-    h.pendingStarts.delete(leadOf(task));
+    h.threads.set(leadOf(task), lead);
     yield* endTurn(h, service, leadOf(task));
     assert.lengthOf(h.removed, 1);
     // Whatever settles afterwards finds the team closed.
@@ -2973,7 +2946,7 @@ const deliverWhileTesting = (h: Harness, service: Service) =>
       h.threads.set(id, {
         ...h.threads.get(id)!,
         settledOverride: "settled",
-        settledAt: timestamp,
+        settledAt: at,
       });
     }
     return { task, tester };
@@ -3000,18 +2973,10 @@ it.effect("a finished team keeps its worktree until the last turn's checkpoint i
     yield* endTurn(h, service, tester);
     // The turn ended just now by the clock, so its checkpoint is still being captured.
     const thread = h.threads.get(tester)!;
-    const now = DateTime.formatIso(yield* DateTime.now);
     h.threads.set(tester, {
       ...thread,
       settledOverride: null,
-      latestTurn: {
-        turnId: TurnId.make("tester-last"),
-        state: "completed",
-        requestedAt: now,
-        startedAt: now,
-        completedAt: now,
-        assistantMessageId: null,
-      },
+      latestRunCompletedAt: yield* DateTime.now,
     });
     const sql = yield* SqlClient.SqlClient;
     yield* sql`UPDATE assistant_tasks SET data = json_remove(data, '$.teamClosedAt') WHERE id = ${task.id}`;
@@ -3048,15 +3013,8 @@ it.effect("a finished team a settle was refused for closes from a later scan", (
         h.threads.set(tester, {
           ...thread,
           settledOverride: null,
-          session: {
-            threadId: tester,
-            status: "running",
-            providerName: "test",
-            activeTurnId: TurnId.make("raced"),
-            runtimeMode: "approval-required",
-            lastError: null,
-            updatedAt: timestamp,
-          },
+          status: "running",
+          activeRunId: RunId.make("raced"),
         });
       }),
     );
@@ -3624,15 +3582,8 @@ it.effect("a leader is not nudged while another of its issue's threads is still 
     const worker = h.threads.get(first.threadId)!;
     h.threads.set(first.threadId, {
       ...worker,
-      session: {
-        threadId: first.threadId,
-        status: "running",
-        providerName: "test",
-        activeTurnId: null,
-        runtimeMode: "approval-required",
-        lastError: null,
-        updatedAt: timestamp,
-      },
+      status: "running",
+      activeRunId: RunId.make("follow-up"),
     });
     yield* endTurn(h, service, lead);
     const nudges = (yield* queuedFor(lead)).filter((m) => m.id.includes(":nudge:"));
@@ -3660,24 +3611,6 @@ it.effect("a queued nudge is dropped once the issue has moved on from its leader
     yield* endTurn(h, service, team.threadId);
     yield* service.deliver();
     assert.isFalse(turnsOf(h, lead).some((text) => text.includes("You ended your turn")));
-  }).pipe(Effect.provide(database()), Effect.scoped),
-);
-
-it.effect("a queued turn is dispatched with the time it starts, not the time it was queued", () =>
-  Effect.gen(function* () {
-    const h = harness();
-    const { service } = yield* h.setup;
-    const team = yield* activeTask(service);
-    yield* TestClock.adjust(Duration.minutes(15));
-    yield* service.deliver();
-    const start = h.commands.find(
-      (c) => c.type === "thread.turn.start" && c.threadId === leadOf(team),
-    );
-    const queuedAt = (yield* SqlClient.SqlClient)<{
-      created_at: string;
-    }>`SELECT created_at FROM assistant_messages WHERE thread_id = ${leadOf(team)}`;
-    const createdAt = start?.type === "thread.turn.start" ? start.createdAt : "";
-    assert.equal(Date.parse(createdAt) - Date.parse((yield* queuedAt)[0]!.created_at), 15 * 60_000);
   }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
@@ -3771,24 +3704,24 @@ it.effect(
     }).pipe(Effect.provide(database()), Effect.scoped),
 );
 
-/** A thread's turn failed the way the provider reports it. */
-const sessionError = (threadId: ThreadId, lastError: string) =>
-  ({
-    ...eventBase(threadId),
-    type: "thread.session-set",
-    payload: {
-      threadId,
-      session: {
-        threadId,
-        status: "error",
-        providerName: "test",
-        activeTurnId: null,
-        runtimeMode: "approval-required",
-        lastError,
-        updatedAt: timestamp,
-      },
-    },
-  }) satisfies OrchestrationEvent;
+/**
+ * A thread's run failed the way the provider reports it. A usage limit carries
+ * its class, and its reset time when the provider said when it lifts.
+ */
+const sessionError = (h: Harness, threadId: ThreadId, lastError: string) => {
+  const limit = /usage limit/i.test(lastError);
+  const resets = /resets in 2h 10m/.test(lastError);
+  const thread = {
+    ...h.threads.get(threadId)!,
+    status: "failed" as const,
+    activeRunId: null,
+    lastError,
+    lastErrorClass: limit ? ("usage_limit" as const) : null,
+    usageLimitResetAt: resets ? IsoDateTime.make("1970-01-01T02:10:00.000Z") : null,
+  };
+  h.threads.set(threadId, thread);
+  return runEnded(thread, "failed");
+};
 const LIMIT_ERROR =
   "Claude usage limit reached. Send the message again once the 5-hour limit resets in 2h 10m.";
 
@@ -3805,7 +3738,7 @@ it.effect(
       assert.lengthOf(turnsOf(h, lead), 1);
       assert.lengthOf(turnsOf(h, leadOf(second!)), 1);
       h.finish(lead);
-      yield* service.observe(sessionError(lead, LIMIT_ERROR));
+      yield* service.observe(sessionError(h, lead, LIMIT_ERROR));
       // The issue is not blocked and its leader is not told about a failure.
       const held = yield* taskById(service, first!.id);
       assert.equal(held.status, "working");
@@ -3844,7 +3777,7 @@ it.effect("a limit failure with no reset time is tried again after a while", () 
     yield* service.deliver();
     h.finish(leadOf(team));
     yield* service.observe(
-      sessionError(leadOf(team), "Claude stopped: a usage limit blocked the request."),
+      sessionError(h, leadOf(team), "Claude stopped: a usage limit blocked the request."),
     );
     assert.equal(
       (yield* service.board(null)).projects[0]?.limitedUntil,
@@ -3861,7 +3794,7 @@ it.effect("starting the assistant lifts a usage-limit hold and sends what waited
     const lead = leadOf(team);
     yield* service.deliver();
     h.finish(lead);
-    yield* service.observe(sessionError(lead, LIMIT_ERROR));
+    yield* service.observe(sessionError(h, lead, LIMIT_ERROR));
     yield* service.deliver();
     assert.lengthOf(turnsOf(h, lead), 1);
     yield* service.control({ projectId: config.projectId, action: "start" });
@@ -3878,8 +3811,9 @@ it.effect("a provider error gets the thread one more turn before it blocks the i
     const { service } = yield* h.setup;
     const first = yield* takeIssue(h, service);
     yield* service.deliver();
-    const failed = service.observe(
-      sessionError(first.threadId, "Claude gave up after repeated API errors."),
+    // Each failure is a run of its own.
+    const failed = Effect.suspend(() =>
+      service.observe(sessionError(h, first.threadId, "Claude gave up after repeated API errors.")),
     );
     const retries = () =>
       turnsOf(h, first.threadId).filter((text) => text.includes("Continue where you left off."))
@@ -4345,7 +4279,7 @@ it.effect("an issue blocked for the person is an error in its session, once", ()
     // The first error is retried; the second, soon after, blocks the issue.
     for (const _ of [1, 2])
       yield* service.observe(
-        sessionError(first.threadId, "Claude gave up after repeated API errors."),
+        sessionError(h, first.threadId, "Claude gave up after repeated API errors."),
       );
     assert.equal((yield* taskById(service, first.id)).status, "blocked");
     // Interrupting an issue that is already blocked adds nothing.
@@ -4515,22 +4449,7 @@ it.effect("a provider request waiting in a team thread is not answered from Line
     const { service } = yield* h.setup;
     const team = yield* activeTask(service);
     const lead = leadOf(team);
-    yield* service.observe({
-      ...eventBase(lead),
-      type: "thread.activity-appended",
-      payload: {
-        threadId: lead,
-        activity: {
-          id: EventId.make("approval"),
-          kind: "approval.requested",
-          summary: "Approve the command",
-          tone: "approval",
-          turnId: null,
-          createdAt: timestamp,
-          payload: { requestId: "approval-1" },
-        },
-      },
-    });
+    yield* service.observe(requestOpened(lead, "approval", "approval-1", "Approve the command"));
     yield* linearReply(h, team, "d1", "approve");
     assert.isNull((yield* service.board(null)).decisions[0]?.answer);
     assert.equal(
@@ -4556,9 +4475,7 @@ it.effect(
         stopped.error,
         "Stopped from Linear. Resume or skip the issue on the developer assistant board in T3 Code.",
       );
-      const interrupted = h.commands.flatMap((c) =>
-        c.type === "thread.turn.interrupt" ? [c.threadId] : [],
-      );
+      const interrupted = h.commands.flatMap((c) => (c.type === "thread.stop" ? [c.threadId] : []));
       assert.includeMembers(interrupted, [leadOf(first), first.threadId]);
       const errors = h.app.queued.filter((item) => item.content.type === "error");
       assert.lengthOf(errors, 1);
@@ -4573,7 +4490,7 @@ it.effect(
         1,
       );
       assert.deepEqual(
-        h.commands.flatMap((c) => (c.type === "thread.turn.interrupt" ? [c.threadId] : [])),
+        h.commands.flatMap((c) => (c.type === "thread.stop" ? [c.threadId] : [])),
         interrupted,
       );
     }).pipe(Effect.provide(database()), Effect.scoped),

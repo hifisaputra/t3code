@@ -167,7 +167,7 @@ export function CalendarAgenda({
   const mutate = async (input: GoogleCalendarUpdateInput) => {
     setBusy(true);
     setNotice(null);
-    try {
+    const attempt = async () => {
       const result = await update({ environmentId, input });
       if (result._tag === "Success") {
         events.refresh();
@@ -175,9 +175,10 @@ export function CalendarAgenda({
         if (input.action === "delete") creation.current = null;
         setNotice("Calendar updated.");
       }
-    } finally {
+    };
+    await attempt().finally(() => {
       setBusy(false);
-    }
+    });
   };
 
   const create = async () => {
@@ -185,16 +186,17 @@ export function CalendarAgenda({
     const signature = JSON.stringify({ calendarId, issueIdentifier, ...blockRange });
     if (creation.current?.signature !== signature)
       creation.current = { signature, requestId: randomUUID().replaceAll("-", "") };
+    const requestId = creation.current.requestId;
     setBusy(true);
     setNotice(null);
-    try {
+    const attempt = async () => {
       const result = await schedule({
         environmentId,
         input: {
           calendarId,
           reference: issueIdentifier,
           ...blockRange,
-          requestId: creation.current.requestId,
+          requestId,
         },
       });
       if (result._tag === "Success") {
@@ -203,9 +205,10 @@ export function CalendarAgenda({
         // create an identical block after a slow response or retry.
         setNotice(`Scheduled ${issueIdentifier}. Change the time to add another session.`);
       }
-    } finally {
+    };
+    await attempt().finally(() => {
       setBusy(false);
-    }
+    });
   };
 
   const embedded = !!issueIdentifier;

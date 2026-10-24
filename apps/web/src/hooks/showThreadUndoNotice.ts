@@ -9,10 +9,11 @@ import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import * as ThreadUndo from "./threadUndo";
 
 type UndoOptions = {
-  action: "Settled" | "Snoozed" | "Unpinned" | "Archived";
+  action: "Settled" | "Snoozed" | "Unpinned" | "Archived" | "Discarded";
   undo: () => Promise<AtomCommandResult<unknown, unknown>>;
   failureTitle: string;
   claim: ReturnType<typeof ThreadUndo.begin>;
+  commit?: () => void;
 };
 
 type UndoNotice = {
@@ -23,13 +24,16 @@ type UndoNotice = {
 
 export const useThreadUndoNotice = create<{ notice: UndoNotice | null }>(() => ({ notice: null }));
 
-// Shared across sidebar, header and menu actions. Consecutive actions of the
-// same kind share one notice and can be restored together.
 let liveUndos: UndoOptions[] = [];
 let expiry: ReturnType<typeof setTimeout> | undefined;
+// A new notice owns mod+z even inside a text field, until the user presses
+// another key or edits text. After that, mod+z is the field's own undo again.
+let shortcutClaimed = false;
 
 function refreshNotice() {
-  liveUndos = liveUndos.filter(({ claim }) => claim.isCurrent());
+  const stale = liveUndos.filter(({ claim }) => !claim.isCurrent());
+  liveUndos = liveUndos.filter((entry) => !stale.includes(entry));
+  for (const entry of stale) entry.commit?.();
   const latest = liveUndos.at(-1);
   if (!latest) {
     clearTimeout(expiry);
@@ -83,7 +87,6 @@ function refreshNotice() {
 
 ThreadUndo.subscribe(refreshNotice);
 
-/** Runs the group displayed in the sidebar; false when nothing is left to undo. */
 export function undoLatestThreadAction(): boolean {
   const notice = useThreadUndoNotice.getState().notice;
   if (!notice) return false;
@@ -91,16 +94,30 @@ export function undoLatestThreadAction(): boolean {
   return true;
 }
 
+/** Whether mod+z should undo the notice's actions even while a text field is focused. */
+export function threadUndoClaimsShortcut(): boolean {
+  return shortcutClaimed && useThreadUndoNotice.getState().notice !== null;
+}
+
+/** Called on any other keypress or text edit; hands mod+z back to text fields. */
+export function releaseThreadUndoShortcut() {
+  shortcutClaimed = false;
+}
+
 /** Shows one compact confirmation for the currently undoable thread actions. */
 export function showThreadUndoNotice(options: UndoOptions) {
   if (!options.claim.isCurrent()) return;
   liveUndos.push(options);
+  shortcutClaimed = true;
   refreshNotice();
   clearTimeout(expiry);
   expiry = setTimeout(() => {
     const expired = liveUndos;
     liveUndos = [];
-    for (const { claim } of expired) claim.finish();
+    for (const { claim, commit } of expired) {
+      claim.finish();
+      commit?.();
+    }
     refreshNotice();
   }, 5_000);
 }

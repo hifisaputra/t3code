@@ -2,7 +2,8 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { IsoDateTime, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
-import { ModelSelection, RuntimeMode } from "./orchestration.ts";
+import { ModelSelection } from "./modelSelection.ts";
+import { RuntimeMode } from "./providerPolicy.ts";
 import { LinearIssueSummary } from "./linear.ts";
 
 export class DeveloperAssistantError extends Schema.TaggedError<DeveloperAssistantError>()(

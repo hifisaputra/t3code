@@ -1,7 +1,10 @@
-import type {
-  ProjectScript,
-  ProjectScriptIcon,
-  ResolvedKeybindingsConfig,
+import {
+  AuthOrchestrationOperateScope,
+  AuthSettingsWriteScope,
+  type EnvironmentId,
+  type ProjectScript,
+  type ProjectScriptIcon,
+  type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
@@ -19,10 +22,8 @@ import {
 import React, {
   type FormEvent,
   type KeyboardEvent,
-  useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -37,6 +38,8 @@ import {
   nextProjectScriptId,
   type PackageScriptSuggestion,
 } from "~/projectScripts";
+import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
+import { useComposerMenuState } from "./chat/useComposerMenuState";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -97,12 +100,11 @@ export interface NewProjectScriptInput {
   cwd: string | null;
   icon: ProjectScriptIcon;
   runOnWorktreeCreate: boolean;
-  /** Setup scripts only: hold the agent until the script exits. */
   waitForSetup: boolean;
-  keybinding: string | null;
-  /** Optional URL to open in the in-app preview when this script runs. */
+  runOnSettle: boolean;
+  /** Omit to preserve the current shortcut when the form did not edit it. */
+  keybinding?: string | null;
   previewUrl: string | null;
-  /** When true, automatically open the preview panel pointed at `previewUrl`. */
   autoOpenPreview: boolean;
 }
 
@@ -115,16 +117,15 @@ export const EMPTY_PROJECT_SCRIPT_INPUT: NewProjectScriptInput = {
   icon: "play",
   runOnWorktreeCreate: false,
   waitForSetup: false,
+  runOnSettle: false,
   keybinding: null,
   previewUrl: null,
   autoOpenPreview: false,
 };
 
-/** What the editor dialog should open with. `scriptId: null` means "add". */
 export interface ProjectScriptEditorRequest {
   scriptId: string | null;
   initial: NewProjectScriptInput;
-  /** Validation error to show immediately (e.g. a failed t3.json import). */
   error?: string;
 }
 
@@ -141,6 +142,7 @@ export function editorRequestForScript(
       icon: script.icon,
       runOnWorktreeCreate: script.runOnWorktreeCreate,
       waitForSetup: script.runOnWorktreeCreate && script.async === false,
+      runOnSettle: script.runOnSettle ?? false,
       keybinding: keybindingValueForCommand(keybindings, commandForProjectScript(script.id)),
       previewUrl: script.previewUrl ?? null,
       autoOpenPreview: script.autoOpenPreview ?? false,
@@ -148,12 +150,9 @@ export function editorRequestForScript(
   };
 }
 
-/**
- * Add/edit dialog for a project script, shared by the chat-header scripts menu
- * and the project settings page. The parent owns which script (if any) is
- * being edited via `request`; the dialog owns the form state and validation.
- */
 export function ProjectScriptEditorDialog({
+  environmentId,
+  editScope = AuthOrchestrationOperateScope,
   request,
   scripts,
   onSubmit,
@@ -161,8 +160,9 @@ export function ProjectScriptEditorDialog({
   onClose,
   onLoadPackageScripts,
 }: {
+  environmentId: EnvironmentId;
+  editScope?: typeof AuthOrchestrationOperateScope | typeof AuthSettingsWriteScope;
   request: ProjectScriptEditorRequest | null;
-  /** Existing scripts, used to derive a unique id for new scripts. */
   scripts: ReadonlyArray<ProjectScript>;
   onSubmit: (
     scriptId: string | null,
@@ -176,81 +176,162 @@ export function ProjectScriptEditorDialog({
    */
   onLoadPackageScripts?: () => Promise<PackageScriptSuggestion[]>;
 }) {
+  const canEditActions = useEnvironmentScope(environmentId, editScope);
+  // Keyed by the request it belongs to: a new request starts from its own error,
+  // and a late save from the previous request can't overwrite it.
+  const [errorState, setErrorState] = useState<{
+    readonly request: ProjectScriptEditorRequest;
+    readonly message: string | null;
+  } | null>(null);
+  const validationError =
+    request === null
+      ? null
+      : errorState?.request === request
+        ? errorState.message
+        : (request.error ?? null);
+  const setValidationError = (message: string | null) => {
+    if (request !== null) setErrorState({ request, message });
+  };
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useComposerMenuState(!canEditActions);
+  const [deleteName, setDeleteName] = useState("");
+
+  return (
+    <>
+      <Dialog
+        open={request !== null}
+        onOpenChange={(open) => {
+          if (!open) onClose();
+        }}
+      >
+        {/* The form owns its fields so a keystroke re-renders it, not the dialog chrome. */}
+        <DialogPopup>
+          <ProjectScriptEditorForm
+            environmentId={environmentId}
+            editScope={editScope}
+            request={request}
+            scripts={scripts}
+            validationError={validationError}
+            onValidationError={setValidationError}
+            onSubmit={onSubmit}
+            onRequestDelete={(name) => {
+              setDeleteName(name);
+              setDeleteConfirmOpen(true);
+            }}
+            onClose={onClose}
+            {...(onLoadPackageScripts ? { onLoadPackageScripts } : {})}
+          />
+        </DialogPopup>
+      </Dialog>
+
+      <AlertDialog open={deleteConfirmOpen && canEditActions} onOpenChange={setDeleteConfirmOpen}>
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete action "{deleteName}"?</AlertDialogTitle>
+            <AlertDialogDescription>This action cannot be undone.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <Button
+              variant="destructive"
+              disabled={!canEditActions}
+              onClick={() => {
+                if (!request?.scriptId) return;
+                if (!readEnvironmentScope(environmentId, editScope)) {
+                  setValidationError("This connection cannot change project actions.");
+                  return;
+                }
+                setDeleteConfirmOpen(false);
+                onClose();
+                onDelete(request.scriptId);
+              }}
+            >
+              Delete action
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+    </>
+  );
+}
+
+function ProjectScriptEditorForm({
+  environmentId,
+  editScope,
+  request,
+  scripts,
+  validationError,
+  onValidationError: setValidationError,
+  onSubmit,
+  onRequestDelete,
+  onClose,
+  onLoadPackageScripts,
+}: {
+  environmentId: EnvironmentId;
+  editScope: typeof AuthOrchestrationOperateScope | typeof AuthSettingsWriteScope;
+  request: ProjectScriptEditorRequest | null;
+  scripts: ReadonlyArray<ProjectScript>;
+  validationError: string | null;
+  onValidationError: (error: string | null) => void;
+  onSubmit: (
+    scriptId: string | null,
+    input: NewProjectScriptInput,
+  ) => Promise<ProjectScriptActionResult>;
+  onRequestDelete: (name: string) => void;
+  onClose: () => void;
+  onLoadPackageScripts?: () => Promise<PackageScriptSuggestion[]>;
+}) {
+  const canEditActions = useEnvironmentScope(environmentId, editScope);
+  const canWriteSettings = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const formId = React.useId();
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
   const [cwd, setCwd] = useState("");
   const [icon, setIcon] = useState<ProjectScriptIcon>("play");
-  const [iconPickerOpen, setIconPickerOpen] = useState(false);
+  const [iconPickerOpen, setIconPickerOpen] = useComposerMenuState(!canEditActions);
   const [runOnWorktreeCreate, setRunOnWorktreeCreate] = useState(false);
   const [waitForSetup, setWaitForSetup] = useState(false);
+  const [runOnSettle, setRunOnSettle] = useState(false);
   const [keybinding, setKeybinding] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
   const [autoOpenPreview, setAutoOpenPreview] = useState(false);
-  const [validationError, setValidationError] = useState<string | null>(null);
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [packageScripts, setPackageScripts] = useState<PackageScriptSuggestion[]>([]);
   const [packageScriptsLoading, setPackageScriptsLoading] = useState(false);
   const packageScriptsRequestRef = useRef(0);
   const [savingRequest, setSavingRequest] = useState<ProjectScriptEditorRequest | null>(null);
   const pendingSubmissionRef = useRef<{ request: ProjectScriptEditorRequest } | null>(null);
 
-  const isOpen = request !== null;
-  const isEditing = request?.scriptId != null;
-  const isSaving = request !== null && savingRequest === request;
-
-  // A save completion must not affect a replacement request or an unmounted editor.
-  useLayoutEffect(
-    () => () => {
-      if (pendingSubmissionRef.current?.request === request) {
-        pendingSubmissionRef.current = null;
-      }
-    },
-    [request],
-  );
-
-  const existingCommands = useMemo(
-    () => new Set(scripts.map((script) => `${(script.cwd ?? "").trim()} ${script.command.trim()}`)),
-    [scripts],
-  );
   // Hide package scripts that already have a matching action so we don't suggest duplicates.
-  const availablePackageScripts = useMemo(
-    () =>
-      packageScripts.filter(
-        (suggestion) =>
-          !existingCommands.has(`${(suggestion.cwd ?? "").trim()} ${suggestion.command.trim()}`),
-      ),
-    [packageScripts, existingCommands],
+  const existingCommands = new Set(
+    scripts.map((script) => `${(script.cwd ?? "").trim()} ${script.command.trim()}`),
+  );
+  const availablePackageScripts = packageScripts.filter(
+    (suggestion) =>
+      !existingCommands.has(`${(suggestion.cwd ?? "").trim()} ${suggestion.command.trim()}`),
   );
 
-  const loadPackageScriptsForDialog = useCallback(() => {
-    if (!onLoadPackageScripts) {
-      setPackageScripts([]);
+  // Each opened request re-reads the project's scripts; a stale in-flight read
+  // must not overwrite the results of a newer open.
+  useEffect(() => {
+    const requestId = packageScriptsRequestRef.current + 1;
+    packageScriptsRequestRef.current = requestId;
+    // oxlint-disable-next-line react/set-state-in-effect -- Each open starts a new read of the project's scripts, so the previous list clears before it lands.
+    setPackageScripts([]);
+    if (!request || !onLoadPackageScripts) {
       setPackageScriptsLoading(false);
       return;
     }
-    // A stale in-flight read must not overwrite the results of a newer open.
-    const requestId = packageScriptsRequestRef.current + 1;
-    packageScriptsRequestRef.current = requestId;
-    setPackageScripts([]);
     setPackageScriptsLoading(true);
     Promise.resolve(onLoadPackageScripts())
       .then((result) => {
-        if (packageScriptsRequestRef.current === requestId) {
-          setPackageScripts(result);
-        }
+        if (packageScriptsRequestRef.current === requestId) setPackageScripts(result);
       })
       .catch(() => {
-        if (packageScriptsRequestRef.current === requestId) {
-          setPackageScripts([]);
-        }
+        if (packageScriptsRequestRef.current === requestId) setPackageScripts([]);
       })
       .finally(() => {
-        if (packageScriptsRequestRef.current === requestId) {
-          setPackageScriptsLoading(false);
-        }
+        if (packageScriptsRequestRef.current === requestId) setPackageScriptsLoading(false);
       });
-  }, [onLoadPackageScripts]);
+  }, [request, onLoadPackageScripts]);
 
   const applyPackageScript = (suggestion: PackageScriptSuggestion) => {
     setName(suggestion.name);
@@ -260,37 +341,47 @@ export function ProjectScriptEditorDialog({
     setValidationError(null);
   };
 
-  // Hydrate the form whenever a new request opens the dialog.
-  useEffect(() => {
-    if (!request) return;
-    setName(request.initial.name);
-    setCommand(request.initial.command);
-    setCwd(request.initial.cwd ?? "");
-    setIcon(request.initial.icon);
-    setIconPickerOpen(false);
-    setRunOnWorktreeCreate(request.initial.runOnWorktreeCreate);
-    setWaitForSetup(request.initial.waitForSetup);
-    setKeybinding(request.initial.keybinding ?? "");
-    setPreviewUrl(request.initial.previewUrl ?? "");
-    setAutoOpenPreview(request.initial.autoOpenPreview);
-    setValidationError(request.error ?? null);
-    setSavingRequest(null);
-    loadPackageScriptsForDialog();
-  }, [request, loadPackageScriptsForDialog]);
+  const isEditing = request?.scriptId != null;
+  const isSaving = request !== null && savingRequest === request;
+
+  useLayoutEffect(
+    () => () => {
+      if (pendingSubmissionRef.current?.request === request) {
+        pendingSubmissionRef.current = null;
+      }
+    },
+    [request],
+  );
+
+  const [formRequest, setFormRequest] = useState<ProjectScriptEditorRequest | null>(null);
+  if (request !== formRequest) {
+    setFormRequest(request);
+    if (request) {
+      setName(request.initial.name);
+      setCommand(request.initial.command);
+      setCwd(request.initial.cwd ?? "");
+      setIcon(request.initial.icon);
+      setIconPickerOpen(false);
+      setRunOnWorktreeCreate(request.initial.runOnWorktreeCreate);
+      setWaitForSetup(request.initial.waitForSetup);
+      setRunOnSettle(request.initial.runOnSettle);
+      setKeybinding(request.initial.keybinding ?? "");
+      setPreviewUrl(request.initial.previewUrl ?? "");
+      setAutoOpenPreview(request.initial.autoOpenPreview);
+      setSavingRequest(null);
+    }
+  }
 
   const close = () => {
     pendingSubmissionRef.current = null;
     setSavingRequest(null);
     setIconPickerOpen(false);
-    // Drop suggestions on close so a reopen re-reads rather than
-    // flashing the previous project's scripts.
-    packageScriptsRequestRef.current += 1;
-    setPackageScripts([]);
-    setPackageScriptsLoading(false);
     onClose();
   };
 
   const captureKeybinding = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (!readEnvironmentScope(environmentId, editScope)) return;
+    if (!readEnvironmentScope(environmentId, AuthSettingsWriteScope)) return;
     if (event.key === "Tab") return;
     event.preventDefault();
     if (event.key === "Backspace" || event.key === "Delete") {
@@ -305,6 +396,17 @@ export function ProjectScriptEditorDialog({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!request || pendingSubmissionRef.current !== null) return;
+    if (!readEnvironmentScope(environmentId, editScope)) {
+      setValidationError("This connection cannot change project actions.");
+      return;
+    }
+    const changesKeybinding =
+      (keybinding.trim() || null) !== (request.initial.keybinding?.trim() || null);
+    const canChangeKeybinding = readEnvironmentScope(environmentId, AuthSettingsWriteScope);
+    if (changesKeybinding && !canChangeKeybinding) {
+      setValidationError("This connection cannot change keyboard shortcuts.");
+      return;
+    }
     const trimmedName = name.trim();
     const trimmedCommand = command.trim();
     if (trimmedName.length === 0) {
@@ -338,7 +440,10 @@ export function ProjectScriptEditorDialog({
         icon,
         runOnWorktreeCreate,
         waitForSetup: runOnWorktreeCreate && waitForSetup,
-        keybinding: keybindingRule?.key ?? null,
+        runOnSettle,
+        ...((request.scriptId === null && canChangeKeybinding) || changesKeybinding
+          ? { keybinding: keybindingRule?.key ?? null }
+          : {}),
         previewUrl: trimmedPreviewUrl.length > 0 ? trimmedPreviewUrl : null,
         autoOpenPreview: trimmedPreviewUrl.length > 0 ? autoOpenPreview : false,
       } satisfies NewProjectScriptInput;
@@ -376,239 +481,212 @@ export function ProjectScriptEditorDialog({
 
   return (
     <>
-      <Dialog
-        open={isOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            close();
-          }
-        }}
-      >
-        <DialogPopup>
-          <DialogHeader>
-            <DialogTitle>{isEditing ? "Edit Action" : "Add Action"}</DialogTitle>
-            <DialogDescription>
-              Actions are project-scoped commands you can run from the top bar or keybindings.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel>
-            <form id={formId} onSubmit={submit}>
-              <fieldset className="space-y-4" disabled={isSaving}>
-                {(packageScriptsLoading || availablePackageScripts.length > 0) && (
-                  <div className="space-y-1.5">
-                    <Label>From package.json</Label>
-                    {packageScriptsLoading ? (
-                      <p className="text-xs text-muted-foreground">Reading scripts…</p>
-                    ) : (
-                      <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
-                        {availablePackageScripts.map((suggestion) => (
-                          <Tooltip key={suggestion.name}>
-                            <TooltipTrigger
-                              render={
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="xs"
-                                  onClick={() => applyPackageScript(suggestion)}
-                                />
-                              }
-                            >
-                              <ScriptIcon icon={suggestion.icon} className="size-3.5" />
-                              <span className="ml-1">{suggestion.name}</span>
-                            </TooltipTrigger>
-                            <TooltipPopup side="top">
-                              {suggestion.cwd
-                                ? `${suggestion.command} · in ${suggestion.cwd}`
-                                : suggestion.command}
-                            </TooltipPopup>
-                          </Tooltip>
-                        ))}
-                      </div>
-                    )}
-                    <p className="text-xs text-muted-foreground">
-                      Pick a script to prefill, or enter a custom command below.
-                    </p>
+      <DialogHeader>
+        <DialogTitle>{isEditing ? "Edit Action" : "Add Action"}</DialogTitle>
+        <DialogDescription>
+          Actions are project-scoped commands you can run from the top bar or keybindings.
+        </DialogDescription>
+      </DialogHeader>
+      <DialogPanel>
+        <form id={formId} onSubmit={submit}>
+          <fieldset className="space-y-4" disabled={isSaving || !canEditActions}>
+            {(packageScriptsLoading || availablePackageScripts.length > 0) && (
+              <div className="space-y-1.5">
+                <Label>From package.json</Label>
+                {packageScriptsLoading ? (
+                  <p className="text-xs text-muted-foreground">Reading scripts…</p>
+                ) : (
+                  <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
+                    {availablePackageScripts.map((suggestion) => (
+                      <Tooltip key={suggestion.name}>
+                        <TooltipTrigger
+                          render={
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="xs"
+                              onClick={() => applyPackageScript(suggestion)}
+                            />
+                          }
+                        >
+                          <ScriptIcon icon={suggestion.icon} className="size-3.5" />
+                          <span className="ml-1">{suggestion.name}</span>
+                        </TooltipTrigger>
+                        <TooltipPopup side="top">
+                          {suggestion.cwd
+                            ? `${suggestion.command} · in ${suggestion.cwd}`
+                            : suggestion.command}
+                        </TooltipPopup>
+                      </Tooltip>
+                    ))}
                   </div>
                 )}
-                <div className="space-y-1.5">
-                  <Label htmlFor="script-name">Name</Label>
-                  <div className="flex items-center gap-2">
-                    <Popover onOpenChange={setIconPickerOpen} open={iconPickerOpen}>
-                      <PopoverTrigger
-                        render={
-                          <Button
-                            type="button"
-                            variant="outline"
-                            className="size-9 shrink-0"
-                            aria-label="Choose icon"
-                          />
-                        }
-                      >
-                        <ScriptIcon icon={icon} className="size-4.5" />
-                      </PopoverTrigger>
-                      <PopoverPopup align="start">
-                        <div className="grid grid-cols-3 gap-2">
-                          {SCRIPT_ICONS.map((entry) => {
-                            const isSelected = entry.id === icon;
-                            return (
-                              <button
-                                key={entry.id}
-                                type="button"
-                                className={`relative flex flex-col items-center gap-2 rounded-md border px-2 py-2 text-xs dark:border-transparent ${
-                                  isSelected
-                                    ? "border-primary/70 bg-primary/10 dark:ring-1 dark:ring-primary/30"
-                                    : "border-border/70 hover:bg-accent/60 dark:bg-white/[0.035]"
-                                }`}
-                                onClick={() => {
-                                  setIcon(entry.id);
-                                  setIconPickerOpen(false);
-                                }}
-                              >
-                                <ScriptIcon icon={entry.id} className="size-4" />
-                                <span>{entry.label}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </PopoverPopup>
-                    </Popover>
-                    <Input
-                      id="script-name"
-                      autoFocus
-                      placeholder="Test"
-                      value={name}
-                      onChange={(event) => setName(event.target.value)}
-                    />
-                  </div>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="script-keybinding">Keybinding</Label>
-                  <Input
-                    id="script-keybinding"
-                    placeholder="Press shortcut"
-                    value={keybinding}
-                    readOnly
-                    onKeyDown={captureKeybinding}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Press a shortcut. Use <code>Backspace</code> to clear. Shortcuts are
-                    environment-wide. Projects using the same action share its shortcut.
-                  </p>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="script-command">Command</Label>
-                  <Textarea
-                    id="script-command"
-                    placeholder="bun test"
-                    value={command}
-                    onChange={(event) => setCommand(event.target.value)}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="script-cwd">Working directory</Label>
-                  <Input
-                    id="script-cwd"
-                    placeholder="Project root"
-                    value={cwd}
-                    onChange={(event) => setCwd(event.target.value)}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Relative to the project root (e.g. <code>apps/web</code>). Leave empty to run at
-                    the root.
-                  </p>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="script-preview-url">Preview URL (optional)</Label>
-                  <Input
-                    id="script-preview-url"
-                    placeholder="http://localhost:5173"
-                    value={previewUrl}
-                    onChange={(event) => setPreviewUrl(event.target.value)}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Open this URL in the in-app preview when this action runs.
-                  </p>
-                </div>
-                <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
-                  <span>Run automatically on worktree creation</span>
-                  <Switch
-                    checked={runOnWorktreeCreate}
-                    onCheckedChange={(checked) => setRunOnWorktreeCreate(Boolean(checked))}
-                  />
-                </label>
-                <label
-                  className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
-                    runOnWorktreeCreate ? "" : "opacity-60"
-                  }`}
-                >
-                  <span>Wait for it to finish before the agent starts</span>
-                  <Switch
-                    checked={waitForSetup}
-                    disabled={!runOnWorktreeCreate}
-                    onCheckedChange={(checked) => setWaitForSetup(Boolean(checked))}
-                  />
-                </label>
-                <label
-                  className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
-                    previewUrl.trim().length === 0 ? "opacity-60" : ""
-                  }`}
-                >
-                  <span>Open preview automatically when this action runs</span>
-                  <Switch
-                    checked={autoOpenPreview}
-                    disabled={previewUrl.trim().length === 0}
-                    onCheckedChange={(checked) => setAutoOpenPreview(Boolean(checked))}
-                  />
-                </label>
-                {validationError && <p className="text-sm text-destructive">{validationError}</p>}
-              </fieldset>
-            </form>
-          </DialogPanel>
-          <DialogFooter variant="bare">
-            {isEditing && (
-              <Button
-                type="button"
-                variant="destructive-outline"
-                className="mr-auto"
-                disabled={isSaving}
-                onClick={() => setDeleteConfirmOpen(true)}
-              >
-                Delete
-              </Button>
+                <p className="text-xs text-muted-foreground">
+                  Pick a script to prefill, or enter a custom command below.
+                </p>
+              </div>
             )}
-            <Button type="button" variant="outline" onClick={close}>
-              Cancel
-            </Button>
-            <Button form={formId} type="submit" disabled={isSaving}>
-              {isSaving ? "Saving…" : isEditing ? "Save changes" : "Save action"}
-            </Button>
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
-
-      <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
-        <AlertDialogPopup>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete action "{name}"?</AlertDialogTitle>
-            <AlertDialogDescription>This action cannot be undone.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
-            <Button
-              variant="destructive"
-              disabled={isSaving}
-              onClick={() => {
-                if (!request?.scriptId) return;
-                setDeleteConfirmOpen(false);
-                close();
-                onDelete(request.scriptId);
-              }}
+            <div className="space-y-1.5">
+              <Label htmlFor="script-name">Name</Label>
+              <div className="flex items-center gap-2">
+                <Popover onOpenChange={setIconPickerOpen} open={iconPickerOpen}>
+                  <PopoverTrigger
+                    render={
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="size-9 shrink-0"
+                        aria-label="Choose icon"
+                      />
+                    }
+                  >
+                    <ScriptIcon icon={icon} className="size-4.5" />
+                  </PopoverTrigger>
+                  <PopoverPopup align="start">
+                    <div className="grid grid-cols-3 gap-2">
+                      {SCRIPT_ICONS.map((entry) => {
+                        const isSelected = entry.id === icon;
+                        return (
+                          <button
+                            key={entry.id}
+                            type="button"
+                            className={`relative flex flex-col items-center gap-2 rounded-md border px-2 py-2 text-xs dark:border-transparent ${
+                              isSelected
+                                ? "border-primary/70 bg-primary/10 ring-inset dark:ring-1 dark:ring-primary/30"
+                                : "border-border/70 hover:bg-accent/60 dark:bg-white/[0.035]"
+                            }`}
+                            onClick={() => {
+                              setIcon(entry.id);
+                              setIconPickerOpen(false);
+                            }}
+                          >
+                            <ScriptIcon icon={entry.id} className="size-4" />
+                            <span>{entry.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </PopoverPopup>
+                </Popover>
+                <Input
+                  id="script-name"
+                  autoFocus
+                  placeholder="Test"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="script-keybinding">Keybinding</Label>
+              <Input
+                disabled={!canWriteSettings}
+                id="script-keybinding"
+                placeholder="Press shortcut"
+                value={keybinding}
+                readOnly
+                onKeyDown={captureKeybinding}
+              />
+              <p className="text-xs text-muted-foreground">
+                Press a shortcut. Use <code>Backspace</code> to clear. Shortcuts are
+                environment-wide. Projects using the same action share its shortcut.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="script-command">Command</Label>
+              <Textarea
+                id="script-command"
+                placeholder="bun test"
+                value={command}
+                onChange={(event) => setCommand(event.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="script-cwd">Working directory</Label>
+              <Input
+                id="script-cwd"
+                placeholder="Project root"
+                value={cwd}
+                onChange={(event) => setCwd(event.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Relative to the project root (e.g. <code>apps/web</code>). Leave empty to run at the
+                root.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="script-preview-url">Preview URL (optional)</Label>
+              <Input
+                id="script-preview-url"
+                placeholder="http://localhost:5173"
+                value={previewUrl}
+                onChange={(event) => setPreviewUrl(event.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Open this URL in the in-app preview when this action runs.
+              </p>
+            </div>
+            <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
+              <span>Run automatically on worktree creation</span>
+              <Switch
+                checked={runOnWorktreeCreate}
+                onCheckedChange={(checked) => setRunOnWorktreeCreate(Boolean(checked))}
+              />
+            </label>
+            <label
+              className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
+                runOnWorktreeCreate ? "" : "opacity-60"
+              }`}
             >
-              Delete action
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogPopup>
-      </AlertDialog>
+              <span>Wait for it to finish before the agent starts</span>
+              <Switch
+                checked={waitForSetup}
+                disabled={!runOnWorktreeCreate}
+                onCheckedChange={(checked) => setWaitForSetup(Boolean(checked))}
+              />
+            </label>
+            <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035]">
+              <span>Run in the thread's worktree when the thread settles</span>
+              <Switch
+                checked={runOnSettle}
+                onCheckedChange={(checked) => setRunOnSettle(Boolean(checked))}
+              />
+            </label>
+            <label
+              className={`flex items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2 text-sm dark:border-transparent dark:bg-white/[0.035] ${
+                previewUrl.trim().length === 0 ? "opacity-60" : ""
+              }`}
+            >
+              <span>Open preview automatically when this action runs</span>
+              <Switch
+                checked={autoOpenPreview}
+                disabled={previewUrl.trim().length === 0}
+                onCheckedChange={(checked) => setAutoOpenPreview(Boolean(checked))}
+              />
+            </label>
+            {validationError && <p className="text-sm text-destructive">{validationError}</p>}
+          </fieldset>
+        </form>
+      </DialogPanel>
+      <DialogFooter variant="bare">
+        {isEditing && (
+          <Button
+            type="button"
+            variant="destructive-outline"
+            className="mr-auto"
+            disabled={isSaving || !canEditActions}
+            onClick={() => onRequestDelete(name)}
+          >
+            Delete
+          </Button>
+        )}
+        <Button type="button" variant="outline" onClick={close}>
+          Cancel
+        </Button>
+        <Button form={formId} type="submit" disabled={isSaving || !canEditActions}>
+          {isSaving ? "Saving…" : isEditing ? "Save changes" : "Save action"}
+        </Button>
+      </DialogFooter>
     </>
   );
 }

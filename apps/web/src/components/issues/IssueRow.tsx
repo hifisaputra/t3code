@@ -65,7 +65,7 @@ function IssueRowImpl({
         aria-current={selected ? "true" : undefined}
         aria-label={`${issue.identifier} ${issue.title}`}
         onClick={() => onSelect(issue)}
-        className="absolute inset-0 rounded-lg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="absolute inset-0 rounded-lg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
       />
       <IssuePriorityIcon priority={issue.priority} className="size-3.5" />
       <Tooltip>

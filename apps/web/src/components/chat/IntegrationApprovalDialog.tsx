@@ -1,5 +1,5 @@
 import type {
-  ApprovalRequestId,
+  RuntimeRequestId,
   EnvironmentId,
   IntegrationApprovalChangeField,
   ProviderApprovalDecision,
@@ -9,7 +9,8 @@ import type {
 import { ExternalLinkIcon } from "lucide-react";
 import { memo } from "react";
 
-import ChatMarkdown, { ChatMarkdownAssetImage } from "../ChatMarkdown";
+import ChatMarkdown from "../ChatMarkdown";
+import { ChatMarkdownAssetImage } from "./ChatMarkdownMedia";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -24,7 +25,7 @@ import { ScrollArea } from "../ui/scroll-area";
 interface IntegrationApprovalDialogProps {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
-  readonly requestId: ApprovalRequestId;
+  readonly requestId: RuntimeRequestId;
   readonly appName: string | undefined;
   readonly headline: string;
   readonly record: { readonly label: string; readonly url?: string | undefined } | undefined;
@@ -35,7 +36,7 @@ interface IntegrationApprovalDialogProps {
   readonly options: ReadonlyArray<ProviderApprovalOption>;
   readonly isResponding: boolean;
   readonly onRespondToApproval: (
-    requestId: ApprovalRequestId,
+    requestId: RuntimeRequestId,
     decision: ProviderApprovalDecision,
   ) => Promise<unknown>;
 }

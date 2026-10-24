@@ -294,6 +294,10 @@ to inspect the run in T3, including from mobile. Reply to questions in Linear;
 permission requests accept `approve` or `deny`. When several questions arrive
 together, answer one per line using the question identifiers shown.
 
+To keep your environment URL out of Linear, turn off **Post thread links to
+Linear**. Delegation keeps working, but the Linear session shows no link back to
+the T3 thread, including the team leader thread of team tasks.
+
 Use **Stop delegation** in the T3 thread header, or send `stop delegation` in the
 Linear session, to interrupt work and stop forwarding replies for that session.
 Disabling inbound delegation prevents new incoming requests; existing runs may

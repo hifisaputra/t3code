@@ -5,18 +5,24 @@ import type {
 } from "@pierre/trees";
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelector } from "@pierre/trees/react";
+import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
-import { ChevronsDownUpIcon, ChevronsUpDownIcon, Upload } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as AsyncResult from "effect/reactivity/AsyncResult";
+import * as Cause from "effect/Cause";
+import { ChevronsDownUp, ChevronsUpDown } from "lucide";
+import { Upload } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import { bytesToBase64 } from "~/lib/base64";
 import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupInput } from "~/components/ui/input-group";
+import { MorphIcon } from "~/components/MorphIcon";
 import { toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useComposerHandleContext } from "~/composerHandleContext";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import { useTheme } from "~/hooks/useTheme";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
 import { useFileContextMenu, type FileContextMenuAction } from "~/fileContextMenu";
@@ -27,9 +33,11 @@ import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { FileDownloadButton } from "./FileDownloadButton";
+import { joinHostPath } from "./filePath";
 import { createFileTreeDragMentionController } from "./fileTreeDragMention";
 import { areAllDirectoriesExpanded, setAllDirectoriesExpanded } from "./fileTreeExpansion";
 import { buildFileTreePathUpdates } from "./fileTreePathReconciliation";
+import { loadFileAncestors } from "./loadFileAncestors";
 import { useDirectoryEntries } from "./useDirectoryEntries";
 import { useProjectPathSearch } from "~/state/queries";
 
@@ -46,11 +54,16 @@ interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
   cwd: string;
   projectName: string;
-  /** Entry currently open in the surface; revealed and selected in the tree. A directory is expanded. */
   selectedPath: string | null;
-  /** Bumped when the same path should be revealed again (e.g. re-opened from search). */
   selectedPathRevealId: number;
   onOpenFile: (relativePath: string) => void;
+  /**
+   * Set when `cwd` is a host folder outside the workspace rather than the
+   * workspace root. Entries then open and mention as host paths. A host folder can
+   * be a home directory, so nothing walks it whole: there is no expand-all, and
+   * search filters the folders already loaded instead of indexing on the server.
+   */
+  hostFolder?: boolean;
   onRefreshSelectedFile?: () => void;
   workspaceMutationId: string | null;
 }
@@ -108,6 +121,38 @@ function FileSearchField(props: {
   );
 }
 
+// The tree diffs `treePaths` by identity, so the panel must keep this result cached
+// across the hooks that read it.
+function buildTreeEntries(
+  directoryEntries: readonly ProjectEntry[],
+  searchEntries: readonly ProjectEntry[],
+  searchPending: boolean,
+  query: string,
+) {
+  const result = new Map(directoryEntries.map((entry) => [entry.path, entry]));
+  if (query.trim() && !searchPending) {
+    for (const entry of searchEntries) {
+      if (!result.has(entry.path)) result.set(entry.path, entry);
+      const segments = entry.path.split("/");
+      for (let index = 1; index < segments.length; index++) {
+        const path = segments.slice(0, index).join("/");
+        if (!result.has(path)) result.set(path, { path, kind: "directory" });
+      }
+    }
+  }
+  const entries = [...result.values()];
+  const entryKinds: ReadonlyMap<string, ProjectEntry["kind"]> = new Map(
+    entries.map((entry) => [entry.path, entry.kind] as const),
+  );
+  const treePaths = entries.map(treePath);
+  const directories = entries.filter((entry) => entry.kind === "directory");
+  const directoryPaths = directories.map(treePath);
+  // Expanding a folder lists it, and an ignored one such as `node_modules` can hold tens of
+  // thousands, so expand all skips ignored folders. They still open by hand.
+  const expandableDirectoryPaths = directories.filter((entry) => !entry.ignored).map(treePath);
+  return { entries, entryKinds, treePaths, directoryPaths, expandableDirectoryPaths };
+}
+
 export default function FileBrowserPanel({
   environmentId,
   cwd,
@@ -117,7 +162,10 @@ export default function FileBrowserPanel({
   onOpenFile,
   onRefreshSelectedFile,
   workspaceMutationId,
+  hostFolder = false,
 }: FileBrowserPanelProps) {
+  const panelPath = (relativePath: string) =>
+    hostFolder ? joinHostPath(cwd, relativePath) : relativePath;
   const { resolvedTheme } = useTheme();
   const composerRef = useComposerHandleContext();
   const fileContextMenu = useFileContextMenu(environmentId);
@@ -128,24 +176,16 @@ export default function FileBrowserPanel({
     ready,
     error,
     isPending,
+    loadingDirectories,
   } = useDirectoryEntries(environmentId, cwd);
   const [query, setQuery] = useState("");
   const [expandAll, setExpandAll] = useState(false);
-  const pathSearch = useProjectPathSearch({ environmentId, cwd, query: query.slice(0, 256) }, 200);
-  const entries = useMemo(() => {
-    const result = new Map(directoryEntries.map((entry) => [entry.path, entry]));
-    if (query.trim() && !pathSearch.isPending) {
-      for (const entry of pathSearch.entries) {
-        if (!result.has(entry.path)) result.set(entry.path, entry);
-        const segments = entry.path.split("/");
-        for (let index = 1; index < segments.length; index++) {
-          const path = segments.slice(0, index).join("/");
-          if (!result.has(path)) result.set(path, { path, kind: "directory" });
-        }
-      }
-    }
-    return [...result.values()];
-  }, [directoryEntries, pathSearch.entries, pathSearch.isPending, query]);
+  const pathSearch = useProjectPathSearch(
+    { environmentId, cwd: hostFolder ? null : cwd, query: query.slice(0, 256) },
+    200,
+  );
+  const { entries, entryKinds, treePaths, directoryPaths, expandableDirectoryPaths } =
+    buildTreeEntries(directoryEntries, pathSearch.entries, pathSearch.isPending, query);
   const writeFile = useAtomCommand(projectEnvironment.writeFile);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -154,58 +194,52 @@ export default function FileBrowserPanel({
   const [uploadDirectory, setUploadDirectory] = useState("");
   // Currently-selected file path (null when a directory or nothing is selected).
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const handleUpload = useCallback(
-    async (fileList: FileList | null) => {
-      const files = fileList ? Array.from(fileList) : [];
-      if (files.length === 0) return;
-      setIsUploading(true);
-      setUploadError(null);
-      const skipped: string[] = [];
-      try {
-        for (const file of files) {
-          if (file.size > MAX_UPLOAD_BYTES) {
-            skipped.push(file.name);
-            continue;
-          }
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          const result = await writeFile({
-            environmentId,
-            input: {
-              cwd,
-              relativePath: uploadDirectory ? `${uploadDirectory}/${file.name}` : file.name,
-              contents: bytesToBase64(bytes),
-              encoding: "base64",
-            },
-          });
-          if (result._tag === "Failure") {
-            skipped.push(file.name);
-          }
+  // Reset selection-derived state when switching projects so it never points into a stale tree.
+  const [selectionCwd, setSelectionCwd] = useState(cwd);
+  if (selectionCwd !== cwd) {
+    setSelectionCwd(cwd);
+    setUploadDirectory("");
+    setSelectedFile(null);
+  }
+  const handleUpload = async (fileList: FileList | null) => {
+    const files = fileList ? Array.from(fileList) : [];
+    if (files.length === 0) return;
+    setIsUploading(true);
+    setUploadError(null);
+    const skipped: string[] = [];
+    const upload = async () => {
+      for (const file of files) {
+        if (file.size > MAX_UPLOAD_BYTES) {
+          skipped.push(file.name);
+          continue;
         }
-        // Folders load on demand, so only the one the files landed in needs re-reading.
-        void load(uploadDirectory, true);
-        setUploadError(
-          skipped.length > 0
-            ? `Could not upload ${skipped.length === files.length ? "" : "some "}${
-                skipped.length === 1 ? "file" : "files"
-              }: ${skipped.join(", ")} (over ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB or write failed)`
-            : null,
-        );
-      } finally {
-        setIsUploading(false);
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const result = await writeFile({
+          environmentId,
+          input: {
+            cwd,
+            relativePath: uploadDirectory ? `${uploadDirectory}/${file.name}` : file.name,
+            contents: bytesToBase64(bytes),
+            encoding: "base64",
+          },
+        });
+        if (result._tag === "Failure") {
+          skipped.push(file.name);
+        }
       }
-    },
-    [cwd, environmentId, load, uploadDirectory, writeFile],
-  );
-  const entryKinds = useMemo(
-    () => new Map(entries.map((entry) => [entry.path, entry.kind] as const)),
-    [entries],
-  );
-  const entryKindsRef = useRef<ReadonlyMap<string, ProjectEntry["kind"]>>(entryKinds);
-  const treePaths = useMemo(() => entries.map(treePath), [entries]);
-  const directoryPaths = useMemo(
-    () => entries.filter((entry) => entry.kind === "directory").map(treePath),
-    [entries],
-  );
+      // Folders load on demand, so only the one the files landed in needs re-reading.
+      void load(uploadDirectory, true);
+      setUploadError(
+        skipped.length > 0
+          ? `Could not upload ${skipped.length === files.length ? "" : "some "}${
+              skipped.length === 1 ? "file" : "files"
+            }: ${skipped.join(", ")} (over ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB or write failed)`
+          : null,
+      );
+    };
+    await upload().finally(() => setIsUploading(false));
+  };
+  const entryKindsRef = useRef(entryKinds);
   const previousTreePathsRef = useRef<readonly string[] | null>(null);
   const syncingSelectionRef = useRef(false);
   const treeSelectionPathRef = useRef<string | null>(null);
@@ -223,104 +257,98 @@ export default function FileBrowserPanel({
     return () => document.removeEventListener("contextmenu", capturePointer, true);
   }, []);
 
-  /** Combines the file actions (open/reveal/open with) with the panel's own mention actions. */
-  const showEntryContextMenu = async (
-    item: TreeContextMenuItem,
-    context: TreeContextMenuOpenContext,
-  ) => {
-    const api = readLocalApi();
-    if (!api) {
-      context.close();
-      return;
-    }
-    const relativePath = item.path.replace(/\/$/, "");
-    const mention = serializeComposerFileLink(relativePath);
-    const pointer = contextMenuPointerRef.current;
-    const pointerIsFresh = pointer !== null && performance.now() - pointer.at < 1000;
-    const anchorRect = context.anchorElement.getBoundingClientRect();
-    const position = pointerIsFresh
-      ? { x: pointer.x, y: pointer.y }
-      : { x: anchorRect.left, y: anchorRect.bottom };
-    const fileTarget = { environmentId, filePath: relativePath, workspaceRoot: cwd };
-    const fileMenuItems = fileContextMenu.buildItems(fileTarget);
-    try {
-      const clicked = await api.contextMenu.show(
-        [
-          ...fileMenuItems,
-          { id: "copy-mention", label: "Copy mention" },
-          { id: "add-to-chat", label: "Add to chat" },
-        ],
-        position,
-      );
-      if (clicked === null) return;
-      // "Open with" submenu selections report the child id ("editor:<id>"),
-      // which is not present in the top-level item list.
-      const isFileMenuAction =
-        fileMenuItems.some((entry) => entry.id === clicked) || clicked.startsWith("editor:");
-      if (isFileMenuAction) {
-        await fileContextMenu.activate(clicked as FileContextMenuAction, fileTarget);
+  const showEntryContextMenu = useStableCallback(
+    (item: TreeContextMenuItem, context: TreeContextMenuOpenContext) => {
+      const api = readLocalApi();
+      if (!api) {
+        context.close();
         return;
       }
-      if (clicked === "copy-mention") {
-        try {
-          await writeTextToClipboard(mention);
-          toastManager.add({ type: "success", title: "Mention copied", description: relativePath });
-        } catch (error) {
-          toastManager.add({
-            type: "error",
-            title: "Failed to copy mention",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          });
-        }
-        return;
-      }
-      if (clicked === "add-to-chat") {
-        const composer = composerRef?.current;
-        if (!composer) {
-          toastManager.add({
-            type: "error",
-            title: "Unable to add to chat",
-            description: "Open a chat for this project and try again.",
-          });
+      const relativePath = item.path.replace(/\/$/, "");
+      const mention = serializeComposerFileLink(panelPath(relativePath));
+      const pointer = contextMenuPointerRef.current;
+      const pointerIsFresh = pointer !== null && performance.now() - pointer.at < 1000;
+      const anchorRect = context.anchorElement.getBoundingClientRect();
+      const position = pointerIsFresh
+        ? { x: pointer.x, y: pointer.y }
+        : { x: anchorRect.left, y: anchorRect.bottom };
+      const fileTarget = { environmentId, filePath: relativePath, workspaceRoot: cwd };
+      const fileMenuItems = fileContextMenu.buildItems(fileTarget);
+      void settlePromise(async () => {
+        const clicked = await api.contextMenu.show(
+          [
+            ...fileMenuItems,
+            { id: "copy-mention", label: "Copy mention" },
+            { id: "add-to-chat", label: "Add to chat" },
+          ],
+          position,
+        );
+        if (clicked === null) return;
+        // "Open with" submenu selections report the child id ("editor:<id>"),
+        // which is not present in the top-level item list.
+        const isFileMenuAction =
+          fileMenuItems.some((entry) => entry.id === clicked) || clicked.startsWith("editor:");
+        if (isFileMenuAction) {
+          await fileContextMenu.activate(clicked as FileContextMenuAction, fileTarget);
           return;
         }
-        const inserted = composer.insertTextAtEnd(`${mention} `, { ensureLeadingBoundary: true });
-        if (!inserted) {
-          toastManager.add({
-            type: "error",
-            title: "Unable to add to chat",
-            description: "The chat isn't ready to accept input right now.",
-          });
+        if (clicked === "copy-mention") {
+          try {
+            await writeTextToClipboard(mention);
+            toastManager.add({
+              type: "success",
+              title: "Mention copied",
+              description: relativePath,
+            });
+          } catch (error) {
+            toastManager.add({
+              type: "error",
+              title: "Failed to copy mention",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            });
+          }
+          return;
         }
-      }
-    } finally {
-      context.close();
-    }
-  };
-  const showEntryContextMenuRef = useRef(showEntryContextMenu);
-  useEffect(() => {
-    showEntryContextMenuRef.current = showEntryContextMenu;
-  });
+        if (clicked === "add-to-chat") {
+          const composer = composerRef?.current;
+          if (!composer) {
+            toastManager.add({
+              type: "error",
+              title: "Unable to add to chat",
+              description: "Open a chat for this project and try again.",
+            });
+            return;
+          }
+          const inserted = composer.insertTextAtEnd(`${mention} `, { ensureLeadingBoundary: true });
+          if (!inserted) {
+            toastManager.add({
+              type: "error",
+              title: "Unable to add to chat",
+              description: "The chat isn't ready to accept input right now.",
+            });
+          }
+        }
+      }).then((result) => {
+        context.close();
+        // Keep surfacing unexpected failures as unhandled rejections.
+        if (!AsyncResult.isSuccess(result)) throw Cause.squash(result.cause);
+      });
+    },
+  );
 
-  const treeModelRef = useRef<ReturnType<typeof useFileTree>["model"] | null>(null);
-  const dragMention = useMemo(
-    () =>
-      createFileTreeDragMentionController({
-        deselect: (path) => treeModelRef.current?.getItem(path)?.deselect(),
-      }),
-    [],
+  const loadingDirectoriesRef = useRef(loadingDirectories);
+  const dragMention = createFileTreeDragMentionController(
+    hostFolder ? { mentionPath: (path: string) => joinHostPath(cwd, path) } : {},
   );
   const { model } = useFileTree({
     composition: {
       contextMenu: {
         triggerMode: "right-click",
         onOpen: (item, context) => {
-          void showEntryContextMenuRef.current(item, context);
+          showEntryContextMenu(item, context);
         },
       },
     },
-    // Rows only need to be draggable so entries can be dropped into the chat
-    // composer; rearranging files inside the tree stays off.
     dragAndDrop: { canDrop: () => false },
     density: "compact",
     fileTreeSearchMode: "hide-non-matches",
@@ -331,11 +359,7 @@ export default function FileBrowserPanel({
       // The drag controller's selection cache must track every change,
       // including reveal-driven ones, or drags act on a stale selection.
       dragMention.handleSelectionChange(selectedPaths);
-      // Selection changes driven by the reveal sync below are echoes of an
-      // already-open file, not a request to open it again.
       if (syncingSelectionRef.current) return;
-      // Starting a drag selects the dragged row; that selection is a side
-      // effect of the gesture, not a request to open the file.
       if (dragMention.isDragInProgress()) {
         return;
       }
@@ -351,25 +375,42 @@ export default function FileBrowserPanel({
         setUploadDirectory(parentDirectory(selectedPath));
         setSelectedFile(selectedPath);
         treeSelectionPathRef.current = selectedPath;
-        onOpenFile(selectedPath);
+        onOpenFile(panelPath(selectedPath));
       } else if (kind === "directory") {
         setUploadDirectory(selectedPath);
         setSelectedFile(null);
       }
     },
     paths: [],
+    renderRowDecoration: ({ item, row }) =>
+      row.kind === "directory" &&
+      row.isExpanded &&
+      loadingDirectoriesRef.current.has(item.path.replace(/\/$/, ""))
+        ? { icon: "t3-tree-icon-loading", title: "Loading…" }
+        : null,
     search: false,
     onSearchChange: (value) => setQuery(value ?? ""),
     unsafeCSS: PIERRE_TREE_UNSAFE_CSS,
   });
+  useEffect(() => {
+    if (loadingDirectoriesRef.current === loadingDirectories) return;
+    loadingDirectoriesRef.current = loadingDirectories;
+    model.setComposition(model.getComposition());
+  }, [loadingDirectories, model]);
   const search = useFileTreeSearch(model);
+  // Pierre restores the unfiltered tree when a search has no matches.
+  const hasNoSearchMatches = search.value.trim().length > 0 && search.matchingPaths.length === 0;
   const allDirectoriesExpanded = useFileTreeSelector(model, (currentModel) =>
-    areAllDirectoriesExpanded(currentModel, directoryPaths),
+    areAllDirectoriesExpanded(currentModel, expandableDirectoryPaths),
   );
   const toggleAllDirectories = () => {
     const expanded = !(expandAll || allDirectoriesExpanded);
     setExpandAll(expanded);
-    setAllDirectoriesExpanded(model, directoryPaths, expanded);
+    setAllDirectoriesExpanded(
+      model,
+      expanded ? expandableDirectoryPaths : directoryPaths,
+      expanded,
+    );
   };
   const closeSearch = () => {
     setQuery("");
@@ -412,12 +453,7 @@ export default function FileBrowserPanel({
   useEffect(() => {
     if (!selectedPath) return;
     const controller = new AbortController();
-    void (async () => {
-      const segments = selectedPath.split("/");
-      for (let index = 0; index < segments.length && !controller.signal.aborted; index++) {
-        await load(segments.slice(0, index).join("/"));
-      }
-    })();
+    void loadFileAncestors(selectedPath, load, { signal: controller.signal });
     return () => {
       controller.abort();
     };
@@ -459,14 +495,9 @@ export default function FileBrowserPanel({
   }, [ready, entryKinds, model, treePaths]);
 
   useEffect(() => {
-    if (expandAll && !query.trim()) setAllDirectoriesExpanded(model, directoryPaths, true);
-  }, [directoryPaths, expandAll, model, query]);
-
-  // Reset selection-derived state when switching projects so it never points into a stale tree.
-  useEffect(() => {
-    setUploadDirectory("");
-    setSelectedFile(null);
-  }, [cwd]);
+    if (expandAll && !query.trim())
+      setAllDirectoriesExpanded(model, expandableDirectoryPaths, true);
+  }, [expandableDirectoryPaths, expandAll, model, query]);
 
   useEffect(() => {
     if (!selectedPath) {
@@ -474,8 +505,6 @@ export default function FileBrowserPanel({
       return;
     }
     const selectedKind = entryKinds.get(selectedPath);
-    // An unloaded entry has no row to reveal yet; folders do, and chat links can
-    // point at them.
     if (selectedKind === undefined) {
       handledRevealRef.current = null;
       return;
@@ -490,7 +519,6 @@ export default function FileBrowserPanel({
     ) {
       return;
     }
-    // Directory rows are registered with a trailing slash (see treePath).
     const selectedTreePath = selectedKind === "directory" ? `${selectedPath}/` : selectedPath;
     const selectedItem = model.getItem(selectedTreePath);
     if (!selectedItem) return;
@@ -528,6 +556,7 @@ export default function FileBrowserPanel({
     }
 
     if (selectedKind === "directory") {
+      // oxlint-disable-next-line react/set-state-in-effect -- The upload target follows the entry this effect reveals in the external tree model.
       setSelectedFile(null);
       setUploadDirectory(selectedPath);
     } else {
@@ -545,30 +574,24 @@ export default function FileBrowserPanel({
     });
   }, [entryKinds, model, selectedPath, selectedPathRevealId]);
 
-  // Tag tree drags with the composer mention payload. The row is read from
-  // the composed event path (the tree's shadow root is open), so this does
-  // not depend on running after the tree's own dragstart handler; the drag
-  // data store is writable for every dragstart listener in the dispatch.
   // The capture phase runs before the tree's own dragstart handler selects
   // the dragged row, so the drag flag is up before that selection emits.
   const panelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    treeModelRef.current = model;
-  }, [model]);
   useEffect(() => {
     const panel = panelRef.current;
     if (panel === null) {
       return;
     }
     const handleDragStart = (event: DragEvent) => dragMention.handleDragStart(event);
-    const handleDragEnd = () => dragMention.handleDragEnd();
+    const handleDragEnd = () =>
+      dragMention.handleDragEnd((path) => model.getItem(path)?.deselect());
     panel.addEventListener("dragstart", handleDragStart, true);
     panel.addEventListener("dragend", handleDragEnd);
     return () => {
       panel.removeEventListener("dragstart", handleDragStart, true);
       panel.removeEventListener("dragend", handleDragEnd);
     };
-  }, [dragMention]);
+  }, [dragMention, model]);
 
   return (
     <div
@@ -581,36 +604,46 @@ export default function FileBrowserPanel({
         data-surface-subheader
       >
         <RefreshFilesButton isPending={isPending} onRefresh={handleRefresh} />
-        <input
-          ref={uploadInputRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(event) => {
-            void handleUpload(event.target.files);
-            event.target.value = "";
-          }}
-        />
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label={`Upload files to ${uploadDirectory ? `${projectName}/${uploadDirectory}` : projectName}`}
-                disabled={isUploading}
-                onClick={() => uploadInputRef.current?.click()}
-              />
-            }
-          >
-            <Upload className={cn("size-3.5", isUploading && "animate-pulse")} />
-          </TooltipTrigger>
-          <TooltipPopup side="bottom">
-            Upload to {uploadDirectory ? `${uploadDirectory}/` : "project root"}
-          </TooltipPopup>
-        </Tooltip>
-        <FileDownloadButton environmentId={environmentId} cwd={cwd} relativePath={selectedFile} />
+        {/* Uploads and downloads go through the workspace file API, which a host folder
+            outside the workspace is not part of. */}
+        {hostFolder ? null : (
+          <>
+            <input
+              ref={uploadInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                void handleUpload(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={`Upload files to ${uploadDirectory ? `${projectName}/${uploadDirectory}` : projectName}`}
+                    disabled={isUploading}
+                    onClick={() => uploadInputRef.current?.click()}
+                  />
+                }
+              >
+                <Upload className={cn("size-3.5", isUploading && "animate-pulse")} />
+              </TooltipTrigger>
+              <TooltipPopup side="bottom">
+                Upload to {uploadDirectory ? `${uploadDirectory}/` : "project root"}
+              </TooltipPopup>
+            </Tooltip>
+            <FileDownloadButton
+              environmentId={environmentId}
+              cwd={cwd}
+              relativePath={selectedFile}
+            />
+          </>
+        )}
         <FileSearchField
           name="project-files-search"
           ariaLabel={`Search ${projectName} files`}
@@ -618,7 +651,7 @@ export default function FileBrowserPanel({
           onValueChange={handleSearchValueChange}
           onClose={closeSearch}
         />
-        {directoryPaths.length > 0 ? (
+        {directoryPaths.length > 0 && !hostFolder ? (
           <Tooltip>
             <TooltipTrigger
               render={
@@ -635,11 +668,10 @@ export default function FileBrowserPanel({
                 />
               }
             >
-              {allDirectoriesExpanded ? (
-                <ChevronsDownUpIcon className="size-3.5" />
-              ) : (
-                <ChevronsUpDownIcon className="size-3.5" />
-              )}
+              <MorphIcon
+                className="size-3.5"
+                icon={allDirectoriesExpanded ? ChevronsDownUp : ChevronsUpDown}
+              />
             </TooltipTrigger>
             <TooltipPopup>
               {expandAll || allDirectoriesExpanded ? "Collapse all folders" : "Expand all folders"}
@@ -666,17 +698,32 @@ export default function FileBrowserPanel({
           More matches available. Refine your search.
         </div>
       ) : null}
-      {(isPending || pathSearch.isPending) && (
-        <div role="status" className="px-3 py-1 text-xs text-muted-foreground">
+      {(!ready || pathSearch.isPending) && (
+        <div
+          role="status"
+          className={
+            entries.length > 0 && !hasNoSearchMatches
+              ? "sr-only"
+              : "px-3 py-1 text-xs text-muted-foreground"
+          }
+        >
           Loading files…
         </div>
       )}
-      <FileTree
-        model={model}
-        aria-label={`${projectName} files`}
-        className="min-h-0 flex-1 overflow-hidden"
-        style={pierreTreeStyle(resolvedTheme)}
-      />
+      {hasNoSearchMatches ? (
+        ready && !isPending && !pathSearch.isPending && !error && !pathSearch.error ? (
+          <div role="status" className="px-3 py-4 text-xs text-muted-foreground">
+            No matching files.
+          </div>
+        ) : null
+      ) : (
+        <FileTree
+          model={model}
+          aria-label={`${projectName} files`}
+          className="min-h-0 flex-1 overflow-hidden"
+          style={pierreTreeStyle(resolvedTheme)}
+        />
+      )}
     </div>
   );
 }

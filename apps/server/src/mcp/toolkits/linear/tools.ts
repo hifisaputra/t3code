@@ -19,18 +19,20 @@ import {
   LinearWorkflowStateType,
   PositiveInt,
   McpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 
 import { AssistantEvidence } from "../../../assistant/AssistantEvidence.ts";
 import { LinearAgentOutbox } from "../../../linear/LinearAgentOutbox.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
 import { LinearOAuth } from "../../../linear/LinearOAuth.ts";
-import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectService from "../../../project/ProjectService.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
 import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
 import { McpApprovalBroker } from "../../McpApprovalBroker.ts";
@@ -39,7 +41,9 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
   LinearApi.LinearApi,
-  ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+  // The calling thread's linked issue and session; also what McpToolAccess
+  // checks a writing caller against.
+  ThreadManagementService.ThreadManagementService,
   // The write tools ask before they mutate; both services are resolved per
   // call so the confirmation setting can change mid-session.
   ServerSettingsService,
@@ -58,6 +62,7 @@ const uploadDependencies = [
   FileSystem.FileSystem,
   Path.Path,
   WorkspacePaths.WorkspacePaths,
+  ProjectService.ProjectService,
   AssistantEvidence,
 ];
 
@@ -71,6 +76,8 @@ const LinearToolError = Schema.Union([
   LinearIssueNotFoundError,
   LinearOperationError,
   McpCapabilityUnavailableError,
+  // McpToolAccess refuses a read-only client or a caller with no live run.
+  OrchestratorMcpFailure,
 ]);
 
 /** Every Linear call leaves the server, and none of them can be replayed blindly. */

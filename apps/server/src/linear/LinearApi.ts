@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import {
   LinearDocument,
   LinearDocumentPage,
@@ -17,7 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Predicate from "effect/Predicate";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest } from "effect/http";
 import {
   LinearIssueAttachment,
   LinearIssueNotFoundError,
@@ -41,8 +42,8 @@ import {
   type LinearWorkspaceStructure,
 } from "@t3tools/contracts";
 
-import { retryAtFromHeader } from "../sourceControl/SourceControlRateLimit.ts";
-import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
+import { retryAtFromHeader } from "@t3tools/source-control-core/server/SourceControlRateLimit";
+import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStreamText";
 import { ServerSettingsService } from "../serverSettings.ts";
 
 const DEFAULT_API_BASE_URL = "https://api.linear.app/graphql";
@@ -1304,171 +1305,169 @@ const make = Effect.gen(function* () {
    * A request that may not be repeated says so when it fails transiently, so
    * the caller knows to check before trying again.
    */
-  const request = <A>(
+  const request = Effect.fn("LinearApi.request")(function* <A>(
     input: RequestInput<A>,
-  ): Effect.Effect<A, LinearUnavailableError | LinearRequestFailure> =>
-    Effect.gen(function* () {
-      const operation = input.operation;
-      const appCredential = yield* LinearAppCredential;
-      const apiKey = appCredential
-        ? `Bearer ${yield* appCredential.pipe(Effect.mapError(() => new LinearRequestFailure({ operation, detail: "Reconnect the Linear app.", code: "" })))}`
-        : yield* readApiKey(operation);
-      if (apiKey.length === 0) {
-        return yield* new LinearUnavailableError({ reason: "unconfigured" });
-      }
+  ): Effect.fn.Return<A, LinearUnavailableError | LinearRequestFailure> {
+    const operation = input.operation;
+    const appCredential = yield* LinearAppCredential;
+    const apiKey = appCredential
+      ? `Bearer ${yield* appCredential.pipe(Effect.mapError(() => new LinearRequestFailure({ operation, detail: "Reconnect the Linear app.", code: "" })))}`
+      : yield* readApiKey(operation);
+    if (apiKey.length === 0) {
+      return yield* new LinearUnavailableError({ reason: "unconfigured" });
+    }
 
-      const repeatable = input.repeatable ?? /^\s*query\b/u.test(input.query);
-      let attempts = 0;
-      return yield* Effect.suspend(() => {
-        attempts += 1;
-        return attempt(input, apiKey);
-      }).pipe(
-        Effect.retry({
-          schedule: retrySchedule,
-          while: (error) =>
-            Effect.map(Clock.currentTimeMillis, (now) => shouldRetry(error, repeatable, now)),
-        }),
-        Effect.mapError((error) => {
-          if (error._tag !== "LinearRequestFailure") return error;
-          const unsent = !repeatable && error.transient === true;
-          if (attempts === 1 && !unsent) return error;
-          return new LinearRequestFailure({
-            ...failureFields(error),
-            ...(attempts > 1 ? { retried: true } : {}),
-            ...(unsent
-              ? { detail: `${error.detail} Linear may have applied it, so it was not sent again.` }
-              : {}),
-          });
-        }),
-      );
-    });
+    const repeatable = input.repeatable ?? /^\s*query\b/u.test(input.query);
+    let attempts = 0;
+    return yield* Effect.suspend(() => {
+      attempts += 1;
+      return attempt(input, apiKey);
+    }).pipe(
+      Effect.retry({
+        schedule: retrySchedule,
+        while: (error) =>
+          Effect.map(Clock.currentTimeMillis, (now) => shouldRetry(error, repeatable, now)),
+      }),
+      Effect.mapError((error) => {
+        if (error._tag !== "LinearRequestFailure") return error;
+        const unsent = !repeatable && error.transient === true;
+        if (attempts === 1 && !unsent) return error;
+        return new LinearRequestFailure({
+          ...failureFields(error),
+          ...(attempts > 1 ? { retried: true } : {}),
+          ...(unsent
+            ? { detail: `${error.detail} Linear may have applied it, so it was not sent again.` }
+            : {}),
+        });
+      }),
+    );
+  });
 
-  const attempt = <A>(
+  const attempt = Effect.fn("LinearApi.attempt")(function* <A>(
     input: RequestInput<A>,
     apiKey: string,
-  ): Effect.Effect<A, LinearUnavailableError | LinearRequestFailure> =>
-    Effect.gen(function* () {
-      const operation = input.operation;
-      const { response, collected } = yield* Effect.gen(function* () {
-        const response = yield* httpClient
-          .execute(
-            HttpClientRequest.post(baseUrl).pipe(
-              // Linear personal keys are sent raw; a `Bearer` prefix is only for OAuth tokens.
-              HttpClientRequest.setHeader("authorization", apiKey),
-              HttpClientRequest.acceptJson,
-              HttpClientRequest.bodyJsonUnsafe({ query: input.query, variables: input.variables }),
-            ),
-          )
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new LinearRequestFailure({
-                  operation,
-                  detail: "Could not reach Linear.",
-                  code: "",
-                  // A reset or closed socket; a request this server could not build is not.
-                  transient: cause.reason._tag === "TransportError",
-                  cause,
-                }),
-            ),
-          );
-        const collected = yield* collectUint8StreamText({
-          stream: response.stream,
-          maxBytes: MAX_RESPONSE_BYTES,
-        }).pipe(
+  ): Effect.fn.Return<A, LinearUnavailableError | LinearRequestFailure> {
+    const operation = input.operation;
+    const { response, collected } = yield* Effect.gen(function* () {
+      const response = yield* httpClient
+        .execute(
+          HttpClientRequest.post(baseUrl).pipe(
+            // Linear personal keys are sent raw; a `Bearer` prefix is only for OAuth tokens.
+            HttpClientRequest.setHeader("authorization", apiKey),
+            HttpClientRequest.acceptJson,
+            HttpClientRequest.bodyJsonUnsafe({ query: input.query, variables: input.variables }),
+          ),
+        )
+        .pipe(
           Effect.mapError(
             (cause) =>
               new LinearRequestFailure({
                 operation,
-                detail: "Could not read Linear's response.",
+                detail: "Could not reach Linear.",
                 code: "",
-                transient: true,
+                // A reset or closed socket; a request this server could not build is not.
+                transient: cause.reason._tag === "TransportError",
                 cause,
               }),
           ),
         );
-        return { response, collected };
+      const collected = yield* collectUint8StreamText({
+        stream: response.stream,
+        maxBytes: MAX_RESPONSE_BYTES,
       }).pipe(
-        Effect.timeoutOrElse({
-          duration: ATTEMPT_TIMEOUT,
-          orElse: () =>
-            Effect.fail(
-              new LinearRequestFailure({
-                operation,
-                detail: "Linear did not answer in time.",
-                code: "",
-                transient: true,
-              }),
-            ),
-        }),
-      );
-
-      const now = yield* Clock.currentTimeMillis;
-      const retryAt =
-        retryAtFromHeader(response.headers["retry-after"], now) ??
-        retryAtFromResetHeader(response.headers["x-ratelimit-requests-reset"], now);
-      const transient = TRANSIENT_STATUSES.has(response.status);
-
-      if (collected.truncated) {
-        return yield* new LinearRequestFailure({
-          operation,
-          detail: "Linear's response was too large to read.",
-          code: "",
-        });
-      }
-
-      // A body Linear did not write as GraphQL JSON still has a status worth reporting.
-      const envelope = yield* decodeGraphQLEnvelope(collected.text).pipe(
-        Effect.orElseSucceed(() => undefined),
-      );
-      const graphQLError = envelope?.errors?.[0];
-      const code = graphQLError?.extensions?.code ?? "";
-
-      if (response.status === 401 || code === "AUTHENTICATION_ERROR") {
-        return yield* new LinearUnavailableError({ reason: "unauthenticated" });
-      }
-      if (response.status === 429 || code === "RATELIMITED") {
-        return yield* new LinearUnavailableError({
-          reason: "rate-limited",
-          ...(retryAt !== undefined ? { retryAt } : {}),
-        });
-      }
-      if (graphQLError !== undefined) {
-        return yield* new LinearRequestFailure({
-          operation,
-          code,
-          transient,
-          detail: rejectionDetail(graphQLError),
-        });
-      }
-      if (response.status < 200 || response.status >= 300) {
-        return yield* new LinearRequestFailure({
-          operation,
-          code,
-          transient,
-          detail: `Linear returned HTTP ${response.status}.`,
-        });
-      }
-      if (envelope?.data === undefined || envelope.data === null) {
-        return yield* new LinearRequestFailure({
-          operation,
-          code,
-          detail: "Linear returned a response this server could not read.",
-        });
-      }
-
-      return yield* input.decode(envelope.data).pipe(
         Effect.mapError(
           (cause) =>
             new LinearRequestFailure({
               operation,
-              detail: "Linear returned an unexpected response shape.",
+              detail: "Could not read Linear's response.",
               code: "",
+              transient: true,
               cause,
             }),
         ),
       );
-    });
+      return { response, collected };
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: ATTEMPT_TIMEOUT,
+        orElse: () =>
+          Effect.fail(
+            new LinearRequestFailure({
+              operation,
+              detail: "Linear did not answer in time.",
+              code: "",
+              transient: true,
+            }),
+          ),
+      }),
+    );
+
+    const now = yield* Clock.currentTimeMillis;
+    const retryAt =
+      retryAtFromHeader(response.headers["retry-after"], now) ??
+      retryAtFromResetHeader(response.headers["x-ratelimit-requests-reset"], now);
+    const transient = TRANSIENT_STATUSES.has(response.status);
+
+    if (collected.truncated) {
+      return yield* new LinearRequestFailure({
+        operation,
+        detail: "Linear's response was too large to read.",
+        code: "",
+      });
+    }
+
+    // A body Linear did not write as GraphQL JSON still has a status worth reporting.
+    const envelope = yield* decodeGraphQLEnvelope(collected.text).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    const graphQLError = envelope?.errors?.[0];
+    const code = graphQLError?.extensions?.code ?? "";
+
+    if (response.status === 401 || code === "AUTHENTICATION_ERROR") {
+      return yield* new LinearUnavailableError({ reason: "unauthenticated" });
+    }
+    if (response.status === 429 || code === "RATELIMITED") {
+      return yield* new LinearUnavailableError({
+        reason: "rate-limited",
+        ...(retryAt !== undefined ? { retryAt } : {}),
+      });
+    }
+    if (graphQLError !== undefined) {
+      return yield* new LinearRequestFailure({
+        operation,
+        code,
+        transient,
+        detail: rejectionDetail(graphQLError),
+      });
+    }
+    if (response.status < 200 || response.status >= 300) {
+      return yield* new LinearRequestFailure({
+        operation,
+        code,
+        transient,
+        detail: `Linear returned HTTP ${response.status}.`,
+      });
+    }
+    if (envelope?.data === undefined || envelope.data === null) {
+      return yield* new LinearRequestFailure({
+        operation,
+        code,
+        detail: "Linear returned a response this server could not read.",
+      });
+    }
+
+    return yield* input.decode(envelope.data).pipe(
+      Effect.mapError(
+        (cause) =>
+          new LinearRequestFailure({
+            operation,
+            detail: "Linear returned an unexpected response shape.",
+            code: "",
+            cause,
+          }),
+      ),
+    );
+  });
 
   /**
    * A create sends a client `id`, so retrying it cannot create twice. If it
@@ -1528,7 +1527,7 @@ const make = Effect.gen(function* () {
    * the first page the issue query already holds. The common issue fits that
    * page and costs nothing more; `truncated` says the list was cut short.
    */
-  const readIssueList = <A>(
+  const readIssueList = Effect.fn("LinearApi.readIssueList")(function* <A>(
     issueId: string,
     page: {
       readonly query: string;
@@ -1540,23 +1539,22 @@ const make = Effect.gen(function* () {
       >;
     },
     first: IssueListPage<A>,
-  ) =>
-    Effect.gen(function* () {
-      const nodes = [...first.nodes];
-      let pageInfo = first.pageInfo;
-      while (pageInfo?.hasNextPage && pageInfo.endCursor && nodes.length < MAX_ISSUE_LIST_NODES) {
-        const next = yield* request({
-          operation: "getIssue",
-          query: page.query,
-          variables: { id: issueId, after: pageInfo.endCursor },
-          decode: page.decode,
-        }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
-        if (next.issue === null) break;
-        nodes.push(...next.issue.page.nodes);
-        pageInfo = next.issue.page.pageInfo;
-      }
-      return { nodes, truncated: pageInfo?.hasNextPage === true };
-    });
+  ) {
+    const nodes = [...first.nodes];
+    let pageInfo = first.pageInfo;
+    while (pageInfo?.hasNextPage && pageInfo.endCursor && nodes.length < MAX_ISSUE_LIST_NODES) {
+      const next = yield* request({
+        operation: "getIssue",
+        query: page.query,
+        variables: { id: issueId, after: pageInfo.endCursor },
+        decode: page.decode,
+      }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
+      if (next.issue === null) break;
+      nodes.push(...next.issue.page.nodes);
+      pageInfo = next.issue.page.pageInfo;
+    }
+    return { nodes, truncated: pageInfo?.hasNextPage === true };
+  });
 
   const getIssue = Effect.fn("LinearApi.getIssue")(function* (input: LinearGetIssueInput) {
     const reference = issueReferenceFromText(input.reference);
@@ -1567,13 +1565,14 @@ const make = Effect.gen(function* () {
       variables: { id: reference },
       decode: decodeGetIssueResult,
     }).pipe(
-      Effect.catchTag(
-        "LinearRequestFailure",
-        (failure): Effect.Effect<never, LinearIssueNotFoundError | LinearOperationError> =>
+      Effect.catchTags({
+        LinearRequestFailure: (
+          failure,
+        ): Effect.Effect<never, LinearIssueNotFoundError | LinearOperationError> =>
           isEntityNotFound(failure)
             ? Effect.fail(new LinearIssueNotFoundError({ reference }))
             : failOperation(failure),
-      ),
+      }),
     );
     if (result.issue === null) {
       return yield* new LinearIssueNotFoundError({ reference });
@@ -1627,7 +1626,7 @@ const make = Effect.gen(function* () {
         ...(input.cursor !== undefined ? { after: input.cursor } : {}),
       },
       decode: decodeListIssuesResult,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     return {
       issues: result.issues.nodes,
       ...(result.issues.pageInfo ? { pageInfo: result.issues.pageInfo } : {}),
@@ -1643,7 +1642,7 @@ const make = Effect.gen(function* () {
     variables: {},
     decode: decodeWorkspaceResult,
   }).pipe(
-    Effect.catchTag("LinearRequestFailure", failOperation),
+    Effect.catchTags({ LinearRequestFailure: failOperation }),
     Effect.map((result) => ({
       teams: result.teams.nodes
         .map((team) => ({
@@ -1665,7 +1664,7 @@ const make = Effect.gen(function* () {
       query: TEAM_STATES_QUERY,
       variables: { teamId },
       decode: decodeTeamStatesResult,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (result.team === null) {
       return yield* new LinearOperationError({
         operation: "workflowStates",
@@ -1687,7 +1686,7 @@ const make = Effect.gen(function* () {
       variables: { id: input.issueId, stateId: input.stateId },
       decode: decodeIssueUpdateResult,
       repeatable: true,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (!result.issueUpdate.success) {
       return yield* new LinearOperationError({
         operation: "updateIssueState",
@@ -1740,7 +1739,7 @@ const make = Effect.gen(function* () {
         after: input.cursor ?? null,
       },
       decode: decodeResourcePage,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     return result.resources;
   });
   const getResource = Effect.fn("LinearApi.getResource")(function* (
@@ -1753,7 +1752,7 @@ const make = Effect.gen(function* () {
       query: `query T3CodeResource($id: String!) { resource: ${definition.entity}(id: $id) { ${definition.fields} } }`,
       variables: { id },
       decode: decodeResource,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (!result.resource)
       return yield* new LinearOperationError({
         operation: "getResource",
@@ -1783,16 +1782,15 @@ const make = Effect.gen(function* () {
       decode: decodeResourceMutation,
       repeatable: true,
     }).pipe(
-      Effect.catchTag(
-        "LinearRequestFailure",
-        createdId
+      Effect.catchTags({
+        LinearRequestFailure: createdId
           ? readBackCreate(() =>
               getResource(input.kind, createdId).pipe(
                 Effect.map((resource) => ({ result: { success: true, resource } })),
               ),
             )
           : failOperation,
-      ),
+      }),
     );
     if (!result.result.success || !result.result.resource)
       return yield* new LinearOperationError({
@@ -1825,7 +1823,7 @@ const make = Effect.gen(function* () {
       }`,
       variables: { filter },
       decode: decodeAssigneeResult,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     const user = result.users.nodes[0];
     if (result.users.nodes.length !== 1 || !user)
       return yield* new LinearOperationError({
@@ -1874,7 +1872,7 @@ const make = Effect.gen(function* () {
       },
       decode: decodeIssueUpdateResult,
       repeatable: true,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (!result.issueUpdate.success) {
       return yield* new LinearOperationError({
         operation: "updateIssue",
@@ -1925,20 +1923,19 @@ const make = Effect.gen(function* () {
       decode: decodeIssueCreateResult,
       repeatable: true,
     }).pipe(
-      Effect.catchTag(
-        "LinearRequestFailure",
-        readBackCreate(() =>
+      Effect.catchTags({
+        LinearRequestFailure: readBackCreate(() =>
           request({
             operation: "createIssue",
             query: GET_ISSUE_SUMMARY_QUERY,
             variables: { id },
             decode: decodeIssueSummaryResult,
           }).pipe(
-            Effect.catchTag("LinearRequestFailure", failOperation),
+            Effect.catchTags({ LinearRequestFailure: failOperation }),
             Effect.map(({ issue }) => ({ issueCreate: { success: true, issue } })),
           ),
         ),
-      ),
+      }),
     );
     if (!result.issueCreate.success || result.issueCreate.issue === null) {
       return yield* new LinearOperationError({
@@ -1970,20 +1967,19 @@ const make = Effect.gen(function* () {
       decode: decodeIssueRelationCreateResult,
       repeatable: true,
     }).pipe(
-      Effect.catchTag(
-        "LinearRequestFailure",
-        readBackCreate(() =>
+      Effect.catchTags({
+        LinearRequestFailure: readBackCreate(() =>
           request({
             operation: "addIssueRelation",
             query: GET_ISSUE_RELATION_QUERY,
             variables: { id },
             decode: decodeIssueRelationResult,
           }).pipe(
-            Effect.catchTag("LinearRequestFailure", failOperation),
+            Effect.catchTags({ LinearRequestFailure: failOperation }),
             Effect.as({ issueRelationCreate: { success: true } }),
           ),
         ),
-      ),
+      }),
     );
     if (!result.issueRelationCreate.success) {
       return yield* new LinearOperationError({
@@ -2003,12 +1999,13 @@ const make = Effect.gen(function* () {
       decode: decodeIssueRelationDeleteResult,
       repeatable: true,
     }).pipe(
-      Effect.catchTag("LinearRequestFailure", (failure) =>
-        // A retried delete finding nothing means an earlier attempt removed it.
-        failure.retried && isEntityNotFound(failure)
-          ? Effect.succeed({ issueRelationDelete: { success: true } })
-          : failOperation(failure),
-      ),
+      Effect.catchTags({
+        LinearRequestFailure: (failure) =>
+          // A retried delete finding nothing means an earlier attempt removed it.
+          failure.retried && isEntityNotFound(failure)
+            ? Effect.succeed({ issueRelationDelete: { success: true } })
+            : failOperation(failure),
+      }),
     );
     if (!result.issueRelationDelete.success) {
       return yield* new LinearOperationError({
@@ -2029,7 +2026,7 @@ const make = Effect.gen(function* () {
       // A second copy sets the state the first one did.
       repeatable: true,
       decode: decodeIssueArchiveResult,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (!result.result.success) {
       return yield* new LinearOperationError({
         operation: "archiveIssue",
@@ -2046,7 +2043,7 @@ const make = Effect.gen(function* () {
       query: LABELS_QUERY,
       variables: { teamId },
       decode: decodeLabelsResult,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     return [...result.issueLabels.nodes].sort((left, right) =>
       left.name.toLocaleLowerCase().localeCompare(right.name.toLocaleLowerCase()),
     );
@@ -2071,16 +2068,15 @@ const make = Effect.gen(function* () {
       decode: decodeCommentCreateResult,
       repeatable: true,
     }).pipe(
-      Effect.catchTag(
-        "LinearRequestFailure",
-        readBackCreate(() =>
+      Effect.catchTags({
+        LinearRequestFailure: readBackCreate(() =>
           getComment(id).pipe(
             Effect.map((comment) => ({
               commentCreate: { success: true, comment: { id: comment.id, url: comment.url } },
             })),
           ),
         ),
-      ),
+      }),
     );
     if (!result.commentCreate.success || result.commentCreate.comment === null) {
       return yield* new LinearOperationError({
@@ -2097,7 +2093,7 @@ const make = Effect.gen(function* () {
       query: GET_COMMENT_QUERY,
       variables: { id },
       decode: Schema.decodeUnknownEffect(CommentResult),
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (result.comment === null) {
       return yield* new LinearOperationError({
         operation: "getComment",
@@ -2117,7 +2113,7 @@ const make = Effect.gen(function* () {
       variables: { id: input.id, body: input.body },
       decode: Schema.decodeUnknownEffect(CommentUpdateResult),
       repeatable: true,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (!result.commentUpdate.success || result.commentUpdate.comment === null) {
       return yield* new LinearOperationError({
         operation: "updateComment",
@@ -2141,7 +2137,7 @@ const make = Effect.gen(function* () {
         size: input.bytes.byteLength,
       },
       decode: decodeFileUploadResult,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     const upload = result.fileUpload.uploadFile;
     if (!result.fileUpload.success || upload === null) {
       return yield* new LinearOperationError({
@@ -2193,26 +2189,27 @@ const make = Effect.gen(function* () {
       decode: Schema.decodeUnknownEffect(CommentDeleteResult),
       repeatable: true,
     }).pipe(
-      Effect.catchTag("LinearRequestFailure", (failure) =>
-        // A retried delete finding nothing means an earlier attempt removed it.
-        failure.retried && isEntityNotFound(failure)
-          ? Effect.succeed({ commentDelete: { success: true } })
-          : isEntityNotFound(failure)
-            ? Effect.fail(
-                new LinearOperationError({
-                  operation: failure.operation,
-                  detail: "Comment not found or inaccessible.",
-                }),
-              )
-            : failure.code === "FORBIDDEN"
+      Effect.catchTags({
+        LinearRequestFailure: (failure) =>
+          // A retried delete finding nothing means an earlier attempt removed it.
+          failure.retried && isEntityNotFound(failure)
+            ? Effect.succeed({ commentDelete: { success: true } })
+            : isEntityNotFound(failure)
               ? Effect.fail(
                   new LinearOperationError({
                     operation: failure.operation,
-                    detail: `${failure.detail} ${notAuthor}`,
+                    detail: "Comment not found or inaccessible.",
                   }),
                 )
-              : failOperation(failure),
-      ),
+              : failure.code === "FORBIDDEN"
+                ? Effect.fail(
+                    new LinearOperationError({
+                      operation: failure.operation,
+                      detail: `${failure.detail} ${notAuthor}`,
+                    }),
+                  )
+                : failOperation(failure),
+      }),
     );
     if (!result.commentDelete.success) {
       return yield* new LinearOperationError({
@@ -2243,7 +2240,7 @@ const make = Effect.gen(function* () {
       // Linear updates the issue's attachment for a URL it already has, so a
       // second copy cannot add a duplicate link.
       repeatable: true,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (!result.attachmentCreate.success || result.attachmentCreate.attachment === null) {
       return yield* new LinearOperationError({
         operation: "createAttachment",
@@ -2264,9 +2261,10 @@ const make = Effect.gen(function* () {
       variables: { id },
       decode: decodeAttachmentResult,
     }).pipe(
-      Effect.catchTag("LinearRequestFailure", (failure) =>
-        isEntityNotFound(failure) ? Effect.fail(notFound) : failOperation(failure),
-      ),
+      Effect.catchTags({
+        LinearRequestFailure: (failure) =>
+          isEntityNotFound(failure) ? Effect.fail(notFound) : failOperation(failure),
+      }),
     );
     if (result.attachment === null) return yield* notFound;
     return result.attachment;
@@ -2280,12 +2278,13 @@ const make = Effect.gen(function* () {
       decode: decodeAttachmentDeleteResult,
       repeatable: true,
     }).pipe(
-      Effect.catchTag("LinearRequestFailure", (failure) =>
-        // A retried delete finding nothing means an earlier attempt removed it.
-        failure.retried && isEntityNotFound(failure)
-          ? Effect.succeed({ attachmentDelete: { success: true } })
-          : failOperation(failure),
-      ),
+      Effect.catchTags({
+        LinearRequestFailure: (failure) =>
+          // A retried delete finding nothing means an earlier attempt removed it.
+          failure.retried && isEntityNotFound(failure)
+            ? Effect.succeed({ attachmentDelete: { success: true } })
+            : failOperation(failure),
+      }),
     );
     if (!result.attachmentDelete.success) {
       return yield* new LinearOperationError({
@@ -2324,7 +2323,7 @@ const make = Effect.gen(function* () {
         after: input.cursor ?? null,
       },
       decode: decodeDocumentPage,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     return result.documents;
   });
 
@@ -2339,9 +2338,10 @@ const make = Effect.gen(function* () {
       variables: { id: documentReferenceFromText(reference) },
       decode: decodeDocumentResult,
     }).pipe(
-      Effect.catchTag("LinearRequestFailure", (failure) =>
-        isEntityNotFound(failure) ? Effect.fail(notFound) : failOperation(failure),
-      ),
+      Effect.catchTags({
+        LinearRequestFailure: (failure) =>
+          isEntityNotFound(failure) ? Effect.fail(notFound) : failOperation(failure),
+      }),
     );
     if (result.document === null) return yield* notFound;
     return toDocument(result.document);
@@ -2369,16 +2369,15 @@ const make = Effect.gen(function* () {
       decode: decodeDocumentMutation,
       repeatable: true,
     }).pipe(
-      Effect.catchTag(
-        "LinearRequestFailure",
-        createdId
+      Effect.catchTags({
+        LinearRequestFailure: createdId
           ? readBackCreate(() =>
               getDocument(createdId).pipe(
                 Effect.map((document) => ({ result: { success: true, document } })),
               ),
             )
           : failOperation,
-      ),
+      }),
     );
     if (!result.result.success || result.result.document === null) {
       return yield* new LinearOperationError({
@@ -2397,7 +2396,7 @@ const make = Effect.gen(function* () {
       decode: decodeDocumentDeleteResult,
       // A second copy finds the document already in the trash.
       repeatable: true,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (!result.documentDelete.success) {
       return yield* new LinearOperationError({
         operation: "deleteDocument",
@@ -2414,7 +2413,7 @@ const make = Effect.gen(function* () {
       decode: decodeDocumentRestoreResult,
       // A second copy restores a document that is already back.
       repeatable: true,
-    }).pipe(Effect.catchTag("LinearRequestFailure", failOperation));
+    }).pipe(Effect.catchTags({ LinearRequestFailure: failOperation }));
     if (!result.documentUnarchive.success || result.documentUnarchive.entity === null) {
       return yield* new LinearOperationError({
         operation: "restoreDocument",

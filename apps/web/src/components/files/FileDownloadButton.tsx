@@ -9,6 +9,22 @@ import { base64ToBytes } from "~/lib/base64";
 import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
 
+/** Hands the bytes to the browser as a file download. Module scope: the compiler skips try/finally. */
+function saveDownload(fileName: string, contentsBase64: string) {
+  const url = URL.createObjectURL(new Blob([base64ToBytes(contentsBase64)]));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    // Give the browser time to start consuming the download before releasing its bytes.
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+}
+
 export function FileDownloadButton({
   environmentId,
   cwd,
@@ -32,7 +48,7 @@ export function FileDownloadButton({
     pendingRef.current = true;
     setIsDownloading(true);
     const fileName = relativePath.split("/").at(-1) ?? relativePath;
-    try {
+    const download = async () => {
       const result = await readFile({
         environmentId,
         input: { cwd, relativePath, encoding: "base64" },
@@ -43,28 +59,20 @@ export function FileDownloadButton({
       if (result.value.truncated) {
         throw new Error(`${fileName} is too large to download (over 50MB).`);
       }
-      const url = URL.createObjectURL(new Blob([base64ToBytes(result.value.contents)]));
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = fileName;
-      document.body.appendChild(anchor);
-      try {
-        anchor.click();
-      } finally {
-        anchor.remove();
-        // Give the browser time to start consuming the download before releasing its bytes.
-        setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      }
-    } catch (error) {
-      toastManager.add({
-        type: "error",
-        title: "Download failed",
-        description: error instanceof Error ? error.message : `Could not download ${fileName}.`,
+      saveDownload(fileName, result.value.contents);
+    };
+    await download()
+      .catch((error: unknown) => {
+        toastManager.add({
+          type: "error",
+          title: "Download failed",
+          description: error instanceof Error ? error.message : `Could not download ${fileName}.`,
+        });
+      })
+      .finally(() => {
+        pendingRef.current = false;
+        setIsDownloading(false);
       });
-    } finally {
-      pendingRef.current = false;
-      setIsDownloading(false);
-    }
   };
 
   return (

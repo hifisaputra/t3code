@@ -1,6 +1,6 @@
 import type { EnvironmentId, LinearIssueSummary } from "@t3tools/contracts";
 import { CalendarPlusIcon, ClockIcon, EllipsisIcon, XIcon } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -49,7 +49,7 @@ export function CalendarToday({
   const today = localCalendarDate(new Date(now));
   const range = calendarDayRange(today)!;
   const [snapshots, setSnapshots] = useState<Record<string, Snapshot>>({});
-  const report = useCallback((key: string, snapshot: Snapshot) => {
+  const report = (key: string, snapshot: Snapshot) => {
     setSnapshots((current) =>
       Object.fromEntries([
         ...Object.entries(current)
@@ -58,7 +58,7 @@ export function CalendarToday({
         [key, snapshot],
       ]),
     );
-  }, []);
+  };
   const selected = calendars.map((c) => ({
     calendar: c,
     snapshot: snapshots[JSON.stringify([c.id, range.start, range.end])],

@@ -1,13 +1,11 @@
 import type {
   AssetCreateUrlResult,
-  AssetCreateUrlsResult,
   AssetResource,
   EnvironmentId,
   PreviewOpenInput,
   PreviewSessionSnapshot,
   ScopedThreadRef,
 } from "@t3tools/contracts";
-import { ASSET_CREATE_URLS_MAX } from "@t3tools/contracts";
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 import {
   type AtomCommandResult,
@@ -15,15 +13,18 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 
 import { resolveAssetUrl } from "~/assets/assetUrls";
+import { isPreviewAvailableFor, previewRuntimeFor } from "~/browser/previewRuntime";
 import {
   applyPreviewServerSnapshot,
-  isPreviewSupportedInRuntime,
+  readThreadPreviewState,
   rememberPreviewUrl,
+  setActivePreviewTab,
+  updatePreviewServerSnapshot,
 } from "~/previewStateStore";
-import { useRightPanelStore } from "~/rightPanelStore";
+import { selectSelectedRightPanelSurface, useRightPanelStore } from "~/rightPanelStore";
 
 import {
   browserDefaultOpenProfileId,
@@ -57,6 +58,8 @@ export async function openUrlInPreview<E>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly url: string;
   readonly openPreview: OpenPreviewMutation<E>;
+  readonly profileId?: PreviewOpenInput["profileId"];
+  readonly background?: boolean;
 }): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   const defaults = await resolveBrowserDefaults().catch(
     (cause: unknown) => new BrowserSettingsReadError({ cause }),
@@ -64,129 +67,44 @@ export async function openUrlInPreview<E>(input: {
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
+  const runtime = previewRuntimeFor(input.threadRef.environmentId);
+  const previousActiveTabId = readThreadPreviewState(input.threadRef).activeTabId;
+  // The server's "opened" event switches the preview tab but not the panel's
+  // selection, so a changed selection means the user picked a tab themselves.
+  const selectedSurface = () =>
+    selectSelectedRightPanelSurface(useRightPanelStore.getState().byThreadKey, input.threadRef)
+      ?.id ?? null;
+  const surfaceBeforeOpen = selectedSurface();
   const result = await input.openPreview({
     environmentId: input.threadRef.environmentId,
     input: {
       threadId: input.threadRef.threadId,
       url: input.url,
-      // Built here rather than via `openPreviewSession` because this path
-      // maps the result differently, so the configured defaults have to be
-      // applied explicitly or file/link opens would ignore them.
       viewport: browserDefaultOpenViewport(defaults),
-      profileId: browserDefaultOpenProfileId(defaults),
+      profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
+      ...(runtime === undefined ? {} : { runtime }),
     },
   });
   return mapAtomCommandResult(result, (snapshot) => {
-    applyPreviewServerSnapshot(input.threadRef, snapshot);
     rememberPreviewUrl(input.threadRef, input.url);
+    if (input.background) {
+      updatePreviewServerSnapshot(input.threadRef, snapshot);
+      // The server's "opened" event activates the new tab; hand focus back,
+      // unless the user picked a tab, this one included, while the open was in flight.
+      if (
+        previousActiveTabId &&
+        readThreadPreviewState(input.threadRef).activeTabId === snapshot.tabId &&
+        selectedSurface() === surfaceBeforeOpen
+      ) {
+        setActivePreviewTab(input.threadRef, previousActiveTabId);
+      }
+      return;
+    }
+    applyPreviewServerSnapshot(input.threadRef, snapshot);
     useRightPanelStore.getState().openBrowser(input.threadRef, snapshot.tabId);
   });
 }
 
-export type CreateAssetUrlMutation<AssetError> = (input: {
-  readonly environmentId: EnvironmentId;
-  readonly input: { readonly resource: AssetResource };
-}) => Promise<AtomCommandResult<AssetCreateUrlResult, AssetError>>;
-
-/** An absolute asset URL together with the moment its signed token stops being accepted. */
-export interface ResolvedFileAsset {
-  readonly url: string;
-  readonly expiresAt: number;
-}
-
-/**
- * Resolve a workspace file to an absolute, backend-served asset URL and the token's
- * expiry — callers that cache the URL need to know how long it stays usable.
- */
-async function resolveWorkspaceFileAsset<AssetError>(input: {
-  readonly threadRef: ScopedThreadRef;
-  readonly filePath: string;
-  readonly httpBaseUrl: string;
-  readonly createAssetUrl: CreateAssetUrlMutation<AssetError>;
-}): Promise<AtomCommandResult<ResolvedFileAsset, AssetError>> {
-  const assetResult = await input.createAssetUrl({
-    environmentId: input.threadRef.environmentId,
-    input: {
-      resource: {
-        _tag: "workspace-file",
-        threadId: input.threadRef.threadId,
-        path: input.filePath,
-      },
-    },
-  });
-  if (assetResult._tag === "Failure") {
-    return AsyncResult.failure(assetResult.cause);
-  }
-  const assetUrl = resolveAssetUrl(input.httpBaseUrl, assetResult.value.relativeUrl);
-  if (assetUrl === null) {
-    return AsyncResult.failure(
-      Cause.die(new Error("The environment returned an invalid asset URL.")),
-    );
-  }
-  return AsyncResult.success({ url: assetUrl, expiresAt: assetResult.value.expiresAt });
-}
-
-export type CreateAssetUrlsMutation<AssetError> = (input: {
-  readonly environmentId: EnvironmentId;
-  readonly input: { readonly resources: ReadonlyArray<AssetResource> };
-}) => Promise<AtomCommandResult<AssetCreateUrlsResult, AssetError>>;
-
-/**
- * Resolve many workspace files in one round trip — the shape a chat message needs, where
- * asking per image cost one request each and dominated the time to first paint on a
- * high-latency link. Returns one slot per requested path, in order; a file the server
- * could not mint a URL for comes back as `null` rather than failing its neighbours.
- * Requests beyond the protocol's batch size are split across as few calls as possible.
- */
-export async function resolveWorkspaceFileAssets<AssetError>(input: {
-  readonly threadRef: ScopedThreadRef;
-  readonly filePaths: ReadonlyArray<string>;
-  readonly httpBaseUrl: string;
-  readonly createAssetUrls: CreateAssetUrlsMutation<AssetError>;
-}): Promise<AtomCommandResult<ReadonlyArray<ResolvedFileAsset | null>, AssetError>> {
-  const resolved: Array<ResolvedFileAsset | null> = [];
-  for (let start = 0; start < input.filePaths.length; start += ASSET_CREATE_URLS_MAX) {
-    const chunk = input.filePaths.slice(start, start + ASSET_CREATE_URLS_MAX);
-    const batchResult = await input.createAssetUrls({
-      environmentId: input.threadRef.environmentId,
-      input: {
-        resources: chunk.map((path) => ({
-          _tag: "workspace-file" as const,
-          threadId: input.threadRef.threadId,
-          path,
-        })),
-      },
-    });
-    if (batchResult._tag === "Failure") {
-      return AsyncResult.failure(batchResult.cause);
-    }
-    for (const [index] of chunk.entries()) {
-      const entry = batchResult.value.entries[index];
-      if (entry === undefined || entry._tag === "failed") {
-        resolved.push(null);
-        continue;
-      }
-      const assetUrl = resolveAssetUrl(input.httpBaseUrl, entry.relativeUrl);
-      resolved.push(assetUrl === null ? null : { url: assetUrl, expiresAt: entry.expiresAt });
-    }
-  }
-  return AsyncResult.success(resolved);
-}
-
-/** {@link resolveWorkspaceFileAsset} for callers that only need the URL. */
-export async function resolveWorkspaceFileAssetUrl<AssetError>(input: {
-  readonly threadRef: ScopedThreadRef;
-  readonly filePath: string;
-  readonly httpBaseUrl: string;
-  readonly createAssetUrl: CreateAssetUrlMutation<AssetError>;
-}): Promise<AtomCommandResult<string, AssetError>> {
-  return mapAtomCommandResult(await resolveWorkspaceFileAsset(input), (asset) => asset.url);
-}
-
-/**
- * Opens a browser document in the integrated browser. Inside the workspace the
- * page may load sibling assets; a file outside it is served on its own.
- */
 export async function openFileInPreview<AssetError, PreviewError>(input: {
   readonly threadRef: ScopedThreadRef;
   readonly filePath: string;
@@ -203,7 +121,7 @@ export async function openFileInPreview<AssetError, PreviewError>(input: {
     AssetError | PreviewError | BrowserPreviewUnavailableError | BrowserSettingsReadError
   >
 > {
-  if (!isPreviewSupportedInRuntime()) {
+  if (!isPreviewAvailableFor(input.threadRef.environmentId)) {
     return AsyncResult.failure(
       Cause.fail(
         new BrowserPreviewUnavailableError({

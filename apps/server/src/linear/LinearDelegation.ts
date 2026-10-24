@@ -1,5 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off - webhook signatures need a synchronous HMAC and timing-safe compare.
 import { forkParked } from "../serverActivation.ts";
-import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
 import * as NodeCrypto from "node:crypto";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
@@ -12,20 +12,19 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   UserInputQuestion,
-  CommandId,
-  MessageId,
   ThreadId,
-  ApprovalRequestId,
   LinearOperationError,
   resolveLinearRepositoryMapping,
-  type OrchestrationEvent,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2StoredEvent,
+  type OrchestrationV2UserInputQuestion,
 } from "@t3tools/contracts";
 import { ServerSettingsService } from "../serverSettings.ts";
-import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { make as makeAssistantThreads } from "../assistant/assistantThreads.ts";
+import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
 import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
 import { LinearOAuth } from "./LinearOAuth.ts";
 import { LinearAgentOutbox } from "./LinearAgentOutbox.ts";
@@ -79,6 +78,20 @@ const Question = Schema.Struct({
 });
 
 const encodeEvent = Schema.encodeEffect(Schema.fromJsonString(AgentEvent));
+/** A provider's question as the session stores it, to resolve a reply's options. */
+const toQuestion = (q: OrchestrationV2UserInputQuestion): typeof UserInputQuestion.Type => ({
+  id: q.id,
+  header: q.header,
+  question: q.question,
+  options: q.options.map((o) => ({
+    label: o.label,
+    description: o.description,
+    ...(o.value === undefined ? {} : { value: o.value }),
+  })),
+  ...(q.allowCustomAnswer === undefined ? {} : { allowCustomAnswer: q.allowCustomAnswer }),
+  ...(q.initialAnswer === undefined ? {} : { initialAnswer: q.initialAnswer }),
+  multiSelect: q.multiSelect ?? false,
+});
 const encodeQuestion = Schema.encodeEffect(Schema.fromJsonString(Question));
 const decodeQuestion = Schema.decodeUnknownEffect(Schema.fromJsonString(Question));
 const encodeGuidance = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -115,20 +128,15 @@ export function delegationNote(body: string): string {
     .trim();
 }
 
-function isRelevantEvent(event: OrchestrationEvent): boolean {
+function isRelevantEvent(event: OrchestrationV2DomainEvent): boolean {
   return (
-    event.type === "thread.session-set" ||
     event.type === "thread.deleted" ||
-    (event.type === "thread.meta-updated" &&
-      (event.payload.branchPullRequest != null || event.payload.linkedPullRequest != null)) ||
-    event.type === "thread.pull-request-linked" ||
-    (event.type === "thread.activity-appended" &&
-      [
-        "user-input.requested",
-        "approval.requested",
-        "user-input.resolved",
-        "approval.resolved",
-      ].includes(event.payload.activity.kind))
+    event.type === "run.updated" ||
+    event.type === "runtime-request.updated" ||
+    event.type === "thread.pull-request-link-updated" ||
+    event.type === "thread.pull-request-synced" ||
+    (event.type === "turn-item.updated" &&
+      (event.payload.type === "approval_request" || event.payload.type === "user_input_request"))
   );
 }
 
@@ -143,15 +151,14 @@ export const make = Effect.gen(function* () {
   const outbox = yield* LinearAgentOutbox;
   const linear = yield* LinearApi;
   const threads = yield* LinearThreadService;
-  const engine = yield* OrchestrationEngineService;
-  const ingestion = yield* ProviderRuntimeIngestionService;
-  const snapshots = yield* ProjectionSnapshotQuery;
+  const v2 = yield* makeAssistantThreads;
+  const eventSink = yield* EventSinkV2;
   const files = yield* T3ProjectFileLoader;
   const processLock = yield* Semaphore.make(1);
   const queue = yield* Queue.unbounded<string>();
   const ackQueue = yield* Queue.unbounded<string>();
   const enqueueOutgoing = outbox.enqueue;
-  const commandId = (id: string, step: string) => CommandId.make(`linear:${id}:${step}`);
+  const commandId = (id: string, step: string) => `linear:${id}:${step}`;
   /**
    * Sessions the assistant created for a team come back as `created` webhooks with no
    * creator, like a triage delegation. They are settled here and never start a thread.
@@ -262,7 +269,6 @@ export const make = Effect.gen(function* () {
           pending_question: null,
         };
       }
-      const now = DateTime.formatIso(yield* DateTime.now);
       const prompt =
         event.agentActivity?.content?.body ??
         event.agentActivity?.body ??
@@ -285,13 +291,11 @@ export const make = Effect.gen(function* () {
             const answer = prompt.trim().toLowerCase();
             if (!["approve", "deny"].includes(answer))
               return yield* fail("Reply approve or deny to the pending permission request.");
-            yield* engine.dispatch({
-              type: "thread.approval.respond",
+            yield* v2.respond({
               commandId: commandId(deliveryId, "approval"),
               threadId,
-              requestId: ApprovalRequestId.make(pending.requestId),
+              requestId: pending.requestId,
               decision: answer === "approve" ? "accept" : "decline",
-              createdAt: now,
             });
           } else {
             const ids = pending.ids ?? [];
@@ -305,11 +309,10 @@ export const make = Effect.gen(function* () {
                 answers[id] = line.slice(id.length + 1).trim();
               }
             }
-            yield* engine.dispatch({
-              type: "thread.user-input.respond",
+            yield* v2.respond({
               commandId: commandId(deliveryId, "answer"),
               threadId,
-              requestId: ApprovalRequestId.make(pending.requestId),
+              requestId: pending.requestId,
               answers: yield* Effect.try({
                 try: () =>
                   Object.fromEntries(
@@ -339,7 +342,6 @@ export const make = Effect.gen(function* () {
                     "Select one of the offered options. Separate multiple selections with commas.",
                   ),
               }),
-              createdAt: now,
             });
           }
           yield* sql`UPDATE linear_agent_sessions SET pending_question = NULL, status = 'running' WHERE id = ${sessionId} AND pending_question = ${session.pending_question}`;
@@ -348,8 +350,7 @@ export const make = Effect.gen(function* () {
           if (!threadId) {
             if (!c.modelSelection)
               return yield* fail("Choose a delegation model in T3 Settings first.");
-            const snapshot = yield* snapshots.getShellSnapshot();
-            const projects = snapshot.projects;
+            const projects = yield* v2.listProjects;
             const mapping = resolveLinearRepositoryMapping(allSettings.linear.repositories, issue);
             const candidates = mapping
               ? projects.filter((p) => p.id === mapping.projectId)
@@ -398,15 +399,13 @@ export const make = Effect.gen(function* () {
             });
             if (!prepared.worktreePath)
               return yield* fail("Delegation requires an isolated worktree.");
-            yield* engine.dispatch({
-              type: "thread.create",
+            yield* v2.create({
               commandId: commandId(sessionId, "create"),
               threadId,
               projectId: project.id,
               title: `${issue.identifier}: ${issue.title}`,
               modelSelection: c.modelSelection,
               runtimeMode: c.runtimeMode,
-              interactionMode: "default",
               branch: prepared.branch,
               worktreePath: prepared.worktreePath,
               linkedIssue: {
@@ -415,7 +414,6 @@ export const make = Effect.gen(function* () {
                 identifier: issue.identifier,
                 url: issue.url,
               },
-              createdAt: now,
             });
             yield* sql`UPDATE linear_agent_sessions SET thread_id = ${threadId} WHERE id = ${sessionId}`;
           }
@@ -431,20 +429,12 @@ export const make = Effect.gen(function* () {
               : prompt ||
                 "Read the current issue description and comments with the get_issue and list_comments MCP tools, then continue working on the delegated issue.";
           yield* sql`UPDATE linear_agent_sessions SET status = 'running', pending_question = NULL, updated_at = ${yield* Clock.currentTimeMillis} WHERE id = ${sessionId}`;
-          yield* engine.dispatch({
-            type: "thread.turn.start",
+          yield* v2.send({
             commandId: commandId(deliveryId, "turn"),
+            messageId: `linear-${deliveryId}`,
             threadId,
-            message: {
-              messageId: MessageId.make(`linear-${deliveryId}`),
-              role: "user",
-              text,
-              attachments: [],
-            },
-            ...(c.modelSelection ? { modelSelection: c.modelSelection } : {}),
-            runtimeMode: c.runtimeMode,
-            interactionMode: "default",
-            createdAt: now,
+            text,
+            modelSelection: c.modelSelection,
           });
         }
       }
@@ -459,12 +449,11 @@ export const make = Effect.gen(function* () {
   ) {
     yield* sql`UPDATE linear_agent_sessions SET status = 'stopped', pending_question = NULL WHERE id = ${session.id}`;
     if (session.thread_id)
-      yield* engine.dispatch({
-        type: "thread.turn.interrupt",
-        commandId: commandId(id, "stop"),
-        threadId: ThreadId.make(session.thread_id),
-        createdAt: DateTime.formatIso(yield* DateTime.now),
-      });
+      yield* v2.stop(
+        commandId(id, "stop"),
+        ThreadId.make(session.thread_id),
+        "Delegation was stopped from Linear.",
+      );
     yield* enqueueOutgoing(`${id}:stopped`, session.id, {
       type: "response",
       body: "Delegation stopped. You can continue from the T3 Code thread.",
@@ -514,88 +503,89 @@ export const make = Effect.gen(function* () {
     },
     Effect.mapError(() => fail("Webhook was not accepted.")),
   );
-  const observe = Effect.fn("LinearDelegation.observe")(function* (event: OrchestrationEvent) {
-    if (!isRelevantEvent(event) || !("threadId" in event.payload)) return;
+  const observe = Effect.fn("LinearDelegation.observe")(function* (
+    stored: OrchestrationV2StoredEvent,
+  ) {
+    const event = stored.event;
+    if (!isRelevantEvent(event)) return;
     const rows =
-      yield* sql<Session>`SELECT * FROM linear_agent_sessions WHERE thread_id = ${event.payload.threadId} AND status != 'stopped'`;
+      yield* sql<Session>`SELECT * FROM linear_agent_sessions WHERE thread_id = ${event.threadId} AND status != 'stopped'`;
     for (const row of rows) {
-      const id = `event:${event.sequence}:${row.id}`;
-      if (event.type === "thread.session-set" && event.payload.session.status === "running") {
-        yield* sql`UPDATE linear_agent_sessions SET active_turn_id = ${event.payload.session.activeTurnId} WHERE id = ${row.id}`;
-      } else if (
-        event.type === "thread.session-set" &&
-        event.payload.session.status === "ready" &&
-        row.active_turn_id
-      ) {
-        yield* ingestion.drain;
-        const detail = yield* snapshots.getThreadDetailById(ThreadId.make(row.thread_id!));
-        if (Option.isSome(detail)) {
-          const last = detail.value.messages.findLast(
-            (m) => m.role === "assistant" && m.turnId === row.active_turn_id && m.text.trim(),
-          );
-          yield* enqueueOutgoing(id, row.id, {
+      const id = `event:${stored.sequence}:${row.id}`;
+      if (event.type === "run.updated") {
+        const run = event.payload;
+        if (run.status === "running") {
+          if (row.active_turn_id !== run.id)
+            yield* sql`UPDATE linear_agent_sessions SET active_turn_id = ${run.id} WHERE id = ${row.id}`;
+        } else if (run.status === "completed" && row.active_turn_id === run.id) {
+          // A run's messages are final once it completes.
+          const last = (yield* v2.runAssistantMessages(event.threadId, run.id)).at(-1);
+          yield* enqueueOutgoing(`run:${run.id}:${row.id}`, row.id, {
             type: "response",
             body:
               last?.text ??
               "The turn finished without a final message. Open the T3 thread to review the result.",
           });
+          yield* sql`UPDATE linear_agent_sessions SET status = 'complete', active_turn_id = NULL WHERE id = ${row.id}`;
+        } else if (run.status === "failed" && row.active_turn_id === run.id) {
+          const shell = yield* v2.shell(event.threadId, { includeArchived: true });
+          yield* sql`UPDATE linear_agent_sessions SET status = 'failed', active_turn_id = NULL WHERE id = ${row.id}`;
+          yield* enqueueOutgoing(`run:${run.id}:${row.id}`, row.id, {
+            type: "error",
+            body:
+              (Option.isSome(shell) ? shell.value.lastError : null) ??
+              "The provider failed. Open the T3 thread for details.",
+          });
+        } else if (
+          (run.status === "interrupted" || run.status === "cancelled") &&
+          row.active_turn_id === run.id
+        ) {
+          yield* sql`UPDATE linear_agent_sessions SET status = 'complete', active_turn_id = NULL WHERE id = ${row.id}`;
+          yield* enqueueOutgoing(`run:${run.id}:${row.id}`, row.id, {
+            type: "response",
+            body: "The agent stopped before finishing. Open the T3 thread to review its progress, or reply here to continue.",
+          });
         }
-        yield* sql`UPDATE linear_agent_sessions SET status = 'complete', active_turn_id = NULL WHERE id = ${row.id}`;
-      } else if (event.type === "thread.session-set" && event.payload.session.status === "error") {
-        yield* sql`UPDATE linear_agent_sessions SET status = 'failed', active_turn_id = NULL WHERE id = ${row.id}`;
-        yield* enqueueOutgoing(id, row.id, {
-          type: "error",
-          body:
-            event.payload.session.lastError ??
-            "The provider failed. Open the T3 thread for details.",
-        });
       } else if (
-        event.type === "thread.session-set" &&
-        ["stopped", "interrupted"].includes(event.payload.session.status) &&
-        row.active_turn_id
+        event.type === "thread.pull-request-link-updated" ||
+        event.type === "thread.pull-request-synced"
       ) {
-        yield* sql`UPDATE linear_agent_sessions SET status = 'complete', active_turn_id = NULL WHERE id = ${row.id}`;
-        yield* enqueueOutgoing(id, row.id, {
-          type: "response",
-          body: "The agent stopped before finishing. Open the T3 thread to review its progress, or reply here to continue.",
-        });
-      } else if (
-        event.type === "thread.pull-request-linked" ||
-        (event.type === "thread.meta-updated" &&
-          (event.payload.branchPullRequest || event.payload.linkedPullRequest))
-      ) {
-        // Links now arrive as their own event; meta-updated only carries one for
-        // events persisted before that change and for the branch's own PR.
         const pullRequestUrl =
-          event.type === "thread.pull-request-linked"
-            ? event.payload.link.url
-            : (event.payload.branchPullRequest ?? event.payload.linkedPullRequest)!.url;
+          event.type === "thread.pull-request-link-updated"
+            ? event.payload.source === "stack-dismissed"
+              ? null
+              : event.payload.url
+            : (event.payload.branchPullRequest?.url ?? null);
+        if (!pullRequestUrl) continue;
+        // Keyed on the pull request: its link updates whenever its state syncs.
         const link = yield* outbox.threadLink(row.thread_id!);
-        yield* enqueueOutgoing(id, row.id, {
+        yield* enqueueOutgoing(`pull-request:${pullRequestUrl}:${row.id}`, row.id, {
           type: "links",
           links: [...(link ? [link] : []), { label: "Pull request", url: pullRequestUrl }],
         });
-      } else if (event.type === "thread.activity-appended") {
-        const activity = event.payload.activity;
-        if (activity.kind === "user-input.resolved" || activity.kind === "approval.resolved") {
-          const resolved = yield* decodeResolvedRequest(activity.payload);
-          if (row.pending_question) {
-            const pending = yield* decodeQuestion(row.pending_question);
-            if (pending.requestId === resolved.requestId)
-              yield* sql`UPDATE linear_agent_sessions SET pending_question = NULL WHERE id = ${row.id} AND pending_question = ${row.pending_question}`;
-          }
-          continue;
+      } else if (event.type === "runtime-request.updated") {
+        if (event.payload.status === "pending" || !row.pending_question) continue;
+        const pending = yield* decodeQuestion(row.pending_question);
+        if (pending.requestId === event.payload.id)
+          yield* sql`UPDATE linear_agent_sessions SET pending_question = NULL WHERE id = ${row.id} AND pending_question = ${row.pending_question}`;
+      } else if (event.type === "turn-item.updated") {
+        const item = event.payload;
+        if (item.type !== "approval_request" && item.type !== "user_input_request") continue;
+        if (item.status !== "waiting" && item.status !== "pending") continue;
+        const approval = item.type === "approval_request";
+        const questions = item.type === "user_input_request" ? item.questions : undefined;
+        if (row.pending_question) {
+          const pending = yield* decodeQuestion(row.pending_question);
+          if (pending.requestId === item.requestId) continue;
         }
-        if (activity.kind !== "user-input.requested" && activity.kind !== "approval.requested")
-          continue;
-        const payload = yield* decodeRequestedInput(activity.payload);
-        const approval = activity.kind === "approval.requested";
-        yield* sql`UPDATE linear_agent_sessions SET pending_question = ${yield* encodeQuestion({ kind: approval ? "approval" : "input", requestId: payload.requestId, ids: payload.questions?.map((q) => q.id) ?? [], ...(payload.questions ? { questions: payload.questions } : {}) })}, status = 'awaiting-input' WHERE id = ${row.id}`;
-        yield* enqueueOutgoing(id, row.id, {
+        yield* sql`UPDATE linear_agent_sessions SET pending_question = ${yield* encodeQuestion({ kind: approval ? "approval" : "input", requestId: item.requestId, ids: questions?.map((q) => q.id) ?? [], ...(questions ? { questions: questions.map(toQuestion) } : {}) })}, status = 'awaiting-input' WHERE id = ${row.id}`;
+        const summary = item.title ?? (approval ? "Approval requested" : "Input requested");
+        yield* enqueueOutgoing(`request:${item.requestId}:${row.id}`, row.id, {
           type: "elicitation",
-          body: approval
-            ? `${activity.summary}\n${payload.detail ?? ""}\nReview the request in your T3 thread. Reply approve or deny.`
-            : `${payload.questions?.map((q) => `${q.id}: ${q.question}${q.options.length ? "\n" + q.options.map((o) => "- " + o.label + (o.description ? ": " + o.description : "")).join("\n") : ""}${q.multiSelect ? "\nSeparate multiple selections with commas." : ""}`).join("\n") ?? activity.summary}\nReply with your answer${(payload.questions?.length ?? 0) > 1 ? ", using one question-id: answer per line" : ""}.`,
+          body:
+            item.type === "approval_request"
+              ? `${summary}\n${item.prompt ?? ""}\nReview the request in your T3 thread. Reply approve or deny.`
+              : `${item.questions.map((q) => `${q.id}: ${q.question}${q.options.length ? "\n" + q.options.map((o) => "- " + o.label + (o.description ? ": " + o.description : "")).join("\n") : ""}${q.multiSelect ? "\nSeparate multiple selections with commas." : ""}`).join("\n") || summary}\nReply with your answer${item.questions.length > 1 ? ", using one question-id: answer per line" : ""}.`,
         });
       } else if (event.type === "thread.deleted") {
         yield* sql`UPDATE linear_agent_sessions SET status = 'stopped' WHERE id = ${row.id}`;
@@ -626,34 +616,28 @@ export const make = Effect.gen(function* () {
   });
   if (!(yield* LinearDelegationWorkers))
     return { receive, stop, isActive, process, observe, acknowledge };
-  const events = yield* engine.subscribeDomainEvents;
   const recordEvent = Effect.fn("LinearDelegation.recordEvent")(function* (
-    event: OrchestrationEvent,
+    stored: OrchestrationV2StoredEvent,
   ) {
     const rows = yield* sql<{
       sequence: number;
     }>`SELECT sequence FROM linear_agent_cursor WHERE id = 1`;
-    if ((rows[0]?.sequence ?? 0) >= event.sequence) return;
-    yield* observe(event);
-    yield* sql`UPDATE linear_agent_cursor SET sequence = ${event.sequence} WHERE id = 1`;
+    if ((rows[0]?.sequence ?? 0) >= stored.sequence) return;
+    yield* observe(stored);
+    yield* sql`UPDATE linear_agent_cursor SET sequence = ${stored.sequence} WHERE id = 1`;
   });
-  const replay = Effect.gen(function* () {
-    while (true) {
-      const rows = yield* sql<{
-        sequence: number;
-      }>`SELECT sequence FROM linear_agent_cursor WHERE id = 1`;
-      const cursor = rows[0]?.sequence ?? 0;
-      const batch = yield* engine.readEvents(cursor, 500).pipe(Stream.runCollect);
-      if (!batch.length) break;
-      for (const event of batch) if (isRelevantEvent(event)) yield* recordEvent(event);
-      yield* sql`UPDATE linear_agent_cursor SET sequence = ${batch[batch.length - 1]!.sequence} WHERE id = 1`;
-    }
-  });
-  yield* replay;
-  yield* events.pipe(
-    Stream.filter(isRelevantEvent),
-    Stream.runForEach((event) =>
-      recordEvent(event).pipe(Effect.retry(Schedule.exponential("1 second"))),
+  // A database copied from v1 carries the v1 event sequence, which v2's own
+  // sequence starts below; nothing before the copy is delegation's to replay.
+  const latest = yield* eventSink.latestSequence();
+  yield* sql`UPDATE linear_agent_cursor SET sequence = ${latest} WHERE id = 1 AND sequence > ${latest}`;
+  const cursor = (yield* sql<{
+    sequence: number;
+  }>`SELECT sequence FROM linear_agent_cursor WHERE id = 1`)[0]?.sequence;
+  // The event store replays what came after the cursor, then follows live events.
+  yield* eventSink.stream({ afterSequence: cursor ?? latest }).pipe(
+    Stream.filter((stored) => isRelevantEvent(stored.event)),
+    Stream.runForEach((stored) =>
+      recordEvent(stored).pipe(Effect.retry(Schedule.exponential("1 second"))),
     ),
     forkParked,
   );

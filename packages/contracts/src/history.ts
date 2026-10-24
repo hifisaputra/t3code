@@ -21,7 +21,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { ThreadLinkedIssue } from "./orchestration.ts";
+import { ThreadLinkedIssue } from "./threadPullRequest.ts";
 
 const HISTORY_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 

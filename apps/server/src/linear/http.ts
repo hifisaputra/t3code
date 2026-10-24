@@ -2,8 +2,8 @@ import * as Stream from "effect/Stream";
 import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
-import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStreamText";
 import { LinearOAuth } from "./LinearOAuth.ts";
 import { LinearDelegation } from "./LinearDelegation.ts";
 

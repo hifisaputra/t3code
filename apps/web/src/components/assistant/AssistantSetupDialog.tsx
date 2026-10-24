@@ -21,7 +21,9 @@ import {
 } from "~/providerInstances";
 import { developerAssistant } from "~/state/developerAssistant";
 import { useProjects } from "~/state/entities";
-import type { EnvironmentPresentation } from "~/state/environments";
+import { useEnvironmentProviders, type EnvironmentPresentation } from "~/state/environments";
+import { EMPTY_SERVER_PROVIDERS } from "~/state/server";
+import { mergeEnvironmentSettings } from "~/hooks/useSettings";
 import { linearEnvironment } from "~/state/linear";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -137,7 +139,8 @@ export function AssistantSetupDialog({
   );
   const beginSetup = useAtomCommand(developerAssistant.beginSetup);
   const { pending, run } = useAssistantAction();
-  const providers = environment.serverConfig?.providers ?? [];
+  const providers =
+    useEnvironmentProviders().get(environment.environmentId) ?? EMPTY_SERVER_PROVIDERS;
   // A setup conversation already under way holds the choices the person made
   // last; starting again rewrites those, so they are what the form shows. The
   // saved config is the fallback for a project with no setup in flight.
@@ -190,16 +193,16 @@ export function AssistantSetupDialog({
   ) =>
     selection ? (
       <ProviderModelPicker
+        environmentId={environmentId}
         activeInstanceId={selection.instanceId}
         model={selection.model}
         lockedProvider={null}
         instanceEntries={deriveProviderInstanceEntries(providers)}
         modelOptionsByInstance={getCustomModelOptionsByInstance(
-          {
-            ...DEFAULT_SERVER_SETTINGS,
-            ...DEFAULT_CLIENT_SETTINGS,
-            ...environment.serverConfig?.settings,
-          },
+          mergeEnvironmentSettings(
+            environment.serverConfig?.settings ?? DEFAULT_SERVER_SETTINGS,
+            DEFAULT_CLIENT_SETTINGS,
+          ),
           providers,
           selection.instanceId,
           selection.model,

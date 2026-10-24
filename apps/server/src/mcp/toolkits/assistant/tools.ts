@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 import {
   ASSISTANT_PROJECT_NOTES,
   AssistantCriteria,
@@ -14,13 +14,25 @@ import {
   AssistantThreadRole,
   DeveloperAssistantError,
   McpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
   assistantTaskE2eEnvironment,
 } from "@t3tools/contracts";
 import { DeveloperAssistant } from "../../../assistant/DeveloperAssistant.ts";
-import { McpInvocationContext, requireMcpCapability } from "../../McpInvocationContext.ts";
+import { ThreadManagementService } from "../../../orchestration-v2/ThreadManagementService.ts";
+import {
+  McpInvocationContext,
+  requireMcpCapability,
+  requireThreadScope,
+} from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
 
-const dependencies = [DeveloperAssistant, McpInvocationContext];
-const failure = Schema.Union([DeveloperAssistantError, McpCapabilityUnavailableError]);
+// ThreadManagementService is how McpToolAccess checks that the calling thread is live.
+const dependencies = [DeveloperAssistant, McpInvocationContext, ThreadManagementService];
+const failure = Schema.Union([
+  DeveloperAssistantError,
+  McpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
+]);
 const text = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(20000));
 const smokeCriteria = Schema.Array(Schema.Int).annotate({
   description:
@@ -399,22 +411,26 @@ const verifyNote = (result: {
   return "Verified. Start the e2e check with assistant_start_e2e.";
 };
 
+/** Every assistant tool acts as its calling team or setup thread, behind Linear access. */
 const scope = Effect.gen(function* () {
   const invocation = yield* requireMcpCapability("linear");
-  return { service: yield* DeveloperAssistant, caller: invocation.threadId };
+  const thread = yield* requireThreadScope(invocation, "This developer assistant tool");
+  return { service: yield* DeveloperAssistant, caller: thread.thread.threadId };
 });
-export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
-  assistant_get_setup: () =>
+export const layer = McpToolAccess.toLayer(AssistantToolkit, {
+  assistant_get_setup: McpToolAccess.readsAsCaller(() =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.getSetup(caller);
     }),
-  assistant_propose_setup: (input) =>
+  ),
+  assistant_propose_setup: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.proposeSetup(caller, input.plan, input.summary.trim());
     }),
-  assistant_accept_issue: (input) =>
+  ),
+  assistant_accept_issue: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       const e2e = input.e2e;
@@ -437,27 +453,32 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         input.skipReview?.trim() || undefined,
       );
     }),
-  assistant_decline_issue: (input) =>
+  ),
+  assistant_decline_issue: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.declineIssue(caller, input.reason.trim());
     }),
-  assistant_read_thread: (input) =>
+  ),
+  assistant_read_thread: McpToolAccess.readsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.readThread(caller, input.thread);
     }),
-  assistant_message_worker: (input) =>
+  ),
+  assistant_message_worker: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.messageWorker(caller, input.message.trim(), input.thread);
     }),
-  assistant_ask_decision: (input) =>
+  ),
+  assistant_ask_decision: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.askDecision(caller, input.question.trim());
     }),
-  assistant_request_review: (input) =>
+  ),
+  assistant_request_review: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.requestReview(caller, input.message.trim(), {
@@ -465,7 +486,8 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         ...(input.planChanged !== undefined ? { planChanged: input.planChanged } : {}),
       });
     }),
-  assistant_submit_review: (input) =>
+  ),
+  assistant_submit_review: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.submitReview(
@@ -476,7 +498,8 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         input.needsE2e,
       );
     }),
-  assistant_submit_research: (input) =>
+  ),
+  assistant_submit_research: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.submitResearch(caller, {
@@ -489,18 +512,21 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         })),
       });
     }),
-  assistant_report_merged: (input) =>
+  ),
+  assistant_report_merged: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.reportMerged(caller, input.summary.trim());
     }),
-  assistant_verify_staging: (input) =>
+  ),
+  assistant_verify_staging: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       const result = yield* service.verifyStaging(caller, input.targetIds);
       return { ...result, note: verifyNote(result) };
     }),
-  assistant_start_e2e: (input) =>
+  ),
+  assistant_start_e2e: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.startE2e(caller, input.brief.trim(), {
@@ -508,7 +534,8 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         ...(input.smokeCriteria ? { smokeCriteria: input.smokeCriteria } : {}),
       });
     }),
-  assistant_submit_e2e: (input) =>
+  ),
+  assistant_submit_e2e: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.submitE2e(caller, {
@@ -540,12 +567,14 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
           : {}),
       });
     }),
-  assistant_deliver: (input) =>
+  ),
+  assistant_deliver: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       return yield* service.deliverChecked(caller, input.settled.trim());
     }),
-  assistant_add_note: (input) =>
+  ),
+  assistant_add_note: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       const { note, added } = yield* service.addProjectNoteFromThread(caller, input.text);
@@ -553,7 +582,8 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         ? "Noted. Later teams of this project see it in their first message."
         : `Already noted, so nothing was added. The open note reads: ${note.text}`;
     }),
-  assistant_wait: (input) =>
+  ),
+  assistant_wait: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { service, caller } = yield* scope;
       const result = yield* service.waitForExternal(
@@ -565,4 +595,5 @@ export const AssistantToolkitHandlers = AssistantToolkit.toLayer({
         return "T3 has checked back 15 times without this completing, so the issue is now blocked for the person to look at. End your turn.";
       return `T3 checks back in about ${result.minutes === 1 ? "a minute" : `${result.minutes} minutes`}. End your turn now.`;
     }),
+  ),
 });

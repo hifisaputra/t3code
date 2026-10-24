@@ -2,9 +2,12 @@ import type {
   EnvironmentId,
   LinearIssueSummary,
   ModelSelection,
-  OrchestrationThreadShell,
   ServerProvider,
 } from "@t3tools/contracts";
+import {
+  threadRuntimeIsActive,
+  type EnvironmentThreadShell,
+} from "@t3tools/client-runtime/state/models";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -17,7 +20,7 @@ import {
   ExternalLinkIcon,
   GitCommitHorizontalIcon,
 } from "lucide-react";
-import { useCallback, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -141,7 +144,7 @@ export function ExpandableMarkdown({
         <button
           type="button"
           onClick={() => setExpanded((value) => !value)}
-          className="mt-1 inline-flex items-center gap-1 rounded-sm font-medium text-muted-foreground text-xs hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="mt-1 inline-flex items-center gap-1 rounded-sm font-medium text-muted-foreground text-xs hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
         >
           <ChevronDownIcon
             aria-hidden
@@ -230,26 +233,29 @@ export function urlHost(url: string | undefined): string | null {
 export const runtimeModeLabel = (mode: string) =>
   mode === "full-access" ? "Full access" : "Asks before commands";
 
+type ThreadActivityShell = Pick<EnvironmentThreadShell, "runtime" | "pendingBackgroundTasks">;
+
+/**
+ * What a thread's background work is doing: a watch loop only `monitoring`,
+ * anything else still `working`, or null with nothing pending.
+ */
+function backgroundLiveness(shell: ThreadActivityShell | null): "working" | "monitoring" | null {
+  const tasks = shell?.pendingBackgroundTasks ?? [];
+  if (tasks.length === 0) return null;
+  return tasks.some((task) => task.kind !== "monitor") ? "working" : "monitoring";
+}
+
 /** Whether a thread is mid-turn or holding a request, so its state is still moving. */
-export function threadIsBusy(
-  shell: Pick<OrchestrationThreadShell, "session" | "latestTurn" | "backgroundLiveness"> | null,
-): boolean {
-  return (
-    shell?.session?.status === "running" ||
-    shell?.session?.status === "starting" ||
-    shell?.latestTurn?.state === "running" ||
-    shell?.backgroundLiveness === "working"
-  );
+export function threadIsBusy(shell: ThreadActivityShell | null): boolean {
+  return threadRuntimeIsActive(shell?.runtime) || backgroundLiveness(shell) === "working";
 }
 
 /**
  * Whether a thread keeps its issue's team waiting: mid-turn, or with background
  * work the server counts as busy, a watch loop included.
  */
-export function threadKeepsTeamWaiting(
-  shell: Pick<OrchestrationThreadShell, "session" | "latestTurn" | "backgroundLiveness"> | null,
-): boolean {
-  return threadIsBusy(shell) || (shell?.backgroundLiveness ?? null) !== null;
+export function threadKeepsTeamWaiting(shell: ThreadActivityShell | null): boolean {
+  return threadIsBusy(shell) || backgroundLiveness(shell) !== null;
 }
 
 /** The themed confirmation, falling back to the browser's when no host is mounted. */
@@ -274,31 +280,32 @@ function failureMessage(result: {
  */
 export function useAssistantAction() {
   const [pending, setPending] = useState<string | null>(null);
-  const run = useCallback(
-    async (
-      key: string,
-      action: () => Promise<AtomCommandResult<unknown, unknown>>,
-      messages: { failure: string; success?: string },
-    ): Promise<boolean> => {
-      setPending(key);
-      try {
-        const result = await action();
-        if (result._tag === "Failure") {
-          if (!isAtomCommandInterrupted(result))
-            toastManager.add({
-              type: "error",
-              title: messages.failure,
-              description: failureMessage(result),
-            });
-          return false;
-        }
-        if (messages.success) toastManager.add({ type: "success", title: messages.success });
-        return result._tag === "Success";
-      } finally {
-        setPending(null);
-      }
-    },
-    [],
-  );
+  const run = (
+    key: string,
+    action: () => Promise<AtomCommandResult<unknown, unknown>>,
+    messages: { failure: string; success?: string },
+  ): Promise<boolean> => {
+    setPending(key);
+    return runAssistantAction(action, messages).finally(() => setPending(null));
+  };
   return { pending, run };
+}
+
+/** Runs one action and toasts its outcome. Lives outside the hook because the compiler skips try/finally. */
+async function runAssistantAction(
+  action: () => Promise<AtomCommandResult<unknown, unknown>>,
+  messages: { failure: string; success?: string },
+): Promise<boolean> {
+  const result = await action();
+  if (result._tag === "Failure") {
+    if (!isAtomCommandInterrupted(result))
+      toastManager.add({
+        type: "error",
+        title: messages.failure,
+        description: failureMessage(result),
+      });
+    return false;
+  }
+  if (messages.success) toastManager.add({ type: "success", title: messages.success });
+  return result._tag === "Success";
 }

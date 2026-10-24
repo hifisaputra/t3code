@@ -1,38 +1,40 @@
-/**
- * Durable per-file scan cache.
- *
- * Transcripts are append-only and a file that has not changed can never yield
- * different usage, so parsed records are keyed by `(size, mtime)` and reused.
- * Without this every server restart re-parses the whole window: roughly 3.5s
- * for a 30-day scan here, against ~11ms to reload this cache.
- *
- * Caching *per file* rather than per day is deliberate. It is timezone
- * independent, so changing the reporting zone does not invalidate anything, and
- * it keeps cross-file de-duplication exact: cached entries are de-duplicated
- * within their own file only, and the aggregator still applies the global
- * dedupe pass over the small surviving key set.
- *
- * @module usageScanCache
- */
 import type { UsageProviderKind } from "@t3tools/contracts";
+import type {
+  TranscriptUsageFormat,
+  UsageRecord,
+  UsageSpeed,
+} from "@t3tools/provider-core/server/usage";
+import * as Schema from "effect/Schema";
 
+import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
-import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 
-// v2: Codex fork-copy suppression changed what a file parses to, so v1
-// entries would keep serving double-counted records forever.
-// v3: entries carry the parse position and reducer state so a grown file
-// re-parses only its appended bytes instead of starting over.
-// v4: records carry agent attribution so subagent spend can be broken out per
-// thread; v3 entries would report every subagent's tokens as the main agent's.
-// v5: records carry Claude fast mode, which v4 rows never captured.
-const USAGE_SCAN_CACHE_VERSION = 5 as const;
+// v10: records carry agent attribution so subagent spend can be broken out
+// per thread.
+const USAGE_SCAN_CACHE_VERSION = 10 as const;
+const SPEED_COMPATIBLE_SINCE_VERSION = 4;
+
+/**
+ * An older server sharing that directory cannot read a newer cache and would
+ * replace it, dropping saved usage for deleted transcripts. Separate files keep
+ * both.
+ */
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v10.json";
+export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v9.json",
+  "usage-scan-cache-v8.json",
+  "usage-scan-cache-v7.json",
+  "usage-scan-cache-v6.json",
+  "usage-scan-cache-v5.json",
+  "usage-scan-cache.json",
+] as const;
+
+const SPEEDS: readonly UsageSpeed[] = ["standard", "fast", "ultrafast"];
 
 export interface CachedFile {
   readonly size: number;
   readonly mtimeMs: number;
   readonly provider: UsageProviderKind;
-  /** Records from newline-terminated lines, up to `position.resumeOffset`. */
   readonly records: readonly UsageRecord[];
   /**
    * Records from a trailing segment the writer had not newline-terminated at
@@ -40,16 +42,13 @@ export interface CachedFile {
    * re-reads that segment and would otherwise double count it.
    */
   readonly tailRecords: readonly UsageRecord[];
+  /** Whole-file count, including diagnostics from the tentative tail. */
+  readonly malformedRecords: number;
   readonly position: TranscriptParsePosition;
 }
 
 export type ScanCache = Map<string, CachedFile>;
 
-/**
- * Row layout for the serialised form. Positional and interned rather than
- * object-per-record: on a 30-day window that is the difference between a file
- * measured in tens of megabytes and one under six.
- */
 type SerializedRecord = readonly [
   timestampMs: number,
   modelIndex: number,
@@ -61,125 +60,199 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  speed: number,
+  rateModelIndex?: number | null,
+  unresolvedServiceTierTurnId?: string | null,
   /**
-   * Which agent produced the record: `null` for the session's main agent,
-   * `-1` for a subagent the provider did not name, otherwise an index into
-   * the `agents` table.
+   * Which agent produced the record: absent or `null` for the session's main
+   * agent, `-1` for a subagent the provider did not name, otherwise an index
+   * into the `agents` table.
    */
-  agentIndex: number | null,
-  fast: 0 | 1,
+  agentIndex?: number | null,
 ];
+
+/** Agent slot for a subagent the provider ran without naming it. */
+const UNNAMED_SUBAGENT_INDEX = -1;
 
 interface SerializedFile {
   readonly s: number;
   readonly m: number;
   readonly p: UsageProviderKind;
   readonly r: readonly SerializedRecord[];
-  /** Tail records; see `CachedFile.tailRecords`. */
   readonly t: readonly SerializedRecord[];
-  /** Parse position: resume offset, guard length, guard hash. */
+  readonly mr: number;
   readonly o: number;
   readonly gl: number;
   readonly gh: number;
-  /** Codex reducer state at `o`; `null` for stateless providers. */
-  readonly cs: CodexScanState | null;
+  readonly cs: unknown;
 }
-
-/** Agent slot for a subagent the provider ran without naming it. */
-const UNNAMED_SUBAGENT_INDEX = -1;
 
 interface SerializedCache {
   readonly version: number;
   readonly models: readonly string[];
   readonly sessions: readonly string[];
-  readonly agents: readonly string[];
+  /** Subagent names, from v10. */
+  readonly agents?: readonly string[];
   readonly files: Readonly<Record<string, SerializedFile>>;
 }
 
-/** Serialises the cache, interning the repeated model and session strings. */
-export function encodeScanCache(cache: ScanCache): SerializedCache {
-  const models: string[] = [];
-  const sessions: string[] = [];
-  const agents: string[] = [];
-  const modelIndex = new Map<string, number>();
-  const sessionIndex = new Map<string, number>();
-  const agentIndex = new Map<string, number>();
+interface InternTables {
+  readonly models: string[];
+  readonly sessions: string[];
+  readonly agents: string[];
+  readonly modelIndex: Map<string, number>;
+  readonly sessionIndex: Map<string, number>;
+  readonly agentIndex: Map<string, number>;
+}
 
-  const intern = (table: string[], index: Map<string, number>, value: string): number => {
-    const existing = index.get(value);
-    if (existing !== undefined) return existing;
-    const next = table.length;
-    table.push(value);
-    index.set(value, next);
-    return next;
+function makeInternTables(): InternTables {
+  return {
+    models: [],
+    sessions: [],
+    agents: [],
+    modelIndex: new Map(),
+    sessionIndex: new Map(),
+    agentIndex: new Map(),
   };
+}
 
-  const serializeRecord = (record: UsageRecord): SerializedRecord => [
-    record.timestampMs,
-    intern(models, modelIndex, record.model),
-    intern(sessions, sessionIndex, record.sessionId),
-    record.totals.uncachedInputTokens,
-    record.totals.cachedInputTokens,
-    record.totals.cacheCreationTokens,
-    record.totals.outputTokens,
-    record.totals.reasoningTokens,
-    record.dedupeKey,
-    record.reportedCostUsd,
-    record.subagent === null
+function intern(table: string[], index: Map<string, number>, value: string): number {
+  const existing = index.get(value);
+  if (existing !== undefined) return existing;
+  const next = table.length;
+  table.push(value);
+  index.set(value, next);
+  return next;
+}
+
+function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile {
+  const agentSlot = (record: UsageRecord) =>
+    record.subagent == null
       ? null
       : record.subagent.name === null
         ? UNNAMED_SUBAGENT_INDEX
-        : intern(agents, agentIndex, record.subagent.name),
-    record.fast ? 1 : 0,
-  ];
+        : intern(tables.agents, tables.agentIndex, record.subagent.name);
+  const serializeRecord = (record: UsageRecord): SerializedRecord => {
+    const agent = agentSlot(record);
+    return [
+      record.timestampMs,
+      intern(tables.models, tables.modelIndex, record.model),
+      intern(tables.sessions, tables.sessionIndex, record.sessionId),
+      record.totals.uncachedInputTokens,
+      record.totals.cachedInputTokens,
+      record.totals.cacheCreationTokens,
+      record.totals.outputTokens,
+      record.totals.reasoningTokens,
+      record.dedupeKey,
+      record.reportedCostUsd,
+      SPEEDS.indexOf(record.speed),
+      record.rateModel === undefined
+        ? null
+        : intern(tables.models, tables.modelIndex, record.rateModel),
+      // Trailing slots are positional, so a main-agent record omits both.
+      ...(agent !== null
+        ? ([record.unresolvedServiceTierTurnId ?? null, agent] as const)
+        : record.unresolvedServiceTierTurnId === undefined
+          ? ([] as const)
+          : ([record.unresolvedServiceTierTurnId] as const)),
+    ];
+  };
+  return {
+    s: entry.size,
+    m: entry.mtimeMs,
+    p: entry.provider,
+    r: entry.records.map(serializeRecord),
+    t: entry.tailRecords.map(serializeRecord),
+    mr: entry.malformedRecords,
+    o: entry.position.resumeOffset,
+    gl: entry.position.guardLength,
+    gh: entry.position.guardHash,
+    cs: entry.position.state,
+  };
+}
 
+export function encodeScanCache(cache: ScanCache): SerializedCache {
+  const tables = makeInternTables();
   const files: Record<string, SerializedFile> = {};
-  for (const [path, entry] of cache) {
-    files[path] = {
-      s: entry.size,
-      m: entry.mtimeMs,
-      p: entry.provider,
-      r: entry.records.map(serializeRecord),
-      t: entry.tailRecords.map(serializeRecord),
-      o: entry.position.resumeOffset,
-      gl: entry.position.guardLength,
-      gh: entry.position.guardHash,
-      cs: entry.position.codexState,
-    };
-  }
+  for (const [path, entry] of cache) files[path] = serializeFile(entry, tables);
+  return {
+    version: USAGE_SCAN_CACHE_VERSION,
+    models: tables.models,
+    sessions: tables.sessions,
+    ...(tables.agents.length === 0 ? {} : { agents: tables.agents }),
+    files,
+  };
+}
 
-  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, agents, files };
+/**
+ * Entries are replaced, never mutated, when their file changes, so an entry's JSON is memoised by
+ * identity. The intern tables only grow, so a memoised entry's indexes stay valid; a pruned entry
+ * can leave an unused string behind until the next process start.
+ */
+export function makeScanCacheWriter(): (
+  cache: ScanCache,
+  extra: Readonly<Record<string, unknown>>,
+) => string {
+  const tables = makeInternTables();
+  const fragments = new WeakMap<CachedFile, string>();
+  return (cache, extra) => {
+    const files: string[] = [];
+    for (const [path, entry] of cache) {
+      let fragment = fragments.get(entry);
+      if (fragment === undefined) {
+        fragment = JSON.stringify(serializeFile(entry, tables));
+        fragments.set(entry, fragment);
+      }
+      files.push(`${JSON.stringify(path)}:${fragment}`);
+    }
+    // Encoded after the files, which may have added to the intern tables.
+    const head = JSON.stringify({
+      ...extra,
+      version: USAGE_SCAN_CACHE_VERSION,
+      models: tables.models,
+      sessions: tables.sessions,
+      ...(tables.agents.length === 0 ? {} : { agents: tables.agents }),
+    });
+    return `${head.slice(0, -1)},"files":{${files.join(",")}}}`;
+  };
 }
 
 function isRecordArray(value: unknown): value is readonly unknown[] {
   return Array.isArray(value);
 }
 
-/**
- * Rebuilds the cache from a parsed document.
- *
- * Anything malformed yields an empty cache rather than an error: a corrupt
- * cache should cost one cold scan, never a broken page.
- */
-export function decodeScanCache(document: unknown): ScanCache {
+export function decodeScanCache(
+  document: unknown,
+  formats: ReadonlyMap<UsageProviderKind, TranscriptUsageFormat<unknown>>,
+): ScanCache {
   const cache: ScanCache = new Map();
+  const isValidState = makeStateValidators(formats);
   if (typeof document !== "object" || document === null) return cache;
 
   const root = document as Partial<SerializedCache>;
-  if (root.version !== USAGE_SCAN_CACHE_VERSION) return cache;
+  const version = root.version;
+  if (
+    typeof version !== "number" ||
+    version < SPEED_COMPATIBLE_SINCE_VERSION ||
+    version > USAGE_SCAN_CACHE_VERSION
+  ) {
+    return cache;
+  }
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
-  if (!isRecordArray(root.agents)) return cache;
   if (typeof root.files !== "object" || root.files === null) return cache;
+  // Before v10 only this fork's own cache carried an agent table (always,
+  // even empty), with the agent where upstream keeps speed; it cannot be read
+  // as-is. From v10 the table is written only when a subagent is recorded.
+  if (version < 10 && root.agents !== undefined) return cache;
+  const rawAgents = root.agents ?? [];
+  if (!isRecordArray(rawAgents)) return cache;
 
-  // The intern tables must be all strings: a numeric entry would pass the
-  // undefined guard below, land in a record's model, and crash the aggregate
-  // at lookupRate. A corrupt table rejects the whole cache.
   if (!root.models.every((value) => typeof value === "string")) return cache;
   if (!root.sessions.every((value) => typeof value === "string")) return cache;
-  if (!root.agents.every((value) => typeof value === "string")) return cache;
+  if (!rawAgents.every((value) => typeof value === "string")) return cache;
   const models = root.models as readonly string[];
-  const agents = root.agents as readonly string[];
   const sessions = root.sessions as readonly string[];
+  const agents = rawAgents as readonly string[];
 
   // Any corrupt row disqualifies the whole entry. Keeping the survivors
   // under the original (size, mtime) would read as a valid warm hit and the
@@ -190,7 +263,7 @@ export function decodeScanCache(document: unknown): ScanCache {
   ): UsageRecord[] | null => {
     const records: UsageRecord[] = [];
     for (const row of rows) {
-      if (!isRecordArray(row) || row.length < 12) return null;
+      if (!isRecordArray(row) || row.length < 11) return null;
       const [
         timestampMs,
         modelIndex,
@@ -202,29 +275,50 @@ export function decodeScanCache(document: unknown): ScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
+        speedIndex,
+        rateModelIndex,
+        storedServiceTierTurnId,
         agentSlot,
-        fast,
       ] = row as SerializedRecord;
+      // A record with an agent slot stores `null` here for "no turn id".
+      const unresolvedServiceTierTurnId = storedServiceTierTurnId ?? undefined;
+      const agentName =
+        typeof agentSlot === "number" && agentSlot !== UNNAMED_SUBAGENT_INDEX
+          ? agents[agentSlot]
+          : undefined;
+      const speed = typeof speedIndex === "number" ? SPEEDS[speedIndex] : undefined;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
+      const rateModel = typeof rateModelIndex === "number" ? models[rateModelIndex] : undefined;
       if (
         typeof timestampMs !== "number" ||
         !Number.isFinite(timestampMs) ||
         model === undefined ||
+        (unresolvedServiceTierTurnId !== undefined &&
+          typeof unresolvedServiceTierTurnId !== "string") ||
+        (rateModelIndex != null && rateModel === undefined) ||
         !Number.isFinite(uncached) ||
         !Number.isFinite(cached) ||
         !Number.isFinite(cacheCreation) ||
         !Number.isFinite(output) ||
         !Number.isFinite(reasoning) ||
-        (fast !== 0 && fast !== 1)
+        speed === undefined ||
+        (agentSlot != null &&
+          (typeof agentSlot !== "number" ||
+            (agentSlot !== UNNAMED_SUBAGENT_INDEX && agentName === undefined)))
       ) {
         return null;
       }
+
+      // Unchanged and deleted transcripts may only exist in the cache, so the
+      // parser cannot remove their previously saved local placeholders.
+      if (provider === "claude" && model === CLAUDE_SYNTHETIC_MODEL) continue;
 
       records.push({
         provider,
         timestampMs,
         model,
+        ...(rateModel === undefined ? {} : { rateModel }),
         sessionId: (typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined) ?? "",
         totals: {
           uncachedInputTokens: uncached,
@@ -234,12 +328,12 @@ export function decodeScanCache(document: unknown): ScanCache {
           reasoningTokens: reasoning,
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
-        fast: fast === 1,
+        speed,
+        ...(version >= 7 && unresolvedServiceTierTurnId !== undefined
+          ? { unresolvedServiceTierTurnId }
+          : {}),
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
-        subagent:
-          typeof agentSlot !== "number"
-            ? null
-            : { name: agentSlot === UNNAMED_SUBAGENT_INDEX ? null : (agents[agentSlot] ?? null) },
+        ...(agentSlot == null ? {} : { subagent: { name: agentName ?? null } }),
       });
     }
     return records;
@@ -249,8 +343,12 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as Partial<SerializedFile>;
     if (typeof entry.s !== "number" || typeof entry.m !== "number") continue;
-    if (entry.p !== "claude" && entry.p !== "codex" && entry.p !== "grok") continue;
+    if (entry.p === undefined) continue;
+    const format = formats.get(entry.p);
+    if (format === undefined) continue;
     if (!isRecordArray(entry.r) || !isRecordArray(entry.t)) continue;
+    const malformedRecords = entry.mr === undefined ? 0 : entry.mr;
+    if (!Number.isSafeInteger(malformedRecords) || malformedRecords < 0) continue;
     // Position fields feed byte offsets and a Buffer allocation in the reader,
     // so anything outside their real ranges must reject the entry: a bogus
     // guard length would otherwise fail every parse of the file, silently
@@ -269,63 +367,56 @@ export function decodeScanCache(document: unknown): ScanCache {
     ) {
       continue;
     }
-    const codexState = decodeCodexState(entry.cs);
-    if (codexState === undefined) continue;
+    // Keep history for deleted rollouts, but re-parse incompatible reducer state.
+    // v9 repairs skipped initial Codex requests; clean v8 entries can still resume.
+    const legacy =
+      format.state !== undefined &&
+      (version < 6 ||
+        (entry.p === "codex" && (version < 8 || (version < 9 && malformedRecords > 0))));
+    // A corrupt state disqualifies the entry: resuming with it would attach
+    // appended usage to the wrong model or replay fork-copied history.
+    if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;
 
-    const provider: UsageProviderKind = entry.p;
+    const provider = entry.p;
     const records = decodeRecords(entry.r, provider);
     const tailRecords = decodeRecords(entry.t, provider);
     if (records === null || tailRecords === null) continue;
 
     cache.set(path, {
-      size: entry.s,
+      size: legacy ? -1 : entry.s,
       mtimeMs: entry.m,
       provider,
       records,
       tailRecords,
-      position: {
-        resumeOffset: entry.o,
-        guardLength: entry.gl,
-        guardHash: entry.gh,
-        codexState,
-      },
+      malformedRecords,
+      position: legacy
+        ? { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null }
+        : {
+            resumeOffset: entry.o,
+            guardLength: entry.gl,
+            guardHash: entry.gh,
+            state: entry.cs,
+          },
     });
   }
 
   return cache;
 }
 
-/**
- * Validates a persisted Codex reducer state. Returns `undefined` for a corrupt
- * value, which disqualifies the entry: resuming with a bad state would attach
- * appended usage to the wrong model or replay fork-copied history.
- */
-function decodeCodexState(value: unknown): CodexScanState | null | undefined {
-  if (value === null) return null;
-  if (typeof value !== "object") return undefined;
-  const state = value as Partial<CodexScanState>;
-  if (
-    typeof state.model !== "string" ||
-    typeof state.sessionId !== "string" ||
-    (state.lastUsageSignature !== null && typeof state.lastUsageSignature !== "string") ||
-    typeof state.sawSessionMeta !== "boolean" ||
-    typeof state.suppressingForkCopies !== "boolean" ||
-    typeof state.forkCopyAnchorMs !== "number" ||
-    !Number.isFinite(state.forkCopyAnchorMs)
-  ) {
-    return undefined;
-  }
-  return {
-    model: state.model,
-    sessionId: state.sessionId,
-    lastUsageSignature: state.lastUsageSignature ?? null,
-    sawSessionMeta: state.sawSessionMeta,
-    suppressingForkCopies: state.suppressingForkCopies,
-    forkCopyAnchorMs: state.forkCopyAnchorMs,
-  };
+function makeStateValidators(
+  formats: ReadonlyMap<UsageProviderKind, TranscriptUsageFormat<unknown>>,
+): ReadonlyMap<UsageProviderKind, (value: unknown) => boolean> {
+  return new Map(
+    [...formats].map(([provider, format]) => {
+      const isState = format.state === undefined ? undefined : Schema.is(format.state.schema);
+      return [
+        provider,
+        (value: unknown) => value === null || (isState !== undefined && isState(value)),
+      ] as const;
+    }),
+  );
 }
 
-/** Keeps saved usage after transcript cleanup, until the reporting retention expires. */
 export function pruneScanCache(cache: ScanCache, retentionCutoffMs: number): number {
   let removed = 0;
   for (const [path, entry] of cache) {
@@ -338,11 +429,8 @@ export function pruneScanCache(cache: ScanCache, retentionCutoffMs: number): num
 }
 
 /**
- * Within-file de-duplication, applied before an entry is cached.
- *
- * Callers stitching an incremental parse together pass one `seen` set across
- * the line and tail record batches so the whole file stays deduplicated as a
- * unit; the set is mutated in place.
+ * Callers stitching an incremental parse together pass one `seen` set across the line and tail
+ * record batches so the whole file stays deduplicated as a unit; the set is mutated in place.
  */
 export function dedupeWithinFile(
   records: readonly UsageRecord[],

@@ -48,12 +48,13 @@ export function GoogleCalendarSettingsSection() {
               onClick={async () => {
                 if (!environmentId) return;
                 setBusy(true);
-                try {
+                const attempt = async () => {
                   const result = await authorize({ environmentId, input: {} });
                   if (result._tag === "Success") setAuthorizationUrl(result.value.url);
-                } finally {
+                };
+                await attempt().finally(() => {
                   setBusy(false);
-                }
+                });
               }}
             >
               {status.data?.connected ? "Reconnect" : "Connect"}
@@ -66,15 +67,16 @@ export function GoogleCalendarSettingsSection() {
                 onClick={async () => {
                   if (!environmentId) return;
                   setBusy(true);
-                  try {
+                  const attempt = async () => {
                     const result = await disconnect({ environmentId, input: {} });
                     if (result._tag === "Success") {
                       setAuthorizationUrl(null);
                       status.refresh();
                     }
-                  } finally {
+                  };
+                  await attempt().finally(() => {
                     setBusy(false);
-                  }
+                  });
                 }}
               >
                 Disconnect
@@ -157,7 +159,7 @@ function GoogleOAuthSettings({ onSaved }: { onSaved: () => void }) {
     if (!environmentId) return;
     setBusy(true);
     setError(null);
-    try {
+    const attempt = async () => {
       const result = await update({
         environmentId,
         input: {
@@ -176,9 +178,10 @@ function GoogleOAuthSettings({ onSaved }: { onSaved: () => void }) {
         setClientSecret("");
         onSaved();
       } else setError("Could not save Google OAuth settings. Try again.");
-    } finally {
+    };
+    await attempt().finally(() => {
       setBusy(false);
-    }
+    });
   };
   return (
     <SettingsRow

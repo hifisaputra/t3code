@@ -1,6 +1,6 @@
 import { Alert, Pressable, View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { cn } from "../../lib/cn";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import type { ThreadIssuePresentation } from "../../state/thread-issue-presentation";

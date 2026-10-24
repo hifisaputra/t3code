@@ -33,13 +33,14 @@ export function LinearDelegationControl({
       }
       onClick={async () => {
         setBusy(true);
-        try {
+        const attempt = async () => {
           const result = await stop({ environmentId, input: { threadId } });
           setFailed(result._tag !== "Success");
           status.refresh();
-        } finally {
+        };
+        await attempt().finally(() => {
           setBusy(false);
-        }
+        });
       }}
     >
       {failed ? "Retry stop delegation" : "Stop delegation"}

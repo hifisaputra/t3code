@@ -10,7 +10,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import type { AgentProcess, EnvironmentId } from "@t3tools/contracts";
-import { memo, useMemo } from "react";
+import { memo } from "react";
 
 import { resolveDiscoveredServerUrl } from "../../browser/browserTargetResolver";
 import { isElectron } from "../../env";
@@ -44,20 +44,17 @@ export function AgentProcessesPage() {
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
   const stopController = useStopAgentProcess();
 
-  const groups = useMemo(() => groupAgentProcesses(entries), [entries]);
+  const groups = groupAgentProcesses(entries);
   // Only worth naming the machine when there is more than one to confuse.
-  const environmentLabels = useMemo(
-    () =>
-      presentations.size < 2
-        ? null
-        : new Map(
-            Array.from(presentations, ([environmentId, presentation]) => [
-              environmentId,
-              presentation.entry.target.label,
-            ]),
-          ),
-    [presentations],
-  );
+  const environmentLabels =
+    presentations.size < 2
+      ? null
+      : new Map(
+          Array.from(presentations, ([environmentId, presentation]) => [
+            environmentId,
+            presentation.entry.target.label,
+          ]),
+        );
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none isolate">
@@ -141,7 +138,7 @@ const ThreadGroupSection = memo(function ThreadGroupSection({
           <span className="min-w-0 truncate text-xs text-muted-foreground">{thread.title}</span>
         ) : (
           <Link
-            className="min-w-0 truncate rounded-sm text-xs text-muted-foreground outline-hidden ring-ring hover:text-foreground hover:underline focus-visible:ring-2"
+            className="min-w-0 truncate rounded-sm text-xs text-muted-foreground outline-hidden ring-ring hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-inset"
             params={{ environmentId: thread.environmentId, threadId: thread.threadId }}
             to="/$environmentId/$threadId"
           >
@@ -183,7 +180,7 @@ const AgentProcessRow = memo(function AgentProcessRow({
   readonly status: AgentProcessStopStatus | null;
   readonly stop: StopAgentProcessController["stop"];
 }) {
-  const command = useMemo(() => shortenCommand(process.command), [process.command]);
+  const command = shortenCommand(process.command);
   const pending = status?.kind === "pending";
 
   return (

@@ -10,7 +10,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { ProjectHistoryInput } from "@t3tools/contracts";
 import { enumerateDays, formatDayShort } from "@t3tools/shared/usageFormat";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { isElectron } from "../../env";
 import { useClientSettings } from "../../hooks/useSettings";
@@ -70,81 +70,60 @@ export function HistoryPage({ environmentParam, projectParam, onScopeChange }: H
   const [windowDays, setWindowDays] = useState<HistoryPagePreferences["windowDays"]>(
     () => readHistoryPagePreferences().windowDays,
   );
-  const historyWindow = useMemo(() => makeHistoryWindow(windowDays), [windowDays]);
+  const historyWindow = makeHistoryWindow(windowDays);
 
   const projects = useProjects();
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
-  const environmentLabels = useMemo(
-    () =>
-      new Map(
-        Array.from(presentations, ([environmentId, presentation]) => [
-          environmentId,
-          presentation.entry.target.label,
-        ]),
-      ),
-    [presentations],
+  const environmentLabels = new Map(
+    Array.from(presentations, ([environmentId, presentation]) => [
+      environmentId,
+      presentation.entry.target.label,
+    ]),
   );
-  const options = useMemo(
-    () => buildProjectOptions(projects, environmentLabels),
-    [environmentLabels, projects],
-  );
+  const options = buildProjectOptions(projects, environmentLabels);
 
   // The project behind the active thread or draft, so opening History from a
   // conversation lands on the project that conversation belongs to.
   const { activeDraftThread, activeThread } = useHandleNewThread();
   const activeThreadTarget = activeThread ?? activeDraftThread;
-  const activeProject = useMemo(
-    () =>
-      activeThreadTarget
-        ? {
-            environmentId: activeThreadTarget.environmentId,
-            projectId: activeThreadTarget.projectId,
-          }
-        : null,
-    [activeThreadTarget],
+  const activeProject = activeThreadTarget
+    ? {
+        environmentId: activeThreadTarget.environmentId,
+        projectId: activeThreadTarget.projectId,
+      }
+    : null;
+
+  const selected = resolveSelectedProject(
+    options,
+    { environmentId: environmentParam, projectId: projectParam },
+    activeProject,
   );
 
-  const selected = useMemo(
-    () =>
-      resolveSelectedProject(
-        options,
-        { environmentId: environmentParam, projectId: projectParam },
-        activeProject,
-      ),
-    [activeProject, environmentParam, options, projectParam],
-  );
-
-  const target = useMemo(() => {
-    if (selected === null) return null;
-    const input: ProjectHistoryInput = {
-      projectId: selected.project.id,
-      sinceDay: historyWindow.sinceDay,
-      untilDay: historyWindow.untilDay,
-      timeZone: historyWindow.timeZone,
-    };
-    return { environmentId: selected.environmentId, input };
-  }, [historyWindow, selected]);
+  const target =
+    selected === null
+      ? null
+      : {
+          environmentId: selected.environmentId,
+          input: {
+            projectId: selected.project.id,
+            sinceDay: historyWindow.sinceDay,
+            untilDay: historyWindow.untilDay,
+            timeZone: historyWindow.timeZone,
+          } satisfies ProjectHistoryInput,
+        };
 
   const { history, isPending, error, refresh } = useProjectHistory(target);
 
   const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
-  const locale = useMemo(
-    () => resolveTimestampLocale(globalThis.window?.desktopBridge?.getSystemLocale?.() ?? null),
-    [],
+  const locale = resolveTimestampLocale(
+    globalThis.window?.desktopBridge?.getSystemLocale?.() ?? null,
   );
 
-  const days = useMemo(
-    () => enumerateDays(historyWindow.sinceDay, historyWindow.untilDay),
-    [historyWindow.sinceDay, historyWindow.untilDay],
-  );
-  const bars = useMemo(
-    () => buildDayBars(days, history, historyWindow.untilDay),
-    [days, history, historyWindow.untilDay],
-  );
-  const summary = useMemo(() => summarizeHistory(history), [history]);
-  const lifetimeByThread = useMemo(
-    () => new Map((history?.threads ?? []).map((totals) => [totals.threadId, totals])),
-    [history],
+  const days = enumerateDays(historyWindow.sinceDay, historyWindow.untilDay);
+  const bars = buildDayBars(days, history, historyWindow.untilDay);
+  const summary = summarizeHistory(history);
+  const lifetimeByThread = new Map(
+    (history?.threads ?? []).map((totals) => [totals.threadId, totals]),
   );
 
   const selectWindow = (value: number) => {
@@ -295,7 +274,7 @@ function HistoryDayBarColumn({ bar }: { readonly bar: HistoryDayBar }) {
         render={
           <div
             aria-label={`${formatDayShort(bar.day)}, ${durationLabel}`}
-            className="flex h-full min-w-0 flex-1 items-end rounded-sm outline-hidden ring-ring focus-visible:ring-2"
+            className="flex h-full min-w-0 flex-1 items-end rounded-sm outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset"
             role="img"
             tabIndex={0}
           >

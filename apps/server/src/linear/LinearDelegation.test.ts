@@ -1,26 +1,34 @@
-import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
   EventId,
   LinearOperationError,
+  RuntimeRequestId,
+  TurnItemId,
   ThreadId,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
-  type OrchestrationCommand,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2Run,
+  type OrchestrationV2ServerCommand,
+  MessageId,
+  RunId,
   type LinearIssueDetail,
 } from "@t3tools/contracts";
 import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as DateTime from "effect/DateTime";
+import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
+import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
+import { ProjectService } from "../project/ProjectService.ts";
 import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
 import { LinearOAuth } from "./LinearOAuth.ts";
 import { LinearAgentApi } from "./LinearAgentApi.ts";
@@ -28,8 +36,8 @@ import { LinearApi } from "./LinearApi.ts";
 import { LinearThreadService } from "./LinearThreadService.ts";
 import * as Delegation from "./LinearDelegation.ts";
 import * as Outbox from "./LinearAgentOutbox.ts";
-import Migration from "../persistence/Migrations/051_LinearDelegation.ts";
-import SessionTaskMigration from "../persistence/Migrations/058_LinearAgentSessionTask.ts";
+import Migration from "../persistence/ForkMigrations/002_LinearDelegation.ts";
+import SessionTaskMigration from "../persistence/ForkMigrations/009_LinearAgentSessionTask.ts";
 
 const issue: LinearIssueDetail = {
   id: "issue-1",
@@ -69,9 +77,10 @@ const signed = (event: typeof Delegation.AgentEvent.Type) => {
   return { body, signature: NodeCrypto.createHmac("sha256", "secret").update(body).digest("hex") };
 };
 function harness(twoRepos = false, allowedTeamKeys: string[] = []) {
-  const commands: OrchestrationCommand[] = [];
+  const commands: OrchestrationV2ServerCommand[] = [];
   const prepared: string[] = [];
   const outgoing: string[] = [];
+  const assistantMessages: OrchestrationV2ConversationMessage[] = [];
   const projects = ["One", ...(twoRepos ? ["Two"] : [])].map((title) => ({
     id: ProjectId.make(title),
     title,
@@ -82,7 +91,7 @@ function harness(twoRepos = false, allowedTeamKeys: string[] = []) {
     updatedAt: "2026-09-08T00:00:00.000Z",
   }));
   const dependencies = Layer.mergeAll(
-    Layer.mock(ProviderRuntimeIngestionService)({ drain: Effect.void }),
+    Layer.mock(EventSinkV2)({ latestSequence: () => Effect.succeed(0) }),
     ServerSettings.layerTest({
       linear: {
         delegation: {
@@ -125,21 +134,22 @@ function harness(twoRepos = false, allowedTeamKeys: string[] = []) {
           };
         }),
     }),
-    Layer.mock(OrchestrationEngineService)({
+    Layer.mock(ThreadManagementService)({
       dispatch: (command) =>
         Effect.sync(() => {
           commands.push(command);
-          return { sequence: commands.length };
+          return { sequence: commands.length, storedEvents: [] };
         }),
+      getThreadShell: () => Effect.succeed(null),
+      // Delegation only reads a run's messages.
+      getThreadRecords: ((threadId: ThreadId) =>
+        Effect.sync(() => ({
+          messages: assistantMessages.filter((message) => message.threadId === threadId),
+        }))) as unknown as ThreadManagementService["Service"]["getThreadRecords"],
     }),
-    Layer.mock(ProjectionSnapshotQuery)({
-      getShellSnapshot: () =>
-        Effect.succeed({
-          projects,
-          threads: [],
-          snapshotSequence: 0,
-          updatedAt: "2026-09-08T00:00:00.000Z",
-        }),
+    Layer.mock(ProjectService)({
+      getShell: (id) => Effect.sync(() => Option.fromNullishOr(projects.find((p) => p.id === id))),
+      listShells: () => Effect.sync(() => projects),
     }),
     Layer.succeed(T3ProjectFileLoader, {
       load: () => Effect.succeed(Option.some({ linear: { teams: ["DEL"] } })),
@@ -174,6 +184,7 @@ function harness(twoRepos = false, allowedTeamKeys: string[] = []) {
     prepared,
     outgoing,
     projects,
+    assistantMessages,
   };
 }
 it.effect(
@@ -210,7 +221,7 @@ it.effect("deduplicates deliveries and starts one linked thread in a worktree", 
     assert.deepEqual(h.prepared, ["/repos/One"]);
     assert.deepEqual(
       h.commands.map((c) => c.type),
-      ["thread.create", "thread.turn.start"],
+      ["thread.create", "message.dispatch"],
     );
     const created = h.commands[0];
     assert.equal(created?.type, "thread.create");
@@ -219,15 +230,15 @@ it.effect("deduplicates deliveries and starts one linked thread in a worktree", 
       assert.equal(created.linkedIssue?.identifier, "DEL-1");
     }
     const start = h.commands[1];
-    assert.equal(start?.type, "thread.turn.start");
-    if (start?.type === "thread.turn.start") {
-      assert.include(start.message.text, "$linear-work DEL-1: A fix");
-      assert.include(start.message.text, issue.url);
-      assert.include(start.message.text, "get_issue and list_comments MCP tools");
-      assert.include(start.message.text, original.guidance);
-      assert.notInclude(start.message.text, original.promptContext);
-      assert.notInclude(start.message.text, issue.description!);
-      assert.notInclude(start.message.text, original.agentSession.comment.body);
+    assert.equal(start?.type, "message.dispatch");
+    if (start?.type === "message.dispatch") {
+      assert.include(start.text, "$linear-work DEL-1: A fix");
+      assert.include(start.text, issue.url);
+      assert.include(start.text, "get_issue and list_comments MCP tools");
+      assert.include(start.text, original.guidance);
+      assert.notInclude(start.text, original.promptContext);
+      assert.notInclude(start.text, issue.description!);
+      assert.notInclude(start.text, original.agentSession.comment.body);
     }
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
@@ -251,13 +262,13 @@ it.effect("asks which repository to use and resumes with the original issue cont
     yield* service.process("d2");
     assert.deepEqual(h.prepared, ["/repos/Two"]);
     const start = h.commands[1];
-    assert.equal(start?.type, "thread.turn.start");
-    if (start?.type === "thread.turn.start") {
-      assert.include(start.message.text, "$linear-work DEL-1: A fix");
-      assert.include(start.message.text, "get_issue and list_comments MCP tools");
-      assert.include(start.message.text, original.guidance);
-      assert.notInclude(start.message.text, original.promptContext);
-      assert.notInclude(start.message.text, original.agentSession.comment.body);
+    assert.equal(start?.type, "message.dispatch");
+    if (start?.type === "message.dispatch") {
+      assert.include(start.text, "$linear-work DEL-1: A fix");
+      assert.include(start.text, "get_issue and list_comments MCP tools");
+      assert.include(start.text, original.guidance);
+      assert.notInclude(start.text, original.promptContext);
+      assert.notInclude(start.text, original.agentSession.comment.body);
     }
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
@@ -281,12 +292,12 @@ it.effect("forwards follow-up replies without copying prompt context", () => {
       yield* service.receive(next.body, next.signature, id);
       yield* service.process(id);
       const start = h.commands.at(-1);
-      assert.equal(start?.type, "thread.turn.start");
-      if (start?.type === "thread.turn.start") {
-        if (body) assert.equal(start.message.text, body);
-        else assert.include(start.message.text, "get_issue and list_comments MCP tools");
-        assert.notInclude(start.message.text, original.promptContext);
-        assert.notInclude(start.message.text, original.agentSession.comment.body);
+      assert.equal(start?.type, "message.dispatch");
+      if (start?.type === "message.dispatch") {
+        if (body) assert.equal(start.text, body);
+        else assert.include(start.text, "get_issue and list_comments MCP tools");
+        assert.notInclude(start.text, original.promptContext);
+        assert.notInclude(start.text, original.agentSession.comment.body);
       }
     }
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
@@ -307,7 +318,7 @@ it.effect("re-delegation resumes the same thread and stop prevents later prompts
     yield* service.receive(next.body, next.signature, "d2");
     yield* service.process("d2");
     assert.lengthOf(h.prepared, 1);
-    assert.equal(h.commands[2]?.type, "thread.turn.start");
+    assert.equal(h.commands[2]?.type, "message.dispatch");
     const threadId = h.commands[0]?.type === "thread.create" ? h.commands[0].threadId : undefined;
     assert.ok(threadId);
     yield* service.stop(threadId!);
@@ -321,7 +332,7 @@ it.effect("re-delegation resumes the same thread and stop prevents later prompts
     yield* service.process("d3");
     assert.deepEqual(
       h.commands.map((c) => c.type),
-      ["thread.create", "thread.turn.start", "thread.turn.start", "thread.turn.interrupt"],
+      ["thread.create", "message.dispatch", "message.dispatch", "thread.stop"],
     );
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
@@ -348,43 +359,46 @@ it.effect(
       yield* service.receive(first.body, first.signature, "d1");
       yield* service.process("d1");
       const threadId = ThreadId.make("linear-session-1");
+      const at = DateTime.makeUnsafe("2026-09-08T00:00:00.000Z");
       yield* service.observe({
-        type: "thread.activity-appended",
         sequence: 10,
-        eventId: EventId.make("question-event"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: "2026-09-08T00:00:00.000Z",
         commandId: null,
-        causationEventId: null,
-        correlationId: null,
-        metadata: {},
-        payload: {
+        event: {
+          id: EventId.make("question-event"),
           threadId,
-          activity: {
-            id: EventId.make("question"),
-            kind: "user-input.requested",
-            summary: "Choose the behavior",
-            tone: "approval",
-            turnId: null,
-            createdAt: "2026-09-08T00:00:00.000Z",
-            payload: {
-              requestId: "request-1",
-              questions: [
-                {
-                  id: "behavior",
-                  header: "Behavior",
-                  options: [
-                    {
-                      label: "Keep the old behavior",
-                      description: "Preserve compatibility",
-                      value: "keep",
-                    },
-                  ],
-                  question: "Which behavior should I implement?",
-                },
-              ],
-            },
+          type: "turn-item.updated",
+          occurredAt: at,
+          payload: {
+            id: TurnItemId.make("question"),
+            threadId,
+            runId: null,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 0,
+            status: "waiting",
+            title: "Choose the behavior",
+            startedAt: at,
+            completedAt: null,
+            updatedAt: at,
+            type: "user_input_request",
+            requestId: RuntimeRequestId.make("request-1"),
+            questions: [
+              {
+                id: "behavior",
+                header: "Behavior",
+                options: [
+                  {
+                    label: "Keep the old behavior",
+                    description: "Preserve compatibility",
+                    value: "keep",
+                  },
+                ],
+                question: "Which behavior should I implement?",
+              },
+            ],
           },
         },
       });
@@ -398,8 +412,8 @@ it.effect(
       yield* service.receive(answer.body, answer.signature, "d2");
       yield* service.process("d2");
       const command = h.commands[2];
-      assert.equal(command?.type, "thread.user-input.respond");
-      if (command?.type === "thread.user-input.respond")
+      assert.equal(command?.type, "runtime-request.respond");
+      if (command?.type === "runtime-request.respond")
         assert.deepEqual(command.answers, { behavior: "keep" });
       const sql = yield* SqlClient.SqlClient;
       const rows = yield* sql<{
@@ -409,6 +423,71 @@ it.effect(
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
   },
 );
+
+it.effect("posts the finished run's last assistant message to the session", () => {
+  const h = harness();
+  return Effect.gen(function* () {
+    const service = yield* h.make;
+    const first = signed(original);
+    yield* service.receive(first.body, first.signature, "d1");
+    yield* service.process("d1");
+    const threadId = ThreadId.make("linear-session-1");
+    const at = DateTime.makeUnsafe("2026-09-08T00:00:00.000Z");
+    const runId = RunId.make("run-1");
+    const run: OrchestrationV2Run = {
+      id: runId,
+      threadId,
+      ordinal: 1,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+      providerThreadId: null,
+      userMessageId: MessageId.make("linear-d1"),
+      rootNodeId: null,
+      activeAttemptId: null,
+      status: "running",
+      requestedAt: at,
+      startedAt: at,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    };
+    const runEvent = (sequence: number, payload: OrchestrationV2Run) =>
+      service.observe({
+        sequence,
+        commandId: null,
+        event: {
+          id: EventId.make(`run-${sequence}`),
+          threadId,
+          type: "run.updated",
+          occurredAt: at,
+          payload,
+        },
+      });
+    yield* runEvent(11, run);
+    h.assistantMessages.push({
+      id: MessageId.make("answer"),
+      threadId,
+      runId,
+      nodeId: null,
+      role: "assistant",
+      text: "Fixed the bug and opened a pull request.",
+      attachments: [],
+      streaming: false,
+      createdAt: at,
+      updatedAt: at,
+      createdBy: "agent",
+      creationSource: "provider",
+    });
+    yield* runEvent(12, { ...run, status: "completed", completedAt: at });
+    // The same finished run reported again posts nothing more.
+    yield* runEvent(13, { ...run, status: "completed", completedAt: at });
+    yield* h.send("session-1");
+    assert.deepEqual(
+      h.outgoing.filter((body) => body.includes("Fixed the bug")),
+      ["Fixed the bug and opened a pull request."],
+    );
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
+});
 
 it.effect("refuses teams outside the allowlist before preparing a worktree", () => {
   const h = harness(false, ["OTHER"]);
@@ -621,7 +700,7 @@ it.effect("a delegated issue no assistant takes starts today's thread", () => {
     assert.equal(asked, 1);
     assert.deepEqual(
       h.commands.map((c) => c.type),
-      ["thread.create", "thread.turn.start"],
+      ["thread.create", "message.dispatch"],
     );
     // A session with its thread is not offered to the assistant again.
     const reply = signed({

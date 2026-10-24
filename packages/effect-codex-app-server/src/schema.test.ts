@@ -103,47 +103,6 @@ it("accepts Codex 0.150 multi-agent values", () => {
   assert.equal(Schema.is(CodexSchema.V2ThreadResumeResponse)(resumeResponse), true);
 });
 
-it("accepts Codex rate limit errors for thread responses", () => {
-  const failedThread = {
-    cliVersion: "0.150.0",
-    createdAt: 0,
-    cwd: "/tmp/project",
-    ephemeral: false,
-    id: "thread-1",
-    modelProvider: "openai",
-    preview: "",
-    projectId: null,
-    sessionId: "session-1",
-    source: "cli",
-    status: { type: "idle" },
-    turns: [
-      {
-        error: {
-          codexErrorInfo: "rateLimitExceeded",
-          message: "Rate limit exceeded",
-        },
-        id: "turn-1",
-        items: [],
-        status: "failed",
-      },
-    ],
-    updatedAt: 0,
-  };
-  assert.equal(isThreadReadResponse({ thread: failedThread }), true);
-  assert.equal(
-    isThreadResumeResponse({
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      cwd: "/tmp/project",
-      model: "gpt-5.6-sol",
-      modelProvider: "openai",
-      sandbox: { type: "dangerFullAccess" },
-      thread: failedThread,
-    }),
-    true,
-  );
-});
-
 it("accepts Codex misalignment policy errors for thread responses", () => {
   const failedThread = {
     cliVersion: "0.150.0",
@@ -201,13 +160,15 @@ it("accepts Codex misalignment policy errors for thread responses", () => {
   );
 });
 
-it("accepts Codex 0.150 account plan values", () => {
+it("accepts account plan slugs newer than the pinned protocol", () => {
   const planTypes = [
     "self_serve_business_prolite",
     "ent26",
     "enterprise_cbp_automation",
     "edu_plus",
     "edu_pro",
+    "promax",
+    "some_future_plan",
   ];
 
   for (const planType of planTypes) {

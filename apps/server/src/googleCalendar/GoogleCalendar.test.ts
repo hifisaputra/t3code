@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { GoogleCalendar, layer, validateCalendarRange } from "./GoogleCalendar.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import * as LinearApi from "../linear/LinearApi.ts";
@@ -33,8 +33,11 @@ const ISSUE = {
   description: null,
   parent: null,
   children: { nodes: [] },
+  relations: { nodes: [] },
+  inverseRelations: { nodes: [] },
   labels: { nodes: [] },
   comments: { nodes: [] },
+  attachments: { nodes: [] },
 };
 const target = { calendarId: "work@example.com", eventId: EVENT.id, etag: EVENT.etag };
 const range = { start: "2026-09-09T08:00:00Z", end: "2026-09-09T09:00:00Z" };

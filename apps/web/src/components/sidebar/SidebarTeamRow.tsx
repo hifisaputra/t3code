@@ -4,8 +4,6 @@ import * as Schema from "effect/Schema";
 import { ChevronDownIcon, CircleDashedIcon } from "lucide-react";
 import {
   memo,
-  useCallback,
-  useMemo,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
@@ -135,9 +133,9 @@ function memberStatus(
         rank: WORKING_RANK,
         working: true,
       };
-    case "monitoring":
+    case "waiting":
       return {
-        label: "Monitoring",
+        label: "Waiting",
         className: "text-sky-600 dark:text-sky-400",
         rank: 4,
         working: false,
@@ -233,6 +231,25 @@ type TeamMember = {
   readonly thread: EnvironmentThreadShell;
 };
 
+function teamMembers(
+  threadKeys: readonly string[],
+  threadByKey: ReadonlyMap<string, EnvironmentThreadShell>,
+): TeamMember[] {
+  const list: TeamMember[] = [];
+  for (const key of threadKeys) {
+    const thread = threadByKey.get(key);
+    if (thread === undefined) continue;
+    const team = assistantTeamThread(thread.id);
+    if (team === null) continue;
+    list.push({ role: team.role, key, thread });
+  }
+  // Fixed reading order: who decided, who wrote it, who checked it, who
+  // tested it — not whatever order the list happened to sort them into.
+  return list.toSorted(
+    (left, right) => ROLE_ORDER.indexOf(left.role) - ROLE_ORDER.indexOf(right.role),
+  );
+}
+
 export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
   /** Sortable id, `team:<environmentId>:<taskId>`. */
   teamKey: string;
@@ -266,27 +283,10 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
     threadKeys,
   } = props;
 
-  const members = useMemo(() => {
-    const list: TeamMember[] = [];
-    for (const key of threadKeys) {
-      const thread = threadByKey.get(key);
-      if (thread === undefined) continue;
-      const team = assistantTeamThread(thread.id);
-      if (team === null) continue;
-      list.push({ role: team.role, key, thread });
-    }
-    // Fixed reading order: who decided, who wrote it, who checked it, who
-    // tested it — not whatever order the list happened to sort them into.
-    return list.toSorted(
-      (left, right) => ROLE_ORDER.indexOf(left.role) - ROLE_ORDER.indexOf(right.role),
-    );
-  }, [threadByKey, threadKeys]);
-
-  const byRole = useMemo(() => {
-    const mapping = new Map<AssistantThreadRole, TeamMember>();
-    for (const member of members) mapping.set(member.role, member);
-    return mapping;
-  }, [members]);
+  const members = teamMembers(threadKeys, threadByKey);
+  const byRole = new Map<AssistantThreadRole, TeamMember>(
+    members.map((member) => [member.role, member]),
+  );
 
   const hasRouteMember = members.some((member) => member.key === routeThreadKey);
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(hasRouteMember);
@@ -329,13 +329,9 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
   const issue = useLinkedThreadIssue(environmentId, linkedIssue, leaseLiveStatus);
   const issueStatus = issueStatusIndicator(issue);
   const identifier = linkedIssue?.identifier ?? issue?.identifier ?? "";
-  const issueTitle = useMemo(
-    () =>
-      resolveTeamIssueTitle(
-        identifier,
-        members.map((member) => ({ role: member.role, title: member.thread.title })),
-      ),
-    [identifier, members],
+  const issueTitle = resolveTeamIssueTitle(
+    identifier,
+    members.map((member) => ({ role: member.role, title: member.thread.title })),
   );
   const headerLabel = identifier === "" ? issueTitle : identifier;
   const threadCountLabel = `${members.length} ${members.length === 1 ? "thread" : "threads"}`;
@@ -378,27 +374,19 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
   // The open thread is never hidden behind a collapsed group, same exception
   // the settled tail and the snoozed shelf make for the route row.
   const expanded = hasRouteMember || (flipped ? !defaultExpanded : defaultExpanded);
-  const handleToggle = useCallback(
-    (event: ReactMouseEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setCollapseOverrides((current) =>
-        current.includes(teamKey)
-          ? current.filter((key) => key !== teamKey)
-          : [...current, teamKey],
-      );
-    },
-    [setCollapseOverrides, teamKey],
-  );
+  const handleToggle = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setCollapseOverrides((current) =>
+      current.includes(teamKey) ? current.filter((key) => key !== teamKey) : [...current, teamKey],
+    );
+  };
 
   const openIssueLink = useOpenIssueLink();
-  const handleOpenIssue = useCallback(
-    (event: ReactMouseEvent<HTMLElement>) => {
-      if (issueStatus === null) return;
-      openIssueLink(event, issueStatus.url);
-    },
-    [issueStatus, openIssueLink],
-  );
+  const handleOpenIssue = (event: ReactMouseEvent<HTMLElement>) => {
+    if (issueStatus === null) return;
+    openIssueLink(event, issueStatus.url);
+  };
 
   // Plain functions: `representative` is derived from a per-render array, so
   // a useCallback here only makes the React Compiler give up on the whole
@@ -477,7 +465,7 @@ export const SidebarTeamRow = memo(function SidebarTeamRow(props: {
               aria-expanded={expanded}
               aria-label={expanded ? `Collapse ${headerLabel}` : `Expand ${headerLabel}`}
               onClick={handleToggle}
-              className="mt-0.5 inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-sidebar-muted-foreground outline-none hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              className="mt-0.5 inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-sidebar-muted-foreground outline-none hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
             >
               <ChevronDownIcon
                 aria-hidden
@@ -570,30 +558,18 @@ const SidebarTeamMemberRow = memo(function SidebarTeamMemberRow(props: {
   onContextMenu: (threadRef: ScopedThreadRef, position: { x: number; y: number }) => void;
 }) {
   const { member, onContextMenu, onThreadActivate, onThreadClick } = props;
-  const threadRef = useMemo(
-    () => scopeThreadRef(member.thread.environmentId, member.thread.id),
-    [member.thread.environmentId, member.thread.id],
-  );
-  const handleClick = useCallback(
-    (event: ReactMouseEvent) => onThreadClick(event, threadRef),
-    [onThreadClick, threadRef],
-  );
-  const handleKeyDown = useCallback(
-    (event: ReactKeyboardEvent) => {
-      if (event.target !== event.currentTarget) return;
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      onThreadActivate(threadRef);
-    },
-    [onThreadActivate, threadRef],
-  );
-  const handleContextMenu = useCallback(
-    (event: ReactMouseEvent) => {
-      event.preventDefault();
-      onContextMenu(threadRef, { x: event.clientX, y: event.clientY });
-    },
-    [onContextMenu, threadRef],
-  );
+  const threadRef = scopeThreadRef(member.thread.environmentId, member.thread.id);
+  const handleClick = (event: ReactMouseEvent) => onThreadClick(event, threadRef);
+  const handleKeyDown = (event: ReactKeyboardEvent) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onThreadActivate(threadRef);
+  };
+  const handleContextMenu = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    onContextMenu(threadRef, { x: event.clientX, y: event.clientY });
+  };
   return (
     <li className="list-none">
       <div

@@ -294,7 +294,7 @@ function ScreenshotTile({
         loading="lazy"
         decoding="async"
         onError={() => setFailed(true)}
-        className="aspect-video w-full rounded-md border border-border/70 bg-muted/40 object-cover object-top group-hover:border-border group-focus-visible:ring-1 group-focus-visible:ring-ring"
+        className="aspect-video w-full rounded-md border border-border/70 bg-muted/40 object-cover object-top group-hover:border-border group-focus-visible:ring-1 group-focus-visible:ring-inset group-focus-visible:ring-ring"
       />
       <span className="truncate text-muted-foreground text-xs group-hover:text-foreground">
         {caption}
@@ -312,7 +312,7 @@ export function ScreenshotGrid({ viewer }: { viewer: EvidenceViewer }) {
         const src = viewer.urls[index];
         const caption = shot.caption || `Screenshot ${index + 1}`;
         return (
-          // oxlint-disable-next-line react/no-array-index-key
+          // oxlint-disable-next-line react/no-array-index-key -- shots are positional and never reorder
           <li key={index} className="min-w-0">
             {src ? (
               <ScreenshotTile viewer={viewer} index={index} caption={caption} src={src} />
@@ -344,7 +344,7 @@ export function RecordingList({ viewer }: { viewer: EvidenceViewer }) {
         const src = viewer.videoUrls[index];
         const caption = video.caption || `Recording ${index + 1}`;
         return (
-          // oxlint-disable-next-line react/no-array-index-key
+          // oxlint-disable-next-line react/no-array-index-key -- recordings are positional and never reorder
           <li key={index} className="flex min-w-0 flex-col gap-1">
             {src ? (
               <>
@@ -377,7 +377,7 @@ export function EvidenceNotes({ items }: { items: ReadonlyArray<string> }) {
   return (
     <ul className="flex list-disc flex-col gap-1 pl-4 text-muted-foreground text-sm">
       {items.map((item, index) => (
-        // oxlint-disable-next-line react/no-array-index-key
+        // oxlint-disable-next-line react/no-array-index-key -- notes are plain strings that may repeat and never reorder
         <li key={index}>{item}</li>
       ))}
     </ul>
@@ -400,7 +400,7 @@ export function HumanChecklist({
   return (
     <ul className="flex flex-col gap-1.5 text-sm">
       {checks.map((check, index) => (
-        // oxlint-disable-next-line react/no-array-index-key
+        // oxlint-disable-next-line react/no-array-index-key -- ticks are stored by check index
         <li key={index}>
           <label className="flex cursor-pointer items-start gap-2">
             <Checkbox

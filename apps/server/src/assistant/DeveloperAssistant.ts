@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - ids are minted synchronously while building records.
 import * as NodeCrypto from "node:crypto";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -12,7 +13,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   ASSISTANT_PROJECT_NOTES,
   ASSISTANT_RESEARCH_REPORT_MAX_CHARS,
@@ -69,14 +70,13 @@ import {
   type AssistantSetupInput,
   type AssistantSetupPlan,
   type AssistantSetupResolveInput,
-  type OrchestrationEvent,
-  type OrchestrationThreadActivity,
-  type OrchestrationThreadShell,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2RunStatus,
+  type OrchestrationV2StoredEvent,
   type LinearIssueDetail,
   type LinearIssueSummary,
   type LinearWorkflowStateType,
 } from "@t3tools/contracts";
-import { isStaleRequestFailureDetail } from "../orchestration/decider.ts";
 import {
   LinearAgentOutbox,
   type OutboxContent,
@@ -86,11 +86,10 @@ import {
 import { LinearApi, LinearAppCredential } from "../linear/LinearApi.ts";
 import { LinearOAuth } from "../linear/LinearOAuth.ts";
 import { LinearThreadService } from "../linear/LinearThreadService.ts";
-import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
-import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
-import { ProviderService } from "../provider/Services/ProviderService.ts";
+import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
+import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
+import { ProviderInstanceRegistry } from "../provider/ProviderInstanceRegistry.ts";
+import { getResearchAccess } from "../provider/ProviderResearchAccess.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { TerminalManager } from "../terminal/Manager.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -124,6 +123,15 @@ import {
   workerInstructions,
 } from "./prompts.ts";
 import { makeSetup, validateSetupPlan } from "./AssistantSetup.ts";
+import {
+  make as makeAssistantThreads,
+  latestRunCompletedMs,
+  threadAwaitsAnswer,
+  threadBusy as shellBusy,
+  threadHasBackgroundWork,
+  type ThreadShell,
+} from "./assistantThreads.ts";
+
 import { openProjectNotes, projectNoteKey } from "./projectNotes.ts";
 
 type ProjectRow = {
@@ -146,21 +154,7 @@ const isAssistantError = Schema.is(DeveloperAssistantError);
 const isLinearError = Schema.is(
   Schema.Union([LinearIssueNotFoundError, LinearOperationError, LinearUnavailableError]),
 );
-const decodeRequest = Schema.decodeUnknownEffect(Schema.Struct({ requestId: Schema.String }));
-// Answering a request the provider no longer knows (e.g. after a server restart)
-// closes it, matching the thread's pending accounting.
-const isStale = (activity: Pick<OrchestrationThreadActivity, "kind" | "payload">) => {
-  if (
-    !["provider.approval.respond.failed", "provider.user-input.respond.failed"].includes(
-      activity.kind,
-    ) ||
-    typeof activity.payload !== "object" ||
-    activity.payload === null
-  )
-    return false;
-  const payload = activity.payload as Record<string, unknown>;
-  return typeof payload.requestId === "string" && isStaleRequestFailureDetail(payload);
-};
+const newId = () => NodeCrypto.randomUUID();
 const fail = (detail: string) => new DeveloperAssistantError({ detail });
 const wrap = (error: unknown) =>
   isAssistantError(error)
@@ -171,9 +165,14 @@ const wrap = (error: unknown) =>
           "The developer assistant operation failed. Inspect the thread or server logs and retry.",
         );
 const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
-const newId = () => NodeCrypto.randomUUID();
-const busy = (status: string | undefined) => status === "running" || status === "starting";
 const ROLES = ["lead", "implement", "review", "e2e"] as const;
+/** A run in one of these has ended: its thread's turn is over. */
+const RUN_ENDED: ReadonlySet<OrchestrationV2RunStatus> = new Set([
+  "completed",
+  "failed",
+  "interrupted",
+  "cancelled",
+]);
 /** How long a released session gets to report itself stopped before it is asked again. */
 const RELEASE_RETRY_MS = 30_000;
 /** How long after an issue last changed the scan still closes its finished team. */
@@ -379,19 +378,23 @@ const DEPTH_SETTERS = {
   person: "The person, on the board,",
 } as const;
 /**
- * The Claude adapter fails a turn the account's usage limit stopped with
- * "Claude usage limit reached. Send the message again once the 5-hour limit
- * resets in 2h 10m." The wait is read from that clause. Without one the limit
- * is tried again after a while, which costs one rejected request per thread.
+ * How long a thread's usage limit holds, or null when its last run did not end
+ * on one. The provider reports when the limit resets; without that the limit is
+ * tried again after a while, which costs one rejected request per thread.
  */
 const USAGE_LIMIT_RETRY_MS = 20 * 60_000;
-/** The reset time is rounded up to the minute; the slack keeps the first try after it. */
+/** The reset time can be rounded; the slack keeps the first try after it. */
 const USAGE_LIMIT_SLACK_MS = 60_000;
-const usageLimitWaitMs = (error: string | null | undefined): number | null => {
-  if (!error || !/usage limit/i.test(error)) return null;
-  const match = /limit resets in (?:(\d+)h)?\s*(?:(\d+)m)?/.exec(error);
-  const minutes = match ? Number(match[1] ?? 0) * 60 + Number(match[2] ?? 0) : 0;
-  return (minutes > 0 ? minutes * 60_000 : USAGE_LIMIT_RETRY_MS) + USAGE_LIMIT_SLACK_MS;
+export const usageLimitWaitMs = (
+  shell: Pick<ThreadShell, "lastErrorClass" | "usageLimitResetAt">,
+  nowMs: number,
+): number | null => {
+  if (shell.lastErrorClass !== "usage_limit") return null;
+  const resetMs = shell.usageLimitResetAt ? Date.parse(shell.usageLimitResetAt) : Number.NaN;
+  return (
+    (Number.isFinite(resetMs) ? Math.max(resetMs - nowMs, 0) : USAGE_LIMIT_RETRY_MS) +
+    USAGE_LIMIT_SLACK_MS
+  );
 };
 /**
  * The repository's skill for a role, mentioned on that thread's first message
@@ -463,32 +466,22 @@ export const DeveloperAssistantWorkers = Context.Reference<boolean>("t3/assistan
 
 export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const engine = yield* OrchestrationEngineService;
-  const snapshots = yield* ProjectionSnapshotQuery;
-  const ingestion = yield* ProviderRuntimeIngestionService;
-  const turns = yield* ProjectionTurnRepository;
+  const threadManagement = yield* ThreadManagementService;
+  const threads = yield* makeAssistantThreads;
+  const eventSink = yield* EventSinkV2;
+  const providerInstances = yield* ProviderInstanceRegistry;
   const linear = yield* LinearApi;
   const linearThreads = yield* LinearThreadService;
   const settings = yield* ServerSettingsService;
   const verifier = yield* StagingVerifier;
   const evidence = yield* AssistantEvidence;
   const terminals = yield* TerminalManager;
-  const providers = yield* ProviderService;
   const oauth = yield* LinearOAuth;
   const outbox = yield* LinearAgentOutbox;
   const lock = yield* Semaphore.make(1);
   const deliveryLock = yield* Semaphore.make(1);
   const changes = yield* PubSub.unbounded<void>();
-  const threadBusy = Effect.fn("Assistant.threadBusy")(function* (
-    thread: OrchestrationThreadShell,
-  ) {
-    return (
-      busy(thread.session?.status) ||
-      thread.latestTurn?.state === "running" ||
-      thread.backgroundLiveness != null ||
-      Option.isSome(yield* turns.getPendingTurnStartByThreadId({ threadId: thread.id }))
-    );
-  });
+  const threadBusy = (thread: ThreadShell) => Effect.succeed(shellBusy(thread));
   const changed = PubSub.publish(changes, undefined).pipe(Effect.asVoid);
   // Issues declined in a row since the last one a team took, per project. In
   // memory: a restart only allows a few more declines before the pause.
@@ -623,7 +616,7 @@ export const make = Effect.gen(function* () {
   const taskBusy = Effect.fn("Assistant.taskBusy")(function* (t: AssistantTask, except?: ThreadId) {
     for (const id of taskThreadIds(t)) {
       if (id === except) continue;
-      const shell = yield* snapshots.getThreadShellById(id);
+      const shell = yield* threads.shell(id);
       if (Option.isSome(shell) && (yield* threadBusy(shell.value))) return true;
     }
     return false;
@@ -641,13 +634,11 @@ export const make = Effect.gen(function* () {
     for (const role of ROLES) {
       if (role === t.stage) continue;
       const id = assistantTaskThreadId(t, role);
-      const shell = yield* snapshots.getThreadShellById(id);
-      if (Option.isNone(shell) || shell.value.backgroundLiveness == null) continue;
+      const shell = yield* threads.shell(id);
+      if (Option.isNone(shell) || !threadHasBackgroundWork(shell.value)) continue;
       const last = releasedAt.get(id);
       if (
-        busy(shell.value.session?.status) ||
-        shell.value.latestTurn?.state === "running" ||
-        Option.isSome(yield* turns.getPendingTurnStartByThreadId({ threadId: id })) ||
+        shell.value.activeRunId !== null ||
         (last !== undefined && time - last < RELEASE_RETRY_MS)
       )
         continue;
@@ -656,16 +647,22 @@ export const make = Effect.gen(function* () {
         threadId: id,
         role,
         task: t.id,
-        backgroundLiveness: shell.value.backgroundLiveness,
+        backgroundTasks: shell.value.pendingBackgroundTasks?.length ?? 0,
       });
-      yield* providers.stopSession({ threadId: id }).pipe(
-        Effect.catch((error) =>
-          Effect.logWarning("Developer assistant could not release a handed-off thread", {
-            threadId: id,
-            error,
-          }),
-        ),
-      );
+      yield* threads
+        .stop(
+          newId(),
+          id,
+          "Released by the developer assistant: the issue moved on to another thread.",
+        )
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Developer assistant could not release a handed-off thread", {
+              threadId: id,
+              error,
+            }),
+          ),
+        );
     }
   });
   const taskQueued = Effect.fn("Assistant.taskQueued")(function* (
@@ -677,24 +674,6 @@ export const make = Effect.gen(function* () {
       thread_id: string;
     }>`SELECT thread_id FROM assistant_messages WHERE delivered = 0 AND thread_id IN (${ids[0]}, ${ids[1]}, ${ids[2]}, ${ids[3]})`;
     return rows.some((row) => row.thread_id !== except);
-  });
-  /**
-   * A provider releases an idle session: the inactivity reaper, or settling a
-   * thread after its PR merged. Nothing was in flight; the turn it ran already
-   * ended and was handled when the session went ready.
-   */
-  const releasedWhileIdle = Effect.fn("Assistant.releasedWhileIdle")(function* (
-    threadId: ThreadId,
-  ) {
-    const shell = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
-    if (Option.isNone(shell)) return false;
-    const turn = shell.value.latestTurn;
-    const askedAt = shell.value.latestUserMessageAt;
-    return (
-      turn?.state === "completed" &&
-      (askedAt === null || Date.parse(askedAt) <= Date.parse(turn.requestedAt)) &&
-      Option.isNone(yield* turns.getPendingTurnStartByThreadId({ threadId }))
-    );
   });
   const taskDecisionsPending = Effect.fn("Assistant.taskDecisionsPending")(function* (
     t: AssistantTask,
@@ -715,22 +694,22 @@ export const make = Effect.gen(function* () {
    */
   const settleThread = Effect.fn("Assistant.settleThread")(function* (threadId: ThreadId) {
     // The engine keeps rejected command ids, so never reuse one across attempts.
-    const shell = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
+    const shell = yield* threads.shell(threadId, { includeArchived: true });
     if (
       Option.isSome(shell) &&
       shell.value.archivedAt === null &&
       shell.value.settledOverride !== "settled"
     )
-      yield* engine
-        .dispatch({ type: "thread.settle", commandId: CommandId.make(newId()), threadId })
-        .pipe(
-          Effect.catchTags({
-            OrchestrationCommandInvariantError: () => Effect.void,
-            OrchestrationThreadSettleBlockedError: () => Effect.void,
+      yield* threads.settle(newId(), threadId).pipe(
+        Effect.catch((error) =>
+          Effect.logDebug("Developer assistant left a thread it could not settle active", {
+            threadId,
+            error,
           }),
-        );
+        ),
+      );
     // Whether the thread is out of the way now: settled, archived, or never created.
-    const after = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
+    const after = yield* threads.shell(threadId, { includeArchived: true });
     return (
       Option.isNone(after) ||
       after.value.archivedAt !== null ||
@@ -740,7 +719,7 @@ export const make = Effect.gen(function* () {
   /** The issue's shared worktree; the leader's thread holds it from the start. */
   const taskWorktree = Effect.fn("Assistant.taskWorktree")(function* (t: AssistantTask) {
     for (const id of [assistantTaskThreadId(t, "lead"), t.threadId]) {
-      const shell = yield* snapshots.getThreadShellById(id, { includeArchived: true });
+      const shell = yield* threads.shell(id, { includeArchived: true });
       if (Option.isSome(shell) && shell.value.worktreePath)
         return { path: shell.value.worktreePath, branch: shell.value.branch };
     }
@@ -748,7 +727,7 @@ export const make = Effect.gen(function* () {
   });
   /** The issue's pull request, as the worker's thread knows it. */
   const taskPullRequest = Effect.fn("Assistant.taskPullRequest")(function* (t: AssistantTask) {
-    const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
+    const worker = yield* threads.shell(t.threadId, { includeArchived: true });
     return Option.isSome(worker)
       ? (worker.value.linkedPullRequest ?? worker.value.branchPullRequest ?? null)
       : null;
@@ -783,7 +762,7 @@ export const make = Effect.gen(function* () {
       });
       return;
     }
-    const root = yield* snapshots.getProjectShellById(t.projectId);
+    const root = yield* threads.project(t.projectId);
     if (worktree && Option.isSome(root))
       yield* verifier
         .removeWorktree({ cwd: root.value.workspaceRoot, worktreePath: worktree.path })
@@ -801,9 +780,9 @@ export const make = Effect.gen(function* () {
   const turnJustEnded = Effect.fn("Assistant.turnJustEnded")(function* (t: AssistantTask) {
     const at = yield* Clock.currentTimeMillis;
     for (const threadId of taskThreadIds(t)) {
-      const shell = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
-      const completedAt = Option.isSome(shell) ? shell.value.latestTurn?.completedAt : null;
-      const age = completedAt ? at - Date.parse(completedAt) : null;
+      const shell = yield* threads.shell(threadId, { includeArchived: true });
+      const completedAt = Option.isSome(shell) ? latestRunCompletedMs(shell.value) : null;
+      const age = completedAt !== null ? at - completedAt : null;
       if (age !== null && age >= 0 && age < CHECKPOINT_GRACE_MS) return true;
     }
     return false;
@@ -992,7 +971,7 @@ export const make = Effect.gen(function* () {
   });
   /** Issues a thread outside the assistant is working on. */
   const humanClaims = Effect.fn("Assistant.humanClaims")(function* () {
-    const shell = yield* snapshots.getShellSnapshot();
+    const shell = yield* threadManagement.getShellSnapshot();
     return new Set(
       shell.threads.flatMap((thread) =>
         thread.linkedIssue && !assistantThreadKind(thread.id) ? [thread.linkedIssue.id] : [],
@@ -1022,7 +1001,7 @@ export const make = Effect.gen(function* () {
   ) {
     const deploymentError = validateSetupPlan(config);
     if (deploymentError) return yield* deploymentError;
-    const shell = yield* snapshots.getProjectShellById(config.projectId);
+    const shell = yield* threads.project(config.projectId);
     if (Option.isNone(shell)) return yield* fail("Select an existing T3 project.");
     const existing =
       yield* sql<ProjectRow>`SELECT * FROM assistant_projects WHERE project_id = ${config.projectId}`;
@@ -1064,6 +1043,7 @@ export const make = Effect.gen(function* () {
   }, Effect.mapError(wrap));
 
   const setup = yield* makeSetup({
+    threads,
     changed,
     threadBusy: (thread) => threadBusy(thread).pipe(Effect.mapError(wrap)),
     configure: configureProject,
@@ -1117,13 +1097,8 @@ export const make = Effect.gen(function* () {
           for (const held of b.tasks.filter((t) => assistantTaskHoldsProject(t.status))) {
             // A worker whose worktree setup failed never got a thread to interrupt.
             for (const threadId of taskThreadIds(held)) {
-              yield* engine
-                .dispatch({
-                  type: "thread.turn.interrupt",
-                  commandId: CommandId.make(newId()),
-                  threadId,
-                  createdAt: yield* now,
-                })
+              yield* threads
+                .stop(newId(), threadId, "Stopped by the developer assistant.")
                 .pipe(Effect.catch(() => Effect.void));
               yield* terminals.close({ threadId });
             }
@@ -1223,20 +1198,19 @@ export const make = Effect.gen(function* () {
   ) {
     const threadId = assistantTaskThreadId(t, role);
     if (role === "review" || role === "e2e") {
-      const existing = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
+      const existing = yield* threads.shell(threadId, { includeArchived: true });
       if (Option.isNone(existing)) {
         // A test issue has no worker thread; the leader's holds the same worktree.
         const worktree = yield* taskWorktree(t);
         if (!worktree) return yield* fail("The worker's worktree could not be found.");
-        yield* engine.dispatch({
-          type: "thread.create",
-          commandId: CommandId.make(`${t.id}:${role}:create`),
+        yield* threads.create({
+          commandId: `${t.id}:${role}:create`,
           threadId,
           projectId: p.config.projectId,
           title: `${t.issue.identifier} · ${ROLE_TITLES[role]}`,
           modelSelection: p.config.workerModelSelection,
           runtimeMode: p.config.runtimeMode,
-          interactionMode: "default",
+
           branch: worktree.branch,
           worktreePath: worktree.path,
           linkedIssue: {
@@ -1245,14 +1219,9 @@ export const make = Effect.gen(function* () {
             identifier: t.issue.identifier,
             url: t.issue.url,
           },
-          createdAt: yield* now,
         });
       } else if (existing.value.archivedAt !== null) {
-        yield* engine.dispatch({
-          type: "thread.unarchive",
-          commandId: CommandId.make(newId()),
-          threadId,
-        });
+        yield* threads.unarchive(newId(), threadId);
       }
     }
     // Keyed on what was sent, not on the thread existing, so a failure between
@@ -1333,7 +1302,7 @@ export const make = Effect.gen(function* () {
     p: AwaitedProject,
     t: AssistantTask,
   ) {
-    const shell = yield* snapshots.getProjectShellById(p.config.projectId);
+    const shell = yield* threads.project(p.config.projectId);
     if (Option.isNone(shell)) return yield* fail("The T3 project no longer exists.");
     const prepared = yield* linearThreads.prepareIssueThread({
       cwd: shell.value.workspaceRoot,
@@ -1346,15 +1315,14 @@ export const make = Effect.gen(function* () {
       moveToStarted: false,
     });
     if (!prepared.worktreePath) return yield* fail("A team requires an isolated worktree.");
-    yield* engine.dispatch({
-      type: "thread.create",
-      commandId: CommandId.make(`${t.id}:lead:create`),
+    yield* threads.create({
+      commandId: `${t.id}:lead:create`,
       threadId: assistantTaskThreadId(t, "lead"),
       projectId: p.config.projectId,
       title: `${t.issue.identifier} · ${ROLE_TITLES.lead}`,
       modelSelection: p.config.modelSelection,
       runtimeMode: p.config.runtimeMode,
-      interactionMode: "default",
+
       branch: prepared.branch,
       worktreePath: prepared.worktreePath,
       linkedIssue: {
@@ -1363,17 +1331,18 @@ export const make = Effect.gen(function* () {
         identifier: t.issue.identifier,
         url: t.issue.url,
       },
-      createdAt: yield* now,
     });
     const notes = yield* openProjectNotes(sql, p.project_id);
-    const researchAccess = yield* providers
-      .getResearchAccess(p.config.workerModelSelection.instanceId, prepared.worktreePath)
-      .pipe(
-        Effect.orElseSucceed(
-          () =>
-            "The configured worker's web access could not be verified. Check its available tools before taking research, or ask the person.",
-        ),
-      );
+    const researchAccess = yield* getResearchAccess(
+      p.config.workerModelSelection.instanceId,
+      prepared.worktreePath,
+    ).pipe(
+      Effect.provideService(ProviderInstanceRegistry, providerInstances),
+      Effect.orElseSucceed(
+        () =>
+          "The configured worker's web access could not be verified. Check its available tools before taking research, or ask the person.",
+      ),
+    );
     yield* sql.withTransaction(
       Effect.gen(function* () {
         yield* saveTask({ ...t, status: "working", error: null });
@@ -1825,16 +1794,15 @@ export const make = Effect.gen(function* () {
       if (!worktree) return yield* fail("The issue's worktree could not be found.");
       yield* asAssistant(linearThreads.moveToStarted(t.issue));
       declineStreak.delete(p.project_id);
-      if (Option.isNone(yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true })))
-        yield* engine.dispatch({
-          type: "thread.create",
-          commandId: CommandId.make(`${t.id}:create`),
+      if (Option.isNone(yield* threads.shell(t.threadId, { includeArchived: true })))
+        yield* threads.create({
+          commandId: `${t.id}:create`,
           threadId: t.threadId,
           projectId: p.config.projectId,
           title: `${t.issue.identifier}: ${t.issue.title}`,
           modelSelection: p.config.workerModelSelection,
           runtimeMode: p.config.runtimeMode,
-          interactionMode: "default",
+
           branch: worktree.branch,
           worktreePath: worktree.path,
           linkedIssue: {
@@ -1843,7 +1811,6 @@ export const make = Effect.gen(function* () {
             identifier: t.issue.identifier,
             url: t.issue.url,
           },
-          createdAt: yield* now,
         });
       const taken: AssistantTask = {
         ...t,
@@ -1899,16 +1866,15 @@ export const make = Effect.gen(function* () {
     const directory = yield* evidence.directory(t.id);
     yield* asAssistant(linearThreads.moveToStarted(t.issue));
     declineStreak.delete(p.project_id);
-    if (Option.isNone(yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true })))
-      yield* engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make(`${t.id}:create`),
+    if (Option.isNone(yield* threads.shell(t.threadId, { includeArchived: true })))
+      yield* threads.create({
+        commandId: `${t.id}:create`,
         threadId: t.threadId,
         projectId: p.config.projectId,
         title: `${t.issue.identifier}: ${t.issue.title}`,
         modelSelection: p.config.workerModelSelection,
         runtimeMode: p.config.runtimeMode,
-        interactionMode: "default",
+
         branch: worktree.branch,
         worktreePath: worktree.path,
         linkedIssue: {
@@ -1917,7 +1883,6 @@ export const make = Effect.gen(function* () {
           identifier: t.issue.identifier,
           url: t.issue.url,
         },
-        createdAt: yield* now,
       });
     const taken: AssistantTask = {
       ...t,
@@ -2062,7 +2027,8 @@ export const make = Effect.gen(function* () {
   ) {
     const { t } = yield* authorizeLead(caller);
     const threadId = assistantTaskThreadId(t, role);
-    const detail = yield* snapshots.getThreadDetailById(threadId);
+    const shell = yield* threads.shell(threadId);
+    const conversation = Option.isSome(shell) ? yield* threads.messages(threadId) : [];
     // Queued messages are not in the conversation until their turn starts.
     const queued = yield* sql<{
       text: string;
@@ -2071,15 +2037,11 @@ export const make = Effect.gen(function* () {
     // The recent end of the conversation; a whole transcript would crowd the reader's context.
     return {
       task: t,
-      transcript: Option.isSome(detail)
-        ? detail.value.messages
-            .slice(-8)
-            .map((m) => ({ role: m.role, text: m.text.slice(0, 8000) }))
-        : [],
-      sessionStatus: Option.isSome(detail)
-        ? (detail.value.session?.status ?? "idle")
-        : "archived or not started",
-      worktreePath: Option.isSome(detail) ? detail.value.worktreePath : null,
+      transcript: conversation
+        .slice(-8)
+        .map((m) => ({ role: m.role, text: m.text.slice(0, 8000) })),
+      sessionStatus: Option.isSome(shell) ? shell.value.status : "archived or not started",
+      worktreePath: Option.isSome(shell) ? shell.value.worktreePath : null,
       queued: queued.map((m) => ({ queuedAt: m.created_at, preview: m.text.slice(0, 300) })),
     };
   }, Effect.mapError(wrap));
@@ -2120,7 +2082,7 @@ export const make = Effect.gen(function* () {
         role === "e2e" &&
         (!testerReady ||
           Option.isNone(
-            yield* snapshots.getThreadShellById(assistantTaskThreadId(t, "e2e"), {
+            yield* threads.shell(assistantTaskThreadId(t, "e2e"), {
               includeArchived: true,
             }),
           ))
@@ -2352,13 +2314,8 @@ export const make = Effect.gen(function* () {
         // Like the board's interrupt, for this issue alone. Interrupting twice
         // is harmless, so a retry after a failure below repeats it.
         for (const threadId of taskThreadIds(t)) {
-          yield* engine
-            .dispatch({
-              type: "thread.turn.interrupt",
-              commandId: CommandId.make(newId()),
-              threadId,
-              createdAt: yield* now,
-            })
+          yield* threads
+            .stop(newId(), threadId, "Stopped by the developer assistant.")
             .pipe(Effect.catch(() => Effect.void));
           yield* terminals.close({ threadId });
         }
@@ -2463,7 +2420,7 @@ export const make = Effect.gen(function* () {
       return yield* fail(
         "Pass testNotes and planChanged with assistant_request_review. testNotes: what the change does now for a user, the pages, endpoints and flows to test, and the data they need. planChanged: true when the work differs from the team leader's brief in a way the e2e test depends on, otherwise false. T3 starts the e2e tester with them.",
       );
-    const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
+    const worker = yield* threads.shell(t.threadId, { includeArchived: true });
     if (Option.isNone(worker) || !worker.value.worktreePath)
       return yield* fail("The worker's worktree could not be found.");
     // The reviewer approves a commit, so there must be one: this fails on uncommitted work.
@@ -2810,7 +2767,7 @@ export const make = Effect.gen(function* () {
         return yield* fail(
           "No review is requested. End your turn; the implementer asks when ready.",
         );
-      const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
+      const worker = yield* threads.shell(t.threadId, { includeArchived: true });
       if (Option.isNone(worker) || !worker.value.worktreePath)
         return yield* fail("The worker's worktree could not be found.");
       // Findings may concern uncommitted files; only an approval needs a clean commit.
@@ -2869,8 +2826,8 @@ export const make = Effect.gen(function* () {
       const review = t.codeReview;
       if (review?.verdict !== "approved")
         return yield* fail("Request a code review and wait for its approval before merging.");
-      const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
-      const root = yield* snapshots.getProjectShellById(t.projectId);
+      const worker = yield* threads.shell(t.threadId, { includeArchived: true });
+      const root = yield* threads.project(t.projectId);
       if (Option.isNone(worker) || Option.isNone(root) || !worker.value.worktreePath)
         return yield* fail("The worker's worktree could not be found.");
       const head = yield* verifier.revision(worker.value.worktreePath);
@@ -2939,7 +2896,7 @@ export const make = Effect.gen(function* () {
 
   /** The team worktree's HEAD; it fails on uncommitted changes. */
   const workerRevision = Effect.fn("Assistant.workerRevision")(function* (t: AssistantTask) {
-    const worker = yield* snapshots.getThreadShellById(t.threadId, { includeArchived: true });
+    const worker = yield* threads.shell(t.threadId, { includeArchived: true });
     if (Option.isNone(worker) || !worker.value.worktreePath)
       return yield* fail("The worker's worktree could not be found.");
     return yield* verifier.revision(worker.value.worktreePath);
@@ -3271,7 +3228,7 @@ export const make = Effect.gen(function* () {
       );
     // An archived worker still owns its worktree, which the leader's thread shares.
     const worktree = yield* taskWorktree(t);
-    const root = yield* snapshots.getProjectShellById(t.projectId);
+    const root = yield* threads.project(t.projectId);
     if (!worktree || Option.isNone(root))
       return yield* fail("The worker's worktree could not be found.");
     // A test issue checks the commit its worktree was made at, fresh from origin's branch.
@@ -4017,13 +3974,8 @@ export const make = Effect.gen(function* () {
         if (!assistantTaskHoldsProject(t.status) && t.status !== "queued")
           return yield* fail("Only an active or queued issue can be skipped.");
         for (const threadId of taskThreadIds(t)) {
-          yield* engine
-            .dispatch({
-              type: "thread.turn.interrupt",
-              commandId: CommandId.make(newId()),
-              threadId,
-              createdAt: yield* now,
-            })
+          yield* threads
+            .stop(newId(), threadId, "Stopped by the developer assistant.")
             .pipe(Effect.catch(() => Effect.void));
           yield* terminals.close({ threadId });
           yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE thread_id = ${threadId}`;
@@ -4039,7 +3991,7 @@ export const make = Effect.gen(function* () {
       } else {
         if (!assistantTaskHoldsProject(t.status))
           return yield* fail("Only blocked or active work can be retried.");
-        const lead = yield* snapshots.getThreadShellById(assistantTaskThreadId(t, "lead"), {
+        const lead = yield* threads.shell(assistantTaskThreadId(t, "lead"), {
           includeArchived: true,
         });
         // A team whose worktree could not be prepared has no leader to tell yet.
@@ -4139,7 +4091,7 @@ export const make = Effect.gen(function* () {
       );
       for (const m of ordered) {
         const threadId = ThreadId.make(m.thread_id);
-        const current = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
+        const current = yield* threads.shell(threadId, { includeArchived: true });
         if (Option.isNone(current)) continue;
         const owner = owners.get(m.thread_id) ?? null;
         // A nudge is only right while the issue is still the leader's to move on.
@@ -4158,12 +4110,10 @@ export const make = Effect.gen(function* () {
         // Nothing else delivers this message, so a thread the person archived
         // with work still queued for it comes back rather than wedging its issue.
         if (current.value.archivedAt !== null) {
-          const unarchived = yield* engine
-            .dispatch({ type: "thread.unarchive", commandId: CommandId.make(newId()), threadId })
-            .pipe(
-              Effect.as(true),
-              Effect.catch(() => Effect.succeed(false)),
-            );
+          const unarchived = yield* threads.unarchive(newId(), threadId).pipe(
+            Effect.as(true),
+            Effect.catch(() => Effect.succeed(false)),
+          );
           if (!unarchived) continue;
         }
         if (yield* threadBusy(current.value)) continue;
@@ -4174,25 +4124,15 @@ export const make = Effect.gen(function* () {
         }
         const pending =
           yield* sql`SELECT id FROM assistant_decisions WHERE thread_id = ${threadId} AND resolved = 0`;
-        if (
-          pending.length ||
-          current.value.hasPendingApprovals ||
-          current.value.hasPendingUserInput
-        )
-          continue;
-        yield* engine.dispatch({
-          type: "thread.turn.start",
-          commandId: CommandId.make(m.id),
+        if (pending.length || threadAwaitsAnswer(current.value)) continue;
+        yield* threads.send({
+          commandId: m.id,
+          messageId: m.id,
           threadId,
-          message: { messageId: MessageId.make(m.id), role: "user", text: m.text, attachments: [] },
+          text: m.text,
           // Team leaders decide; the other threads do the work.
           modelSelection:
             owner?.role === "lead" ? p.config.modelSelection : p.config.workerModelSelection,
-          runtimeMode: p.config.runtimeMode,
-          interactionMode: "default",
-          // The turn starts now; a message that waited in the queue must not
-          // make the turn look as long as the wait.
-          createdAt: yield* now,
         });
         yield* sql`UPDATE assistant_messages SET delivered = 1 WHERE id = ${m.id}`;
       }
@@ -4214,10 +4154,7 @@ export const make = Effect.gen(function* () {
     // Another thread still at work (the worker it just handed to) carries the
     // issue on; its turn ending is what brings the issue back.
     if (yield* taskBusy(t, lead)) return;
-    const detail = yield* snapshots.getThreadDetailById(lead);
-    const asked = Option.isSome(detail)
-      ? detail.value.messages.findLast((m) => m.role === "user")
-      : undefined;
+    const asked = (yield* threads.messages(lead, ["user"])).at(-1);
     if (!asked) return;
     const automated = yield* sql`SELECT id FROM assistant_messages WHERE id = ${asked.id}`;
     if (!automated.length) return;
@@ -4374,9 +4311,11 @@ export const make = Effect.gen(function* () {
     return true;
   });
 
-  const observe = Effect.fn("Assistant.observe")(function* (event: OrchestrationEvent) {
-    if (!("threadId" in event.payload)) return;
-    const threadId = event.payload.threadId;
+  // run.updated repeats for a finished run (its checkpoint lands later); a run's
+  // end is handled once. In memory: a restart replays only past the cursor.
+  const endedRuns = new Set<string>();
+  const observe = Effect.fn("Assistant.observe")(function* (event: OrchestrationV2DomainEvent) {
+    const threadId = event.threadId;
     if (event.type === "thread.deleted") {
       const removed =
         yield* sql`DELETE FROM assistant_setups WHERE thread_id = ${threadId} RETURNING project_id`;
@@ -4387,12 +4326,14 @@ export const make = Effect.gen(function* () {
     const projectId = owner.task.projectId;
     const t = owner.task;
     if (
-      event.type === "thread.message-sent" &&
+      event.type === "message.updated" &&
       event.payload.role === "user" &&
+      event.payload.createdBy === "user" &&
+      !event.payload.streaming &&
       event.payload.text.trim()
     ) {
       const automated =
-        yield* sql`SELECT id FROM assistant_messages WHERE id = ${event.payload.messageId}`;
+        yield* sql`SELECT id FROM assistant_messages WHERE id = ${event.payload.id}`;
       if (automated.length) return;
       const decisions = yield* sql<{
         id: string;
@@ -4412,65 +4353,77 @@ export const make = Effect.gen(function* () {
             ...(t.stage ? { stage: owner.role } : {}),
           });
       }
-    } else if (event.type === "thread.activity-appended") {
-      const a = event.payload.activity;
-      if (["user-input.requested", "approval.requested"].includes(a.kind)) {
-        const payload = yield* decodeRequest(a.payload);
-        const id = `provider:${threadId}:${payload.requestId}`;
-        const decision: AssistantDecision = {
-          id,
-          projectId: ProjectId.make(projectId),
-          threadId,
-          taskId: t.id,
-          requestId: payload.requestId,
-          kind: a.kind === "approval.requested" ? "approval" : "user-input",
-          question: a.summary,
-          answer: null,
-          createdAt: yield* now,
-        };
-        yield* sql`INSERT OR IGNORE INTO assistant_decisions (id, project_id, thread_id, request_id, data) VALUES (${id}, ${projectId}, ${threadId}, ${payload.requestId}, ${encodeDecision(decision)})`;
-        // The inbox shows the request; it is answered in its own thread.
-        if (assistantTaskHoldsProject(t.status)) yield* saveTask({ ...t, status: "waiting" });
-      } else if (["user-input.resolved", "approval.resolved"].includes(a.kind) || isStale(a)) {
-        const payload = yield* decodeRequest(a.payload);
-        const answer = isStale(a)
-          ? "The request expired before it was answered"
-          : "Answered in the thread";
-        const ds = yield* sql<{
-          id: string;
-          data: string;
-        }>`SELECT * FROM assistant_decisions WHERE thread_id = ${threadId} AND request_id = ${payload.requestId} AND resolved = 0`;
-        for (const d of ds)
-          yield* sql`UPDATE assistant_decisions SET resolved = 1, data = ${encodeDecision({ ...(yield* decodeDecision(d.data)), answer })} WHERE id = ${d.id}`;
-        if (t.status === "waiting") yield* saveTask({ ...t, status: "working" });
-      }
-    } else if (event.type === "thread.session-set") {
-      const status = event.payload.session.status;
-      const failed = status === "error" || status === "interrupted" || status === "stopped";
+    } else if (
+      event.type === "turn-item.updated" &&
+      (event.payload.type === "approval_request" || event.payload.type === "user_input_request") &&
+      (event.payload.status === "waiting" || event.payload.status === "pending")
+    ) {
+      const item = event.payload;
+      const requestId = item.requestId;
+      const id = `provider:${threadId}:${requestId}`;
+      const decision: AssistantDecision = {
+        id,
+        projectId: ProjectId.make(projectId),
+        threadId,
+        taskId: t.id,
+        requestId,
+        kind: item.type === "approval_request" ? "approval" : "user-input",
+        question:
+          item.type === "approval_request"
+            ? (item.title ?? item.prompt ?? "Approval requested").slice(0, 2000)
+            : item.questions.map((q) => q.question).join("\n") || item.title || "Input requested",
+        answer: null,
+        createdAt: yield* now,
+      };
+      const inserted =
+        yield* sql`INSERT OR IGNORE INTO assistant_decisions (id, project_id, thread_id, request_id, data) VALUES (${id}, ${projectId}, ${threadId}, ${requestId}, ${encodeDecision(decision)}) RETURNING id`;
+      // The inbox shows the request; it is answered in its own thread.
+      if (inserted.length && assistantTaskHoldsProject(t.status))
+        yield* saveTask({ ...t, status: "waiting" });
+    } else if (event.type === "runtime-request.updated" && event.payload.status !== "pending") {
+      const answer =
+        event.payload.status === "resolved"
+          ? "Answered in the thread"
+          : "The request expired before it was answered";
+      const ds = yield* sql<{
+        id: string;
+        data: string;
+      }>`SELECT * FROM assistant_decisions WHERE thread_id = ${threadId} AND request_id = ${event.payload.id} AND resolved = 0`;
+      for (const d of ds)
+        yield* sql`UPDATE assistant_decisions SET resolved = 1, data = ${encodeDecision({ ...(yield* decodeDecision(d.data)), answer })} WHERE id = ${d.id}`;
+      if (ds.length && t.status === "waiting") yield* saveTask({ ...t, status: "working" });
+    } else if (event.type === "run.updated" && RUN_ENDED.has(event.payload.status)) {
+      const run = event.payload;
+      // A run cancelled before it started (a queued message dropped by a stop) was no turn.
+      if (run.startedAt === null || endedRuns.has(run.id)) return;
+      endedRuns.add(run.id);
+      if (endedRuns.size > 1000) endedRuns.delete(endedRuns.values().next().value!);
+      const shell = yield* threads.shell(threadId, { includeArchived: true });
+      const lastError = Option.isSome(shell) ? (shell.value.lastError ?? null) : null;
+      const failed = run.status !== "completed";
       const limitWait =
-        status === "error" ? usageLimitWaitMs(event.payload.session.lastError) : null;
+        run.status === "failed" && Option.isSome(shell)
+          ? usageLimitWaitMs(shell.value, yield* Clock.currentTimeMillis)
+          : null;
       if (limitWait !== null && (yield* holdForUsageLimit(projectId, threadId, t, limitWait))) {
         // The thread continues once the limit resets; its issue is not blocked
         // and the loop is not stopped.
       } else if (
-        status === "stopped" &&
-        (releasedAt.delete(threadId) || (yield* releasedWhileIdle(threadId)))
-      ) {
-        // Nothing to do: the thread's turn ended normally before its session was released.
-      } else if (
         // A delivered issue's tester may stop instead of settling; either way its work is done.
-        status === "ready" ||
+        run.status === "completed" ||
         (failed && (t.status === "review" || t.status === "declined"))
       ) {
-        yield* ingestion.drain;
+        // A message queued behind this run already started the next one.
         if (
-          status === "ready" &&
-          Option.isSome(yield* turns.getPendingTurnStartByThreadId({ threadId }))
+          run.status === "completed" &&
+          Option.isSome(shell) &&
+          shell.value.activeRunId !== null &&
+          shell.value.activeRunId !== run.id
         )
           return;
         yield* turnEnded(t, owner.role);
       } else if (
-        status === "error" &&
+        run.status === "failed" &&
         t.status !== "blocked" &&
         assistantTaskHoldsProject(t.status) &&
         (!t.errorRetriedAt ||
@@ -4478,27 +4431,25 @@ export const make = Effect.gen(function* () {
       ) {
         // A provider error is often passing, so the thread gets one more turn by
         // itself before the issue waits for the person.
-        yield* ingestion.drain;
         const retried = yield* saveTask({ ...t, errorRetriedAt: yield* now });
         yield* queueMessage(
           projectId,
           threadId,
           `${t.id}:error-retry:${threadId}:${retried.errorRetriedAt}`,
-          `Your last turn stopped with a provider error: ${event.payload.session.lastError ?? "no detail"}\nContinue where you left off.`,
+          `Your last turn stopped with a provider error: ${lastError ?? "no detail"}\nContinue where you left off.`,
         );
       } else if (failed && assistantTaskHoldsProject(t.status)) {
-        yield* ingestion.drain;
         yield* saveTask({
           ...t,
           stage: "lead",
           status: "blocked",
-          error: event.payload.session.lastError ?? "The worker stopped before delivery.",
+          error: lastError ?? "The worker stopped before delivery.",
         });
         // A leader that failed is not told about itself; the board shows the issue blocked.
         if (owner.role !== "lead")
           yield* notifyLead(
             t,
-            `The ${ROLE_NAMES[owner.role]} for ${t.issue.identifier} is ${status}. Read its result and manage the next step. A finished turn does not prove deployment.`,
+            `The ${ROLE_NAMES[owner.role]} for ${t.issue.identifier} is ${run.status}. Read its result and manage the next step. A finished turn does not prove deployment.`,
           );
       }
     } else if (event.type === "thread.deleted" && assistantTaskHoldsProject(t.status)) {
@@ -4589,7 +4540,7 @@ export const make = Effect.gen(function* () {
     const wait = t.deployWait;
     if (!wait) return;
     const worktree = yield* taskWorktree(t);
-    const root = yield* snapshots.getProjectShellById(t.projectId);
+    const root = yield* threads.project(t.projectId);
     if (!worktree || Option.isNone(root)) return;
     const check = yield* verifier
       .checkDeploy(
@@ -4709,13 +4660,9 @@ export const make = Effect.gen(function* () {
     for (const row of rows) {
       const threadId = ThreadId.make(row.thread_id);
       yield* Effect.gen(function* () {
-        const shell = yield* snapshots.getThreadShellById(threadId, { includeArchived: true });
+        const shell = yield* threads.shell(threadId, { includeArchived: true });
         if (Option.isSome(shell) && shell.value.archivedAt === null)
-          yield* engine.dispatch({
-            type: "thread.archive",
-            commandId: CommandId.make(newId()),
-            threadId,
-          });
+          yield* threads.archive(newId(), threadId);
         yield* sql`DELETE FROM assistant_retired_threads WHERE thread_id = ${row.thread_id}`;
       }).pipe(
         Effect.catch((error) =>
@@ -4806,53 +4753,37 @@ export const make = Effect.gen(function* () {
   };
   if (!(yield* DeveloperAssistantWorkers)) return service;
 
-  const events = yield* engine.subscribeDomainEvents;
-  const relevant = (event: OrchestrationEvent) =>
-    (event.type === "thread.message-sent" && event.payload.role === "user") ||
-    event.type === "thread.session-set" ||
+  const relevant = (event: OrchestrationV2DomainEvent) =>
     event.type === "thread.deleted" ||
-    (event.type === "thread.activity-appended" &&
-      ([
-        "user-input.requested",
-        "approval.requested",
-        "user-input.resolved",
-        "approval.resolved",
-      ].includes(event.payload.activity.kind) ||
-        isStale(event.payload.activity)));
+    event.type === "run.updated" ||
+    event.type === "runtime-request.updated" ||
+    (event.type === "message.updated" && event.payload.role === "user") ||
+    (event.type === "turn-item.updated" &&
+      (event.payload.type === "approval_request" || event.payload.type === "user_input_request"));
   const eventLock = yield* Semaphore.make(1);
-  const record = Effect.fn("Assistant.recordEvent")(function* (event: OrchestrationEvent) {
+  const record = Effect.fn("Assistant.recordEvent")(function* (stored: OrchestrationV2StoredEvent) {
     const cursors = yield* sql<{
       sequence: number;
     }>`SELECT sequence FROM assistant_event_cursor WHERE id = 1`;
-    if ((cursors[0]?.sequence ?? 0) >= event.sequence) return;
-    if (relevant(event)) yield* observe(event);
-    yield* sql`UPDATE assistant_event_cursor SET sequence = ${event.sequence} WHERE id = 1`;
+    if ((cursors[0]?.sequence ?? 0) >= stored.sequence) return;
+    if (relevant(stored.event)) yield* observe(stored.event);
+    yield* sql`UPDATE assistant_event_cursor SET sequence = ${stored.sequence} WHERE id = 1`;
   }, eventLock.withPermits(1));
   const recovered = yield* Deferred.make<void>();
-  const handleEvent = (event: OrchestrationEvent) =>
-    record(event).pipe(
+  const handleEvent = (stored: OrchestrationV2StoredEvent) =>
+    record(stored).pipe(
       Effect.tapError((error) =>
         Effect.logWarning("Developer assistant event handling will retry", { error }),
       ),
       Effect.retry(Schedule.spaced("5 seconds")),
     );
-  // Subscribe before replay, then consume the buffered stream in sequence. A failed
-  // event must not be skipped by a later cursor; delivery waits for recovery.
+  // The event store replays everything after the cursor, then follows live
+  // events in order. A failed event must not be skipped by a later cursor.
   yield* Effect.gen(function* () {
-    while (true) {
-      const cursors = yield* sql<{
-        sequence: number;
-      }>`SELECT sequence FROM assistant_event_cursor WHERE id = 1`;
-      const batch = yield* engine
-        .readEvents(cursors[0]?.sequence ?? 0, 500)
-        .pipe(Stream.runCollect);
-      if (!batch.length) break;
-      for (const event of batch) if (relevant(event)) yield* handleEvent(event);
-      // Token deltas need no assistant projection write. Advance once for the
-      // remainder of this replay batch, after every relevant event succeeded.
-      const lastSequence = batch[batch.length - 1]!.sequence;
-      yield* sql`UPDATE assistant_event_cursor SET sequence = ${lastSequence} WHERE id = 1 AND sequence < ${lastSequence}`;
-    }
+    // A database copied from v1 carries the v1 event sequence, which v2's own
+    // sequence starts below; nothing before the copy is the assistant's to replay.
+    const latest = yield* eventSink.latestSequence();
+    yield* sql`UPDATE assistant_event_cursor SET sequence = ${latest} WHERE id = 1 AND sequence > ${latest}`;
     yield* archiveRetiredThreads().pipe(
       Effect.catch((error) =>
         Effect.logWarning("Developer assistant could not read the retired assistant threads", {
@@ -4860,8 +4791,23 @@ export const make = Effect.gen(function* () {
         }),
       ),
     );
-    yield* Deferred.succeed(recovered, undefined);
-    yield* events.pipe(Stream.filter(relevant), Stream.runForEach(handleEvent));
+    const cursors = yield* sql<{
+      sequence: number;
+    }>`SELECT sequence FROM assistant_event_cursor WHERE id = 1`;
+    const from = cursors[0]?.sequence ?? latest;
+    // Delivery and the scan wait until the replay caught up with startup.
+    if (from >= latest) yield* Deferred.succeed(recovered, undefined);
+    yield* eventSink
+      .stream({ afterSequence: from })
+      .pipe(
+        Stream.runForEach((stored) =>
+          (relevant(stored.event) ? handleEvent(stored) : Effect.void).pipe(
+            Effect.andThen(
+              stored.sequence >= latest ? Deferred.succeed(recovered, undefined) : Effect.void,
+            ),
+          ),
+        ),
+      );
   }).pipe(
     Effect.tapError((error) =>
       Effect.logWarning("Developer assistant recovery will retry", { error }),

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import { aggregateThreadUsage } from "./threadUsageStats.ts";
+import type { UsageRecord } from "@t3tools/provider-core/server/usage";
+
 import { parseRateTable } from "./usagePricing.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
 
 /** Round numbers so a cost assertion reads as tokens x rate rather than a magic float. */
 const rates = parseRateTable({
@@ -47,7 +48,7 @@ function record(input: {
       reasoningTokens: 0,
     },
     reportedCostUsd: input.reportedCostUsd ?? null,
-    fast: false,
+    speed: "standard",
     dedupeKey: input.dedupeKey === undefined ? `d${nextDedupe++}` : input.dedupeKey,
   };
 }

@@ -1,28 +1,61 @@
 import {
+  type AuthMcpClientAccess,
   type EnvironmentId,
   McpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
+  type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
 /**
- * What a provider session's MCP credential may reach. `preview` is the
- * collaborative browser, `device` the simulators and emulators, `pull-requests`
- * the PR toolkit, and `linear` the connected Linear workspace, granted when
- * `settings.linear.agentAccess` is on and a key is stored.
+ * `linear` reaches the connected Linear workspace; it is granted when
+ * `settings.linear.agentAccess` is on and a key (or delegation) is configured.
  */
-export type McpCapability = "preview" | "device" | "pull-requests" | "linear";
+const ALL_MCP_CAPABILITIES = [
+  "preview",
+  "orchestration",
+  "worktree",
+  "device",
+  "pull-requests",
+  "linear",
+] as const;
+export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
-export interface McpInvocationScope {
-  readonly environmentId: EnvironmentId;
+export interface McpThreadCaller {
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
+}
+
+export interface McpClientCaller {
+  readonly sessionId: string;
+  readonly label: string;
+  readonly access: AuthMcpClientAccess;
+}
+
+/**
+ * A read-only client never reaches a write (`McpToolAccess` refuses it first),
+ * so it maps to the lowest mode rather than to nothing.
+ */
+export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): RuntimeMode =>
+  client === undefined || client.access === "read-only" ? "approval-required" : client.access;
+
+/**
+ * A thread caller's omitted target falls back to its own thread; a client
+ * caller has no own thread, so tools that act as the caller (delegate_task,
+ * preview, worktree handoff) need `thread`.
+ */
+export interface McpInvocationScope {
+  readonly environmentId: EnvironmentId;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;
+  readonly requestNamespace: string;
+  readonly thread: McpThreadCaller | undefined;
+  readonly client: McpClientCaller | undefined;
 }
 
 export class McpInvocationContext extends Context.Service<
@@ -30,7 +63,6 @@ export class McpInvocationContext extends Context.Service<
   McpInvocationScope
 >()("t3/mcp/McpInvocationContext") {}
 
-/** The error a missing capability surfaces as; preview keeps its own so the broker can route it. */
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"
   ? PreviewAutomationUnavailableError
   : McpCapabilityUnavailableError;
@@ -41,9 +73,13 @@ const missingCapability = (
 ): PreviewAutomationUnavailableError | McpCapabilityUnavailableError => {
   const fields = {
     environmentId: invocation.environmentId,
-    threadId: invocation.threadId,
-    providerSessionId: invocation.providerSessionId,
-    providerInstanceId: invocation.providerInstanceId,
+    ...(invocation.thread === undefined
+      ? {}
+      : {
+          threadId: invocation.thread.threadId,
+          providerSessionId: invocation.thread.providerSessionId,
+          providerInstanceId: invocation.thread.providerInstanceId,
+        }),
   };
   return capability === "preview"
     ? new PreviewAutomationUnavailableError({ capability, ...fields })
@@ -56,8 +92,32 @@ export const requireMcpCapability = <const C extends McpCapability>(
   McpInvocationContext.pipe(
     Effect.filterOrFail(
       (invocation) => invocation.capabilities.has(capability),
-      // The conditional type narrows what the literal argument decided at runtime.
       (invocation) => missingCapability(invocation, capability) as McpCapabilityError<C>,
     ),
     Effect.withSpan("mcp.requireCapability"),
   );
+
+export const requireThreadMcpCapability = <const C extends "preview" | "device">(
+  capability: C,
+): Effect.Effect<McpThreadInvocationScope, McpCapabilityError<C>, McpInvocationContext> =>
+  McpInvocationContext.pipe(
+    Effect.filterOrFail(
+      (invocation): invocation is McpThreadInvocationScope =>
+        invocation.capabilities.has(capability) && invocation.thread !== undefined,
+      (invocation) => missingCapability(invocation, capability) as McpCapabilityError<C>,
+    ),
+    Effect.withSpan("mcp.requireCapability"),
+  );
+
+const threadCallerRequired = (operation: string) =>
+  new OrchestratorMcpFailure({
+    code: "thread_credential_required",
+    message: `${operation} acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.`,
+  });
+
+export type McpThreadInvocationScope = McpInvocationScope & { readonly thread: McpThreadCaller };
+
+export const requireThreadScope = (scope: McpInvocationScope, operation: string) =>
+  scope.thread === undefined
+    ? Effect.fail(threadCallerRequired(operation))
+    : Effect.succeed(scope as McpThreadInvocationScope);

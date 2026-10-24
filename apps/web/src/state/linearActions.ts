@@ -6,12 +6,12 @@ import type {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { useCallback, useState } from "react";
+import { useState } from "react";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { linearEnvironment } from "./linear";
@@ -39,46 +39,43 @@ export function usePrepareIssueThreadAction(scope: LinearIssueThreadScope) {
   const [isPending, setIsPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  const resetError = useCallback(() => {
+  const resetError = () => {
     setError(null);
-  }, []);
+  };
 
-  const run = useCallback(
-    async (input: {
-      reference: string;
-      mode: "local" | "worktree";
-      /** Omitted when the dialog left the branch to the server's naming setting. */
-      branch?: string;
-      /** `current` starts on the branch the checkout is already on; the server touches git only under `issue`. */
-      branchMode?: LinearIssueThreadBranchMode;
-      threadId?: ThreadId;
-    }) => {
-      if (scope.environmentId === null || scope.cwd === null) {
-        const unavailable = new Error("No project is available to start an issue thread in.");
-        setError(unavailable);
-        return AsyncResult.failure<never, Error>(Cause.fail(unavailable));
-      }
-      setIsPending(true);
-      setError(null);
-      const result = await prepareIssueThread({
-        environmentId: scope.environmentId,
-        input: {
-          cwd: scope.cwd,
-          reference: input.reference,
-          mode: input.mode,
-          ...(input.branch ? { branch: input.branch } : {}),
-          ...(input.branchMode ? { branchMode: input.branchMode } : {}),
-          ...(input.threadId ? { threadId: input.threadId } : {}),
-        },
-      });
-      setIsPending(false);
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        setError(squashAtomCommandFailure(result));
-      }
-      return result;
-    },
-    [prepareIssueThread, scope.cwd, scope.environmentId],
-  );
+  const run = async (input: {
+    reference: string;
+    mode: "local" | "worktree";
+    /** Omitted when the dialog left the branch to the server's naming setting. */
+    branch?: string;
+    /** `current` starts on the branch the checkout is already on; the server touches git only under `issue`. */
+    branchMode?: LinearIssueThreadBranchMode;
+    threadId?: ThreadId;
+  }) => {
+    if (scope.environmentId === null || scope.cwd === null) {
+      const unavailable = new Error("No project is available to start an issue thread in.");
+      setError(unavailable);
+      return AsyncResult.failure<never, Error>(Cause.fail(unavailable));
+    }
+    setIsPending(true);
+    setError(null);
+    const result = await prepareIssueThread({
+      environmentId: scope.environmentId,
+      input: {
+        cwd: scope.cwd,
+        reference: input.reference,
+        mode: input.mode,
+        ...(input.branch ? { branch: input.branch } : {}),
+        ...(input.branchMode ? { branchMode: input.branchMode } : {}),
+        ...(input.threadId ? { threadId: input.threadId } : {}),
+      },
+    });
+    setIsPending(false);
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      setError(squashAtomCommandFailure(result));
+    }
+    return result;
+  };
 
   return { error, isPending, resetError, run };
 }

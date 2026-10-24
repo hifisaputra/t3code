@@ -1,7 +1,7 @@
 import { createLinearEnvironmentAtoms } from "@t3tools/client-runtime/state/linear";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, LinearIssueDetail } from "@t3tools/contracts";
-import { Atom } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
 import { useLayoutEffect } from "react";
 
 import { connectionAtomRuntime } from "../connection/runtime";

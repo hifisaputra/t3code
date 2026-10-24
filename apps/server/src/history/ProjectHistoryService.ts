@@ -1,11 +1,13 @@
 /**
  * ProjectHistoryService - answers "what did I work on each day" for one project.
  *
- * The read is two queries over the turn projection: every turn whose start
- * could land inside the requested window, then one lifetime aggregate for the
- * threads that actually appear. Day bucketing happens in TypeScript because the
- * client's IANA zone is the only thing that can decide which calendar day a
- * turn belongs to, and SQLite cannot resolve zone rules.
+ * The read is two queries over the v2 run projection (a run that started is a
+ * turn): every run whose request could land inside the requested window, then
+ * one lifetime aggregate for the threads that actually appear. Turn timing from
+ * before the v2 migration is not available: upstream drops `projection_turns`.
+ * Day bucketing happens in TypeScript because the client's IANA zone is the
+ * only thing that can decide which calendar day a turn belongs to, and SQLite
+ * cannot resolve zone rules.
  *
  * @module ProjectHistoryService
  */
@@ -31,8 +33,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlSchema from "effect/sql/SqlSchema";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -307,31 +309,41 @@ const readFailed = (detail: string) => (cause: Cause.Cause<unknown>) =>
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
+  // A provider-native subagent's runs belong to its parent's turn, so they are not counted again.
+  const notProviderSubagent = sql`NOT (
+    COALESCE(json_extract(threads.payload_json, '$.lineage.relationshipToParent'), '') = 'subagent'
+    AND COALESCE(json_extract(threads.payload_json, '$.creationSource'), '') = 'provider'
+  )`;
+
   const listWindowTurns = SqlSchema.findAll({
     Request: ProjectHistoryTurnsRequest,
     Result: ProjectHistoryTurnRow,
     execute: ({ projectId, fromInstant, toInstant }) =>
       sql`
         SELECT
-          turns.thread_id AS "threadId",
-          turns.turn_id AS "turnId",
+          runs.thread_id AS "threadId",
+          runs.run_id AS "turnId",
           threads.title AS "title",
-          threads.branch AS "branch",
-          threads.linked_issue_json AS "linkedIssue",
+          json_extract(threads.payload_json, '$.branch') AS "branch",
+          json_extract(threads.payload_json, '$.linkedIssue') AS "linkedIssue",
           threads.archived_at AS "archivedAt",
-          turns.state AS "state",
-          turns.requested_at AS "requestedAt",
-          turns.started_at AS "startedAt",
-          turns.completed_at AS "completedAt"
-        FROM projection_turns AS turns
-        JOIN projection_threads AS threads
-          ON threads.thread_id = turns.thread_id
+          CASE
+            WHEN runs.status IN ('preparing', 'starting', 'running', 'waiting') THEN 'running'
+            ELSE runs.status
+          END AS "state",
+          runs.requested_at AS "requestedAt",
+          json_extract(runs.payload_json, '$.startedAt') AS "startedAt",
+          runs.completed_at AS "completedAt"
+        FROM orchestration_v2_projection_runs AS runs
+        JOIN orchestration_v2_projection_threads AS threads
+          ON threads.thread_id = runs.thread_id
         WHERE threads.project_id = ${projectId}
           AND threads.deleted_at IS NULL
-          AND turns.turn_id IS NOT NULL
-          AND turns.requested_at >= ${fromInstant}
-          AND turns.requested_at < ${toInstant}
-        ORDER BY turns.requested_at ASC
+          AND ${notProviderSubagent}
+          AND json_extract(runs.payload_json, '$.startedAt') IS NOT NULL
+          AND runs.requested_at >= ${fromInstant}
+          AND runs.requested_at < ${toInstant}
+        ORDER BY runs.requested_at ASC
       `,
   });
 
@@ -350,8 +362,8 @@ const make = Effect.gen(function* () {
         SELECT
           thread_id AS "threadId",
           COUNT(*) AS "turns",
-          MIN(COALESCE(started_at, requested_at)) AS "firstActivityAt",
-          MAX(COALESCE(completed_at, started_at, requested_at)) AS "lastActivityAt",
+          MIN(started_at) AS "firstActivityAt",
+          MAX(COALESCE(completed_at, started_at)) AS "lastActivityAt",
           CAST(
             ROUND(
               COALESCE(
@@ -360,7 +372,7 @@ const make = Effect.gen(function* () {
                     0,
                     (
                       julianday(COALESCE(completed_at, ${readAt}))
-                        - julianday(COALESCE(started_at, requested_at))
+                        - julianday(started_at)
                     ) * 86400000
                   )
                 ),
@@ -368,9 +380,15 @@ const make = Effect.gen(function* () {
               )
             ) AS INTEGER
           ) AS "activeMs"
-        FROM projection_turns
-        WHERE ${sql.in("thread_id", chunk)}
-          AND turn_id IS NOT NULL
+        FROM (
+          SELECT
+            thread_id,
+            json_extract(payload_json, '$.startedAt') AS started_at,
+            completed_at
+          FROM orchestration_v2_projection_runs
+          WHERE ${sql.in("thread_id", chunk)}
+        )
+        WHERE started_at IS NOT NULL
         GROUP BY thread_id
       `;
       totals.push(...(yield* decodeThreadTotals(rows)));

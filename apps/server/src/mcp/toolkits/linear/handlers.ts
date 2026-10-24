@@ -5,7 +5,6 @@ import type {
 } from "../../../linear/LinearResources.ts";
 import {
   assistantTeamThread,
-  isProviderDriverKind,
   LinearOperationError,
   type IntegrationApprovalChange,
   type LinearIssueDetail,
@@ -22,14 +21,37 @@ import { imageMimeTypeForFileName } from "../../../imageMime.ts";
 import { LinearAgentOutbox } from "../../../linear/LinearAgentOutbox.ts";
 import * as LinearApi from "../../../linear/LinearApi.ts";
 import { LinearOAuth } from "../../../linear/LinearOAuth.ts";
-import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectService from "../../../project/ProjectService.ts";
 import { ServerSettingsService } from "../../../serverSettings.ts";
 import * as WorkspacePaths from "../../../workspace/WorkspacePaths.ts";
 import { McpApprovalBroker } from "../../McpApprovalBroker.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
 import { LinearToolkit } from "./tools.ts";
 
 type Scope = McpInvocationContext.McpInvocationScope;
+
+/** The assistant team thread the caller is, when an agent inside one calls. */
+const callerTeam = (scope: Scope) =>
+  scope.thread === undefined ? null : assistantTeamThread(scope.thread.threadId);
+
+/**
+ * The calling thread's shell, or undefined for an MCP client signed in from
+ * outside a thread. A deleted thread reads as missing.
+ */
+const callerThread = Effect.fn("LinearToolkit.callerThread")(function* (
+  operation: string,
+  scope: Scope,
+  detail: string,
+) {
+  if (scope.thread === undefined) return undefined;
+  const threads = yield* ThreadManagementService.ThreadManagementService;
+  const shell = yield* threads
+    .getThreadShell(scope.thread.threadId)
+    .pipe(Effect.mapError(() => new LinearOperationError({ operation, detail })));
+  return shell === null || shell.deletedAt !== null ? undefined : shell;
+});
 
 /**
  * Tool parameters arrive as raw strings. Identifiers and names are matched
@@ -50,17 +72,15 @@ const linkedIssueReference = Effect.fn("LinearToolkit.linkedIssueReference")(fun
   operation: string,
   scope: Scope,
 ) {
-  const projections = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-  const shell = yield* projections.getThreadShellById(scope.threadId).pipe(
-    Effect.mapError(
-      () =>
-        new LinearOperationError({
-          operation,
-          detail: "Could not read this thread's linked issue.",
-        }),
-    ),
-  );
-  const linkedIssue = Option.getOrUndefined(shell)?.linkedIssue;
+  if (scope.thread === undefined) {
+    return yield* new LinearOperationError({
+      operation,
+      detail:
+        "This MCP client is not running inside a T3 thread, so it has no linked issue. Pass the issue identifier, such as DEL-123.",
+    });
+  }
+  const shell = yield* callerThread(operation, scope, "Could not read this thread's linked issue.");
+  const linkedIssue = shell?.linkedIssue;
   if (linkedIssue === null || linkedIssue === undefined) {
     return yield* new LinearOperationError({
       operation,
@@ -345,8 +365,21 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
   // cannot drift apart.
   if ((yield* LinearApi.LinearAppCredential) !== undefined) return;
 
-  const projections = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-  const shell = yield* projections.getThreadShellById(scope.threadId).pipe(
+  // The card is shown in the calling thread, so an MCP client signed in from
+  // outside a thread has nowhere to ask. One the user granted full access when
+  // they approved it writes without asking, as its grant already said; any
+  // other is refused rather than writing unconfirmed.
+  if (scope.thread === undefined) {
+    if (scope.client?.access === "full-access") return;
+    return yield* new LinearOperationError({
+      operation,
+      detail:
+        "This Linear change needs the user's confirmation in T3 Code, which only an agent running inside a T3 thread can ask for. Ask the user to make it, to turn off confirmation of agent writes in Settings → Integrations → Linear, or to grant this client full access.",
+    });
+  }
+  const caller = scope.thread;
+  const threads = yield* ThreadManagementService.ThreadManagementService;
+  const records = yield* threads.getThreadRecords(caller.threadId, ["providerSessions"]).pipe(
     Effect.mapError(
       () =>
         new LinearOperationError({
@@ -355,11 +388,13 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
         }),
     ),
   );
-  // The approval rides the thread's runtime event stream, so it needs the
-  // session the agent is speaking through to address the card at all.
-  const session = Option.getOrUndefined(shell)?.session;
-  const provider = session?.providerName;
-  if (!session || provider === null || provider === undefined || !isProviderDriverKind(provider)) {
+  // The approval card names the provider the agent is speaking through.
+  const session =
+    records.providerSessions.find((candidate) => candidate.id === caller.providerSessionId) ??
+    records.providerSessions.findLast(
+      (candidate) => candidate.providerInstanceId === caller.providerInstanceId,
+    );
+  if (session === undefined || records.thread.deletedAt !== null) {
     return yield* new LinearOperationError({
       operation,
       detail: "Could not ask for confirmation: this thread has no active session.",
@@ -368,11 +403,10 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
 
   const broker = yield* McpApprovalBroker;
   const decision = yield* broker.request({
-    threadId: scope.threadId,
-    providerInstanceId: scope.providerInstanceId ?? session.providerInstanceId,
-    provider,
-    ...(session.activeTurnId === null ? {} : { turnId: session.activeTurnId }),
-    sessionKey: `${scope.threadId}:${scope.providerSessionId}`,
+    threadId: caller.threadId,
+    providerInstanceId: caller.providerInstanceId,
+    provider: session.driver,
+    sessionKey: `${caller.threadId}:${caller.providerSessionId}`,
     appName: input.appName,
     detail: describeChange(input.change),
     change: input.change,
@@ -402,38 +436,34 @@ const confirmWrite = Effect.fn("LinearToolkit.confirmWrite")(function* (
  * not read as the person's. Every other thread, and every read, keeps the
  * connected account.
  */
-const confirmedWrite = <A, E, R>(
+const confirmedWrite = Effect.fn("LinearToolkit.confirmedWrite")(function* <A, E, R>(
   operation: string,
   scope: Scope,
   input: Parameters<typeof confirmWrite>[2],
   mutation: Effect.Effect<A, E, R>,
-) =>
-  Effect.gen(function* () {
-    const write = confirmWrite(operation, scope, input).pipe(Effect.andThen(mutation));
-    if (
-      (yield* LinearApi.LinearAppCredential) !== undefined ||
-      assistantTeamThread(scope.threadId) === null
-    ) {
-      return yield* write;
-    }
-    const outbox = yield* LinearAgentOutbox;
-    // An unreadable connection fails the write rather than posting it under
-    // the person's name.
-    const asApp = yield* outbox.connected.pipe(
-      Effect.mapError(
-        () =>
-          new LinearOperationError({
-            operation,
-            detail: "Could not read the Linear app connection.",
-          }),
-      ),
-    );
-    if (!asApp) return yield* write;
-    const oauth = yield* LinearOAuth;
-    return yield* write.pipe(
-      Effect.provideService(LinearApi.LinearAppCredential, oauth.accessToken(false)),
-    );
-  });
+) {
+  const write = confirmWrite(operation, scope, input).pipe(Effect.andThen(mutation));
+  if ((yield* LinearApi.LinearAppCredential) !== undefined || callerTeam(scope) === null) {
+    return yield* write;
+  }
+  const outbox = yield* LinearAgentOutbox;
+  // An unreadable connection fails the write rather than posting it under
+  // the person's name.
+  const asApp = yield* outbox.connected.pipe(
+    Effect.mapError(
+      () =>
+        new LinearOperationError({
+          operation,
+          detail: "Could not read the Linear app connection.",
+        }),
+    ),
+  );
+  if (!asApp) return yield* write;
+  const oauth = yield* LinearOAuth;
+  return yield* write.pipe(
+    Effect.provideService(LinearApi.LinearAppCredential, oauth.accessToken(false)),
+  );
+});
 
 /**
  * Large enough for a full-page screenshot, small enough that a mistyped path
@@ -456,21 +486,24 @@ const threadWorkspaceRoot = Effect.fn("LinearToolkit.threadWorkspaceRoot")(funct
   operation: string,
   scope: Scope,
 ) {
-  const projections = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  if (scope.thread === undefined) {
+    return yield* new LinearOperationError({
+      operation,
+      detail:
+        "This tool reads a file from the calling thread's workspace, so it needs an agent running inside a T3 thread. This MCP client signed in from outside one.",
+    });
+  }
   const unreadable = new LinearOperationError({
     operation,
     detail: "Could not read this thread's workspace.",
   });
-  const thread = Option.getOrUndefined(
-    yield* projections.getThreadShellById(scope.threadId).pipe(Effect.mapError(() => unreadable)),
-  );
+  const thread = yield* callerThread(operation, scope, unreadable.detail);
   if (thread === undefined) return yield* unreadable;
   if (thread.worktreePath !== null) return thread.worktreePath;
 
+  const projects = yield* ProjectService.ProjectService;
   const project = Option.getOrUndefined(
-    yield* projections
-      .getProjectShellById(thread.projectId)
-      .pipe(Effect.mapError(() => unreadable)),
+    yield* projects.getShell(thread.projectId).pipe(Effect.mapError(() => unreadable)),
   );
   if (project === undefined) return yield* unreadable;
   return project.workspaceRoot;
@@ -488,7 +521,7 @@ const taskEvidenceRoot = Effect.fn("LinearToolkit.taskEvidenceRoot")(function* (
   requested: string,
 ) {
   const path = yield* Path.Path;
-  const team = assistantTeamThread(scope.threadId);
+  const team = callerTeam(scope);
   // Task ids are UUIDs; anything else cannot name a folder of its own.
   if (team === null || !isResourceId(team.taskId) || !path.isAbsolute(requested)) return undefined;
   const evidence = yield* AssistantEvidence;
@@ -529,7 +562,7 @@ const inspectWorkspaceImage = Effect.fn("LinearToolkit.inspectWorkspaceImage")(f
   const outside = new LinearOperationError({
     operation,
     detail:
-      assistantTeamThread(scope.threadId) === null
+      callerTeam(scope) === null
         ? `"${requested}" is outside this thread's workspace. Pass a path inside it, relative to its root.`
         : `"${requested}" is outside this thread's workspace and this task's evidence folder. Pass a path relative to the workspace root, or an absolute path inside the evidence folder.`,
   });
@@ -917,8 +950,8 @@ const saveResource = Effect.fn("LinearToolkit.saveResource")(function* (
   );
 });
 
-export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
-  list_issues: (input) =>
+export const layer = McpToolAccess.toLayer(LinearToolkit, {
+  list_issues: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -980,18 +1013,20 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         ...(input.stateTypes !== undefined ? { stateTypes: input.stateTypes } : {}),
       });
     }),
-  list_projects: (input) => listResources("project", input),
-  list_milestones: (input) => listResources("milestone", input),
-  list_cycles: (input) => listResources("cycle", input),
-  list_issue_labels: (input) => listResources("label", input),
-  list_users: (input) => listResources("user", input),
-  list_teams: (input) => listResources("team", input),
-  get_project: (input) =>
+  ),
+  list_projects: McpToolAccess.reads((input) => listResources("project", input)),
+  list_milestones: McpToolAccess.reads((input) => listResources("milestone", input)),
+  list_cycles: McpToolAccess.reads((input) => listResources("cycle", input)),
+  list_issue_labels: McpToolAccess.reads((input) => listResources("label", input)),
+  list_users: McpToolAccess.reads((input) => listResources("user", input)),
+  list_teams: McpToolAccess.reads((input) => listResources("team", input)),
+  get_project: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       yield* McpInvocationContext.requireMcpCapability("linear");
       return yield* resolveResource("project", input.query);
     }),
-  get_milestone: (input) =>
+  ),
+  get_milestone: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       if (!input.project && isResourceId(input.query)) {
@@ -1000,26 +1035,28 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       const projectId = yield* issueProject(scope, input.project);
       return yield* resolveResource("milestone", input.query, { projectId });
     }),
-  get_user: (input) =>
+  ),
+  get_user: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
       const user = yield* linear.resolveAssignee(input.query);
       return yield* linear.getResource("user", user.id);
     }),
-  get_team: (input) =>
+  ),
+  get_team: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
       const team = yield* lookupTeam("get_team", input.query);
       return yield* linear.getResource("team", team.id);
     }),
-  save_project: (input) => saveResource("project", input),
-  save_milestone: (input) => saveResource("milestone", input),
-  update_cycle: (input) => saveResource("cycle", input),
-  save_issue_label: (input) => saveResource("label", input),
-
-  list_documents: (input) =>
+  ),
+  save_project: McpToolAccess.writesWithCapability((input) => saveResource("project", input)),
+  save_milestone: McpToolAccess.writesWithCapability((input) => saveResource("milestone", input)),
+  update_cycle: McpToolAccess.writesWithCapability((input) => saveResource("cycle", input)),
+  save_issue_label: McpToolAccess.writesWithCapability((input) => saveResource("label", input)),
+  list_documents: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1031,14 +1068,14 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         ...(project ? { projectId: (yield* resolveResource("project", project)).id } : {}),
       });
     }),
-
-  get_document: (input) =>
+  ),
+  get_document: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       yield* McpInvocationContext.requireMcpCapability("linear");
       return yield* (yield* LinearApi.LinearApi).getDocument(input.id);
     }),
-
-  save_document: (input) =>
+  ),
+  save_document: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1108,8 +1145,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         linear.saveDocument({ ...patch, ...(current === undefined ? {} : { id: current.id }) }),
       );
     }),
-
-  delete_document: (input) =>
+  ),
+  delete_document: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1135,8 +1172,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       );
       return { id: document.id, title: document.title };
     }),
-
-  restore_document: (input) =>
+  ),
+  restore_document: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1168,14 +1205,14 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         linear.restoreDocument(document.id),
       );
     }),
-
-  get_issue: (input) =>
+  ),
+  get_issue: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       return yield* resolveIssue("get_issue", scope, named(input.id));
     }),
-
-  list_comments: (input) =>
+  ),
+  list_comments: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const issue = yield* resolveIssue("list_comments", scope, named(input.issueId));
@@ -1185,8 +1222,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         ...(issue.truncated?.includes("comments") ? { truncated: true } : {}),
       };
     }),
-
-  list_issue_statuses: (input) =>
+  ),
+  list_issue_statuses: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1197,8 +1234,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         states: [...states].sort((left, right) => left.position - right.position),
       };
     }),
-
-  list_my_issues: (input) =>
+  ),
+  list_my_issues: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1209,8 +1246,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
       });
     }),
-
-  save_comment: (input) =>
+  ),
+  save_comment: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1285,8 +1322,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
             }),
       );
     }),
-
-  delete_comment: (input) =>
+  ),
+  delete_comment: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1319,8 +1356,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         issue: { id: issue.id, identifier: issue.identifier, url: issue.url },
       };
     }),
-
-  upload_image: (input) =>
+  ),
+  upload_image: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1356,8 +1393,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       );
       return { url, name: image.fileName, markdown: `![${alt}](${url})` };
     }),
-
-  create_attachment: (input) =>
+  ),
+  create_attachment: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1404,8 +1441,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         }),
       );
     }),
-
-  delete_attachment: (input) =>
+  ),
+  delete_attachment: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1429,8 +1466,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       );
       return { id: attachment.id, issue: attachment.issue };
     }),
-
-  save_issue: (input) =>
+  ),
+  save_issue: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1578,8 +1615,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       // state and label names it just resolved by name.
       return yield* linear.getIssue({ reference: issue.id });
     }),
-
-  archive_issue: (input) =>
+  ),
+  archive_issue: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1612,8 +1649,8 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
       );
       return yield* linear.getIssue({ reference: issue.id });
     }),
-
-  create_issue: (input) =>
+  ),
+  create_issue: McpToolAccess.writesWithCapability((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.requireMcpCapability("linear");
       const linear = yield* LinearApi.LinearApi;
@@ -1741,4 +1778,5 @@ export const LinearToolkitHandlersLive = LinearToolkit.toLayer({
         }),
       );
     }),
+  ),
 });

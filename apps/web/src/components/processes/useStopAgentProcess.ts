@@ -14,7 +14,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { AgentProcess, EnvironmentId } from "@t3tools/contracts";
-import { useCallback, useState } from "react";
+import { useState } from "react";
 
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -49,7 +49,7 @@ export function useStopAgentProcess(): StopAgentProcessController {
     () => new Map(),
   );
 
-  const setStatus = useCallback((key: string, status: AgentProcessStopStatus | null) => {
+  const setStatus = (key: string, status: AgentProcessStopStatus | null) => {
     setStatuses((previous) => {
       if (status === null && !previous.has(key)) return previous;
       const next = new Map(previous);
@@ -60,51 +60,48 @@ export function useStopAgentProcess(): StopAgentProcessController {
       }
       return next;
     });
-  }, []);
+  };
 
-  const stop = useCallback(
-    async (
-      environmentId: EnvironmentId,
-      process: Pick<AgentProcess, "rootPid" | "startedAt">,
-      options?: { readonly force?: boolean },
-    ) => {
-      const key = agentProcessStopKey(environmentId, process);
-      setStatus(key, { kind: "pending" });
-      const result = await stopAgentProcess({
-        environmentId,
-        input: {
-          rootPid: process.rootPid,
-          startedAt: process.startedAt,
-          ...(options?.force === true ? { force: true } : {}),
-        },
-      });
+  const stop = async (
+    environmentId: EnvironmentId,
+    process: Pick<AgentProcess, "rootPid" | "startedAt">,
+    options?: { readonly force?: boolean },
+  ) => {
+    const key = agentProcessStopKey(environmentId, process);
+    setStatus(key, { kind: "pending" });
+    const result = await stopAgentProcess({
+      environmentId,
+      input: {
+        rootPid: process.rootPid,
+        startedAt: process.startedAt,
+        ...(options?.force === true ? { force: true } : {}),
+      },
+    });
 
-      if (result._tag === "Failure") {
-        // An interrupted command is a teardown, not a failure to report.
-        if (isAtomCommandInterrupted(result)) {
-          setStatus(key, null);
-          return;
-        }
-        const error = squashAtomCommandFailure(result);
-        setStatus(key, {
-          kind: "error",
-          message:
-            error instanceof Error && error.message.trim().length > 0
-              ? error.message
-              : "Could not stop this process.",
-        });
-        return;
-      }
-
-      // Stale means the chain is already gone; either way the list refreshes.
-      if (result.value.stale || result.value.survivors.length === 0) {
+    if (result._tag === "Failure") {
+      // An interrupted command is a teardown, not a failure to report.
+      if (isAtomCommandInterrupted(result)) {
         setStatus(key, null);
         return;
       }
-      setStatus(key, { kind: "survivors", survivors: result.value.survivors });
-    },
-    [setStatus, stopAgentProcess],
-  );
+      const error = squashAtomCommandFailure(result);
+      setStatus(key, {
+        kind: "error",
+        message:
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "Could not stop this process.",
+      });
+      return;
+    }
+
+    // Stale means the chain is already gone; either way the list refreshes.
+    if (result.value.stale || result.value.survivors.length === 0) {
+      setStatus(key, null);
+      return;
+    }
+    setStatus(key, { kind: "survivors", survivors: result.value.survivors });
+  };
 
   return { statuses, stop };
 }

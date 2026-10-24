@@ -6,45 +6,31 @@
  * @module threadUsageSources
  */
 
-/**
- * Session ids a Claude thread may have written under, newest intent first.
- *
- * `resume` is the session the next turn will continue, and is what a live
- * thread writes to. `resumeSessionAt` records the session it resumed *from*;
- * it usually has no transcript of its own, but when it does its records belong
- * to the same conversation. Both are returned because reading an extra file
- * costs one miss while skipping a real one silently undercounts, and records
- * copied forward on resume de-duplicate by `dedupeKey` anyway.
- */
-export function claudeSessionIdsFromResumeCursor(resumeCursor: unknown): readonly string[] {
-  if (!resumeCursor || typeof resumeCursor !== "object" || Array.isArray(resumeCursor)) {
-    return [];
-  }
-  const cursor = resumeCursor as Record<string, unknown>;
-  const ids: string[] = [];
-  const push = (value: unknown) => {
-    if (typeof value !== "string") return;
-    const trimmed = value.trim();
-    // Session ids name files; anything with a separator would escape the
-    // projects directory when joined.
-    if (trimmed.length === 0 || trimmed.includes("/") || trimmed.includes("\\")) return;
-    if (trimmed === "." || trimmed === "..") return;
-    if (!ids.includes(trimmed)) ids.push(trimmed);
-  };
-  // `resume` is canonical; older cursors wrote `sessionId` instead.
-  push(cursor["resume"]);
-  push(cursor["sessionId"]);
-  push(cursor["resumeSessionAt"]);
-  return ids;
+/** What locating a thread's transcripts needs from one of its provider threads. */
+export interface ThreadProviderThreadSource {
+  readonly driver: string;
+  readonly nativeThreadRef: { readonly nativeId: string | null } | null;
 }
 
-/** The workspace a thread ran in, used only to rank likely project directories. */
-export function cwdFromRuntimePayload(runtimePayload: unknown): string | null {
-  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
-    return null;
+/**
+ * Claude session ids a thread wrote under, one per Claude provider thread (a
+ * fork or provider switch opens another). Ids name transcript files, so one
+ * with a path separator, which would escape the projects directory when
+ * joined, is skipped.
+ */
+export function claudeSessionIdsFromProviderThreads(
+  providerThreads: ReadonlyArray<ThreadProviderThreadSource>,
+  claudeDriver: string,
+): readonly string[] {
+  const ids: string[] = [];
+  for (const providerThread of providerThreads) {
+    if (providerThread.driver !== claudeDriver) continue;
+    const trimmed = providerThread.nativeThreadRef?.nativeId?.trim() ?? "";
+    if (trimmed.length === 0 || trimmed.includes("/") || trimmed.includes("\\")) continue;
+    if (trimmed === "." || trimmed === "..") continue;
+    if (!ids.includes(trimmed)) ids.push(trimmed);
   }
-  const cwd = (runtimePayload as Record<string, unknown>)["cwd"];
-  return typeof cwd === "string" && cwd.length > 0 ? cwd : null;
+  return ids;
 }
 
 /**

@@ -1,5 +1,3 @@
-import * as NodeCrypto from "node:crypto";
-
 import {
   ApprovalRequestId,
   EventId,
@@ -24,6 +22,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 
 export interface McpApprovalRequest {
   readonly threadId: ThreadId;
@@ -52,19 +51,19 @@ export interface McpApprovalResponse {
 
 /**
  * Raises approvals for the server's own tools and answers them from the chat
- * UI, by speaking the same `request.opened`/`request.resolved` runtime events a
- * provider adapter emits. Ingestion turns those into the pending-approval
- * projection, so an integration write gets the composer card, the work log
- * entry and the mobile surface for free.
+ * UI. It speaks `request.opened`/`request.resolved` runtime events;
+ * `orchestration-v2/IntegrationApprovalReactor` records them as `integration`
+ * runtime requests with an `approval_request` turn item, so an integration
+ * write gets the composer card, the work log entry and the mobile surface.
  *
- * The provider adapters never see these requests: `ProviderCommandReactor`
- * offers every approval response here first, and only falls through to the
- * provider when `respond` says the broker did not own it.
+ * The provider adapters never see these requests: orchestration settles
+ * `runtime-request.respond` for them itself and the reactor passes the
+ * decision to `respond`.
  */
 export class McpApprovalBroker extends Context.Service<
   McpApprovalBroker,
   {
-    /** Merged into the ingestion worker alongside the provider's own event stream. */
+    /** Single consumer: `IntegrationApprovalReactor` records these in orchestration. */
     readonly streamEvents: Stream.Stream<ProviderRuntimeEvent>;
     /** Suspends until the user answers, the request times out, or the caller goes away. */
     readonly request: (input: McpApprovalRequest) => Effect.Effect<ProviderApprovalDecision>;
@@ -105,10 +104,10 @@ export const make = Effect.gen(function* McpApprovalBrokerMake() {
   const request = Effect.fn("McpApprovalBroker.request")(function* (input: McpApprovalRequest) {
     if (sessionGrants.has(input.sessionKey)) return "acceptForSession" as const;
 
-    // Ids are minted here rather than through `Crypto` so the layer stays
-    // dependency-free and can be dropped into the runtime, the routes and a
-    // test without dragging platform services along.
-    const requestId = ApprovalRequestId.make(NodeCrypto.randomUUID());
+    // Ids come from the default `Random` service rather than `Crypto` so the
+    // layer stays dependency-free and can be dropped into the runtime, the
+    // routes and a test without dragging platform services along.
+    const requestId = ApprovalRequestId.make(yield* randomUuidV4);
     const deferred = yield* Deferred.make<ProviderApprovalDecision>();
     pending.set(requestId, { threadId: input.threadId, deferred });
 
@@ -123,7 +122,7 @@ export const make = Effect.gen(function* McpApprovalBrokerMake() {
     yield* Queue.offer(events, {
       ...base,
       type: "request.opened",
-      eventId: EventId.make(NodeCrypto.randomUUID()),
+      eventId: EventId.make(yield* randomUuidV4),
       createdAt: yield* nowIso,
       payload: {
         requestType: "integration_write_approval",
@@ -145,18 +144,15 @@ export const make = Effect.gen(function* McpApprovalBrokerMake() {
         settled = true;
         pending.delete(requestId);
         if (grantsSession(decision)) sessionGrants.add(input.sessionKey);
-        return nowIso.pipe(
-          Effect.flatMap((createdAt) =>
-            Queue.offer(events, {
-              ...base,
-              type: "request.resolved",
-              eventId: EventId.make(NodeCrypto.randomUUID()),
-              createdAt,
-              payload: { requestType: "integration_write_approval", decision },
-            } satisfies ProviderRuntimeEvent),
-          ),
-          Effect.asVoid,
-        );
+        return Effect.gen(function* () {
+          yield* Queue.offer(events, {
+            ...base,
+            type: "request.resolved",
+            eventId: EventId.make(yield* randomUuidV4),
+            createdAt: yield* nowIso,
+            payload: { requestType: "integration_write_approval", decision },
+          } satisfies ProviderRuntimeEvent);
+        });
       });
 
     const decision = yield* Deferred.await(deferred).pipe(

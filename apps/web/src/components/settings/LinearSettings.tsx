@@ -24,7 +24,7 @@ import {
 } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import { Trash2Icon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { usePrimarySettings, useUpdatePrimarySettings } from "~/hooks/useSettings";
 import { useProjects } from "~/state/entities";
@@ -319,12 +319,9 @@ function LinearRepositoriesSetting({ environmentId }: { readonly environmentId: 
   const repositories = usePrimarySettings((settings) => settings.linear.repositories);
   const updateSettings = useUpdatePrimarySettings();
   const allProjects = useProjects();
-  const projects = useMemo(
-    () => allProjects.filter((project) => project.environmentId === environmentId),
-    [allProjects, environmentId],
-  );
+  const projects = allProjects.filter((project) => project.environmentId === environmentId);
   const workspace = useEnvironmentQuery(linearEnvironment.workspace({ environmentId, input: {} }));
-  const options = useMemo(() => linearPickerOptions(workspace.data?.teams ?? []), [workspace.data]);
+  const options = linearPickerOptions(workspace.data?.teams ?? []);
 
   const save = (next: ReadonlyArray<LinearRepositoryMapping>) =>
     updateSettings({ linear: { repositories: next } });

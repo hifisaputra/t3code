@@ -99,7 +99,7 @@ function InboxRow({
     >
       {/* The toggle's ::after covers the whole header, so the row is one click
           target while the actions, raised above it, stay separate buttons. */}
-      <div className="relative flex min-w-0 items-start gap-3 rounded-xl px-4 py-3 hover:bg-accent/40 has-[>button:focus-visible]:ring-1 has-[>button:focus-visible]:ring-ring">
+      <div className="relative flex min-w-0 items-start gap-3 rounded-xl px-4 py-3 hover:bg-accent/40 has-[>button:focus-visible]:ring-1 has-[>button:focus-visible]:ring-inset has-[>button:focus-visible]:ring-ring">
         <span
           className={cn("mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md", tint)}
         >
@@ -368,7 +368,7 @@ function DecisionCard({
                 type="button"
                 onClick={() => setDraft(`Go with option ${option.number}. `)}
                 className={cn(
-                  "inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-left text-xs transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  "inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-left text-xs transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
                   option.recommended ? "border-info/40 bg-info/6" : "border-border/70",
                 )}
               >

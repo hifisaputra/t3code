@@ -16,16 +16,12 @@ how these modules depend on each other". [Mermaid](https://mermaid.js.org/) cove
 sequence diagrams, state machines, entity relationships, class diagrams, Gantt charts, and
 more, and every agent T3 Code supports already knows the syntax.
 
-Diagrams follow your theme, and the block header carries two actions:
+Diagrams follow your theme. The block header has a toggle that flips between the drawing and the
+Mermaid text behind it, and the copy button copies that text, ready to paste anywhere else that
+speaks Mermaid. Click a diagram to open it full size.
 
-- **Show diagram source** flips between the drawing and the Mermaid text behind it.
-- **Copy diagram source** puts that text on the clipboard, ready to paste anywhere else that
-  speaks Mermaid.
-
-While a reply is still streaming the block shows its source and redraws each time the diagram
-stops changing, so a long diagram takes shape as it arrives rather than flickering. A fence
-whose syntax Mermaid cannot parse stays a normal code block and is marked **unrenderable** —
-hover the marker for the reason.
+While a reply is still streaming the block shows its source, and the drawing appears once the
+reply finishes. A diagram Mermaid cannot draw shows the reason above its source.
 
 Screenshots and other images work differently: an agent writes the file into the workspace and
 links it as an ordinary markdown image.

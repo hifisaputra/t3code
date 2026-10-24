@@ -10,7 +10,7 @@ import { resolveLinearRepositoryMapping } from "@t3tools/contracts";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useDebouncedCallback } from "@tanstack/react-pacer";
 import { ArrowLeftIcon, CalendarDaysIcon, CalendarRangeIcon, ListIcon } from "lucide-react";
-import { useCallback, useEffectEvent, useMemo, useState } from "react";
+import { useEffectEvent, useState } from "react";
 
 import { LinearIssueThreadDialog } from "../components/LinearIssueThreadDialog";
 import { IssueDetailPanel } from "../components/issues/IssueDetailPanel";
@@ -116,27 +116,21 @@ function IssuesRouteView() {
   const allProjects = useProjects();
   const threadShells = useThreadShells();
 
-  const linearEnvironments = useMemo(() => linearCapableEnvironments(environments), [environments]);
-  const environmentId = useMemo(
-    () => resolveIssuesEnvironmentId({ environments, preferred: search.environmentId }),
-    [environments, search.environmentId],
-  );
+  const linearEnvironments = linearCapableEnvironments(environments);
+  const environmentId = resolveIssuesEnvironmentId({
+    environments,
+    preferred: search.environmentId,
+  });
 
-  const projects = useMemo(
-    () => allProjects.filter((project) => project.environmentId === environmentId),
-    [allProjects, environmentId],
-  );
+  const projects = allProjects.filter((project) => project.environmentId === environmentId);
   // Where an issue with no mapping starts. Nothing persists it: the page is
   // about issues, and the project is only the checkout the chosen one lands in.
   const [pickedProjectId, setPickedProjectId] = useState<ProjectId | null>(null);
   const project =
     projects.find((candidate) => candidate.id === pickedProjectId) ?? projects[0] ?? null;
-  const repositories = useMemo(
-    () =>
-      environments.find((environment) => environment.environmentId === environmentId)?.serverConfig
-        ?.settings.linear.repositories ?? [],
-    [environmentId, environments],
-  );
+  const repositories =
+    environments.find((environment) => environment.environmentId === environmentId)?.serverConfig
+      ?.settings.linear.repositories ?? [];
 
   const status = useEnvironmentQuery(
     environmentId ? linearEnvironment.status({ environmentId, input: {} }) : null,
@@ -155,80 +149,60 @@ function IssuesRouteView() {
   );
   const issues = issuesQuery.data?.issues ?? null;
 
-  const facets = useMemo(() => collectIssueListFacets(issues ?? []), [issues]);
-  const filters = useMemo(
-    () => ({ team: search.team, project: search.project, cycle: search.cycle }),
-    [search.cycle, search.project, search.team],
-  );
+  const facets = collectIssueListFacets(issues ?? []);
+  const filters = { team: search.team, project: search.project, cycle: search.cycle };
   const query = search.q ?? "";
   // What is in the box, which is also what the rows are narrowed by: the filter
   // is local, so waiting for the URL to settle would only add lag to typing.
   const [queryInput, setQueryInput] = useState(query);
-  const visibleIssues = useMemo(
-    () =>
-      sortIssues(
-        (issues ?? []).filter(
-          (issue) => matchesIssueFilters(issue, filters) && matchesIssueQuery(issue, queryInput),
-        ),
-      ),
-    [filters, issues, queryInput],
+  const visibleIssues = sortIssues(
+    (issues ?? []).filter(
+      (issue) => matchesIssueFilters(issue, filters) && matchesIssueQuery(issue, queryInput),
+    ),
   );
-  const linkedThreads = useMemo(
-    () =>
-      linkedThreadsByIssueIdentifier(
-        threadShells.filter((thread) => thread.environmentId === environmentId),
-      ),
-    [threadShells, environmentId],
+  const linkedThreads = linkedThreadsByIssueIdentifier(
+    threadShells.filter((thread) => thread.environmentId === environmentId),
   );
   // The fallback only matters for issues nothing maps, so it disappears once
   // every issue on screen already knows its repository.
-  const everyIssueMapped = useMemo(
-    () =>
-      visibleIssues.length > 0 &&
-      visibleIssues.every((issue) => resolveLinearRepositoryMapping(repositories, issue) !== null),
-    [repositories, visibleIssues],
-  );
+  const everyIssueMapped =
+    visibleIssues.length > 0 &&
+    visibleIssues.every((issue) => resolveLinearRepositoryMapping(repositories, issue) !== null);
 
   // Rebuilt rather than spread so a cleared control leaves the URL instead of
   // lingering as an explicit `undefined`.
-  const updateSearch = useCallback(
-    (
-      patch: IssueListPreferencePatch & {
-        selected?: string | undefined;
-        view?: IssuesView | undefined;
+  const updateSearch = (
+    patch: IssueListPreferencePatch & {
+      selected?: string | undefined;
+      view?: IssuesView | undefined;
+    },
+  ) =>
+    void navigate({
+      search: (previous: IssuesSearch): IssuesSearch => {
+        const next = { ...previous, ...patch };
+        return {
+          state: next.state ?? previous.state,
+          ...(next.scope === "all" ? { scope: "all" } : {}),
+          ...(next.environmentId ? { environmentId: next.environmentId } : {}),
+          ...(next.team ? { team: next.team } : {}),
+          ...(next.project ? { project: next.project } : {}),
+          ...(next.cycle ? { cycle: next.cycle } : {}),
+          ...(next.q ? { q: next.q } : {}),
+          ...(next.selected ? { selected: next.selected } : {}),
+          ...(next.view === "agenda" || next.view === "plan" ? { view: next.view } : {}),
+        };
       },
-    ) =>
-      void navigate({
-        search: (previous: IssuesSearch): IssuesSearch => {
-          const next = { ...previous, ...patch };
-          return {
-            state: next.state ?? previous.state,
-            ...(next.scope === "all" ? { scope: "all" } : {}),
-            ...(next.environmentId ? { environmentId: next.environmentId } : {}),
-            ...(next.team ? { team: next.team } : {}),
-            ...(next.project ? { project: next.project } : {}),
-            ...(next.cycle ? { cycle: next.cycle } : {}),
-            ...(next.q ? { q: next.q } : {}),
-            ...(next.selected ? { selected: next.selected } : {}),
-            ...(next.view === "agenda" || next.view === "plan" ? { view: next.view } : {}),
-          };
-        },
-        replace: true,
-      }),
-    [navigate],
-  );
+      replace: true,
+    });
 
   // A list control changes what the sidebar link should restore; the selected
   // row and the view are URL concerns and never reach storage.
-  const updateListScope = useCallback(
-    (patch: IssueListPreferencePatch) => {
-      writeIssueListPreferences(
-        issueListPreferences({ ...search, ...patch, state: patch.state ?? search.state }),
-      );
-      updateSearch(patch);
-    },
-    [search, updateSearch],
-  );
+  const updateListScope = (patch: IssueListPreferencePatch) => {
+    writeIssueListPreferences(
+      issueListPreferences({ ...search, ...patch, state: patch.state ?? search.state }),
+    );
+    updateSearch(patch);
+  };
 
   const commitQuery = useEffectEvent((next: string) => {
     const trimmed = next.trim();
@@ -238,47 +212,32 @@ function IssuesRouteView() {
   // The URL is shared and stored, so it settles once the typing stops rather
   // than recording every keystroke as a destination.
   const commitQueryDebounced = useDebouncedCallback(commitQuery, { wait: SEARCH_DEBOUNCE_MS });
-  const changeQuery = useCallback(
-    (next: string) => {
-      setQueryInput(next);
-      commitQueryDebounced(next);
-    },
-    [commitQueryDebounced],
-  );
+  const changeQuery = (next: string) => {
+    setQueryInput(next);
+    commitQueryDebounced(next);
+  };
 
   const [dialog, setDialog] = useState<{ reference: string; key: number } | null>(null);
-  const openThread = useCallback(
-    (thread: IssueLinkedThread) =>
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams({
-          environmentId: thread.environmentId,
-          threadId: thread.threadId,
-        }),
+  const openThread = (thread: IssueLinkedThread) =>
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams({
+        environmentId: thread.environmentId,
+        threadId: thread.threadId,
       }),
-    [navigate],
-  );
-  const startThread = useCallback((identifier: string) => {
+    });
+  const startThread = (identifier: string) => {
     setDialog({ reference: identifier, key: Date.now() });
-  }, []);
-  const selectIssue = useCallback(
-    (issue: LinearIssueSummary) => updateSearch({ selected: issue.identifier }),
-    [updateSearch],
-  );
-  const startThreadForIssue = useCallback(
-    (issue: LinearIssueSummary) => startThread(issue.identifier),
-    [startThread],
-  );
+  };
+  const selectIssue = (issue: LinearIssueSummary) => updateSearch({ selected: issue.identifier });
+  const startThreadForIssue = (issue: LinearIssueSummary) => startThread(issue.identifier);
 
-  const handleStarted = useCallback(
-    (threadRef: ScopedThreadRef) => {
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(threadRef),
-      });
-    },
-    [navigate],
-  );
+  const handleStarted = (threadRef: ScopedThreadRef) => {
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams(threadRef),
+    });
+  };
 
   const filtered = Boolean(search.team || search.project || search.cycle || queryInput.trim());
   const selectedIdentifier = search.selected ?? null;
@@ -498,7 +457,7 @@ function IssuesRouteView() {
             }}
           />
         ) : view === "agenda" && environmentId ? (
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="scrollbar-gutter-both min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-4xl px-4 py-4 sm:px-6">
               <CalendarAgenda
                 key={environmentId}

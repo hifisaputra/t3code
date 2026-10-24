@@ -1,16 +1,22 @@
+import {
+  FULL_ACCESS_OVERRIDE_QUESTION,
+  fullAccessOverrideExplanation,
+} from "@t3tools/client-runtime/state/thread-requests";
 import type {
-  ApprovalRequestId,
   EnvironmentId,
-  IntegrationApprovalChangeField,
   ProviderApprovalDecision,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import { memo, useState } from "react";
 import { type PendingApproval } from "../../session-logic";
-import { cn } from "~/lib/utils";
-import { Button } from "../ui/button";
+import { Button, InlineButton } from "../ui/button";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { composerFloatingLayerProps } from "./composerEventScope";
 import { DEFAULT_APPROVAL_OPTIONS } from "./ComposerPendingApprovalActions";
 import { IntegrationApprovalDialog } from "./IntegrationApprovalDialog";
+import { integrationApprovalView } from "./ComposerPendingApprovalPanel.logic";
+import { cn } from "~/lib/utils";
 
 interface ComposerPendingApprovalPanelProps {
   approval: PendingApproval;
@@ -20,77 +26,10 @@ interface ComposerPendingApprovalPanelProps {
   threadId?: ThreadId | undefined;
   isResponding: boolean;
   onRespondToApproval: (
-    requestId: ApprovalRequestId,
+    requestId: RuntimeRequestId,
     decision: ProviderApprovalDecision,
   ) => Promise<unknown>;
   className?: string;
-}
-
-/**
- * An integration write arrives as "what" on the first line and the content it
- * will send after a blank line, so the two are shown as a headline and a body
- * rather than one preformatted block the row cannot wrap.
- */
-export function splitIntegrationDetail(detail: string): {
-  readonly headline: string;
-  readonly body: string;
-} {
-  const normalized = detail.replace(/\r\n/g, "\n").trim();
-  const [headline = "", ...rest] = normalized.split("\n");
-  return { headline: headline.trim(), body: rest.join("\n").trim() };
-}
-
-const collapseWhitespace = (value: string): string => value.replace(/\s+/g, " ").trim();
-
-/**
- * What an integration approval is asking for, in the two shapes it comes in.
- *
- * Our own integration tools send the change structured, field by field. A
- * provider's own approval — or a row persisted before that existed — carries
- * only the detail text, whose first line is the headline and whose remainder
- * reads as one block. Both end up as fields so the row and the review dialog
- * have one thing to render.
- */
-export function integrationApprovalView(
-  approval: Pick<PendingApproval, "change" | "detail">,
-  fallbackHeadline: string,
-): {
-  readonly headline: string;
-  readonly preview: string;
-  readonly record: { readonly label: string; readonly url?: string | undefined } | undefined;
-  readonly fields: ReadonlyArray<IntegrationApprovalChangeField>;
-} {
-  const change = approval.change;
-  if (change) {
-    return {
-      headline: change.summary,
-      preview: integrationApprovalPreview(change.fields),
-      record: change.record,
-      fields: change.fields,
-    };
-  }
-  const { headline, body } = splitIntegrationDetail(approval.detail ?? "");
-  const fields = body ? [{ label: "Change", value: body } as const] : [];
-  return {
-    headline: headline || fallbackHeadline,
-    preview: collapseWhitespace(body),
-    record: undefined,
-    fields,
-  };
-}
-
-/**
- * The row's one line about the change. Prose the agent wrote stands on its own;
- * a set of edited fields reads better as `Title: … · State: …`, since a bare
- * value there says nothing about what it is going to become.
- */
-export function integrationApprovalPreview(
-  fields: ReadonlyArray<IntegrationApprovalChangeField>,
-): string {
-  const [first] = fields;
-  if (first === undefined) return "";
-  if (fields.length === 1) return collapseWhitespace(first.value);
-  return fields.map((field) => `${field.label}: ${collapseWhitespace(field.value)}`).join(" · ");
 }
 
 export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprovalPanel({
@@ -132,6 +71,22 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
     <span className="flex w-full min-w-0 items-center gap-2 text-2xs text-muted-foreground">
       <span className="shrink-0 font-medium text-warning">{fallbackLabel}</span>
       {approval.appName ? <span className="min-w-0 truncate">{approval.appName}</span> : null}
+      {approval.fullAccessOverride ? (
+        <Popover>
+          <PopoverTrigger openOnHover render={<InlineButton tone="muted" />}>
+            {FULL_ACCESS_OVERRIDE_QUESTION}
+          </PopoverTrigger>
+          <PopoverPopup
+            {...composerFloatingLayerProps}
+            aria-label={FULL_ACCESS_OVERRIDE_QUESTION}
+            tooltipStyle
+            side="top"
+            className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-normal"
+          >
+            {fullAccessOverrideExplanation(approval.fullAccessOverride)}
+          </PopoverPopup>
+        </Popover>
+      ) : null}
       {pendingCount > 1 ? (
         <span className="ml-auto shrink-0 tabular-nums">1/{pendingCount}</span>
       ) : null}
@@ -180,7 +135,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           environmentId={environmentId}
           threadId={threadId}
           options={approval.options ?? DEFAULT_APPROVAL_OPTIONS}
-          isResponding={isResponding}
+          isResponding={isResponding || approval.responseCapability !== "live"}
           onRespondToApproval={onRespondToApproval}
         />
       </span>
@@ -197,16 +152,23 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
       <Detail
         aria-label={detailAriaLabel}
         className={cn(
-          "block max-h-20 w-full min-w-0 overflow-auto text-xs text-foreground [scrollbar-width:thin] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-scrollbar]:h-1.5",
+          "block w-full min-w-0 overflow-auto text-xs text-foreground [scrollbar-width:thin] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-scrollbar]:h-1.5",
           approval.requestKind === "mcp-elicitation"
-            ? "whitespace-pre-wrap font-sans wrap-break-word"
-            : "whitespace-pre font-mono",
+            ? "max-h-20 whitespace-pre-wrap font-sans wrap-break-word"
+            : "max-h-40 whitespace-pre-wrap font-mono wrap-anywhere",
         )}
         data-approval-detail="complete"
         tabIndex={0}
       >
-        {approval.detail || fallbackLabel}
+        {approval.responseCapability === "not_resumable"
+          ? "Provider process is gone. Interrupt or restart the run to respond."
+          : approval.detail || fallbackLabel}
       </Detail>
+      {approval.reason ? (
+        <span className="w-full min-w-0 text-2xs text-muted-foreground wrap-break-word">
+          {approval.reason}
+        </span>
+      ) : null}
     </span>
   );
 });

@@ -1,7 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { EnvironmentId, LinearOperationError } from "@t3tools/contracts";
 import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
@@ -9,10 +9,10 @@ import * as ServerSettings from "../serverSettings.ts";
 import { LinearOAuth } from "./LinearOAuth.ts";
 import { LinearAgentApi } from "./LinearAgentApi.ts";
 import * as Outbox from "./LinearAgentOutbox.ts";
-import Migration from "../persistence/Migrations/051_LinearDelegation.ts";
-import SessionTaskMigration from "../persistence/Migrations/058_LinearAgentSessionTask.ts";
+import Migration from "../persistence/ForkMigrations/002_LinearDelegation.ts";
+import SessionTaskMigration from "../persistence/ForkMigrations/009_LinearAgentSessionTask.ts";
 
-function harness() {
+function harness(delegation: { postThreadLinks?: boolean } = {}) {
   const sent: string[] = [];
   let failNext = false;
   const record = (entry: string) =>
@@ -26,7 +26,9 @@ function harness() {
     });
   const dependencies = Layer.mergeAll(
     ServerSettings.layerTest({
-      linear: { delegation: { enabled: true, publicUrl: "https://t3.example.com/" } },
+      linear: {
+        delegation: { enabled: true, publicUrl: "https://t3.example.com/", ...delegation },
+      },
     }),
     Layer.succeed(ServerEnvironmentIdentity, {
       getEnvironmentId: Effect.succeed(EnvironmentId.make("env")),
@@ -135,6 +137,14 @@ it.effect("records a created session against its task and builds thread links", 
       url: "https://t3.example.com/env/thread%201",
     });
     assert.isTrue(yield* outbox.connected);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
+});
+
+it.effect("builds no thread links when posting them is turned off", () => {
+  const h = harness({ postThreadLinks: false });
+  return Effect.gen(function* () {
+    const outbox = yield* h.make;
+    assert.isNull(yield* outbox.threadLink("thread 1"));
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped);
 });
 

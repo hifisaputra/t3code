@@ -23,7 +23,8 @@ import { cn } from "~/lib/utils";
 import { developerAssistant } from "~/state/developerAssistant";
 import { useEnvironmentQuery } from "~/state/query";
 import { useProjects, useThreadShell } from "~/state/entities";
-import { useEnvironments } from "~/state/environments";
+import { useEnvironmentProviders } from "~/state/environments";
+import { EMPTY_SERVER_PROVIDERS } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { Button } from "../ui/button";
@@ -106,9 +107,7 @@ function SetupProposal({
   proposal: AssistantProjectConfig;
   environmentId: EnvironmentId;
 }) {
-  const { environments } = useEnvironments();
-  const providers =
-    environments.find((e) => e.environmentId === environmentId)?.serverConfig?.providers ?? [];
+  const providers = useEnvironmentProviders().get(environmentId) ?? EMPTY_SERVER_PROVIDERS;
   const roleSkills = roleSkillList(proposal);
   return (
     <div className="grid gap-5">

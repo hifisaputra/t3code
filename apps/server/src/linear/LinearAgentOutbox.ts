@@ -6,7 +6,7 @@ import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { LinearOperationError } from "@t3tools/contracts";
 import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -233,7 +233,7 @@ export const make = Effect.gen(function* () {
     settings.getSettings.pipe(
       Effect.map((all): ExternalLink | null => {
         const url = all.linear.delegation.publicUrl.trim().replace(/\/$/, "");
-        return url
+        return url && all.linear.delegation.postThreadLinks
           ? {
               label,
               url: `${url}/${encodeURIComponent(environmentId)}/${encodeURIComponent(threadId)}`,

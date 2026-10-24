@@ -35,7 +35,7 @@ import {
   PlayIcon,
   SearchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { useClientSettings } from "~/hooks/useSettings";
@@ -49,7 +49,7 @@ import {
   resolveDefaultProviderModelSelection,
   sortProviderInstanceEntries,
 } from "~/providerInstances";
-import { useEnvironments } from "~/state/environments";
+import { useEnvironmentProviders, useEnvironments } from "~/state/environments";
 import { linearEnvironment } from "~/state/linear";
 import { usePrepareIssueThreadAction, useLinearIssueResolution } from "~/state/linearActions";
 import { useEnvironmentQuery } from "~/state/query";
@@ -244,10 +244,7 @@ export function LinearIssueThreadDialog({
       ? linearEnvironment.issues({ environmentId, input: { limit: MY_ISSUES_LIMIT } })
       : null,
   );
-  const listedIssues = useMemo(
-    () => (myIssues.data ? filterLinearIssues(myIssues.data.issues, reference) : null),
-    [myIssues.data, reference],
-  );
+  const listedIssues = myIssues.data ? filterLinearIssues(myIssues.data.issues, reference) : null;
 
   const resolvedIssue =
     parsedReference !== null && parsedReference === parsedDebouncedReference
@@ -255,12 +252,9 @@ export function LinearIssueThreadDialog({
       : null;
 
   const { environments } = useEnvironments();
-  const serverConfig = useMemo(
-    () =>
-      environments.find((environment) => environment.environmentId === environmentId)
-        ?.serverConfig ?? null,
-    [environmentId, environments],
-  );
+  const serverConfig =
+    environments.find((environment) => environment.environmentId === environmentId)?.serverConfig ??
+    null;
   const serverSettings = serverConfig?.settings ?? DEFAULT_SERVER_SETTINGS;
   const linearSettings = serverConfig?.settings.linear ?? null;
   const repositories = linearSettings?.repositories ?? [];
@@ -281,7 +275,7 @@ export function LinearIssueThreadDialog({
     projects[0] ??
     null;
   const cwd = targetProject?.workspaceRoot ?? null;
-  const scope = useMemo(() => ({ environmentId, cwd }), [cwd, environmentId]);
+  const scope = { environmentId, cwd };
   const prepareIssueThreadAction = usePrepareIssueThreadAction(scope);
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
 
@@ -290,12 +284,12 @@ export function LinearIssueThreadDialog({
   // on the branch the root checkout already holds.
   // The shared resolver folds the project override over the environment
   // setting and fills the built-in default, so an unset tier never leaks null.
-  const defaultThreadEnvMode = useMemo(
-    () =>
-      resolveProjectSettings(serverSettings, targetProject?.id ?? null, targetProject ?? null, null)
-        .settings.defaultThreadEnvMode,
-    [serverSettings, targetProject],
-  );
+  const defaultThreadEnvMode = resolveProjectSettings(
+    serverSettings,
+    targetProject?.id ?? null,
+    targetProject ?? null,
+    null,
+  ).settings.defaultThreadEnvMode;
   const mode: ThreadMode =
     branchMode === "current" ? "local" : (modeOverride ?? defaultThreadEnvMode);
 
@@ -309,18 +303,16 @@ export function LinearIssueThreadDialog({
   // The model row is the composer's picker fed the same way the project
   // defaults page feeds it, defaulting like a new draft would: the project's
   // pinned model, then the server's, then whatever was picked last.
-  const providers = serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS;
+  const providersByEnvironment = useEnvironmentProviders();
+  const providers = providersByEnvironment.get(environmentId) ?? EMPTY_SERVER_PROVIDERS;
   const clientSettings = useClientSettings();
-  const unifiedSettings = useMemo(
-    () => ({ ...serverSettings, ...clientSettings }),
-    [clientSettings, serverSettings],
-  );
-  const providerEntries = useMemo(
-    () =>
-      sortProviderInstanceEntries(
-        applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), unifiedSettings),
-      ),
-    [providers, unifiedSettings],
+  const unifiedSettings = { ...serverSettings, ...clientSettings };
+  const providerEntries = sortProviderInstanceEntries(
+    applyProviderInstanceSettings(
+      deriveProviderInstanceEntries(providers),
+      unifiedSettings,
+      targetProject?.id ?? null,
+    ),
   );
   const stickyProvider = useComposerDraftStore((store) => store.stickyActiveProvider);
   const stickySelection = useComposerDraftStore((store) =>
@@ -337,15 +329,11 @@ export function LinearIssueThreadDialog({
       serverSettings.defaultModelSelection ??
       stickySelection,
   );
-  const modelOptionsByInstance = useMemo(
-    () =>
-      getCustomModelOptionsByInstance(
-        unifiedSettings,
-        providers,
-        modelSelection?.instanceId,
-        modelSelection?.model,
-      ),
-    [modelSelection?.instanceId, modelSelection?.model, providers, unifiedSettings],
+  const modelOptionsByInstance = getCustomModelOptionsByInstance(
+    unifiedSettings,
+    providers,
+    modelSelection?.instanceId,
+    modelSelection?.model,
   );
 
   const isResolving =
@@ -400,7 +388,7 @@ export function LinearIssueThreadDialog({
     !busy &&
     branchProblem === null;
 
-  const handleStart = useCallback(async () => {
+  const handleStart = async () => {
     if (!parsedReference) {
       setReferenceDirty(true);
       return;
@@ -438,10 +426,7 @@ export function LinearIssueThreadDialog({
     const linear = serverConfig?.settings.linear;
     const kickoff = formatLinearIssueKickoff(issue, {
       agentTools: (linear?.agentAccess ?? false) && (linear?.apiKey ?? "").length > 0,
-      skill: hasLinearWorkSkill(
-        serverConfig?.providers ?? [],
-        worktreePath ?? targetProject.workspaceRoot,
-      ),
+      skill: hasLinearWorkSkill(providers, worktreePath ?? targetProject.workspaceRoot),
     });
     const title = linearIssueThreadTitle(issue);
     const createdAt = new Date().toISOString();
@@ -507,24 +492,7 @@ export function LinearIssueThreadDialog({
     }
     onStarted(scopeThreadRef(environmentId, threadId));
     onOpenChange(false);
-  }, [
-    branchIsEditable,
-    branchMode,
-    branchName,
-    branchProblem,
-    environmentId,
-    mode,
-    modelSelection,
-    note,
-    onOpenChange,
-    onStarted,
-    parsedReference,
-    prepareIssueThreadAction,
-    resolvedIssue,
-    serverConfig,
-    startThreadTurn,
-    targetProject,
-  ]);
+  };
 
   const validationMessage = !referenceDirty
     ? null
@@ -885,6 +853,7 @@ function LaunchPanel({
         <LaunchField label="Model">
           {model ? (
             <ProviderModelPicker
+              environmentId={targetProject.environmentId}
               activeInstanceId={model.selection.instanceId}
               model={model.selection.model}
               lockedProvider={null}

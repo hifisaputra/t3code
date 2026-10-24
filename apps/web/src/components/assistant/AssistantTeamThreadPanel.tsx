@@ -39,7 +39,7 @@ export function AssistantTeamThreadPanel({
         task,
         workerBusy: threadIsBusy(holder),
         workerNeedsInput: Boolean(holder?.hasPendingApprovals || holder?.hasPendingUserInput),
-        step: holder?.planProgress?.step ?? null,
+        step: null,
         hasOpenDecision:
           board.data?.decisions.some((d) => d.answer === null && d.taskId === task.id) ?? false,
       }).label;

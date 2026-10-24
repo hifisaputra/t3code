@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - sha256 fingerprints are synchronous hashing.
 import * as NodeCrypto from "node:crypto";
 import type {
   AssistantCodeReview,

@@ -18,13 +18,18 @@ import {
   ServerIcon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { isElectron } from "~/env";
 import { cn } from "~/lib/utils";
 import { developerAssistant } from "~/state/developerAssistant";
 import { useProjects } from "~/state/entities";
-import { useEnvironments, type EnvironmentPresentation } from "~/state/environments";
+import {
+  useEnvironmentProviders,
+  useEnvironments,
+  type EnvironmentPresentation,
+} from "~/state/environments";
+import { EMPTY_SERVER_PROVIDERS } from "~/state/server";
 import { linearEnvironment } from "~/state/linear";
 import { useEnvironmentQuery } from "~/state/query";
 import { buildThreadRouteParams } from "~/threadRoutes";
@@ -178,13 +183,11 @@ function AssistantEnvironment({
   environments: ReadonlyArray<EnvironmentPresentation>;
 }) {
   const environmentId = environment.environmentId;
+  const providersByEnvironment = useEnvironmentProviders();
   const navigate = useNavigate();
   const { review: openedReview } = useSearch({ from: "/_chat/assistant" });
   const allProjects = useProjects();
-  const projects = useMemo(
-    () => allProjects.filter((p) => p.environmentId === environmentId),
-    [allProjects, environmentId],
-  );
+  const projects = allProjects.filter((p) => p.environmentId === environmentId);
   const board = useEnvironmentQuery(developerAssistant.board({ environmentId, input: {} }));
   const setupState = getAssistantSetupState(
     projects.map((project) => project.id),
@@ -339,7 +342,7 @@ function AssistantEnvironment({
         environment={environment}
         summary={empty ? null : <BoardSummary board={data} needsYou={inbox.length} />}
       />
-      <main className="min-h-0 flex-1 overflow-y-auto">
+      <main className="scrollbar-gutter-both min-h-0 flex-1 overflow-y-auto">
         {board.error ? <StaleBoardWarning reason={board.error} /> : null}
         {empty ? (
           <Onboarding
@@ -517,7 +520,9 @@ function AssistantEnvironment({
           linearProjectName={
             panelProject ? linearProjectName(panelProject.config.linearProjectId) : null
           }
-          providers={environment.serverConfig?.providers ?? []}
+          providers={
+            providersByEnvironment.get(environment.environmentId) ?? EMPTY_SERVER_PROVIDERS
+          }
           activeTasks={panelProject ? activeTasksFor(data, panelProject.config.projectId) : []}
           historyTasks={
             panelProject ? history.filter((t) => t.projectId === panelProject.config.projectId) : []

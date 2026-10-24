@@ -162,7 +162,7 @@ function PipelineStepButton({
               aria-disabled={thread === null}
               onClick={() => thread && onOpen(thread)}
               className={cn(
-                "flex w-full min-w-0 flex-col gap-0.5 rounded-lg border px-2 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                "flex w-full min-w-0 flex-col gap-0.5 rounded-lg border px-2 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
                 thread === null ? "cursor-default" : "hover:bg-accent/60",
                 step.state === "failed"
                   ? "border-destructive/40 bg-destructive/6"
@@ -503,7 +503,7 @@ export function ActiveTaskCard({
     task,
     workerBusy: holderBusy,
     workerNeedsInput: Boolean(holder?.hasPendingApprovals || holder?.hasPendingUserInput),
-    step: holder?.planProgress?.step ?? null,
+    step: null,
     hasOpenDecision: openDecision !== null,
     waitingOn,
   });
@@ -1050,7 +1050,7 @@ function HistoryRow({
         type="button"
         aria-expanded={expanded}
         onClick={onToggle}
-        className="grid w-full grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="grid w-full grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
       >
         <status.icon aria-hidden className={cn("size-3.5", status.className)} />
         <span className="font-mono text-muted-foreground text-xs">{task.issue.identifier}</span>

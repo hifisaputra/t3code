@@ -3,7 +3,7 @@ import type { HistoryDay, ProjectHistoryInput, ProjectId, ThreadId } from "@t3to
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import { runMigrations } from "../persistence/Migrations.ts";
@@ -15,7 +15,6 @@ const layer = it.layer(
   ),
 );
 
-const MODEL_SELECTION = '{"instanceId":"codex","model":"gpt-5.6-sol"}';
 const READ_AT = "2026-09-15T10:00:00.000Z";
 
 interface ThreadRow {
@@ -26,10 +25,13 @@ interface ThreadRow {
   readonly linkedIssue?: string | null;
   readonly archivedAt?: string | null;
   readonly deletedAt?: string | null;
+  /** A provider-native subagent thread, whose runs belong to its parent's turn. */
+  readonly providerSubagent?: boolean;
 }
 
 interface TurnRow {
   readonly threadId: string;
+  /** Null for a queued run that never started. */
   readonly turnId: string | null;
   readonly state?: string;
   readonly requestedAt: string;
@@ -39,27 +41,45 @@ interface TurnRow {
 
 const insertThread = (sql: SqlClient.SqlClient, row: ThreadRow) =>
   sql`
-    INSERT INTO projection_threads (
-      thread_id, project_id, title, model_selection_json, branch,
-      linked_issue_json, archived_at, created_at, updated_at, deleted_at
+    INSERT INTO orchestration_v2_projection_threads (
+      thread_id, project_id, title, default_provider, provider_instance_id, runtime_mode,
+      interaction_mode, created_at, updated_at, archived_at, deleted_at, payload_json
     )
     VALUES (
-      ${row.threadId}, ${row.projectId}, ${row.title ?? row.threadId}, ${MODEL_SELECTION},
-      ${row.branch ?? null}, ${row.linkedIssue ?? null}, ${row.archivedAt ?? null},
-      '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z', ${row.deletedAt ?? null}
+      ${row.threadId}, ${row.projectId}, ${row.title ?? row.threadId}, 'codex', 'codex',
+      'full-access', 'default', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z',
+      ${row.archivedAt ?? null}, ${row.deletedAt ?? null},
+      ${JSON.stringify({
+        id: row.threadId,
+        branch: row.branch ?? null,
+        linkedIssue: row.linkedIssue ? JSON.parse(row.linkedIssue) : null,
+        creationSource: row.providerSubagent ? "provider" : "web",
+        lineage: {
+          parentThreadId: row.providerSubagent ? "parent" : null,
+          relationshipToParent: row.providerSubagent ? "subagent" : null,
+          rootThreadId: row.threadId,
+        },
+      })}
     )
   `;
 
-const insertTurn = (sql: SqlClient.SqlClient, row: TurnRow) =>
-  sql`
-    INSERT INTO projection_turns (
-      thread_id, turn_id, state, requested_at, started_at, completed_at, checkpoint_files_json
+let runOrdinal = 0;
+const insertTurn = (sql: SqlClient.SqlClient, row: TurnRow) => {
+  runOrdinal += 1;
+  const startedAt = row.turnId === null ? null : (row.startedAt ?? row.requestedAt);
+  return sql`
+    INSERT INTO orchestration_v2_projection_runs (
+      run_id, thread_id, ordinal, provider, provider_instance_id, status, requested_at,
+      completed_at, payload_json
     )
     VALUES (
-      ${row.threadId}, ${row.turnId}, ${row.state ?? "completed"}, ${row.requestedAt},
-      ${row.startedAt ?? null}, ${row.completedAt ?? null}, '[]'
+      ${row.turnId ?? `queued-${runOrdinal}`}, ${row.threadId}, ${runOrdinal}, 'codex', 'codex',
+      ${row.turnId === null ? "queued" : (row.state ?? "completed")}, ${row.requestedAt},
+      ${row.completedAt ?? null},
+      ${JSON.stringify({ requestedAt: row.requestedAt, startedAt, completedAt: row.completedAt ?? null })}
     )
   `;
+};
 
 const makeInput = (overrides: {
   readonly projectId: string;
@@ -192,7 +212,7 @@ layer("ProjectHistoryService", (it) => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("ignores deleted threads, other projects and pending turn starts", () =>
+  it.effect("ignores deleted threads, other projects, subagents and pending turn starts", () =>
     Effect.gen(function* () {
       const sql = yield* setup;
       const history = yield* ProjectHistoryService.ProjectHistoryService;
@@ -218,8 +238,20 @@ layer("ProjectHistoryService", (it) => {
       yield* insertTurn(sql, {
         threadId: "kept-thread",
         turnId: null,
-        state: "pending",
         requestedAt: "2026-09-15T08:30:00.000Z",
+      });
+      // A provider-native subagent's run belongs to its parent's turn.
+      yield* insertThread(sql, {
+        threadId: "subagent-thread",
+        projectId: "filter-project",
+        providerSubagent: true,
+      });
+      yield* insertTurn(sql, {
+        threadId: "subagent-thread",
+        turnId: "subagent-thread-turn",
+        requestedAt: "2026-09-15T08:00:00.000Z",
+        startedAt: "2026-09-15T08:00:00.000Z",
+        completedAt: "2026-09-15T08:10:00.000Z",
       });
 
       const result = yield* history.readProjectHistory(makeInput({ projectId: "filter-project" }));

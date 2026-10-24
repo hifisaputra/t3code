@@ -232,7 +232,7 @@ const HistoryThreadRow = memo(function HistoryThreadRow({
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
           <Link
             className={cn(
-              "min-w-0 truncate rounded-sm text-sm outline-hidden ring-ring hover:underline focus-visible:ring-2",
+              "min-w-0 truncate rounded-sm text-sm outline-hidden ring-ring hover:underline focus-visible:ring-2 focus-visible:ring-inset",
               archived ? "text-muted-foreground" : "text-foreground",
             )}
             params={{ environmentId, threadId: thread.threadId }}
@@ -242,7 +242,7 @@ const HistoryThreadRow = memo(function HistoryThreadRow({
           </Link>
           {thread.linkedIssue ? (
             <a
-              className="shrink-0 rounded-sm border border-border px-1.5 py-px text-2xs text-muted-foreground outline-hidden ring-ring hover:text-foreground focus-visible:ring-2"
+              className="shrink-0 rounded-sm border border-border px-1.5 py-px text-2xs text-muted-foreground outline-hidden ring-ring hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset"
               href={thread.linkedIssue.url}
               rel="noreferrer"
               target="_blank"

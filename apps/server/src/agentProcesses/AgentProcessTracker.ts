@@ -19,7 +19,7 @@ import type {
   StopAgentProcessResult,
 } from "@t3tools/contracts";
 import { AgentProcessStopError } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -49,7 +49,7 @@ import {
   selectStopTarget,
   type ProcessTableRow,
 } from "./agentProcessModel.ts";
-import * as ProviderProcessRegistry from "./ProviderProcessRegistry.ts";
+import * as ProviderProcessRegistry from "@t3tools/provider-core/server/providerProcessRegistry";
 
 export class AgentProcessTracker extends Context.Service<
   AgentProcessTracker,
@@ -126,7 +126,7 @@ const chunk = <A>(values: ReadonlyArray<A>, size: number): ReadonlyArray<Readonl
 
 const make = Effect.gen(function* AgentProcessTrackerMake() {
   const processRunner = yield* ProcessRunner.ProcessRunner;
-  const hostPlatform = yield* HostProcessPlatform;
+  const hostPlatform = yield* HostProcess.Platform;
   const serverPid = process.pid;
   const stateRef = yield* Ref.make<TrackerState>({ listeners: new Map(), retainCount: 0 });
   const scanSemaphore = yield* Semaphore.make(1);
@@ -385,18 +385,17 @@ const make = Effect.gen(function* AgentProcessTrackerMake() {
       signalPid(target.rootPid, pid, signal).pipe(Effect.map((sent) => (sent ? pid : null))),
     ).pipe(Effect.map((results) => results.filter((pid) => pid !== null)));
 
-  const awaitExit = (
+  const awaitExit = Effect.fn("AgentProcessTracker.awaitExit")(function* (
     pids: ReadonlyArray<number>,
     attempts: number,
-  ): Effect.Effect<ReadonlyArray<number>> =>
-    Effect.gen(function* () {
-      let survivors = pids.filter(isProcessAlive);
-      for (let attempt = 0; attempt < attempts && survivors.length > 0; attempt += 1) {
-        yield* Effect.sleep(STOP_GRACE_POLL_INTERVAL);
-        survivors = survivors.filter(isProcessAlive);
-      }
-      return survivors;
-    });
+  ) {
+    let survivors = pids.filter(isProcessAlive);
+    for (let attempt = 0; attempt < attempts && survivors.length > 0; attempt += 1) {
+      yield* Effect.sleep(STOP_GRACE_POLL_INTERVAL);
+      survivors = survivors.filter(isProcessAlive);
+    }
+    return survivors;
+  });
 
   const stop: AgentProcessTracker["Service"]["stop"] = Effect.fn("AgentProcessTracker.stop")(
     function* (input: StopAgentProcessInput) {

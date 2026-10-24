@@ -1,7 +1,9 @@
 import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-images";
 import type { AssetResource, ScopedThreadRef } from "@t3tools/contracts";
 
-import { normalizeMarkdownLinkDestination, rewriteMarkdownFileUriHref } from "../../markdown-links";
+import { normalizeMarkdownLinkDestination } from "@t3tools/shared/markdownLinks";
+
+import { rewriteMarkdownFileUriHref } from "../../markdown-links";
 
 /** `![alt](src "title")`, with an optional `<…>`-wrapped destination. */
 const MARKDOWN_IMAGE_PATTERN = /!\[[^\]]*]\(\s*(<[^>]*>|[^)\s]+)(?:\s+["'][^"']*["'])?\s*\)/g;

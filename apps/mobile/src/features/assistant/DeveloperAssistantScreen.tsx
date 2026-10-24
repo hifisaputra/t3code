@@ -12,7 +12,7 @@ import {
 } from "@t3tools/contracts";
 import { useState } from "react";
 import { Linking, Pressable, ScrollView, View } from "react-native";
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { useProjects } from "../../state/entities";
 import { developerAssistant } from "../../state/developerAssistant";

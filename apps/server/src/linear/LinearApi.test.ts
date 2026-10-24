@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
   LinearIssueNotFoundError,
@@ -1099,26 +1099,23 @@ it.effect("updates the specified comment body", () => {
   }).pipe(Effect.provide(layer));
 });
 
-for (const payload of [
+it.effect.each([
   { data: { commentUpdate: { success: false, comment: null } } },
   { data: { commentUpdate: { success: true, comment: null } } },
   { errors: [{ message: "Not authorized to edit this comment" }] },
-]) {
-  it.effect("surfaces rejected comment edits", () => {
-    const { layer } = makeLayer({ response: () => Response.json(payload) });
-    return Effect.gen(function* () {
-      const linear = yield* LinearApi.LinearApi;
-      const error = yield* Effect.flip(
-        linear.updateComment({ id: "comment-3", body: "Corrected." }),
-      );
-      assert.instanceOf(error, LinearOperationError);
-      assert.strictEqual(error.operation, "updateComment");
-    }).pipe(Effect.provide(layer));
-  });
-}
+])("surfaces rejected comment edits", (payload) => {
+  const { layer } = makeLayer({ response: () => Response.json(payload) });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.updateComment({ id: "comment-3", body: "Corrected." }));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "updateComment");
+  }).pipe(Effect.provide(layer));
+});
 
-for (const assigneeId of ["user-1", null]) {
-  it.effect(`sends an explicit assignee patch: ${assigneeId}`, () => {
+it.effect.each([{ assigneeId: "user-1" }, { assigneeId: null }])(
+  "sends an explicit assignee patch: $assigneeId",
+  ({ assigneeId }) => {
     const { execute, layer } = makeLayer({
       response: () => Response.json({ data: { issueUpdate: { success: true } } }),
     });
@@ -1130,11 +1127,12 @@ for (const assigneeId of ["user-1", null]) {
         input: { assigneeId },
       });
     }).pipe(Effect.provide(layer));
-  });
-}
+  },
+);
 
-for (const reference of ["Ada", "ada@example.com", "12345678-1234-1234-1234-123456789abc"]) {
-  it.effect(`resolves an assignee by ${reference}`, () => {
+it.effect.each(["Ada", "ada@example.com", "12345678-1234-1234-1234-123456789abc"])(
+  "resolves an assignee by %s",
+  (reference) => {
     const user = { id: "user-1", name: "Ada Lovelace", displayName: "ada" };
     const { execute, layer } = makeLayer({
       response: () => Response.json({ data: { users: { nodes: [user] } } }),
@@ -1154,32 +1152,30 @@ for (const reference of ["Ada", "ada@example.com", "12345678-1234-1234-1234-1234
             },
       });
     }).pipe(Effect.provide(layer));
-  });
-}
+  },
+);
 
-for (const count of [0, 2]) {
-  it.effect(`rejects assignee lookup with ${count} matches`, () => {
-    const { layer } = makeLayer({
-      response: () =>
-        Response.json({
-          data: {
-            users: {
-              nodes: Array.from({ length: count }, (_, i) => ({
-                id: `user-${i}`,
-                name: "Ada",
-                displayName: "ada",
-              })),
-            },
+it.effect.each([0, 2])("rejects assignee lookup with %s matches", (count) => {
+  const { layer } = makeLayer({
+    response: () =>
+      Response.json({
+        data: {
+          users: {
+            nodes: Array.from({ length: count }, (_, i) => ({
+              id: `user-${i}`,
+              name: "Ada",
+              displayName: "ada",
+            })),
           },
-        }),
-    });
-    return Effect.gen(function* () {
-      const linear = yield* LinearApi.LinearApi;
-      const error = yield* Effect.flip(linear.resolveAssignee("Ada"));
-      assert.strictEqual(error._tag, "LinearOperationError");
-    }).pipe(Effect.provide(layer));
+        },
+      }),
   });
-}
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.resolveAssignee("Ada"));
+    assert.strictEqual(error._tag, "LinearOperationError");
+  }).pipe(Effect.provide(layer));
+});
 
 it.effect("sends and clears every issue planning field without losing zero estimates", () => {
   const { execute, layer } = makeLayer({
@@ -1255,8 +1251,9 @@ it.effect("paginates resource discovery and scopes milestones and cycles", () =>
   }).pipe(Effect.provide(layer));
 });
 
-for (const kind of ["project", "milestone", "cycle", "label"] as const) {
-  it.effect(`creates or updates a ${kind} with only supported fields`, () => {
+it.effect.each(["project", "milestone", "cycle", "label"] as const)(
+  "creates or updates a %s with only supported fields",
+  (kind) => {
     const resource = { id: "r1", name: "Ready" };
     const { execute, layer } = makeLayer({
       response: () => Response.json({ data: { result: { success: true, resource } } }),
@@ -1272,8 +1269,8 @@ for (const kind of ["project", "milestone", "cycle", "label"] as const) {
         input: { name: "Ready", description: null },
       });
     }).pipe(Effect.provide(layer));
-  });
-}
+  },
+);
 
 it.effect("rejects a resource mutation when Linear refuses it", () => {
   const { layer } = makeLayer({
@@ -1697,7 +1694,7 @@ it.effect("deletes a comment by id", () => {
   }).pipe(Effect.provide(layer));
 });
 
-for (const [payload, expected] of [
+it.effect.each([
   [
     {
       errors: [
@@ -1714,18 +1711,16 @@ for (const [payload, expected] of [
     { errors: [{ message: "Entity not found", extensions: { code: "ENTITY_NOT_FOUND" } }] },
     "Comment not found or inaccessible.",
   ],
-] as const) {
-  it.effect(`tells the agent why Linear refused a deletion: ${expected}`, () => {
-    const { layer } = makeLayer({ response: () => Response.json(payload) });
-    return Effect.gen(function* () {
-      const linear = yield* LinearApi.LinearApi;
-      const error = yield* Effect.flip(linear.deleteComment("comment-3"));
-      assert.instanceOf(error, LinearOperationError);
-      assert.strictEqual(error.operation, "deleteComment");
-      assert.include(error.detail, expected);
-    }).pipe(Effect.provide(layer));
-  });
-}
+] as const)("tells the agent why Linear refused a deletion: $1", ([payload, expected]) => {
+  const { layer } = makeLayer({ response: () => Response.json(payload) });
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const error = yield* Effect.flip(linear.deleteComment("comment-3"));
+    assert.instanceOf(error, LinearOperationError);
+    assert.strictEqual(error.operation, "deleteComment");
+    assert.include(error.detail, expected);
+  }).pipe(Effect.provide(layer));
+});
 
 it.effect("attaches a link with its title and subtitle", () => {
   const attachment = {
@@ -1913,35 +1908,36 @@ it.effect("reports a missing document in plain words", () => {
   }).pipe(Effect.provide(layer));
 });
 
-for (const id of [undefined, "document-uuid"]) {
-  it.effect(`${id ? "updates" : "creates"} a document with only the fields given`, () => {
-    const { execute, layer } = makeLayer({
-      response: () => Response.json({ data: { result: { success: true, document: launchPlan } } }),
-    });
-    return Effect.gen(function* () {
-      const linear = yield* LinearApi.LinearApi;
-      const saved = yield* linear.saveDocument({
-        ...(id ? { id } : { title: "Launch plan", projectId: "project-1" }),
-        content: launchPlan.content,
-      });
-      assert.deepStrictEqual(saved, launchPlanRead);
-      const request = sentGraphQL(execute.mock.calls[0]![0]);
-      assert.include(request.query, id ? "documentUpdate" : "documentCreate");
-      if (id) {
-        assert.deepStrictEqual(request.variables, { id, input: { content: launchPlan.content } });
-      } else {
-        // A create sends the id it would reuse on a retry.
-        const { id: createdId, ...input } = request.variables.input as Record<string, unknown>;
-        assert.match(String(createdId), UUID);
-        assert.deepStrictEqual(input, {
-          title: "Launch plan",
-          content: launchPlan.content,
-          projectId: "project-1",
-        });
-      }
-    }).pipe(Effect.provide(layer));
+it.effect.each([
+  { verb: "creates", id: undefined },
+  { verb: "updates", id: "document-uuid" },
+])("$verb a document with only the fields given", ({ id }) => {
+  const { execute, layer } = makeLayer({
+    response: () => Response.json({ data: { result: { success: true, document: launchPlan } } }),
   });
-}
+  return Effect.gen(function* () {
+    const linear = yield* LinearApi.LinearApi;
+    const saved = yield* linear.saveDocument({
+      ...(id ? { id } : { title: "Launch plan", projectId: "project-1" }),
+      content: launchPlan.content,
+    });
+    assert.deepStrictEqual(saved, launchPlanRead);
+    const request = sentGraphQL(execute.mock.calls[0]![0]);
+    assert.include(request.query, id ? "documentUpdate" : "documentCreate");
+    if (id) {
+      assert.deepStrictEqual(request.variables, { id, input: { content: launchPlan.content } });
+    } else {
+      // A create sends the id it would reuse on a retry.
+      const { id: createdId, ...input } = request.variables.input as Record<string, unknown>;
+      assert.match(String(createdId), UUID);
+      assert.deepStrictEqual(input, {
+        title: "Launch plan",
+        content: launchPlan.content,
+        projectId: "project-1",
+      });
+    }
+  }).pipe(Effect.provide(layer));
+});
 
 it.effect("trashes a document by id and fails when Linear refuses", () => {
   const { execute, layer } = makeLayer({

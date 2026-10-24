@@ -1,0 +1,143 @@
+import { TextGenerationError } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+
+const isTextGenerationError = Schema.is(TextGenerationError);
+
+export function toJsonSchemaObject(schema: Schema.Top): unknown {
+  const document = Schema.toJsonSchemaDocument(Schema.toType(schema), {
+    onExcessProperty: "error",
+  });
+  if (document.definitions && Object.keys(document.definitions).length > 0) {
+    return { ...document.schema, $defs: document.definitions };
+  }
+  return document.schema;
+}
+
+export function limitSection(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const truncated = value.slice(0, maxChars);
+  return `${truncated}\n\n[truncated]`;
+}
+
+/**
+ * Undo a model that answered the prompt's "return a JSON object with keys …"
+ * instruction *inside* one of the structured-output fields, so that a title
+ * arrives as `{"title": "Add gacha game characters to list"}` and a commit
+ * subject as `{"subject": "Add tag presets", "body": "…"}`. Providers that
+ * enforce a JSON schema still accept it — the wrapper is a valid string — so
+ * the sanitizers are the only shared place that can catch it.
+ *
+ * `key` is the field the value was destined for: only an envelope carrying
+ * that key unwraps, which keeps a value that merely happens to be JSON
+ * intact. Bounded so a doubly-wrapped value resolves but nothing can loop.
+ */
+function unwrapJsonWrappedField(raw: string, key: string): string {
+  let value = raw.trim();
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (!value.startsWith("{")) return value;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return value;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return value;
+    const inner = (parsed as Record<string, unknown>)[key];
+    if (typeof inner !== "string") return value;
+    value = inner.trim();
+  }
+  return value;
+}
+
+/** Normalise a raw commit subject to imperative-mood, ≤72 chars, no trailing period. */
+export function sanitizeCommitSubject(raw: string): string {
+  const singleLine = unwrapJsonWrappedField(raw, "subject").split(/\r?\n/g)[0]?.trim() ?? "";
+  const withoutTrailingPeriod = singleLine.replace(/[.]+$/g, "").trim();
+  if (withoutTrailingPeriod.length === 0) {
+    return "Update project files";
+  }
+
+  if (withoutTrailingPeriod.length <= 72) {
+    return withoutTrailingPeriod;
+  }
+  const segments = new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
+    withoutTrailingPeriod,
+  );
+  let subject = "";
+  for (const { segment } of segments) {
+    if (subject.length + segment.length > 72) break;
+    subject += segment;
+  }
+  return subject.trimEnd() || "Update project files";
+}
+
+export function sanitizePrTitle(raw: string): string {
+  const singleLine = unwrapJsonWrappedField(raw, "title").split(/\r?\n/g)[0]?.trim() ?? "";
+  if (singleLine.length > 0) {
+    return singleLine;
+  }
+  return "Update project changes";
+}
+
+const MAX_THREAD_TITLE_CHARS = 120;
+
+export function sanitizeThreadTitle(raw: string): string {
+  const normalized = unwrapJsonWrappedField(raw, "title")
+    .split(/\r?\n/g)[0]
+    ?.trim()
+    .replace(/^['"`]+|['"`]+$/g, "")
+    .trim()
+    .replace(/\s+/g, " ");
+
+  if (!normalized || normalized.trim().length === 0) {
+    return "New thread";
+  }
+
+  if (normalized.length <= MAX_THREAD_TITLE_CHARS) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, MAX_THREAD_TITLE_CHARS - 3).trimEnd()}...`;
+}
+
+function cliLabel(cliName: string): string {
+  const capitalized = cliName.charAt(0).toUpperCase() + cliName.slice(1);
+  return `${capitalized} CLI (\`${cliName}\`)`;
+}
+
+export function normalizeCliError(
+  cliName: string,
+  operation: string,
+  error: unknown,
+  fallback: string,
+): TextGenerationError {
+  if (isTextGenerationError(error)) {
+    return error;
+  }
+
+  if (error instanceof Error) {
+    const lower = error.message.toLowerCase();
+    if (
+      error.message.includes(`Command not found: ${cliName}`) ||
+      lower.includes(`spawn ${cliName}`) ||
+      lower.includes("enoent")
+    ) {
+      return new TextGenerationError({
+        operation,
+        detail: `${cliLabel(cliName)} is required but not available on PATH.`,
+        cause: error,
+      });
+    }
+    return new TextGenerationError({
+      operation,
+      detail: fallback,
+      cause: error,
+    });
+  }
+
+  return new TextGenerationError({
+    operation,
+    detail: fallback,
+    cause: error,
+  });
+}

@@ -1,30 +1,31 @@
-import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   ASSISTANT_INSTRUCTION_BUDGET,
   AssistantProjectConfig,
   AssistantSetupInput,
   AssistantTask,
-  CommandId,
   DeveloperAssistantError,
-  MessageId,
   ThreadId,
   type AssistantSetup,
   type AssistantSetupPlan,
   type AssistantSetupResolveInput,
-  type OrchestrationThreadShell,
 } from "@t3tools/contracts";
-import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { LinearApi } from "../linear/LinearApi.ts";
 import { discoverClaudeSkills } from "../provider/Drivers/ClaudeSkills.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
+import {
+  isoOrNull,
+  threadAwaitsAnswer,
+  type AssistantThreads,
+  type ThreadShell,
+} from "./assistantThreads.ts";
 import { setupInstructions } from "./prompts.ts";
 import { openProjectNotes } from "./projectNotes.ts";
 
@@ -136,12 +137,14 @@ export function validateSetupPlan(config: AssistantProjectConfig) {
 
 export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
   changed: Effect.Effect<void>;
-  threadBusy: (thread: OrchestrationThreadShell) => Effect.Effect<boolean, DeveloperAssistantError>;
+  threads: AssistantThreads;
+  threadBusy: (thread: ThreadShell) => Effect.Effect<boolean, DeveloperAssistantError>;
   configure: (config: AssistantProjectConfig) => Effect.Effect<void, DeveloperAssistantError>;
 }) {
   const sql = yield* SqlClient.SqlClient;
-  const engine = yield* OrchestrationEngineService;
-  const snapshots = yield* ProjectionSnapshotQuery;
+  const threads = options.threads;
+  const crypto = yield* Crypto.Crypto;
+  const newId = crypto.randomUUIDv4().pipe(Effect.orDie);
   const verifier = yield* StagingVerifier;
   const linear = yield* LinearApi;
   const settings = yield* ServerSettingsService;
@@ -164,11 +167,26 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
    * the developer assistant, whose context carries none.
    */
   const projectSkills = Effect.fn("Assistant.projectSkills")(function* (workspaceRoot: string) {
-    const claude = yield* settings.getSettings.pipe(
-      Effect.map((current) => current.providers.claudeAgent),
-      Effect.orElseSucceed(() => ({ homePath: "" })),
+    // The Claude home decides which skills its settings turn off; the first
+    // Claude instance's is the one, and the default home without one.
+    const homePath = yield* settings.getSettings.pipe(
+      Effect.map((current) => {
+        for (const instance of Object.values(current.providerInstances)) {
+          const config: unknown = instance.config;
+          if (
+            instance.driver === "claudeAgent" &&
+            typeof config === "object" &&
+            config !== null &&
+            "homePath" in config &&
+            typeof config.homePath === "string"
+          )
+            return config.homePath;
+        }
+        return "";
+      }),
+      Effect.orElseSucceed(() => ""),
     );
-    const discovered = yield* discoverClaudeSkills(claude, workspaceRoot).pipe(
+    const discovered = yield* discoverClaudeSkills({ homePath }, workspaceRoot).pipe(
       Effect.provide(NodeServices.layer),
     );
     return discovered.filter(
@@ -187,7 +205,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
       (name): name is string => name !== undefined,
     );
     if (!named.length) return;
-    const root = yield* snapshots.getProjectShellById(config.projectId);
+    const root = yield* threads.project(config.projectId);
     if (Option.isNone(root)) return yield* fail("Select an existing T3 project.");
     const available = yield* projectSkills(root.value.workspaceRoot);
     const unknown = named.find((name) => !available.some((skill) => skill.name === name));
@@ -258,7 +276,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const inProgress = yield* Effect.forEach(active, (row) =>
       decodeTask(row.data).pipe(Effect.map((t) => t.issue.identifier)),
     );
-    const root = yield* snapshots.getProjectShellById(projectId);
+    const root = yield* threads.project(projectId);
     const skills = Option.isSome(root) ? yield* projectSkills(root.value.workspaceRoot) : [];
     const existing = configured[0] ? yield* decodeConfig(configured[0].config) : null;
     // A revision is where the checks a person had to run become test data.
@@ -282,7 +300,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
       return yield* fail(
         "Connect Linear and enable Agent access in Settings → Integrations → Linear before setup.",
       );
-    const root = yield* snapshots.getProjectShellById(input.projectId);
+    const root = yield* threads.project(input.projectId);
     if (Option.isNone(root)) return yield* fail("Select an existing T3 project.");
     const configured = yield* sql<{
       status: string;
@@ -303,10 +321,8 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     let row = existing[0];
     // Archived conversations resume in place; only a deleted thread starts over.
     const thread = row
-      ? yield* snapshots.getThreadShellById(ThreadId.make(row.thread_id), {
-          includeArchived: true,
-        })
-      : Option.none();
+      ? yield* threads.shell(ThreadId.make(row.thread_id), { includeArchived: true })
+      : Option.none<ThreadShell>();
     if (row && Option.isNone(thread)) {
       yield* sql`DELETE FROM assistant_setups WHERE project_id = ${input.projectId}`;
       row = undefined;
@@ -314,7 +330,7 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const encoded = encodePreferences(input);
     let revised = false;
     if (!row) {
-      const threadId = ThreadId.make(`assistant-setup-${NodeCrypto.randomUUID()}`);
+      const threadId = ThreadId.make(`assistant-setup-${yield* newId}`);
       yield* sql`INSERT INTO assistant_setups (project_id, repository_key, thread_id, preferences) VALUES (${input.projectId}, ${repositoryKey}, ${threadId}, ${encoded})`;
       row = yield* get(threadId);
     } else if (row.preferences !== encoded) {
@@ -333,46 +349,31 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const value = yield* decode(row);
     // The engine rejects unarchiving a live thread, so only restore an archived one.
     if (Option.isNone(thread))
-      yield* engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make(`${value.threadId}:create`),
+      yield* threads.create({
+        commandId: `${value.threadId}:create`,
         threadId: value.threadId,
         projectId: input.projectId,
         title: `Assistant setup · ${root.value.title}`,
         modelSelection: value.preferences.modelSelection,
         runtimeMode: value.preferences.setupRuntimeMode,
-        interactionMode: "default",
         branch: null,
         worktreePath: null,
-        createdAt: yield* now,
       });
     else if (thread.value.archivedAt !== null)
-      yield* engine.dispatch({
-        type: "thread.unarchive",
-        commandId: CommandId.make(NodeCrypto.randomUUID()),
-        threadId: value.threadId,
-      });
+      yield* threads.unarchive(yield* newId, value.threadId);
     yield* options.changed;
     // A stable command id makes retries after a disconnect reuse the first turn; a
     // revised brief is a different turn and carries the revision it was written for.
     const start = revised ? `${value.threadId}:start:${value.revision}` : `${value.threadId}:start`;
     const note = value.preferences.context.trim();
-    yield* engine.dispatch({
-      type: "thread.turn.start",
-      commandId: CommandId.make(start),
+    yield* threads.send({
+      commandId: start,
+      messageId: start,
       threadId: value.threadId,
-      message: {
-        messageId: MessageId.make(start),
-        role: "user",
-        attachments: [],
-        text: revised
-          ? `I changed the setup brief: my models, Linear project, permissions or notes are not what they were. Read the saved brief again using your assistant setup tools, check what it changes about the repository and staging deployment you inspected, and propose a setup that matches it. Any earlier proposal is out of date. This is an inspection and discussion; do not change files, deploy, or start issues.${note ? `\n\nWhat I asked for this time:\n${note}` : ""}`
-          : "Help me set up the developer assistant for this project. Read the saved setup brief using your assistant setup tools, then inspect the repository and its staging deployment. Ask me for missing details and propose a setup I can review and save. This is an inspection and discussion; do not change files, deploy, or start issues.",
-      },
+      text: revised
+        ? `I changed the setup brief: my models, Linear project, permissions or notes are not what they were. Read the saved brief again using your assistant setup tools, check what it changes about the repository and staging deployment you inspected, and propose a setup that matches it. Any earlier proposal is out of date. This is an inspection and discussion; do not change files, deploy, or start issues.${note ? `\n\nWhat I asked for this time:\n${note}` : ""}`
+        : "Help me set up the developer assistant for this project. Read the saved setup brief using your assistant setup tools, then inspect the repository and its staging deployment. Ask me for missing details and propose a setup I can review and save. This is an inspection and discussion; do not change files, deploy, or start issues.",
       modelSelection: value.preferences.modelSelection,
-      runtimeMode: value.preferences.setupRuntimeMode,
-      interactionMode: "default",
-      createdAt: yield* now,
     });
     return value;
   });
@@ -388,10 +389,10 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     const error = validateSetupPlan(proposal);
     if (error) return yield* error;
     yield* checkRoleSkills(proposal);
-    const thread = yield* snapshots.getThreadShellById(caller);
+    const thread = yield* threads.shell(caller);
     if (Option.isNone(thread)) return yield* fail("The setup thread no longer exists.");
     yield* sql`UPDATE assistant_setups SET proposal = ${encodeConfig(proposal)}, summary = ${summary},
-      revision = revision + 1, proposed_after = ${thread.value.latestUserMessageAt},
+      revision = revision + 1, proposed_after = ${isoOrNull(thread.value.latestUserMessageAt)},
       proposal_notes = notes_read WHERE thread_id = ${caller}`;
     yield* options.changed;
     return yield* decode(yield* get(caller));
@@ -401,18 +402,14 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
     if (input.action === "save") {
       if (!row.proposal || row.revision !== input.revision)
         return yield* fail("The setup proposal changed. Review the latest proposal before saving.");
-      const thread = yield* snapshots.getThreadShellById(input.threadId);
+      const thread = yield* threads.shell(input.threadId);
       if (Option.isNone(thread))
         return yield* fail("The setup thread no longer exists. Start setup again.");
-      if (
-        (yield* options.threadBusy(thread.value)) ||
-        thread.value.hasPendingApprovals ||
-        thread.value.hasPendingUserInput
-      )
+      if ((yield* options.threadBusy(thread.value)) || threadAwaitsAnswer(thread.value))
         return yield* fail(
           "Wait for the setup turn to finish and answer its requests before saving.",
         );
-      if (thread.value.latestUserMessageAt !== row.proposed_after)
+      if (isoOrNull(thread.value.latestUserMessageAt) !== row.proposed_after)
         return yield* fail(
           "The conversation continued after this proposal. Ask the assistant to update its proposal before saving.",
         );
@@ -424,24 +421,15 @@ export const makeSetup = Effect.fn("Assistant.makeSetup")(function* (options: {
         yield* sql`UPDATE assistant_project_notes SET absorbed_at = ${yield* now}
           WHERE project_id = ${row.project_id} AND absorbed_at IS NULL AND ${sql.in("id", absorbed)}`;
     } else {
-      yield* engine
-        .dispatch({
-          type: "thread.turn.interrupt",
-          commandId: CommandId.make(NodeCrypto.randomUUID()),
-          threadId: input.threadId,
-          createdAt: yield* now,
-        })
+      yield* threads
+        .stop(yield* newId, input.threadId, "The setup conversation was cancelled.")
         .pipe(Effect.catch(() => Effect.void));
     }
     yield* sql`DELETE FROM assistant_setups WHERE thread_id = ${input.threadId}`;
     yield* options.changed;
     // Retain the conversation in history, including cancelled setup discussions.
-    yield* engine
-      .dispatch({
-        type: "thread.archive",
-        commandId: CommandId.make(`${input.threadId}:archive`),
-        threadId: input.threadId,
-      })
+    yield* threads
+      .archive(`${input.threadId}:archive`, input.threadId)
       .pipe(Effect.catch(() => Effect.void));
   });
   return { begin, propose, resolve, list, read };

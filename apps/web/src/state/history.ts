@@ -10,8 +10,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ProjectHistory, ProjectHistoryInput } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
-import { useCallback, useMemo } from "react";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { serverEnvironment } from "./server";
@@ -54,34 +53,30 @@ const historyByTargetAtom = Atom.family((targetKey: string) =>
 );
 
 export function useProjectHistory(target: HistoryTarget | null): ProjectHistoryView {
-  // Callers memoise their target, so keying off the object is enough. The
-  // fixed field order matters: both the read and the refresh below rebuild the
-  // query target from this string, so they land on the same family entry.
-  const targetKey = useMemo(
-    () =>
-      target === null
-        ? null
-        : JSON.stringify({
-            environmentId: target.environmentId,
-            input: {
-              projectId: target.input.projectId,
-              sinceDay: target.input.sinceDay,
-              untilDay: target.input.untilDay,
-              timeZone: target.input.timeZone,
-            },
-          }),
-    [target],
-  );
+  // The fixed field order matters: both the read and the refresh below rebuild
+  // the query target from this string, so they land on the same family entry.
+  const targetKey =
+    target === null
+      ? null
+      : JSON.stringify({
+          environmentId: target.environmentId,
+          input: {
+            projectId: target.input.projectId,
+            sinceDay: target.input.sinceDay,
+            untilDay: target.input.untilDay,
+            timeZone: target.input.timeZone,
+          },
+        });
   const state = useAtomValue(
     targetKey === null ? EMPTY_HISTORY_ATOM : historyByTargetAtom(targetKey),
   );
 
-  const refresh = useCallback(() => {
+  const refresh = () => {
     if (targetKey === null) return;
     appAtomRegistry.refresh(
       serverEnvironment.projectHistory(JSON.parse(targetKey) as HistoryTarget),
     );
-  }, [targetKey]);
+  };
 
   return { ...state, refresh };
 }

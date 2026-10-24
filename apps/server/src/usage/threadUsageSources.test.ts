@@ -2,75 +2,42 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   claudeProjectDirHint,
-  claudeSessionIdsFromResumeCursor,
-  cwdFromRuntimePayload,
+  claudeSessionIdsFromProviderThreads,
   orderProjectDirs,
 } from "./threadUsageSources.ts";
 
-describe("claudeSessionIdsFromResumeCursor", () => {
-  it("reads the session a live thread writes to", () => {
-    expect(
-      claudeSessionIdsFromResumeCursor({
-        threadId: "t",
-        resume: "f49811c9-3f6f-4639-89cd-bda6acb6b650",
-        turnCount: 2,
-      }),
-    ).toEqual(["f49811c9-3f6f-4639-89cd-bda6acb6b650"]);
+describe("claudeSessionIdsFromProviderThreads", () => {
+  const thread = (driver: string, nativeId: string | null) => ({
+    driver,
+    nativeThreadRef: nativeId === null ? null : { nativeId },
   });
 
-  it("keeps the resumed-from session so a continued thread is not undercounted", () => {
+  it("reads each Claude provider thread's session once", () => {
     expect(
-      claudeSessionIdsFromResumeCursor({
-        resume: "aaaa",
-        resumeSessionAt: "bbbb",
-      }),
-    ).toEqual(["aaaa", "bbbb"]);
-  });
-
-  it("falls back to the older sessionId field", () => {
-    expect(claudeSessionIdsFromResumeCursor({ sessionId: "cccc" })).toEqual(["cccc"]);
-  });
-
-  it("de-duplicates when the cursor repeats one id", () => {
-    expect(
-      claudeSessionIdsFromResumeCursor({
-        resume: "aaaa",
-        sessionId: "aaaa",
-        resumeSessionAt: "aaaa",
-      }),
-    ).toEqual(["aaaa"]);
+      claudeSessionIdsFromProviderThreads(
+        [
+          thread("claudeAgent", "f49811c9-3f6f-4639-89cd-bda6acb6b650"),
+          thread("codex", "codex-thread"),
+          thread("claudeAgent", "bbbb"),
+          thread("claudeAgent", "bbbb"),
+          thread("claudeAgent", null),
+        ],
+        "claudeAgent",
+      ),
+    ).toEqual(["f49811c9-3f6f-4639-89cd-bda6acb6b650", "bbbb"]);
   });
 
   it("rejects ids that would escape the projects directory", () => {
     expect(
-      claudeSessionIdsFromResumeCursor({
-        resume: "../../etc/passwd",
-        sessionId: "nested/id",
-        resumeSessionAt: "..",
-      }),
+      claudeSessionIdsFromProviderThreads(
+        [
+          thread("claudeAgent", "../../etc/passwd"),
+          thread("claudeAgent", "nested\\id"),
+          thread("claudeAgent", ".."),
+        ],
+        "claudeAgent",
+      ),
     ).toEqual([]);
-  });
-
-  it("returns nothing for a cursor that carries no session", () => {
-    expect(claudeSessionIdsFromResumeCursor(null)).toEqual([]);
-    expect(claudeSessionIdsFromResumeCursor(undefined)).toEqual([]);
-    expect(claudeSessionIdsFromResumeCursor("resume")).toEqual([]);
-    expect(claudeSessionIdsFromResumeCursor([])).toEqual([]);
-    expect(claudeSessionIdsFromResumeCursor({ turnCount: 3 })).toEqual([]);
-  });
-});
-
-describe("cwdFromRuntimePayload", () => {
-  it("reads the workspace path", () => {
-    expect(cwdFromRuntimePayload({ cwd: "/srv/projects/app", model: "m" })).toBe(
-      "/srv/projects/app",
-    );
-  });
-
-  it("returns null when there is no usable path", () => {
-    expect(cwdFromRuntimePayload({ cwd: "" })).toBeNull();
-    expect(cwdFromRuntimePayload({})).toBeNull();
-    expect(cwdFromRuntimePayload(null)).toBeNull();
   });
 });
 

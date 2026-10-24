@@ -11,8 +11,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { AgentProcess, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
-import { useMemo } from "react";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import type { AgentProcessEntry } from "../components/processes/agentProcessesModel";
 import { useProjects, useThreadShells } from "./entities";
@@ -67,37 +66,33 @@ export function useAgentProcesses(): AgentProcessesView {
   const threadShells = useThreadShells();
   const projects = useProjects();
 
-  const threadsByKey = useMemo(
-    () => new Map(threadShells.map((thread) => [`${thread.environmentId}:${thread.id}`, thread])),
-    [threadShells],
+  const threadsByKey = new Map(
+    threadShells.map((thread) => [`${thread.environmentId}:${thread.id}`, thread]),
   );
-  const projectsByKey = useMemo(
-    () => new Map(projects.map((project) => [`${project.environmentId}:${project.id}`, project])),
-    [projects],
+  const projectsByKey = new Map(
+    projects.map((project) => [`${project.environmentId}:${project.id}`, project]),
   );
 
-  return useMemo(() => {
-    const entries: AgentProcessEntry[] = [];
-    const unsupportedEnvironmentIds: EnvironmentId[] = [];
-    for (const snapshot of snapshots) {
-      if (!snapshot.supported) {
-        unsupportedEnvironmentIds.push(snapshot.environmentId);
-        continue;
-      }
-      for (const process of snapshot.processes) {
-        const thread =
-          process.threadId === null
-            ? null
-            : (threadsByKey.get(`${snapshot.environmentId}:${process.threadId}`) ?? null);
-        const project =
-          thread === null
-            ? null
-            : (projectsByKey.get(`${snapshot.environmentId}:${thread.projectId}`) ?? null);
-        entries.push({ environmentId: snapshot.environmentId, process, thread, project });
-      }
+  const entries: AgentProcessEntry[] = [];
+  const unsupportedEnvironmentIds: EnvironmentId[] = [];
+  for (const snapshot of snapshots) {
+    if (!snapshot.supported) {
+      unsupportedEnvironmentIds.push(snapshot.environmentId);
+      continue;
     }
-    return { entries, unsupportedEnvironmentIds };
-  }, [projectsByKey, snapshots, threadsByKey]);
+    for (const process of snapshot.processes) {
+      const thread =
+        process.threadId === null
+          ? null
+          : (threadsByKey.get(`${snapshot.environmentId}:${process.threadId}`) ?? null);
+      const project =
+        thread === null
+          ? null
+          : (projectsByKey.get(`${snapshot.environmentId}:${thread.projectId}`) ?? null);
+      entries.push({ environmentId: snapshot.environmentId, process, thread, project });
+    }
+  }
+  return { entries, unsupportedEnvironmentIds };
 }
 
 /**
@@ -110,11 +105,9 @@ export function useThreadAgentProcesses(
   const snapshots = useAtomValue(agentProcessesAtom);
   const environmentId = target?.environmentId ?? null;
   const threadId = target?.threadId ?? null;
-  return useMemo(() => {
-    if (environmentId === null || threadId === null) return EMPTY_PROCESSES;
-    const snapshot = snapshots.find((candidate) => candidate.environmentId === environmentId);
-    if (snapshot === undefined || !snapshot.supported) return EMPTY_PROCESSES;
-    const matches = snapshot.processes.filter((process) => process.threadId === threadId);
-    return matches.length === 0 ? EMPTY_PROCESSES : matches;
-  }, [environmentId, snapshots, threadId]);
+  if (environmentId === null || threadId === null) return EMPTY_PROCESSES;
+  const snapshot = snapshots.find((candidate) => candidate.environmentId === environmentId);
+  if (snapshot === undefined || !snapshot.supported) return EMPTY_PROCESSES;
+  const matches = snapshot.processes.filter((process) => process.threadId === threadId);
+  return matches.length === 0 ? EMPTY_PROCESSES : matches;
 }

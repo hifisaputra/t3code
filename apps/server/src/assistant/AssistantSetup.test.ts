@@ -6,28 +6,31 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
   AssistantProjectConfig,
   AssistantTask,
   DeveloperAssistantError,
-  OrchestrationThreadShell,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type AssistantSetupInput,
-  type OrchestrationCommand,
+  type OrchestrationV2ServerCommand,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import { LinearApi } from "../linear/LinearApi.ts";
-import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
+import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
+import { ProjectService } from "../project/ProjectService.ts";
 import * as Settings from "../serverSettings.ts";
-import Migration from "../persistence/Migrations/052_DeveloperAssistant.ts";
-import SetupMigration from "../persistence/Migrations/053_AssistantSetup.ts";
-import UsageLimitMigration from "../persistence/Migrations/056_AssistantUsageLimit.ts";
-import RetireChatMigration from "../persistence/Migrations/057_RetireAssistantCoordinator.ts";
-import ProjectNotesMigration from "../persistence/Migrations/060_AssistantProjectNotes.ts";
+import Migration from "../persistence/ForkMigrations/003_DeveloperAssistant.ts";
+import SetupMigration from "../persistence/ForkMigrations/004_AssistantSetup.ts";
+import UsageLimitMigration from "../persistence/ForkMigrations/007_AssistantUsageLimit.ts";
+import RetireChatMigration from "../persistence/ForkMigrations/008_RetireAssistantCoordinator.ts";
+import ProjectNotesMigration from "../persistence/ForkMigrations/011_AssistantProjectNotes.ts";
+import { make as makeAssistantThreads } from "./assistantThreads.ts";
 import { StagingVerifier } from "./StagingVerifier.ts";
 import { isValidBranchName, makeSetup, validateSetupPlan } from "./AssistantSetup.ts";
 
@@ -140,7 +143,6 @@ const timestamp = "2026-09-12T00:00:00.000Z";
 const isAssistantError = Schema.is(DeveloperAssistantError);
 const encodeConfig = Schema.encodeSync(Schema.fromJsonString(AssistantProjectConfig));
 const encodeTask = Schema.encodeSync(Schema.fromJsonString(AssistantTask));
-const decodeThread = Schema.decodeUnknownSync(OrchestrationThreadShell);
 const project = {
   id: ProjectId.make("project"),
   title: "Next app",
@@ -237,15 +239,22 @@ const harness = (options?: { workspaceRoot?: string; claudeHome?: string }) =>
     yield* UsageLimitMigration;
     yield* RetireChatMigration;
     yield* ProjectNotesMigration;
-    const commands: OrchestrationCommand[] = [];
+    const commands: OrchestrationV2ServerCommand[] = [];
     const seen = new Set<string>();
-    const threads = new Map<ThreadId, OrchestrationThreadShell>();
+    const threads = new Map<ThreadId, OrchestrationV2ThreadShell>();
     const busy = new Set<ThreadId>();
     const dependencies = Layer.mergeAll(
       Settings.layerTest({
         linear: { agentAccess: true, apiKey: "test-key" },
         ...(options?.claudeHome
-          ? { providers: { claudeAgent: { homePath: options.claudeHome } } }
+          ? {
+              providerInstances: {
+                [ProviderInstanceId.make("claudeAgent")]: {
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  config: { homePath: options.claudeHome },
+                },
+              },
+            }
           : {}),
       }),
       Layer.mock(StagingVerifier)({ repositoryKey: () => Effect.succeed("/repos/app/.git") }),
@@ -256,42 +265,36 @@ const harness = (options?: { workspaceRoot?: string; claudeHome?: string }) =>
           workspace: { id: "workspace", name: "Workspace", urlKey: "workspace" },
         }),
       }),
-      Layer.mock(ProjectionSnapshotQuery)({
-        getProjectShellById: () => Effect.succeed(Option.some(shell)),
-        getThreadShellById: (id) => Effect.succeed(Option.fromNullishOr(threads.get(id))),
+      Layer.mock(ProjectService)({
+        getShell: () => Effect.succeed(Option.some(shell)),
       }),
-      Layer.mock(OrchestrationEngineService)({
+      Layer.mock(ThreadManagementService)({
+        getThreadShell: (id) => Effect.succeed(threads.get(id) ?? null),
         dispatch: (command) =>
           Effect.sync(() => {
             if (!seen.has(command.commandId)) {
               seen.add(command.commandId);
               commands.push(command);
               if (command.type === "thread.create")
-                threads.set(
-                  command.threadId,
-                  decodeThread({
-                    ...command,
-                    id: command.threadId,
-                    updatedAt: timestamp,
-                    latestTurn: null,
-                    session: null,
-                    latestUserMessageAt: null,
-                    hasPendingApprovals: false,
-                    hasPendingUserInput: false,
-                    hasActionableProposedPlan: false,
-                  }),
-                );
+                threads.set(command.threadId, {
+                  ...liveThreadShell(command.threadId, { activeRunId: null }),
+                  status: "idle",
+                  projectId: command.projectId,
+                  title: command.title,
+                });
             }
-            return { sequence: commands.length };
+            return { sequence: commands.length, storedEvents: [] };
           }),
       }),
     );
+    const assistantThreads = yield* makeAssistantThreads.pipe(Effect.provide(dependencies));
     const setup = yield* makeSetup({
+      threads: assistantThreads,
       changed: Effect.void,
       threadBusy: (thread) => Effect.succeed(busy.has(thread.id)),
       configure: () => Effect.void,
-    }).pipe(Effect.provide(dependencies));
-    const starts = () => commands.filter((c) => c.type === "thread.turn.start");
+    }).pipe(Effect.provide(Layer.merge(dependencies, NodeServices.layer)));
+    const starts = () => commands.filter((c) => c.type === "message.dispatch");
     return { setup, busy, starts };
   });
 const database = () => NodeSqliteClient.layer({ filename: ":memory:" });
@@ -315,7 +318,7 @@ it.effect("a reopened setup takes the person's new choices and says what changed
     const starts = h.starts();
     assert.lengthOf(starts, 2);
     assert.include(
-      starts[1]?.type === "thread.turn.start" ? starts[1].message.text : "",
+      starts[1]?.type === "message.dispatch" ? starts[1].text : "",
       "Use the new staging project instead.",
     );
     // Reopening without changing anything still reuses the running turn.
