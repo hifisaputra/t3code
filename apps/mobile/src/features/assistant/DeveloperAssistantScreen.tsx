@@ -1,4 +1,3 @@
-import { useNavigation } from "@react-navigation/native";
 import {
   squashAtomCommandFailure,
   type AtomCommandResult,
@@ -18,6 +17,7 @@ import { useProjects } from "../../state/entities";
 import { developerAssistant } from "../../state/developerAssistant";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
 
 function Action({
   title,
@@ -65,7 +65,7 @@ export function DeveloperAssistantScreen() {
 
 function EnvironmentBoard({ environment }: { environment: EnvironmentPresentation }) {
   const environmentId = environment.environmentId;
-  const navigation = useNavigation();
+  const selectDetail = useSelectWorkspaceDetail();
   const projects = useProjects();
   const board = useEnvironmentQuery(developerAssistant.board({ environmentId, input: {} }));
   const control = useAtomCommand(developerAssistant.control);
@@ -77,7 +77,7 @@ function EnvironmentBoard({ environment }: { environment: EnvironmentPresentatio
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const openThread = (threadId: ThreadId) =>
-    navigation.navigate("Thread", { environmentId, threadId });
+    selectDetail({ name: "Thread", params: { environmentId, threadId } });
   const act = async (action: () => Promise<AtomCommandResult<AssistantBoard, unknown>>) => {
     setBusy(true);
     setError(null);

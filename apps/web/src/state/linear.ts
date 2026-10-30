@@ -25,12 +25,8 @@ export function useAnyEnvironmentHasLinearKey(): boolean {
 }
 
 /**
- * The last issue anybody read, kept per identifier outside React.
- *
- * A sidebar row that scrolls offscreen drops its live query, and the chip
- * would blink out with it. Mirrors `useSharedPullRequestSummary`: the shared
- * atom is the external system, so the row can publish into it during layout
- * without a render of its own.
+ * The last issue read per identifier, kept outside React so a chip survives its row's query
+ * dropping offscreen. Like `useSharedPullRequestSummary`, rows publish into it during layout.
  */
 const observedLinearIssueAtom = Atom.family((key: string) =>
   Atom.make<LinearIssueDetail | null>(null).pipe(
@@ -48,6 +44,7 @@ export function useSharedLinearIssue(
     environmentId === null || identifier === null ? "none" : `${environmentId}:${identifier}`;
   const atom = observedLinearIssueAtom(key);
   const observed = useAtomValue(atom);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- caches the latest issue in the atom registry so it outlives the query.
   useLayoutEffect(() => {
     if (environmentId === null || current === null) return;
     appAtomRegistry.modify(atom, (previous) =>

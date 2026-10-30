@@ -1,15 +1,8 @@
 import { LinearDelegationSettingsSection } from "./LinearDelegationSettings";
 /**
- * The Linear connection.
- *
- * The API key belongs to the server this client is anchored to: it is sent
- * once and lives in that server's secret store, and every later read hands the
- * client `SERVER_SECRET_REDACTED_MARKER` instead. So the key row never has a
- * value to render — it reads the marker as "a key is saved" and offers to
- * replace or remove it. Everything the rows say about Linear itself comes from
- * `linear.status`, which the server answers with the key it holds.
- *
- * @module LinearSettings
+ * The Linear connection. The key lives in the anchored server's secret store and reads back
+ * as `SERVER_SECRET_REDACTED_MARKER`, so the key row shows "saved" with replace/remove.
+ * Everything else comes from `linear.status`, answered with the key the server holds.
  */
 import {
   LINEAR_DEFAULT_BRANCH_PREFIXES,
@@ -64,6 +57,7 @@ export function LinearSettingsSection() {
   // saying it has the new one, which is the moment the answer can differ.
   const refreshStatus = status.refresh;
   const checkedKey = useRef(storedKey);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- re-checks the server's connection status once it reports the new key.
   useEffect(() => {
     if (checkedKey.current === storedKey) return;
     checkedKey.current = storedKey;
@@ -595,12 +589,9 @@ function LinearBranchPrefixesSetting({
 }
 
 /**
- * Which prefix a label picks.
- *
- * Like the repository rows, the whole list is written back on every edit, and
- * a row's position is its only identity. A rule whose prefix has since left
- * the prefixes list still offers its own, so editing the list never silently
- * rewrites a rule.
+ * Which prefix a label picks. The whole list is written back on every edit and position is
+ * a row's identity; a rule whose prefix left the list still offers it, so edits never
+ * silently rewrite a rule.
  */
 function LinearLabelPrefixesSetting({
   prefixes,

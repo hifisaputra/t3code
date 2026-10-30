@@ -20,10 +20,9 @@ export const googleCalendarCallbackLayer = Layer.unwrap(
             Effect.as(
               "Google Calendar connected. Return to T3 and refresh the connection in Settings.",
             ),
-            Effect.catch(() =>
-              Effect.succeed(
+            Effect.orElseSucceed(
+              () =>
                 "Google Calendar could not connect. Return to T3 Settings and start the connection again.",
-              ),
             ),
           );
         return HttpServerResponse.text(result, {

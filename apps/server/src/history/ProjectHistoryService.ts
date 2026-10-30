@@ -1,15 +1,7 @@
 /**
- * ProjectHistoryService - answers "what did I work on each day" for one project.
- *
- * The read is two queries over the v2 run projection (a run that started is a
- * turn): every run whose request could land inside the requested window, then
- * one lifetime aggregate for the threads that actually appear. Turn timing from
- * before the v2 migration is not available: upstream drops `projection_turns`.
- * Day bucketing happens in TypeScript because the client's IANA zone is the
- * only thing that can decide which calendar day a turn belongs to, and SQLite
- * cannot resolve zone rules.
- *
- * @module ProjectHistoryService
+ * Answers "what did I work on each day" for one project from the v2 run projection;
+ * turns from before the v2 migration are gone. Days are bucketed in TypeScript
+ * because only the client's IANA zone decides a turn's day and SQLite has no zone rules.
  */
 import {
   IsoDateTime,
@@ -285,23 +277,6 @@ export class ProjectHistoryService extends Context.Service<
     ) => Effect.Effect<ProjectHistory, ProjectHistoryReadError>;
   }
 >()("t3/history/ProjectHistoryService") {}
-
-/** Empty history, for suites that only need the RPC surface to resolve. */
-export const layerTest = Layer.succeed(
-  ProjectHistoryService,
-  ProjectHistoryService.of({
-    readProjectHistory: (input) =>
-      Effect.succeed({
-        projectId: input.projectId,
-        timeZone: input.timeZone,
-        sinceDay: input.sinceDay,
-        untilDay: input.untilDay,
-        readAt: "1970-01-01T00:00:00.000Z",
-        days: [],
-        threads: [],
-      }),
-  }),
-);
 
 const readFailed = (detail: string) => (cause: Cause.Cause<unknown>) =>
   new ProjectHistoryReadError({ reason: "readFailed", detail, cause: Cause.squash(cause) });

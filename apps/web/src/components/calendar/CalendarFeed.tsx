@@ -33,9 +33,11 @@ export function CalendarFeed({
     JSON.stringify([environmentId, calendarId, start, end]),
   );
   const refresh = query.refresh;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the parent's refresh key asks the external query to refetch.
   useEffect(() => {
     if (refreshKey) refresh();
   }, [refreshKey, refresh]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- publishes this feed's result into the parent's registry entry while mounted.
   useEffect(() => {
     report(JSON.stringify([calendarId, start, end]), {
       refreshedAt,

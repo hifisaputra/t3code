@@ -76,13 +76,14 @@ export const layer = Layer.effect(
     const { stateDir } = yield* ServerConfig;
     const root = (taskId: string) => path.join(stateDir, "assistant-evidence", taskId);
     return {
-      directory: (taskId) =>
+      directory: Effect.fn("AssistantEvidence.directory")((taskId: string) =>
         fs.makeDirectory(root(taskId), { recursive: true }).pipe(
           Effect.as(root(taskId)),
           Effect.mapError(
             () => new DeveloperAssistantError({ detail: "Could not create the evidence folder." }),
           ),
         ),
+      ),
       read: Effect.fn("AssistantEvidence.read")(function* (taskId, file, kind) {
         const texts = kinds[kind];
         const unreadable = () => new DeveloperAssistantError({ detail: texts.unreadable(file) });

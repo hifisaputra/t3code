@@ -124,11 +124,7 @@ async function loadPackageScriptSuggestions(
   return suggestions;
 }
 
-/**
- * Adds, edits, and deletes the active project's scripts. A script's keyboard
- * shortcut lives in the environment's keybindings, so each change writes the
- * script settings first and then reconciles the shortcut.
- */
+/** Write script settings before reconciling shortcuts in environment keybindings. */
 export function useProjectScriptEditing(input: {
   readonly environmentId: EnvironmentId;
   readonly project: EnvironmentProject | null;

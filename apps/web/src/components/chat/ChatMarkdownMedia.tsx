@@ -5,8 +5,6 @@ import { TriangleAlertIcon } from "lucide-react";
 import {
   createContext,
   memo,
-  useEffect,
-  useRef,
   useState,
   type ComponentProps,
   type CSSProperties,
@@ -18,7 +16,6 @@ import { useAssetUrlRefresh, useAssetUrlState } from "../../assets/assetUrls";
 import { useBatchedAssetUrlState } from "../../assets/assetUrlBatch";
 import { cn } from "../../lib/utils";
 import { useRightPanelStore } from "../../rightPanelStore";
-import { usePreparedConnection } from "../../state/session";
 import { MediaActions, type MediaActionSource } from "../media/MediaActions";
 import { MediaVideoPlayer } from "../media/MediaVideoPlayer";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
@@ -102,10 +99,15 @@ function expandableMarkdownImageProps(
 
 function ChatMarkdownMediaUnavailableLabel(props: {
   readonly alt: string;
-  readonly kind?: "image" | "video" | undefined;
+  readonly kind?: "image" | "video" | "audio" | undefined;
   readonly detail?: string | undefined;
 }) {
-  const label = props.kind === "video" ? "Video unavailable" : "Image unavailable";
+  const label =
+    props.kind === "audio"
+      ? "Audio unavailable"
+      : props.kind === "video"
+        ? "Video unavailable"
+        : "Image unavailable";
   return (
     <span data-thread-find-ignore className="inline-flex items-center gap-1.5">
       <TriangleAlertIcon aria-hidden className="size-3.5 shrink-0" />
@@ -117,7 +119,7 @@ function ChatMarkdownMediaUnavailableLabel(props: {
 export function ChatMarkdownImageFallback(props: {
   readonly alt: string;
   readonly copyMarkdown?: string | undefined;
-  readonly kind?: "image" | "video";
+  readonly kind?: "image" | "video" | "audio";
   readonly actionsSource?: MediaActionSource | undefined;
   readonly detail?: string | undefined;
 }) {
@@ -203,6 +205,7 @@ export function ChatMarkdownImage(props: {
           alt={props.alt}
           data-markdown-copy={props.copyMarkdown}
           decoding="async"
+          loading="lazy"
           draggable={false}
           className={cn(
             CHAT_MARKDOWN_IMAGE_SIZE_CLASS_NAME,
@@ -259,6 +262,7 @@ export function ChatMarkdownImage(props: {
             src={src}
             alt={props.alt}
             decoding="async"
+            loading="lazy"
             draggable={false}
             className="invisible absolute inset-0 size-full"
             {...imageEvents(src)}
@@ -335,54 +339,27 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
   readonly workspaceMutationId?: string | null | undefined;
   readonly onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
 }) {
+  const resource = props.resource;
+  // A workspace file whose bytes can change under the same path is read per revision,
+  // and each new revision mints a fresh URL.
+  const revision =
+    props.workspaceMutationId !== undefined &&
+    props.kind !== "video" &&
+    (resource._tag === "media-file" || resource._tag === "workspace-file")
+      ? props.workspaceMutationId
+      : undefined;
   // Prefer the URL an enclosing AssetUrlBatchProvider minted with the rest of the
   // message's images: tens of images then cost one request rather than one each. Video
-  // keeps its own, since its retry re-mints a single resource; so does an image once it
-  // re-mints after a workspace change, which a shared batch cannot do.
-  const batchedAssetUrl = useBatchedAssetUrlState(props.resource);
-  const [ownsAssetUrl, setOwnsAssetUrl] = useState(false);
-  const fromBatch = batchedAssetUrl !== undefined && props.kind !== "video" && !ownsAssetUrl;
-  const ownAssetUrl = useAssetUrlState(props.environmentId, fromBatch ? null : props.resource);
+  // keeps its own, since its retry re-mints a single resource; so does an image once its
+  // revision changes after mount, which a shared batch cannot re-mint.
+  const batchedAssetUrl = useBatchedAssetUrlState(resource);
+  const [batchRevision] = useState(revision);
+  const [leftBatch, setLeftBatch] = useState(false);
+  if (!leftBatch && revision !== batchRevision) setLeftBatch(true);
+  const fromBatch = batchedAssetUrl !== undefined && props.kind !== "video" && !leftBatch;
+  const ownAssetUrl = useAssetUrlState(props.environmentId, fromBatch ? null : resource, revision);
   const assetUrl = fromBatch ? batchedAssetUrl : ownAssetUrl;
-  const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, props.resource);
-  const connectionReady = usePreparedConnection(props.environmentId)._tag === "Some";
-  const resource = props.resource;
-  const refreshToken = JSON.stringify([props.environmentId, resource, props.workspaceMutationId]);
-  const handledRefreshToken = useRef<string | null | undefined>(undefined);
-  const assetLoading = assetUrl._tag === "Loading" || assetUrl.waiting === true;
-  useEffect(() => {
-    if (!connectionReady) {
-      handledRefreshToken.current = null;
-      return;
-    }
-    if (
-      props.workspaceMutationId === undefined ||
-      props.kind === "video" ||
-      (resource._tag !== "media-file" && resource._tag !== "workspace-file") ||
-      handledRefreshToken.current === refreshToken
-    ) {
-      return;
-    }
-    if (assetLoading) {
-      // Only the initial mount shares a pending request; edits and reconnects need a new one.
-      if (handledRefreshToken.current === undefined) {
-        handledRefreshToken.current = refreshToken;
-      }
-      return;
-    }
-    handledRefreshToken.current = refreshToken;
-    // oxlint-disable-next-line react/set-state-in-effect -- The re-mint is a server request, and the image leaves the shared batch to own its result.
-    setOwnsAssetUrl(true);
-    void refreshAssetUrl().catch(() => undefined);
-  }, [
-    assetLoading,
-    connectionReady,
-    props.kind,
-    props.workspaceMutationId,
-    refreshAssetUrl,
-    refreshToken,
-    resource._tag,
-  ]);
+  const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, resource);
   const path =
     resource._tag === "media-file"
       ? resource.path

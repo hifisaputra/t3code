@@ -87,12 +87,9 @@ export const make = Effect.gen(function* () {
   });
   const authorize = Effect.gen(function* () {
     const c = yield* config;
-    let origin: URL;
-    try {
-      origin = new URL(c.publicUrl);
-    } catch {
+    const origin = URL.canParse(c.publicUrl) ? new URL(c.publicUrl) : undefined;
+    if (origin === undefined)
       return yield* failure("Set the public HTTPS URL of this T3 environment.");
-    }
     if (
       origin.protocol !== "https:" ||
       origin.username ||

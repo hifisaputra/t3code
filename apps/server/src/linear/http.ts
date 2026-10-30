@@ -25,12 +25,10 @@ export const linearRoutes = Layer.unwrap(
                 status: 200,
                 text: "T3 Code connected to Linear. Return to T3 Settings and refresh the connection.",
               }),
-              Effect.catch(() =>
-                Effect.succeed({
-                  status: 400,
-                  text: "Could not connect to Linear. Return to T3 Settings and start again.",
-                }),
-              ),
+              Effect.orElseSucceed(() => ({
+                status: 400,
+                text: "Could not connect to Linear. Return to T3 Settings and start again.",
+              })),
             );
           return HttpServerResponse.text(result.text, {
             status: result.status,
@@ -63,7 +61,7 @@ export const linearRoutes = Layer.unwrap(
             )
             .pipe(
               Effect.as(HttpServerResponse.empty({ status: 200 })),
-              Effect.catch(() => Effect.succeed(HttpServerResponse.empty({ status: 400 }))),
+              Effect.orElseSucceed(() => HttpServerResponse.empty({ status: 400 })),
             );
         }),
       ),

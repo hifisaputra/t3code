@@ -7,11 +7,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 
-/**
- * Bumped whenever the shape of {@link UsageSummary} changes incompatibly.
- * Adding providers or other array-element variants is additive: unknown entries
- * are skipped on decode and do not require a version bump.
- */
+/** Bump for incompatible UsageSummary changes; skipped unknown array variants need no bump. */
 export const USAGE_CONTRACT_VERSION = 6 as const;
 
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
@@ -41,12 +37,7 @@ export type UsageResolution = typeof UsageResolution.Type;
 export const UsageCostSource = Schema.Literals(["providerReported", "modelPriced", "unpriced"]);
 export type UsageCostSource = typeof UsageCostSource.Type;
 
-/**
- * `cachedInputTokens` and `cacheCreationTokens` are disjoint from
- * `uncachedInputTokens`; summing all three gives total input. `reasoningTokens`
- * is a *subset* of `outputTokens` (Codex reports it that way, and Anthropic
- * folds thinking into output), so it must never be added on top.
- */
+/** Sum uncached input, cache reads, and cache writes for input totals; reasoning is already included in output. */
 export const UsageTokenTotals = Schema.Struct({
   uncachedInputTokens: NonNegativeInt,
   cachedInputTokens: NonNegativeInt,
@@ -88,12 +79,7 @@ export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
   resolvedHomePath: TrimmedNonEmptyString,
-  /**
-   * Filesystem identity of the transcript directory, as `device:inode`.
-   * Hostname and path alone are not enough: every Mac in a fleet resolves
-   * `/Users/<user>/.claude`, so two machines that happen to share a hostname
-   * would look like one source and have their usage silently dropped.
-   */
+  /** Transcript directory device:inode distinguishes machines sharing a hostname and home path. */
   volumeId: Schema.String,
 });
 export type UsageSourceFingerprint = typeof UsageSourceFingerprint.Type;
@@ -107,19 +93,11 @@ export const UsageSource = Schema.Struct({
   scannedFiles: NonNegativeInt,
   skippedFiles: NonNegativeInt,
   malformedRecords: NonNegativeInt,
-  /**
-   * Buckets also carry per-bucket session counts, but a session spans days and
-   * models, so summing those overcounts; this is the figure clients should
-   * total.
-   */
+  /** Total this count; bucket counts double-count sessions spanning days or models. */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
   action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
-  /**
-   * Present when this source answered from its cache while a slow refresh (an
-   * account API, for example) runs. Repeat the request with `awaitRefresh` to
-   * get the refreshed source.
-   */
+  /** Cached response during refresh; repeat with awaitRefresh for fresh data. */
   refreshing: Schema.optionalKey(Schema.Literal(true)),
 });
 export type UsageSource = typeof UsageSource.Type;
@@ -138,10 +116,7 @@ export type UsagePricing = typeof UsagePricing.Type;
 export const UsageSummaryInput = Schema.Struct({
   sinceDay: UsageDay,
   untilDay: UsageDay,
-  /**
-   * IANA zone the client wants days bucketed in. An offset would be wrong for
-   * any window that crosses a DST boundary.
-   */
+  /** IANA bucketing zone; offsets fail across DST boundaries. */
   timeZone: TrimmedNonEmptyString,
   resolution: Schema.optional(UsageResolution),
   sinceTime: Schema.optional(TrimmedNonEmptyString),
@@ -174,12 +149,9 @@ export class UsageReadError extends Schema.TaggedError<UsageReadError>()("UsageR
 }
 
 /**
- * Where a thread's figures came from.
- *
- * `recorded` is usage T3 Code captured as the turns ran and keeps for the life
- * of the thread. `transcript` is read back from the provider CLI's own session
- * files, which are exact but only while the provider keeps them — Claude prunes
- * old transcripts, so an old thread reports `unavailable` rather than zero.
+ * Where a thread's figures came from: `recorded` was captured as turns ran and lasts the
+ * thread's life; `transcript` is read from provider session files, which Claude prunes,
+ * so an old thread reports `unavailable` rather than zero.
  */
 export const ThreadUsageSource = Schema.Literals(["recorded", "transcript", "unavailable"]);
 export type ThreadUsageSource = typeof ThreadUsageSource.Type;
@@ -214,12 +186,8 @@ export const ThreadUsageSlice = Schema.Struct({
 export type ThreadUsageSlice = typeof ThreadUsageSlice.Type;
 
 /**
- * One thread's token and cost breakdown, including everything it delegated to
- * subagents.
- *
- * Subagent work is counted because the provider stamps a subagent's records
- * with its parent session, so delegated spend lands on the thread that caused
- * it rather than vanishing.
+ * One thread's token and cost breakdown, including subagents: the provider stamps their
+ * records with the parent session, so delegated spend lands on the thread that caused it.
  */
 export const ThreadUsageStats = Schema.Struct({
   threadId: ThreadId,

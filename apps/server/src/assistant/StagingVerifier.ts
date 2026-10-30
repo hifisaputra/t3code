@@ -174,7 +174,9 @@ export const layer = Layer.effect(
       return yield* git(worktreePath, ["rev-parse", "HEAD"]);
     });
     return {
-      repositoryKey: (cwd) => git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+      repositoryKey: Effect.fn("StagingVerifier.repositoryKey")((cwd: string) =>
+        git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+      ),
       revision,
       isMerged: Effect.fn("Assistant.isMerged")(function* (input) {
         yield* fetchBase(input.cwd, input.baseBranch);

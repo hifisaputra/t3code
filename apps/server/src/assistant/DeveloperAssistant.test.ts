@@ -6,7 +6,6 @@ import * as Stream from "effect/Stream";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
@@ -80,6 +79,7 @@ type ThreadShell = OrchestrationV2ThreadShell;
 type ProviderInstance = NonNullable<
   Effect.Success<ReturnType<ProviderInstanceRegistry["Service"]["getInstance"]>>
 >;
+const isLinearOperationError = Schema.is(LinearOperationError);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const timestamp = "2026-09-12T00:00:00.000Z";
 const at = DateTime.makeUnsafe(timestamp);
@@ -430,7 +430,7 @@ function harness() {
         ),
     }),
     Layer.mock(ProjectService)({
-      getShell: () => Effect.succeed(Option.some(project)),
+      getShell: () => Effect.succeedSome(project),
       listShells: () => Effect.succeed([project]),
     }),
     Layer.mock(ThreadManagementService)({
@@ -2769,7 +2769,7 @@ it.effect("a review made while Linear is being read is not overwritten by the sy
           action: "request-changes",
           feedback: "The button is still grey.",
         });
-      }).pipe(Effect.catch(() => Effect.void)),
+      }).pipe(Effect.ignore),
     );
     yield* service.scan();
     const reviewed = yield* taskById(service, task.id);
@@ -4741,7 +4741,7 @@ it.effect("delegating an issue waiting for the person's review without a note sa
     const error = yield* delegate(h, first.issue.id, "delegated").pipe(Effect.flip);
     assert.instanceOf(error, LinearOperationError);
     assert.equal(
-      Schema.is(LinearOperationError)(error) ? error.detail : "",
+      isLinearOperationError(error) ? error.detail : "",
       "This issue is waiting for the person's review. Say what should change to give it to a new team, or move it back in Linear.",
     );
     assert.lengthOf(updatesOn(h, "delegated"), 0);

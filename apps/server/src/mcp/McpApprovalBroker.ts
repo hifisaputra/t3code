@@ -50,15 +50,9 @@ export interface McpApprovalResponse {
 }
 
 /**
- * Raises approvals for the server's own tools and answers them from the chat
- * UI. It speaks `request.opened`/`request.resolved` runtime events;
- * `orchestration-v2/IntegrationApprovalReactor` records them as `integration`
- * runtime requests with an `approval_request` turn item, so an integration
- * write gets the composer card, the work log entry and the mobile surface.
- *
- * The provider adapters never see these requests: orchestration settles
- * `runtime-request.respond` for them itself and the reactor passes the
- * decision to `respond`.
+ * Raises approvals for the server's own tools. `IntegrationApprovalReactor` records its
+ * `request.opened`/`request.resolved` events as `integration` runtime requests and passes
+ * decisions back to `respond`; provider adapters never see them.
  */
 export class McpApprovalBroker extends Context.Service<
   McpApprovalBroker,
@@ -78,10 +72,8 @@ interface PendingApproval {
 }
 
 /**
- * An unanswered request cannot hold the MCP request fiber open forever. The
- * adapters give a `t3-code` call longer than this (`MCP_TOOL_CALL_TIMEOUT_MS`),
- * so this is what expires first and the agent is told the person did not
- * answer, rather than its own client aborting into an opaque timeout.
+ * Adapters give a `t3-code` call far longer than this, so this expires first and
+ * the agent is told the person did not answer instead of hitting an opaque timeout.
  */
 const DEFAULT_TIMEOUT = Duration.millis(INTEGRATION_APPROVAL_TIMEOUT_MS);
 

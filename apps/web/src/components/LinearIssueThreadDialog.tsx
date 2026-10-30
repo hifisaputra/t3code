@@ -44,10 +44,8 @@ import { formatLinearIssueKickoff, hasLinearWorkSkill } from "~/linearIssueCompo
 import { parseLinearIssueReference } from "~/linearIssueReference";
 import { getCustomModelOptionsByInstance } from "~/modelSelection";
 import {
-  applyProviderInstanceSettings,
-  deriveProviderInstanceEntries,
   resolveDefaultProviderModelSelection,
-  sortProviderInstanceEntries,
+  providerInstanceEntriesFor,
 } from "~/providerInstances";
 import { useEnvironmentProviders, useEnvironments } from "~/state/environments";
 import { linearEnvironment } from "~/state/linear";
@@ -122,35 +120,10 @@ const DEFAULT_BRANCH_NAMING: LinearBranchNaming = {
 };
 
 /**
- * Start a thread from a Linear issue.
- *
- * Two panes: the left one picks an issue, by reference or from the list of
- * mine, and the right one reads it, description included, so what the thread
- * is for is on screen before it is started. Under the reader sits the launch
- * panel: which checkout the thread starts in, whether it gets its own
- * worktree, what the branch is called, which model runs it, and an optional
- * note for the agent.
- *
- * Starting is one step. The dialog checks the branch out, then creates the
- * thread and its first turn in a single command, so there is no draft to
- * press Enter in: the kickoff prompt that used to be seeded into the composer
- * is sent as the first message. The caller only has to show the thread.
- *
- * The branch row follows the `linear.branchNaming` setting: under Linear's own
- * format there is nothing to decide and the issue's `branchName` is shown as a
- * fact, while the repository convention offers the prefix and lets the whole
- * name be typed over. Either way it has to carry the issue identifier, which
- * is what makes Linear recognise the pull request later.
- *
- * That row can also decline the branch entirely: "Current branch" starts the
- * thread on whatever the checkout is already on, for the fix that belongs on
- * the branch in progress rather than on one of its own. Nothing is created or
- * switched, so it rules out a worktree, and the pull request has to be linked
- * from Linear by hand.
- *
- * The checkout is not the caller's either: the issue's team or Linear project
- * decides it through the repository mapping, and the caller's project is only
- * the fallback.
+ * Start a thread from a Linear issue: pick and read it, then check its branch out and
+ * create the thread with its first turn in one step. The branch must carry the issue
+ * identifier so Linear links the pull request; "Current branch" skips it. The checkout
+ * comes from the repository mapping, with the caller's project as fallback.
  */
 export function LinearIssueThreadDialog({
   open,
@@ -211,6 +184,7 @@ export function LinearIssueThreadDialog({
     (debouncerState) => ({ isPending: debouncerState.isPending }),
   );
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- focuses the DOM input once the opening dialog has laid out, and cancels the pending frame on close
   useEffect(() => {
     if (!open) return;
     const frame = window.requestAnimationFrame(() => {
@@ -279,11 +253,9 @@ export function LinearIssueThreadDialog({
   const prepareIssueThreadAction = usePrepareIssueThreadAction(scope);
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
 
-  // Worktree unless the project, or the server, says threads start locally —
-  // or unless no branch is being cut, since git will not put a second worktree
-  // on the branch the root checkout already holds.
-  // The shared resolver folds the project override over the environment
-  // setting and fills the built-in default, so an unset tier never leaks null.
+  // Worktree unless the project or server says threads start locally, or no branch
+  // is being cut: git will not put a second worktree on the root checkout's branch.
+  // The shared resolver folds the project override over the environment setting.
   const defaultThreadEnvMode = resolveProjectSettings(
     serverSettings,
     targetProject?.id ?? null,
@@ -307,12 +279,10 @@ export function LinearIssueThreadDialog({
   const providers = providersByEnvironment.get(environmentId) ?? EMPTY_SERVER_PROVIDERS;
   const clientSettings = useClientSettings();
   const unifiedSettings = { ...serverSettings, ...clientSettings };
-  const providerEntries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(
-      deriveProviderInstanceEntries(providers),
-      unifiedSettings,
-      targetProject?.id ?? null,
-    ),
+  const providerEntries = providerInstanceEntriesFor(
+    providers,
+    unifiedSettings,
+    targetProject?.id ?? null,
   );
   const stickyProvider = useComposerDraftStore((store) => store.stickyActiveProvider);
   const stickySelection = useComposerDraftStore((store) =>

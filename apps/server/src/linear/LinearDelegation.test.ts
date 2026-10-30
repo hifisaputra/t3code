@@ -39,6 +39,7 @@ import * as Outbox from "./LinearAgentOutbox.ts";
 import Migration from "../persistence/ForkMigrations/002_LinearDelegation.ts";
 import SessionTaskMigration from "../persistence/ForkMigrations/009_LinearAgentSessionTask.ts";
 
+const isLinearOperationError = Schema.is(LinearOperationError);
 const issue: LinearIssueDetail = {
   id: "issue-1",
   identifier: "DEL-1",
@@ -152,7 +153,7 @@ function harness(twoRepos = false, allowedTeamKeys: string[] = []) {
       listShells: () => Effect.sync(() => projects),
     }),
     Layer.succeed(T3ProjectFileLoader, {
-      load: () => Effect.succeed(Option.some({ linear: { teams: ["DEL"] } })),
+      load: () => Effect.succeedSome({ linear: { teams: ["DEL"] } }),
     }),
   );
   let outbox: Outbox.LinearAgentOutbox["Service"] | undefined;
@@ -730,7 +731,7 @@ it.effect("an assistant refusing a delegated issue fails it with the reason and 
     yield* service.receive(created.body, created.signature, "d1");
     const error = yield* service.process("d1").pipe(Effect.flip);
     assert.equal(
-      Schema.is(LinearOperationError)(error) ? error.detail : "",
+      isLinearOperationError(error) ? error.detail : "",
       "This issue is waiting for the person's review.",
     );
     assert.lengthOf(h.commands, 0);

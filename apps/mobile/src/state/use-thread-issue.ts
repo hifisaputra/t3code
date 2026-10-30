@@ -65,6 +65,7 @@ export function useThreadIssue(thread: EnvironmentThreadShell): ThreadIssuePrese
     return detail === null ? undefined : presentThreadIssue(detail);
   }, [link, issue.data]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- caches the live issue in the atom registry so thread rows can read it.
   useEffect(() => {
     if (live === undefined) return;
     appAtomRegistry.modify(threadIssueSnapshotsAtom, (current) => {

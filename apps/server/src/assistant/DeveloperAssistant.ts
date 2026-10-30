@@ -21,12 +21,10 @@ import {
   AssistantDecision,
   AssistantProjectConfig,
   AssistantTask,
-  CommandId,
   DeveloperAssistantError,
   LinearIssueNotFoundError,
   LinearOperationError,
   LinearUnavailableError,
-  MessageId,
   ProjectId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ThreadId,
@@ -385,7 +383,7 @@ const DEPTH_SETTERS = {
 const USAGE_LIMIT_RETRY_MS = 20 * 60_000;
 /** The reset time can be rounded; the slack keeps the first try after it. */
 const USAGE_LIMIT_SLACK_MS = 60_000;
-export const usageLimitWaitMs = (
+const usageLimitWaitMs = (
   shell: Pick<ThreadShell, "lastErrorClass" | "usageLimitResetAt">,
   nowMs: number,
 ): number | null => {
@@ -457,7 +455,7 @@ export type AssistantWaitResult =
  * for, but at least 1, 1, 2, 2, 4, 4, 8, 8, then 15 minutes as the checks on one
  * wait add up, so its 15 checks cover about two hours rather than fifteen minutes.
  */
-export const waitMinutes = (asked: number, checksSoFar: number) =>
+const waitMinutes = (asked: number, checksSoFar: number) =>
   Math.max(asked, Math.min(15, 2 ** Math.floor(checksSoFar / 2)));
 
 export const DeveloperAssistantWorkers = Context.Reference<boolean>("t3/assistant/workers", {
@@ -622,11 +620,9 @@ export const make = Effect.gen(function* () {
     return false;
   });
   /**
-   * A thread that handed the issue on may leave background work behind: a
-   * watch loop, a dev server. That keeps it busy, and a loop that never ends
-   * would hold the team for good. Nothing of a thread that no longer holds the
-   * issue may run on in the shared worktree, so its session is released, which
-   * orphans that work. Its next turn resumes the conversation.
+   * A thread that handed the issue on may leave background work (a watch loop, a
+   * dev server) that would hold the team for good. Its session is released so
+   * nothing of it runs on in the shared worktree; its next turn resumes the conversation.
    */
   const releaseHandedOff = Effect.fn("Assistant.releaseHandedOff")(function* (t: AssistantTask) {
     if (t.stage === undefined) return;
@@ -684,13 +680,10 @@ export const make = Effect.gen(function* () {
     return rows.length > 0;
   });
   /**
-   * Park a finished thread on the Settled shelf. Settling keeps the thread in
-   * the client's live snapshot, so its conversation stays open from the
-   * assistant page, while archiving takes it out of the snapshot entirely.
-   * The decider refuses to settle a thread whose session is starting or
-   * running, one with an open approval or native question, or one with a turn
-   * just queued (OrchestrationThreadSettleBlockedError); such a thread simply
-   * stays active, which is the right answer for a thread still doing something.
+   * Park a finished thread on the Settled shelf; unlike archiving, it stays in the
+   * client snapshot so the assistant page can open it. A thread still doing something
+   * (session running, open approval or question, turn queued) is refused by the
+   * decider and simply stays active.
    */
   const settleThread = Effect.fn("Assistant.settleThread")(function* (threadId: ThreadId) {
     // The engine keeps rejected command ids, so never reuse one across attempts.
@@ -733,14 +726,9 @@ export const make = Effect.gen(function* () {
       : null;
   });
   /**
-   * A team is done: settle its threads and remove the worktree. Git keeps a
-   * worktree with uncommitted changes, and so do we.
-   * Settled rather than archived, so a finished issue's conversations stay
-   * reachable from the assistant page and from the sidebar's Settled shelf.
-   * The task's teamClosedAt says the close happened. A thread settled by
-   * someone else (the PR settlement reactor, the person) does not: its
-   * teammates may still be open. A settle that is refused leaves the team
-   * open, and the scan tries again. Callers hold the assistant lock.
+   * A team is done: settle (not archive) its threads and remove the worktree, which
+   * git keeps if it has uncommitted changes. Only teamClosedAt marks the close; a
+   * refused settle leaves the team open for the next scan. Callers hold the assistant lock.
    */
   const closeTeam = Effect.fn("Assistant.closeTeam")(function* (value: AssistantTask) {
     // Several threads can finish after a delivery; the first close is the one that counts.
@@ -1473,11 +1461,9 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * The loop. It fills the project up to the issues it works at once, each on
-   * its own team: an issue the person dispatched first, then, unless the loop
-   * is paused or set not to pick issues itself, an issue sent back for changes,
-   * then ready issues by priority, including a declined issue someone has
-   * changed since. Linear's ready issues are read at most once per pass.
+   * Fills the project up to its concurrent issues, one team each: dispatched issues
+   * first, then (unless paused or not self-picking) issues sent back for changes, then
+   * ready issues by priority, including declined ones changed since. Reads Linear once per pass.
    */
   const advance = Effect.fn("Assistant.advance")(function* (projectId: string) {
     const p = yield* project(projectId);
@@ -1554,11 +1540,9 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * The person gives an issue to the next team from the board. It goes ahead
-   * of the loop's own picks and runs while the loop is paused. Its team leader
-   * takes it or asks; it does not decline it. A note for an issue a team already
-   * has goes to that team, and a note on a delivered issue sends it back.
-   * `passed` is what became of such a note.
+   * The person dispatches an issue from the board: it jumps the loop's picks, runs
+   * while paused, and its leader takes it or asks but never declines. A note goes to
+   * the team that has the issue, or sends a delivered one back; `passed` says which.
    */
   const dispatchIssue = Effect.fn("Assistant.dispatchIssue")(function* (
     p: AwaitedProject,
@@ -1923,12 +1907,9 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * The start of a test issue: nothing in the repository changes, so no worker
-   * is briefed. T3 verifies that staging runs the team worktree's commit (fresh
-   * from origin's integration branch) and starts the tester there with the
-   * planned brief; a deploy still rolling out is watched from the scan. The run
-   * is on staging even where the project tests changes in the worktree: what is
-   * deployed is what the issue asks to test. Callers hold the assistant lock.
+   * Starts a test issue without briefing a worker. Once staging runs the worktree's commit
+   * (the scan watches a rollout) the tester starts there, even where the project tests in
+   * the worktree, since the deploy is what the issue tests. Callers hold the assistant lock.
    */
   const acceptTest = Effect.fn("Assistant.acceptTest")(function* (
     p: AwaitedProject,
@@ -2700,11 +2681,9 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * An approved commit moves on: in the worktree to the e2e check, which T3
-   * starts itself when one is planned, otherwise to the worker to merge. A
-   * commit on an issue taken without a review is approved by its passing
-   * checks. `caller` is the thread whose turn is still running, so it does not
-   * count as the team being busy. Callers hold the assistant lock.
+   * Moves an approved commit (or, without review, one whose checks pass) to the planned
+   * worktree e2e check or to the worker to merge. `caller`'s running turn does not count
+   * as the team being busy. Callers hold the assistant lock.
    */
   const approveCommit = Effect.fn("Assistant.approveCommit")(function* (
     p: AwaitedProject,
@@ -2902,13 +2881,9 @@ export const make = Effect.gen(function* () {
     return yield* verifier.revision(worker.value.worktreePath);
   });
   /**
-   * The issue is delivered: the e2e card goes on the issue, its description
-   * says what shipped, and Linear moves it to the review state for the person.
-   * Staging runs reach this from the e2e result, worktree runs from the staging
-   * deploy that follows their merge. An issue planned with no e2e test is
-   * delivered with a null result once staging verifies it. A failed staging
-   * run is delivered with `handedOn`, the team leader's account of where each
-   * failure went; its own card is already on the issue.
+   * Delivers the issue to the person's review state with its e2e card and what shipped.
+   * Reached from the e2e result (staging) or the post-merge staging deploy (worktree);
+   * no planned test means a null result. A failed staging run carries `handedOn`.
    */
   const finishDelivery = Effect.fn("Assistant.finishDelivery")(function* (
     p: AwaitedProject,
@@ -3393,9 +3368,12 @@ export const make = Effect.gen(function* () {
           : undefined;
       const e2ePlan =
         briefed && options.depth
-          ? planAtDepth(briefed, options.depth, "lead", {
-              ...(options.smokeCriteria ? { smokeCriteria: options.smokeCriteria } : {}),
-            })
+          ? planAtDepth(
+              briefed,
+              options.depth,
+              "lead",
+              options.smokeCriteria ? { smokeCriteria: options.smokeCriteria } : {},
+            )
           : briefed;
       return yield* startE2eFor(p, e2ePlan ? { ...t, e2ePlan } : t, brief);
     },
@@ -3404,12 +3382,9 @@ export const make = Effect.gen(function* () {
   );
 
   /**
-   * The change is ready to test: staging verified its merge, or, in the
-   * worktree, code review approved it. T3 starts the tester with the brief the
-   * team leader planned on taking the issue, unless the implementer reports
-   * that the work moved away from that plan or the team is not free to test;
-   * then the leader decides. `except` is the thread whose turn is ending.
-   * Callers hold the assistant lock.
+   * Starts the tester with the planned brief once staging verifies the merge (or review
+   * approves, in the worktree); if the work drifted from the plan or the team is busy, the
+   * leader decides. `except` is the thread whose turn is ending. Callers hold the assistant lock.
    */
   const autoStartE2e = Effect.fn("Assistant.autoStartE2e")(function* (
     p: AwaitedProject,
@@ -3713,13 +3688,9 @@ export const make = Effect.gen(function* () {
   );
 
   /**
-   * The team leader settled the engineering checks of a passed or partial run:
-   * the issue goes on as the run would have taken it without them, delivered
-   * with the stored result on staging, or merged in the worktree. What was
-   * settled goes on the result, and on the Linear card with the tester's report.
-   * After a failed run on staging the leader can deliver instead of a fix, once
-   * every failure is handed on outside this issue's change; `settled` then
-   * says where each went.
+   * The leader settled a run's engineering checks: the issue proceeds as if they had
+   * passed, and `settled` is recorded on the result and the Linear card. After a failed
+   * staging run it can deliver once every failure is handed on outside this change.
    */
   const deliverChecked = Effect.fn("Assistant.deliverChecked")(
     function* (caller: ThreadId, settled: string) {
@@ -4112,7 +4083,7 @@ export const make = Effect.gen(function* () {
         if (current.value.archivedAt !== null) {
           const unarchived = yield* threads.unarchive(newId(), threadId).pipe(
             Effect.as(true),
-            Effect.catch(() => Effect.succeed(false)),
+            Effect.orElseSucceed(() => false),
           );
           if (!unarchived) continue;
         }
@@ -4178,11 +4149,9 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * The worker's merge turn ended on an issue with a planned e2e test: T3
-   * watches the staging deploy itself instead of waking the team leader. The
-   * deployment CLIs are slow, so they do not run here, under the assistant lock
-   * and inside event handling: the scan's watchDeploy makes the first check and
-   * starts the tester once it verifies (in the worktree it delivers the issue).
+   * After the merge turn of an issue with a planned e2e test, T3 watches the deploy
+   * instead of waking the leader. The slow deployment CLIs never run here under the
+   * lock: the scan's watchDeploy checks and starts the tester (or delivers, in the worktree).
    */
   const watchAfterMerge = Effect.fn("Assistant.watchAfterMerge")(function* (
     t: AssistantTask,
@@ -4273,11 +4242,9 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * The provider's usage limit stops every turn on the account at once, and it
-   * lifts by itself. The project waits for the reset instead of blocking the
-   * issue or stopping the loop: nothing is sent to its threads until then, and
-   * the thread that was stopped is told to continue. Nothing is held for a
-   * stopped project or a thread whose issue is no longer active.
+   * A provider usage limit stops every turn on the account and lifts by itself, so the
+   * project holds its threads until the reset and then tells the stopped one to continue.
+   * Nothing is held for a stopped project or an issue that is no longer active.
    */
   const holdForUsageLimit = Effect.fn("Assistant.holdForUsageLimit")(function* (
     projectId: string,
@@ -4838,7 +4805,11 @@ export const make = Effect.gen(function* () {
         Effect.catch((error) =>
           Effect.logWarning("Developer assistant issue scan will retry", { error }),
         ),
-        Effect.andThen(Effect.raceFirst(Effect.sleep("60 seconds"), Queue.take(rescan))),
+        Effect.andThen(
+          Queue.take(rescan).pipe(
+            Effect.timeoutOrElse({ duration: "60 seconds", orElse: () => Effect.void }),
+          ),
+        ),
         Effect.forever,
       ),
     ),

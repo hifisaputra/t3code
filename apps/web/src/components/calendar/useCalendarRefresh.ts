@@ -8,10 +8,12 @@ export function useCalendarRefresh<A>(
   key: string,
 ) {
   const latest = useRef(query);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the refresh timer's handle on the latest query.
   useEffect(() => {
     latest.current = query;
   }, [query]);
   const [success, setSuccess] = useState<{ key: string; time: number } | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- stamps the wall-clock time an external query last succeeded.
   useEffect(() => {
     if (enabled && query.data !== null && !query.isPending && !query.error) {
       // Record a successful external query result, retaining its time through failures.
@@ -19,6 +21,7 @@ export function useCalendarRefresh<A>(
       setSuccess({ key, time: Date.now() });
     }
   }, [enabled, key, query.data, query.isPending, query.error]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns the refresh interval and focus/online listeners while enabled.
   useEffect(() => {
     if (!enabled) return;
     return watchCalendarRefresh(
@@ -31,6 +34,7 @@ export function useCalendarRefresh<A>(
 
 export function useCalendarNow() {
   const [now, setNow] = useState(Date.now);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- owns the clock interval and visibility listener while mounted.
   useEffect(() => {
     const tick = () => {
       if (document.visibilityState !== "hidden") setNow(Date.now());

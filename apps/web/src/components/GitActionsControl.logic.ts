@@ -360,10 +360,7 @@ export function resolveDefaultBranchActionDialogCopy(input: {
   };
 }
 
-/**
- * Why the default-ref dialog cannot check out a feature branch, or null when it can.
- * The server names that branch from the uncommitted changes, so a clean tree cannot use it.
- */
+/** Clean trees cannot create feature branches because the server derives names from uncommitted changes. */
 export function resolveFeatureBranchUnavailableReason(input: {
   branchName: string;
   hasWorkingTreeChanges: boolean;
@@ -423,5 +420,3 @@ export function resolveLiveThreadBranchUpdate(input: {
     branch: input.gitStatus.refName,
   };
 }
-
-export { resolveAutoFeatureBranchName } from "@t3tools/shared/git";

@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - webhook signatures need a synchronous HMAC and timing-safe compare.
 import { forkParked } from "../serverActivation.ts";
 import * as NodeCrypto from "node:crypto";
-import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -97,16 +96,6 @@ const decodeQuestion = Schema.decodeUnknownEffect(Schema.fromJsonString(Question
 const encodeGuidance = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeEnvelope = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ type: Schema.String, webhookTimestamp: Schema.Number })),
-);
-const decodeResolvedRequest = Schema.decodeUnknownEffect(
-  Schema.Struct({ requestId: Schema.String }),
-);
-const decodeRequestedInput = Schema.decodeUnknownEffect(
-  Schema.Struct({
-    requestId: Schema.String,
-    questions: Schema.optional(Schema.Array(UserInputQuestion)),
-    detail: Schema.optional(Schema.String),
-  }),
 );
 
 function validLinearSignature(body: Uint8Array, signature: string, secret: string): boolean {

@@ -1,5 +1,4 @@
 import {
-  ActivityIcon,
   ArrowLeftIcon,
   BotIcon,
   ChartNoAxesColumnIcon,
@@ -13,7 +12,6 @@ import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
-import { useAgentProcessCount } from "../../state/agentProcesses";
 import { useEnvironments, usePullRequestsSupported } from "../../state/environments";
 import { useAnyEnvironmentHasLinearKey } from "../../state/linear";
 import { T3Wordmark } from "../T3Wordmark";
@@ -52,7 +50,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
   const backdropVariant = resolveSidebarStageBackdropVariant(
     stageLabel,
-    environmentIdentificationMode === "artwork",
+    environmentIdentificationMode,
   );
   const pillLabel =
     environmentIdentificationMode === "pill"
@@ -115,7 +113,7 @@ export function SidebarBrandWidthProbe({
 function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
   return (
     <Link
-      aria-label="Go to threads"
+      aria-label="T3 Code home"
       className={cn(
         "relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset md:flex",
         onBackdrop ? "text-white" : "text-foreground",
@@ -189,7 +187,7 @@ function SidebarUtilityItem({
   );
 }
 
-export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
+const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const navigate = useNavigate();
   const navigateToMainApp = useNavigateToMainApp();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -199,9 +197,6 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const { environments } = useEnvironments();
   const pullRequestsSupported = usePullRequestsSupported();
   const issuesSupported = useAnyEnvironmentHasLinearKey();
-  // Mounted for the whole session, so this is what keeps the process
-  // subscription open and the page instant when it is opened.
-  const agentProcessCount = useAgentProcessCount();
   // The server the assistant page opens by default.
   const assistantCount = useAssistantBlockingCount(
     environments.find((e) => e.serverConfig?.settings.linear.apiKey)?.environmentId ?? null,
@@ -244,11 +239,6 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     void navigate({ to: "/history", search: { environment: undefined, project: undefined } });
   };
 
-  const handleProcessesClick = () => {
-    closeMobileSidebar();
-    void navigate({ to: "/processes" });
-  };
-
   const handleBackClick = () => {
     closeMobileSidebar();
     void navigateToMainApp();
@@ -273,7 +263,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
           {pullRequestsSupported ? (
             <SidebarUtilityItem
               icon={<PullRequestGlyph.pullRequest />}
-              label="Pull Requests"
+              label="Pull requests"
               onClick={handlePullRequestsClick}
             />
           ) : null}
@@ -297,19 +287,13 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
           ) : null}
           <SidebarUtilityItem icon={<HistoryIcon />} label="History" onClick={handleHistoryClick} />
           <SidebarUtilityItem
-            icon={<ActivityIcon />}
-            label="Processes"
-            count={agentProcessCount}
-            countDescription="running"
-            onClick={handleProcessesClick}
-          />
-          <SidebarUtilityItem
             icon={<ChartNoAxesColumnIcon />}
             label="Usage"
             onClick={handleUsageClick}
           />
         </>
       )}
+      <SidebarThreadUndoNotice />
       <SidebarUpdatePill />
     </SidebarMenu>
   );
@@ -318,7 +302,6 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
 export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   return (
     <SidebarFooter>
-      <SidebarThreadUndoNotice />
       <SidebarProviderUpdatePill />
       <SidebarUpdateArchitectureWarning />
       <SidebarUtilityMenu />

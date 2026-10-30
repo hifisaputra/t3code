@@ -3,7 +3,6 @@ import { assert, describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -266,7 +265,7 @@ const harness = (options?: { workspaceRoot?: string; claudeHome?: string }) =>
         }),
       }),
       Layer.mock(ProjectService)({
-        getShell: () => Effect.succeed(Option.some(shell)),
+        getShell: () => Effect.succeedSome(shell),
       }),
       Layer.mock(ThreadManagementService)({
         getThreadShell: (id) => Effect.succeed(threads.get(id) ?? null),

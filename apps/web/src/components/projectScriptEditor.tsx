@@ -19,14 +19,7 @@ import {
   PlayIcon,
   WrenchIcon,
 } from "lucide-react";
-import React, {
-  type FormEvent,
-  type KeyboardEvent,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import React, { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import {
   keybindingValueForCommand,
@@ -177,8 +170,7 @@ export function ProjectScriptEditorDialog({
   onLoadPackageScripts?: () => Promise<PackageScriptSuggestion[]>;
 }) {
   const canEditActions = useEnvironmentScope(environmentId, editScope);
-  // Keyed by the request it belongs to: a new request starts from its own error,
-  // and a late save from the previous request can't overwrite it.
+  // Scope errors by request so late saves cannot overwrite a newer request's error.
   const [errorState, setErrorState] = useState<{
     readonly request: ProjectScriptEditorRequest;
     readonly message: string | null;
@@ -192,6 +184,15 @@ export function ProjectScriptEditorDialog({
   const setValidationError = (message: string | null) => {
     if (request !== null) setErrorState({ request, message });
   };
+  // The last opened request stays shown while the dialog animates closed. Each
+  // new request mounts a fresh form, which drops the previous request's save.
+  const [shown, setShown] = useState<{
+    readonly request: ProjectScriptEditorRequest;
+    readonly key: number;
+  } | null>(request === null ? null : { request, key: 0 });
+  if (request !== null && request !== shown?.request) {
+    setShown({ request, key: (shown?.key ?? 0) + 1 });
+  }
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useComposerMenuState(!canEditActions);
   const [deleteName, setDeleteName] = useState("");
 
@@ -205,21 +206,24 @@ export function ProjectScriptEditorDialog({
       >
         {/* The form owns its fields so a keystroke re-renders it, not the dialog chrome. */}
         <DialogPopup>
-          <ProjectScriptEditorForm
-            environmentId={environmentId}
-            editScope={editScope}
-            request={request}
-            scripts={scripts}
-            validationError={validationError}
-            onValidationError={setValidationError}
-            onSubmit={onSubmit}
-            onRequestDelete={(name) => {
-              setDeleteName(name);
-              setDeleteConfirmOpen(true);
-            }}
-            onClose={onClose}
-            {...(onLoadPackageScripts ? { onLoadPackageScripts } : {})}
-          />
+          {shown ? (
+            <ProjectScriptEditorForm
+              key={shown.key}
+              environmentId={environmentId}
+              editScope={editScope}
+              request={shown.request}
+              scripts={scripts}
+              validationError={validationError}
+              onValidationError={setValidationError}
+              onSubmit={onSubmit}
+              onRequestDelete={(name) => {
+                setDeleteName(name);
+                setDeleteConfirmOpen(true);
+              }}
+              onClose={onClose}
+              {...(onLoadPackageScripts ? { onLoadPackageScripts } : {})}
+            />
+          ) : null}
         </DialogPopup>
       </Dialog>
 
@@ -268,7 +272,7 @@ function ProjectScriptEditorForm({
 }: {
   environmentId: EnvironmentId;
   editScope: typeof AuthOrchestrationOperateScope | typeof AuthSettingsWriteScope;
-  request: ProjectScriptEditorRequest | null;
+  request: ProjectScriptEditorRequest;
   scripts: ReadonlyArray<ProjectScript>;
   validationError: string | null;
   onValidationError: (error: string | null) => void;
@@ -283,22 +287,23 @@ function ProjectScriptEditorForm({
   const canEditActions = useEnvironmentScope(environmentId, editScope);
   const canWriteSettings = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const formId = React.useId();
-  const [name, setName] = useState("");
-  const [command, setCommand] = useState("");
-  const [cwd, setCwd] = useState("");
-  const [icon, setIcon] = useState<ProjectScriptIcon>("play");
+  const [name, setName] = useState(request.initial.name);
+  const [command, setCommand] = useState(request.initial.command);
+  const [cwd, setCwd] = useState(request.initial.cwd ?? "");
+  const [icon, setIcon] = useState<ProjectScriptIcon>(request.initial.icon);
   const [iconPickerOpen, setIconPickerOpen] = useComposerMenuState(!canEditActions);
-  const [runOnWorktreeCreate, setRunOnWorktreeCreate] = useState(false);
-  const [waitForSetup, setWaitForSetup] = useState(false);
-  const [runOnSettle, setRunOnSettle] = useState(false);
-  const [keybinding, setKeybinding] = useState("");
-  const [previewUrl, setPreviewUrl] = useState("");
-  const [autoOpenPreview, setAutoOpenPreview] = useState(false);
+  const [runOnWorktreeCreate, setRunOnWorktreeCreate] = useState(
+    request.initial.runOnWorktreeCreate,
+  );
+  const [waitForSetup, setWaitForSetup] = useState(request.initial.waitForSetup);
+  const [runOnSettle, setRunOnSettle] = useState(request.initial.runOnSettle);
+  const [keybinding, setKeybinding] = useState(request.initial.keybinding ?? "");
+  const [previewUrl, setPreviewUrl] = useState(request.initial.previewUrl ?? "");
+  const [autoOpenPreview, setAutoOpenPreview] = useState(request.initial.autoOpenPreview);
   const [packageScripts, setPackageScripts] = useState<PackageScriptSuggestion[]>([]);
-  const [packageScriptsLoading, setPackageScriptsLoading] = useState(false);
-  const packageScriptsRequestRef = useRef(0);
-  const [savingRequest, setSavingRequest] = useState<ProjectScriptEditorRequest | null>(null);
-  const pendingSubmissionRef = useRef<{ request: ProjectScriptEditorRequest } | null>(null);
+  const [packageScriptsLoading, setPackageScriptsLoading] = useState(
+    onLoadPackageScripts !== undefined,
+  );
 
   // Hide package scripts that already have a matching action so we don't suggest duplicates.
   const existingCommands = new Set(
@@ -309,29 +314,23 @@ function ProjectScriptEditorForm({
       !existingCommands.has(`${(suggestion.cwd ?? "").trim()} ${suggestion.command.trim()}`),
   );
 
-  // Each opened request re-reads the project's scripts; a stale in-flight read
-  // must not overwrite the results of a newer open.
+  // Each request mounts a fresh form, so the read runs once per opened request.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the project's package.json manifests while the form is open, and drops a result that lands after unmount
   useEffect(() => {
-    const requestId = packageScriptsRequestRef.current + 1;
-    packageScriptsRequestRef.current = requestId;
-    // oxlint-disable-next-line react/set-state-in-effect -- Each open starts a new read of the project's scripts, so the previous list clears before it lands.
-    setPackageScripts([]);
-    if (!request || !onLoadPackageScripts) {
-      setPackageScriptsLoading(false);
-      return;
-    }
-    setPackageScriptsLoading(true);
+    if (!onLoadPackageScripts) return;
+    let cancelled = false;
     Promise.resolve(onLoadPackageScripts())
       .then((result) => {
-        if (packageScriptsRequestRef.current === requestId) setPackageScripts(result);
+        if (!cancelled) setPackageScripts(result);
       })
-      .catch(() => {
-        if (packageScriptsRequestRef.current === requestId) setPackageScripts([]);
-      })
+      .catch(() => undefined)
       .finally(() => {
-        if (packageScriptsRequestRef.current === requestId) setPackageScriptsLoading(false);
+        if (!cancelled) setPackageScriptsLoading(false);
       });
-  }, [request, onLoadPackageScripts]);
+    return () => {
+      cancelled = true;
+    };
+  }, [onLoadPackageScripts]);
 
   const applyPackageScript = (suggestion: PackageScriptSuggestion) => {
     setName(suggestion.name);
@@ -341,40 +340,23 @@ function ProjectScriptEditorForm({
     setValidationError(null);
   };
 
-  const isEditing = request?.scriptId != null;
-  const isSaving = request !== null && savingRequest === request;
-
-  useLayoutEffect(
+  const [isSaving, setIsSaving] = useState(false);
+  const pendingSubmissionRef = useRef<object | null>(null);
+  // A save that settles after this form is replaced must not close or error
+  // the request that replaced it.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- drops the pending save on unmount so a late result cannot close or fail the next request
+  useEffect(
     () => () => {
-      if (pendingSubmissionRef.current?.request === request) {
-        pendingSubmissionRef.current = null;
-      }
+      pendingSubmissionRef.current = null;
     },
-    [request],
+    [],
   );
 
-  const [formRequest, setFormRequest] = useState<ProjectScriptEditorRequest | null>(null);
-  if (request !== formRequest) {
-    setFormRequest(request);
-    if (request) {
-      setName(request.initial.name);
-      setCommand(request.initial.command);
-      setCwd(request.initial.cwd ?? "");
-      setIcon(request.initial.icon);
-      setIconPickerOpen(false);
-      setRunOnWorktreeCreate(request.initial.runOnWorktreeCreate);
-      setWaitForSetup(request.initial.waitForSetup);
-      setRunOnSettle(request.initial.runOnSettle);
-      setKeybinding(request.initial.keybinding ?? "");
-      setPreviewUrl(request.initial.previewUrl ?? "");
-      setAutoOpenPreview(request.initial.autoOpenPreview);
-      setSavingRequest(null);
-    }
-  }
+  const isEditing = request.scriptId != null;
 
   const close = () => {
     pendingSubmissionRef.current = null;
-    setSavingRequest(null);
+    setIsSaving(false);
     setIconPickerOpen(false);
     onClose();
   };
@@ -395,7 +377,7 @@ function ProjectScriptEditorForm({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!request || pendingSubmissionRef.current !== null) return;
+    if (pendingSubmissionRef.current !== null) return;
     if (!readEnvironmentScope(environmentId, editScope)) {
       setValidationError("This connection cannot change project actions.");
       return;
@@ -452,9 +434,9 @@ function ProjectScriptEditorForm({
       return;
     }
 
-    const submission = { request };
+    const submission = {};
     pendingSubmissionRef.current = submission;
-    setSavingRequest(request);
+    setIsSaving(true);
     setIconPickerOpen(false);
     try {
       const result = await onSubmit(request.scriptId, payload);
@@ -475,7 +457,7 @@ function ProjectScriptEditorForm({
     }
     if (pendingSubmissionRef.current === submission) {
       pendingSubmissionRef.current = null;
-      setSavingRequest(null);
+      setIsSaving(false);
     }
   };
 

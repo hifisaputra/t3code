@@ -22,7 +22,6 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
@@ -56,6 +55,8 @@ function unavailableError(error: unknown): McpCapabilityUnavailableError {
   assert.instanceOf(error, McpCapabilityUnavailableError);
   return error;
 }
+
+const decodeApprovalDetail = Schema.decodeUnknownEffect(Schema.Struct({ detail: Schema.String }));
 
 const environmentId = EnvironmentId.make("environment-linear-mcp");
 const threadId = ThreadId.make("thread-linear-mcp");
@@ -244,7 +245,7 @@ const projectionLayer = (
       getShell: () =>
         workspaceRoot === undefined
           ? Effect.die("unused")
-          : Effect.succeed(Option.some(projectShell(workspaceRoot))),
+          : Effect.succeedSome(projectShell(workspaceRoot)),
     }),
   );
 
@@ -908,9 +909,7 @@ it.effect.each(["accept", "decline"] as const)(
           ),
         );
         const opened = yield* nextApprovalEvent;
-        const review = yield* Schema.decodeUnknownEffect(Schema.Struct({ detail: Schema.String }))(
-          opened.payload,
-        );
+        const review = yield* decodeApprovalDetail(opened.payload);
         assert.include(review.detail, "Edit comment on DEL-123");
         assert.include(review.detail, "Corrected finding.");
         assert.deepStrictEqual(updated, []);

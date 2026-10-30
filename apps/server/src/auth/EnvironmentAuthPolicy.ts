@@ -14,15 +14,12 @@ export class EnvironmentAuthPolicy extends Context.Service<
   }
 >()("t3/auth/EnvironmentAuthPolicy") {}
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironmentIdentity;
-  // A loopback bind is normally local-only, but the backend can still be reached
-  // remotely when a proxy fronts it: Tailscale Serve (proxies the *.ts.net
-  // endpoint to 127.0.0.1), or an external trusted reverse proxy such as a
-  // Cloudflare Tunnel (`remoteReachable`). In those cases it must be treated as
-  // remotely reachable to allow remote pairing.
+  // A loopback bind is still remotely reachable behind Tailscale Serve or a trusted
+  // reverse proxy such as a Cloudflare Tunnel (`remoteReachable`), and must allow remote pairing.
   const isRemoteReachable =
     isRemoteReachableHost(config.host) || config.tailscaleServeEnabled || config.remoteReachable;
 
@@ -58,8 +55,9 @@ export const make = Effect.gen(function* () {
   };
 
   return EnvironmentAuthPolicy.of({
-    getDescriptor: () =>
-      Effect.succeed(descriptor).pipe(Effect.withSpan("EnvironmentAuthPolicy.getDescriptor")),
+    getDescriptor: Effect.fn("EnvironmentAuthPolicy.getDescriptor")(function () {
+      return Effect.succeed(descriptor);
+    }),
   });
 });
 
